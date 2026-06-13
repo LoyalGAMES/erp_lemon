@@ -251,6 +251,58 @@ BLADE,
         $this->assertTrue($pdfFile->metadata['html_layout']);
     }
 
+    public function test_correction_template_builds_before_and_after_rows_from_corrected_invoice(): void
+    {
+        $original = $this->createInvoice('FV/2026/000020');
+        $originalLine = $original->lines()->firstOrFail();
+
+        $correction = Invoice::query()->create([
+            'number' => 'FK/2026/000001',
+            'type' => 'correction',
+            'status' => 'issued',
+            'issue_date' => '2026-06-10',
+            'sale_date' => '2026-06-01',
+            'payment_due_date' => '2026-06-17',
+            'currency' => 'PLN',
+            'seller_data' => $original->seller_data,
+            'buyer_data' => $original->buyer_data,
+            'net_total' => -100,
+            'vat_total' => -23,
+            'gross_total' => -123,
+            'issued_at' => now(),
+            'metadata' => [
+                'corrected_invoice_id' => $original->id,
+                'corrected_invoice_number' => $original->number,
+                'corrected_invoice_issue_date' => $original->issue_date?->toDateString(),
+                'correction_reason' => 'Zwrot towaru',
+            ],
+        ]);
+
+        $correction->lines()->create([
+            'name' => 'Korekta zwrotu: Produkt fakturowany',
+            'sku' => 'SKU-FV',
+            'unit' => 'szt',
+            'quantity' => -1,
+            'unit_net_price' => 100,
+            'net_total' => -100,
+            'vat_rate' => 23,
+            'vat_total' => -23,
+            'gross_total' => -123,
+            'metadata' => [
+                'corrected_invoice_line_id' => $originalLine->id,
+            ],
+        ]);
+
+        $html = app(InvoiceTemplateService::class)->renderHtml($correction);
+
+        $this->assertStringContainsString('Pozycje przed korektą', $html);
+        $this->assertStringContainsString('Pozycje po korekcie', $html);
+        $this->assertStringContainsString('FV/2026/000020', $html);
+        $this->assertStringContainsString('1 szt', $html);
+        $this->assertStringContainsString('0 szt', $html);
+        $this->assertStringNotContainsString('Pozycje korekty', $html);
+    }
+
     public function test_operator_can_fix_invoice_data_and_regenerate_files(): void
     {
         $invoice = $this->createInvoice();

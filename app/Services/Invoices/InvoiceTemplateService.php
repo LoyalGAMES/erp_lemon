@@ -16,7 +16,7 @@ use Throwable;
 final class InvoiceTemplateService
 {
     private const DEFAULT_TEMPLATE_SOURCE = 'resources/views/invoices/print.blade.php';
-    private const DEFAULT_TEMPLATE_VERSION = '2026-06-13-managed-business-invoice-v6';
+    private const DEFAULT_TEMPLATE_VERSION = '2026-06-13-managed-business-invoice-v7';
 
     public function defaultTemplate(): InvoiceTemplate
     {
@@ -113,6 +113,7 @@ final class InvoiceTemplateService
     public function renderHtml(Invoice $invoice): string
     {
         $invoice->loadMissing(['lines', 'externalOrder', 'invoiceTemplate']);
+        $this->loadCorrectedInvoiceForTemplate($invoice);
 
         $template = $invoice->invoiceTemplate;
 
@@ -123,6 +124,27 @@ final class InvoiceTemplateService
         }
 
         return $this->renderBody($template->template_body, $invoice, $template);
+    }
+
+    private function loadCorrectedInvoiceForTemplate(Invoice $invoice): void
+    {
+        if ($invoice->type !== 'correction') {
+            return;
+        }
+
+        $correctedInvoiceId = data_get($invoice->metadata, 'corrected_invoice_id');
+
+        if (! is_numeric($correctedInvoiceId)) {
+            return;
+        }
+
+        $correctedInvoice = Invoice::query()
+            ->with('lines')
+            ->find((int) $correctedInvoiceId);
+
+        if ($correctedInvoice instanceof Invoice) {
+            $invoice->setRelation('correctedInvoice', $correctedInvoice);
+        }
     }
 
     private function renderBody(string $body, Invoice $invoice, InvoiceTemplate $template): string

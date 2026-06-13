@@ -24,20 +24,78 @@
     $showCurrencyConversion = strtoupper((string) $invoice->currency) !== 'PLN' && $currencyConversion !== [];
     $vatSummaryPln = (array) ($currencyConversion['vat_summary_pln'] ?? []);
     $issuedBy = trim((string) data_get($invoice->metadata, 'issued_by_name', data_get($invoice->metadata, 'issued_by', 'Sempre ERP'))) ?: 'Sempre ERP';
-    $correctionComparisonRows = $isCorrection
-        ? $invoice->lines
-            ->map(function ($line): ?array {
-                $before = (array) data_get($line->metadata, 'before_correction', []);
-                $after = (array) data_get($line->metadata, 'after_correction', []);
+    $correctedInvoice = $invoice->relationLoaded('correctedInvoice') ? $invoice->getRelation('correctedInvoice') : null;
+    $lineSnapshot = fn ($line): array => [
+        'name' => $line->name,
+        'sku' => $line->sku,
+        'unit' => $line->unit,
+        'quantity' => (float) $line->quantity,
+        'unit_net_price' => (float) $line->unit_net_price,
+        'net_total' => (float) $line->net_total,
+        'vat_rate' => (float) $line->vat_rate,
+        'vat_total' => (float) $line->vat_total,
+        'gross_total' => (float) $line->gross_total,
+    ];
+    $applyCorrectionLines = function (array $before, $correctionLines): array {
+        $after = $before;
 
-                return $before !== [] && $after !== []
-                    ? ['line' => $line, 'before' => $before, 'after' => $after]
-                    : null;
-            })
-            ->filter()
-            ->values()
-        : collect();
-    $hasCorrectionComparison = $correctionComparisonRows->isNotEmpty();
+        foreach ($correctionLines as $correctionLine) {
+            $after['quantity'] = round((float) $after['quantity'] + (float) $correctionLine->quantity, 4);
+            $after['net_total'] = round((float) $after['net_total'] + (float) $correctionLine->net_total, 2);
+            $after['vat_total'] = round((float) $after['vat_total'] + (float) $correctionLine->vat_total, 2);
+            $after['gross_total'] = round((float) $after['gross_total'] + (float) $correctionLine->gross_total, 2);
+        }
+
+        return $after;
+    };
+    $matchesCorrectedLine = function ($correctionLine, $sourceLine): bool {
+        $correctedLineId = data_get($correctionLine->metadata, 'corrected_invoice_line_id');
+
+        if (is_numeric($correctedLineId)) {
+            return (int) $correctedLineId === (int) $sourceLine->id;
+        }
+
+        if (! empty($correctionLine->sku) && ! empty($sourceLine->sku)) {
+            return (string) $correctionLine->sku === (string) $sourceLine->sku;
+        }
+
+        return $correctionLine->product_id !== null && $correctionLine->product_id === $sourceLine->product_id;
+    };
+    $correctionBeforeRows = collect();
+    $correctionAfterRows = collect();
+    $matchedCorrectionLineIds = collect();
+
+    if ($isCorrection && $correctedInvoice instanceof \App\Models\Invoice) {
+        foreach ($correctedInvoice->lines as $sourceLine) {
+            $before = $lineSnapshot($sourceLine);
+            $correctionLines = $invoice->lines
+                ->filter(fn ($line): bool => $matchesCorrectedLine($line, $sourceLine))
+                ->values();
+
+            $correctionLines->each(fn ($line) => $matchedCorrectionLineIds->push((int) $line->id));
+
+            $correctionBeforeRows->push(['values' => $before]);
+            $correctionAfterRows->push(['values' => $applyCorrectionLines($before, $correctionLines)]);
+        }
+    }
+
+    foreach ($invoice->lines as $line) {
+        if ($matchedCorrectionLineIds->contains((int) $line->id)) {
+            continue;
+        }
+
+        $before = (array) data_get($line->metadata, 'before_correction', []);
+        $after = (array) data_get($line->metadata, 'after_correction', []);
+
+        if ($before !== [] && $after !== []) {
+            $correctionBeforeRows->push(['values' => $before]);
+            $correctionAfterRows->push(['values' => $after]);
+        } elseif ($isCorrection && ! ($correctedInvoice instanceof \App\Models\Invoice)) {
+            $correctionAfterRows->push(['values' => $lineSnapshot($line)]);
+        }
+    }
+
+    $hasCorrectionComparison = $correctionBeforeRows->isNotEmpty() || $correctionAfterRows->isNotEmpty();
 @endphp
 <!DOCTYPE html>
 <html lang="pl">
@@ -355,15 +413,15 @@
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach ($correctionComparisonRows as $row)
-                        @php($before = $row['before'])
+                    @foreach ($correctionBeforeRows as $row)
+                        @php($before = $row['values'])
                         <tr>
                             <td>{{ $loop->iteration }}</td>
                             <td>
-                                <div class="item-name">{{ $before['name'] ?? $row['line']->name }}</div>
-                                <div class="item-sku">SKU: {{ ($before['sku'] ?? $row['line']->sku) ?: '-' }}</div>
+                                <div class="item-name">{{ $before['name'] ?? '' }}</div>
+                                <div class="item-sku">SKU: {{ ($before['sku'] ?? null) ?: '-' }}</div>
                             </td>
-                            <td class="right nowrap">{{ $qty($before['quantity'] ?? 0) }} {{ ($before['unit'] ?? $row['line']->unit) ?: 'szt' }}</td>
+                            <td class="right nowrap">{{ $qty($before['quantity'] ?? 0) }} {{ ($before['unit'] ?? null) ?: 'szt' }}</td>
                             <td class="right nowrap">{{ $money($before['unit_net_price'] ?? 0) }}</td>
                             <td class="right nowrap">{{ $money($before['net_total'] ?? 0) }}</td>
                             <td class="right nowrap">{{ $money($before['vat_rate'] ?? 0) }}%</td>
@@ -389,15 +447,15 @@
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach ($correctionComparisonRows as $row)
-                        @php($after = $row['after'])
+                    @foreach ($correctionAfterRows as $row)
+                        @php($after = $row['values'])
                         <tr>
                             <td>{{ $loop->iteration }}</td>
                             <td>
-                                <div class="item-name">{{ $after['name'] ?? $row['line']->name }}</div>
-                                <div class="item-sku">SKU: {{ ($after['sku'] ?? $row['line']->sku) ?: '-' }}</div>
+                                <div class="item-name">{{ $after['name'] ?? '' }}</div>
+                                <div class="item-sku">SKU: {{ ($after['sku'] ?? null) ?: '-' }}</div>
                             </td>
-                            <td class="right nowrap">{{ $qty($after['quantity'] ?? 0) }} {{ ($after['unit'] ?? $row['line']->unit) ?: 'szt' }}</td>
+                            <td class="right nowrap">{{ $qty($after['quantity'] ?? 0) }} {{ ($after['unit'] ?? null) ?: 'szt' }}</td>
                             <td class="right nowrap">{{ $money($after['unit_net_price'] ?? 0) }}</td>
                             <td class="right nowrap">{{ $money($after['net_total'] ?? 0) }}</td>
                             <td class="right nowrap">{{ $money($after['vat_rate'] ?? 0) }}%</td>
