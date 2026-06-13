@@ -246,10 +246,10 @@ class InvoiceController extends Controller
             ->with('status', "Dane faktury {$invoice->number} zostały zapisane i pliki zostały wygenerowane ponownie.");
     }
 
-    public function preview(Invoice $invoice, InvoiceTemplateService $templates): Response
+    public function preview(Invoice $invoice, OrderInvoiceService $invoices): Response
     {
         try {
-            $html = $templates->renderHtml($invoice);
+            $pdf = $invoices->previewPdf($invoice);
         } catch (RuntimeException $exception) {
             return response(
                 '<!DOCTYPE html><html lang="pl"><meta charset="utf-8"><body><h1>Błąd szablonu faktury</h1><p>'
@@ -260,7 +260,12 @@ class InvoiceController extends Controller
             );
         }
 
-        return response($html, 200, ['Content-Type' => 'text/html; charset=UTF-8']);
+        $filename = str_replace(['/', '\\'], '-', $invoice->number) . '.pdf';
+
+        return response($pdf, 200, [
+            'Content-Type' => 'application/pdf',
+            'Content-Disposition' => 'inline; filename="' . $filename . '"',
+        ]);
     }
 
     public function applySellerSettings(

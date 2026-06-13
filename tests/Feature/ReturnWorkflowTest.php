@@ -842,10 +842,11 @@ class ReturnWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee('Korekta ' . $correction->number);
 
-        $this->get(route('invoices.preview', $correction))
+        $preview = $this->get(route('invoices.preview', $correction))
             ->assertOk()
-            ->assertSee('Faktura korygująca')
-            ->assertSee($originalInvoice->number)
-            ->assertSee('Odstąpienie od umowy');
+            ->assertHeader('Content-Type', 'application/pdf')
+            ->assertHeader('Content-Disposition', 'inline; filename="' . str_replace(['/', '\\'], '-', $correction->number) . '.pdf"');
+
+        $this->assertStringStartsWith('%PDF-', $preview->getContent());
     }
 }

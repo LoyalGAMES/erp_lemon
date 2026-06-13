@@ -30,171 +30,183 @@
     <meta charset="utf-8">
     <title>{{ $documentTitle }} {{ $invoice->number }}</title>
     <style>
-        @page { margin: 24px 28px 28px; }
+        @page { size: A4; margin: 20mm; }
         * { box-sizing: border-box; }
         body {
             margin: 0;
-            color: #161412;
+            color: #202124;
             background: #fff;
             font-family: "DejaVu Sans", Arial, sans-serif;
-            font-size: 11px;
-            line-height: 1.42;
+            font-size: 9.2px;
+            line-height: 1.34;
         }
         table { border-collapse: collapse; }
         .page { width: 100%; }
-        .top-rule { height: 4px; background: #867364; margin-bottom: 16px; }
-        .header-table, .meta-table, .party-table, .items-table, .summary-table, .vat-table, .payment-table { width: 100%; }
+        .top-rule { border-top: 1px solid #b8bdc3; margin-bottom: 10px; }
+        .header-table, .meta-table, .party-table, .items-table, .summary-table, .vat-table, .payment-table, .totals-layout { width: 100%; }
         .header-table td { vertical-align: top; padding: 0; }
-        .brand-cell { width: 42%; }
-        .logo { width: 150px; height: auto; display: block; margin-bottom: 13px; }
-        .logo-fallback { margin-bottom: 13px; color: #161412; font-size: 28px; letter-spacing: 8px; font-weight: 400; }
-        .document-title { margin: 0 0 7px; color: #161412; font-size: 29px; line-height: 1.05; font-weight: 900; }
-        .document-number { color: #867364; font-size: 15px; font-weight: 900; }
-        .document-note { margin-top: 8px; color: #71685f; font-size: 9.5px; }
+        .brand-cell { width: 42%; padding-right: 18px; }
+        .logo { width: 108px; height: auto; display: block; margin-bottom: 8px; }
+        .logo-fallback { margin-bottom: 8px; color: #202124; font-size: 18px; letter-spacing: 4px; font-weight: 700; }
+        .document-title { margin: 0 0 4px; color: #202124; font-size: 21px; line-height: 1.12; font-weight: 700; }
+        .document-number { color: #3f454b; font-size: 11.2px; font-weight: 700; }
+        .document-note { margin-top: 5px; color: #5f666d; font-size: 8.2px; }
         .meta-shell {
             width: 100%;
-            border: 1px solid #d9d1ca;
-            background: #fbfaf8;
+            border: 1px solid #d3d7dc;
+            background: #fff;
         }
         .meta-table td {
             width: 50%;
-            padding: 7px 10px 8px;
-            border-bottom: 1px solid #e8e1dc;
-            border-right: 1px solid #e8e1dc;
+            padding: 4px 6px 5px;
+            border-bottom: 1px solid #e2e5e8;
+            border-right: 1px solid #e2e5e8;
             vertical-align: top;
         }
         .meta-table tr:last-child td { border-bottom: 0; }
         .meta-table td:last-child { border-right: 0; }
         .label {
             display: block;
-            color: #756b62;
-            font-size: 8.8px;
-            font-weight: 900;
+            color: #5f666d;
+            font-size: 7.4px;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: .08em;
+            letter-spacing: .03em;
         }
-        .value { display: block; margin-top: 2px; color: #161412; font-size: 12.2px; font-weight: 900; }
+        .value { display: block; margin-top: 1px; color: #202124; font-size: 9.4px; font-weight: 600; line-height: 1.25; }
         .section-title {
-            margin: 15px 0 6px;
-            color: #867364;
-            font-size: 9.6px;
-            font-weight: 900;
-            letter-spacing: .1em;
+            margin: 11px 0 5px;
+            color: #30363d;
+            font-size: 8.5px;
+            font-weight: 700;
+            letter-spacing: .04em;
             text-transform: uppercase;
         }
-        .party-table { margin-top: 8px; }
+        .party-table { margin-top: 9px; }
         .party-table td {
             width: 50%;
-            padding: 12px 14px 11px;
+            padding: 8px 10px;
             vertical-align: top;
-            border: 1px solid #d9d1ca;
+            border: 1px solid #d3d7dc;
             background: #fff;
         }
         .party-table td + td { border-left: 0; }
         .party-heading {
-            margin-bottom: 8px;
-            color: #867364;
-            font-size: 9.4px;
-            font-weight: 900;
-            letter-spacing: .12em;
-            text-transform: uppercase;
-        }
-        .party-name { margin-bottom: 5px; color: #161412; font-size: 13.2px; line-height: 1.3; font-weight: 900; }
-        .tax-id { margin: 0 0 6px; font-weight: 900; }
-        .muted { color: #71685f; }
-        .correction-box {
-            margin-top: 18px;
-            padding: 10px 12px;
-            border-left: 5px solid #867364;
-            background: #f3efec;
-            color: #161412;
-        }
-        .items-table { margin-top: 7px; }
-        .items-table th {
-            padding: 7px 6px;
-            background: #eee9e5;
-            border-top: 1px solid #d9d1ca;
-            border-bottom: 1px solid #d9d1ca;
-            color: #5d544d;
-            font-size: 8.7px;
-            font-weight: 900;
+            margin-bottom: 5px;
+            color: #3f454b;
+            font-size: 7.8px;
+            font-weight: 700;
             letter-spacing: .05em;
             text-transform: uppercase;
         }
+        .party-name { margin-bottom: 3px; color: #202124; font-size: 10px; line-height: 1.25; font-weight: 700; }
+        .tax-id { margin: 0 0 4px; font-weight: 700; }
+        .muted { color: #5f666d; }
+        .correction-box {
+            margin-top: 10px;
+            padding: 7px 9px;
+            border: 1px solid #d3d7dc;
+            background: #f7f8f9;
+            color: #202124;
+        }
+        .items-table { margin-top: 5px; font-size: 8.2px; }
+        .items-table th {
+            padding: 5px 4px;
+            background: #f0f2f4;
+            border: 1px solid #cfd4da;
+            color: #30363d;
+            font-size: 7.5px;
+            font-weight: 700;
+            letter-spacing: .02em;
+            text-transform: uppercase;
+        }
         .items-table td {
-            padding: 8px 6px;
-            border-bottom: 1px solid #e8e1dc;
+            padding: 5px 4px;
+            border: 1px solid #e0e4e8;
             vertical-align: top;
         }
-        .items-table tbody tr:nth-child(even) td { background: #fbfaf8; }
-        .item-name { color: #161412; font-weight: 900; }
-        .item-sku { margin-top: 3px; color: #71685f; font-size: 9.5px; }
+        .items-table tbody tr:nth-child(even) td { background: #fafbfc; }
+        .item-name { color: #202124; font-size: 8.4px; font-weight: 700; line-height: 1.25; word-break: break-word; overflow-wrap: anywhere; }
+        .item-sku { margin-top: 2px; color: #5f666d; font-size: 7.5px; line-height: 1.2; word-break: break-word; overflow-wrap: anywhere; }
         .right { text-align: right; }
         .nowrap { white-space: nowrap; }
-        .totals-layout { width: 100%; margin-top: 15px; }
+        .totals-layout { margin-top: 10px; }
         .totals-layout td { vertical-align: top; }
+        .totals-spacer { width: 44%; }
+        .totals-stack { width: 56%; }
         .vat-table {
-            width: 330px;
-            border: 1px solid #d9d1ca;
+            width: 100%;
+            margin-top: 7px;
+            border: 1px solid #d3d7dc;
             background: #fff;
+            font-size: 7.8px;
         }
         .vat-table th {
-            padding: 7px 8px;
-            background: #eee9e5;
-            color: #5d544d;
-            font-size: 8.7px;
-            font-weight: 900;
+            padding: 4px 5px;
+            background: #f0f2f4;
+            color: #30363d;
+            font-size: 7.2px;
+            font-weight: 700;
             text-align: right;
             text-transform: uppercase;
         }
         .vat-table th:first-child, .vat-table td:first-child { text-align: left; }
         .vat-table td {
-            padding: 7px 8px;
-            border-top: 1px solid #e8e1dc;
+            padding: 4px 5px;
+            border-top: 1px solid #e0e4e8;
             text-align: right;
         }
+        .table-caption {
+            margin-top: 7px;
+            color: #30363d;
+            font-size: 7.8px;
+            font-weight: 700;
+            letter-spacing: .04em;
+            text-transform: uppercase;
+        }
         .summary-table {
-            width: 330px;
+            width: 100%;
             margin-left: auto;
-            border: 1px solid #d9d1ca;
+            border: 1px solid #d3d7dc;
         }
         .summary-table td {
-            padding: 8px 10px;
-            border-bottom: 1px solid #e8e1dc;
+            padding: 5px 7px;
+            border-bottom: 1px solid #e0e4e8;
         }
         .summary-table tr:last-child td { border-bottom: 0; }
         .summary-table .total td {
-            background: #867364;
-            color: #fff;
-            font-size: 14px;
-            font-weight: 900;
+            background: #f0f2f4;
+            color: #202124;
+            font-size: 10.2px;
+            font-weight: 700;
+            border-top: 2px solid #8f98a3;
         }
         .currency-note {
-            margin-top: 10px;
-            color: #71685f;
-            font-size: 9.5px;
-            line-height: 1.35;
+            margin-top: 6px;
+            color: #5f666d;
+            font-size: 7.6px;
+            line-height: 1.3;
         }
         .payment-table {
-            margin-top: 15px;
-            border: 1px solid #d9d1ca;
-            background: #fbfaf8;
+            margin-top: 10px;
+            border: 1px solid #d3d7dc;
+            background: #fff;
         }
         .payment-table td {
             width: 33.333%;
-            padding: 10px 12px;
-            border-right: 1px solid #e8e1dc;
+            padding: 6px 8px;
+            border-right: 1px solid #e0e4e8;
             vertical-align: top;
         }
         .payment-table td:last-child { border-right: 0; }
-        .payment-value { display: block; margin-top: 3px; font-size: 13px; font-weight: 900; }
-        .payment-total { color: #867364; font-size: 16px; }
+        .payment-value { display: block; margin-top: 2px; font-size: 8.8px; font-weight: 600; line-height: 1.25; word-break: break-word; overflow-wrap: anywhere; }
+        .payment-total { color: #202124; font-size: 10.8px; font-weight: 700; }
         .footer {
-            margin-top: 18px;
-            padding-top: 11px;
-            border-top: 1px solid #d9d1ca;
-            color: #71685f;
-            font-size: 9px;
+            margin-top: 12px;
+            padding-top: 7px;
+            border-top: 1px solid #d3d7dc;
+            color: #5f666d;
+            font-size: 7.6px;
         }
     </style>
 </head>
@@ -308,12 +320,12 @@
         <table class="items-table">
             <thead>
                 <tr>
-                    <th style="width: 26px;">Lp.</th>
-                    <th style="width: 198px;">Nazwa towaru/usługi</th>
-                    <th class="right nowrap" style="width: 44px;">Ilość</th>
-                    <th class="right nowrap" style="width: 65px;">Cena netto</th>
-                    <th class="right nowrap" style="width: 58px;">Netto</th>
-                    <th class="right nowrap" style="width: 47px;">VAT</th>
+                    <th style="width: 24px;">Lp.</th>
+                    <th style="width: 222px;">Nazwa towaru/usługi</th>
+                    <th class="right nowrap" style="width: 54px;">Ilość / jm</th>
+                    <th class="right nowrap" style="width: 62px;">Cena netto</th>
+                    <th class="right nowrap" style="width: 56px;">Netto</th>
+                    <th class="right nowrap" style="width: 40px;">VAT</th>
                     <th class="right nowrap" style="width: 62px;">Kwota VAT</th>
                     <th class="right nowrap" style="width: 64px;">Brutto</th>
                 </tr>
@@ -324,9 +336,9 @@
                         <td>{{ $loop->iteration }}</td>
                         <td>
                             <div class="item-name">{{ $line->name }}</div>
-                            <div class="item-sku">SKU: {{ $line->sku ?: '-' }} | jm: {{ $line->unit ?: 'szt' }}</div>
+                            <div class="item-sku">SKU: {{ $line->sku ?: '-' }}</div>
                         </td>
-                        <td class="right nowrap">{{ $qty($line->quantity) }}</td>
+                        <td class="right nowrap">{{ $qty($line->quantity) }} {{ $line->unit ?: 'szt' }}</td>
                         <td class="right nowrap">{{ $money($line->unit_net_price) }}</td>
                         <td class="right nowrap">{{ $money($line->net_total) }}</td>
                         <td class="right nowrap">{{ $money($line->vat_rate) }}%</td>
@@ -339,7 +351,35 @@
 
         <table class="totals-layout">
             <tr>
-                <td>
+                <td class="totals-spacer">
+                    @if ($showCurrencyConversion)
+                        <div class="currency-note">
+                            VAT w PLN: {{ $money((float) ($currencyConversion['vat_total_pln'] ?? 0)) }} PLN.
+                            @if (! empty($currencyConversion['rate']))
+                                Kurs VAT: 1 {{ $invoice->currency }} = {{ number_format((float) $currencyConversion['rate'], 4, ',', ' ') }} PLN,
+                                tabela {{ $currencyConversion['table_no'] ?? 'NBP' }} z dnia {{ $currencyConversion['rate_date'] ?? '-' }}.
+                            @else
+                                {{ $currencyConversion['note'] ?? 'Kwota VAT nie wymaga przeliczenia.' }}
+                            @endif
+                        </div>
+                    @endif
+                </td>
+                <td class="totals-stack">
+                    <table class="summary-table">
+                        <tr>
+                            <td>{{ $netSummaryLabel }}</td>
+                            <td class="right nowrap">{{ $money($invoice->net_total) }} {{ $invoice->currency }}</td>
+                        </tr>
+                        <tr>
+                            <td>{{ $vatSummaryLabel }}</td>
+                            <td class="right nowrap">{{ $money($invoice->vat_total) }} {{ $invoice->currency }}</td>
+                        </tr>
+                        <tr class="total">
+                            <td>{{ $grossSummaryLabel }}</td>
+                            <td class="right nowrap">{{ $money($invoice->gross_total) }} {{ $invoice->currency }}</td>
+                        </tr>
+                    </table>
+                    <div class="table-caption">Podsumowanie VAT</div>
                     <table class="vat-table">
                         <thead>
                             <tr>
@@ -365,33 +405,6 @@
                                 </tr>
                             @endforeach
                         </tbody>
-                    </table>
-                    @if ($showCurrencyConversion)
-                        <div class="currency-note">
-                            VAT w PLN: {{ $money((float) ($currencyConversion['vat_total_pln'] ?? 0)) }} PLN.
-                            @if (! empty($currencyConversion['rate']))
-                                Kurs VAT: 1 {{ $invoice->currency }} = {{ number_format((float) $currencyConversion['rate'], 4, ',', ' ') }} PLN,
-                                tabela {{ $currencyConversion['table_no'] ?? 'NBP' }} z dnia {{ $currencyConversion['rate_date'] ?? '-' }}.
-                            @else
-                                {{ $currencyConversion['note'] ?? 'Kwota VAT nie wymaga przeliczenia.' }}
-                            @endif
-                        </div>
-                    @endif
-                </td>
-                <td>
-                    <table class="summary-table">
-                        <tr>
-                            <td>{{ $netSummaryLabel }}</td>
-                            <td class="right nowrap">{{ $money($invoice->net_total) }} {{ $invoice->currency }}</td>
-                        </tr>
-                        <tr>
-                            <td>{{ $vatSummaryLabel }}</td>
-                            <td class="right nowrap">{{ $money($invoice->vat_total) }} {{ $invoice->currency }}</td>
-                        </tr>
-                        <tr class="total">
-                            <td>{{ $grossSummaryLabel }}</td>
-                            <td class="right nowrap">{{ $money($invoice->gross_total) }} {{ $invoice->currency }}</td>
-                        </tr>
                     </table>
                 </td>
             </tr>

@@ -59,10 +59,12 @@ BLADE;
         $this->assertSame('Sempre custom', $template->name);
         $this->assertTrue($template->is_default);
 
-        $this->get(route('invoices.preview', $invoice))
+        $preview = $this->get(route('invoices.preview', $invoice))
             ->assertOk()
-            ->assertSee('Niestandardowy szablon Sempre')
-            ->assertSee('Faktura: FV/2026/000010');
+            ->assertHeader('Content-Type', 'application/pdf')
+            ->assertHeader('Content-Disposition', 'inline; filename="FV-2026-000010.pdf"');
+
+        $this->assertStringStartsWith('%PDF-', $preview->getContent());
 
         $this->post(route('invoices.regenerate', $invoice))
             ->assertRedirect()
@@ -243,9 +245,10 @@ BLADE,
             ->firstOrFail();
 
         $this->assertStringContainsString('Koszula ŁÓDŹ śliwkowa', File::get(storage_path('app/' . $htmlFile->path)));
-        $this->assertStringStartsWith('%PDF-1.4', File::get(storage_path('app/' . $pdfFile->path)));
-        $this->assertSame('gd_raster_pdf', $pdfFile->metadata['renderer']);
+        $this->assertStringStartsWith('%PDF-', File::get(storage_path('app/' . $pdfFile->path)));
+        $this->assertSame('dompdf_html_pdf', $pdfFile->metadata['renderer']);
         $this->assertTrue($pdfFile->metadata['unicode_text']);
+        $this->assertTrue($pdfFile->metadata['html_layout']);
     }
 
     public function test_operator_can_fix_invoice_data_and_regenerate_files(): void

@@ -284,6 +284,14 @@ final class OrderInvoiceService
         return $invoice->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']);
     }
 
+    public function previewPdf(Invoice $invoice): string
+    {
+        [$pdf, $rendererMetadata] = $this->renderPdf($invoice);
+        $this->assertUsablePdf($pdf, (string) ($rendererMetadata['renderer'] ?? 'unknown'));
+
+        return $pdf;
+    }
+
     private function storePdfFile(Invoice $invoice): void
     {
         $relativePath = 'invoices/' . str_replace(['/', '\\'], '-', $invoice->number) . '.pdf';
