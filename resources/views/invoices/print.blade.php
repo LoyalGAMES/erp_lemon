@@ -23,6 +23,21 @@
     $currencyConversion = (array) data_get($invoice->metadata, 'currency_conversion', []);
     $showCurrencyConversion = strtoupper((string) $invoice->currency) !== 'PLN' && $currencyConversion !== [];
     $vatSummaryPln = (array) ($currencyConversion['vat_summary_pln'] ?? []);
+    $issuedBy = trim((string) data_get($invoice->metadata, 'issued_by_name', data_get($invoice->metadata, 'issued_by', 'Sempre ERP'))) ?: 'Sempre ERP';
+    $correctionComparisonRows = $isCorrection
+        ? $invoice->lines
+            ->map(function ($line): ?array {
+                $before = (array) data_get($line->metadata, 'before_correction', []);
+                $after = (array) data_get($line->metadata, 'after_correction', []);
+
+                return $before !== [] && $after !== []
+                    ? ['line' => $line, 'before' => $before, 'after' => $after]
+                    : null;
+            })
+            ->filter()
+            ->values()
+        : collect();
+    $hasCorrectionComparison = $correctionComparisonRows->isNotEmpty();
 @endphp
 <!DOCTYPE html>
 <html lang="pl">
@@ -41,7 +56,7 @@
             line-height: 1.34;
         }
         table { border-collapse: collapse; }
-        .page { width: 100%; }
+        .page { width: 100%; padding-bottom: 18mm; }
         .top-rule { border-top: 1px solid #b8bdc3; margin-bottom: 10px; }
         .header-table, .meta-table, .party-table, .items-table, .summary-table, .vat-table, .payment-table, .totals-layout { width: 100%; }
         .header-table td { vertical-align: top; padding: 0; }
@@ -118,13 +133,17 @@
             font-size: 7.5px;
             font-weight: 700;
             letter-spacing: .02em;
+            text-align: left;
             text-transform: uppercase;
         }
+        .items-table th.right { text-align: right; }
         .items-table td {
             padding: 5px 4px;
             border: 1px solid #e0e4e8;
             vertical-align: top;
         }
+        .items-table.compact-items th { font-size: 7.1px; }
+        .items-table.compact-items td { font-size: 7.9px; }
         .items-table tbody tr:nth-child(even) td { background: #fafbfc; }
         .item-name { color: #202124; font-size: 8.4px; font-weight: 700; line-height: 1.25; word-break: break-word; overflow-wrap: anywhere; }
         .item-sku { margin-top: 2px; color: #5f666d; font-size: 7.5px; line-height: 1.2; word-break: break-word; overflow-wrap: anywhere; }
@@ -202,12 +221,18 @@
         .payment-value { display: block; margin-top: 2px; font-size: 8.8px; font-weight: 600; line-height: 1.25; word-break: break-word; overflow-wrap: anywhere; }
         .payment-total { color: #202124; font-size: 10.8px; font-weight: 700; }
         .footer {
-            margin-top: 12px;
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
             padding-top: 7px;
             border-top: 1px solid #d3d7dc;
             color: #5f666d;
             font-size: 7.6px;
         }
+        .footer-table { width: 100%; }
+        .footer-table td { padding: 0; vertical-align: top; }
+        .footer-issued-by { text-align: right; color: #30363d; }
     </style>
 </head>
 <body>
@@ -270,6 +295,7 @@
         @if ($isCorrection)
             <div class="correction-box">
                 <strong>Korekta do faktury:</strong> {{ data_get($invoice->metadata, 'corrected_invoice_number', '-') }}<br>
+                <strong>Data faktury korygowanej:</strong> {{ data_get($invoice->metadata, 'corrected_invoice_issue_date', '-') }}<br>
                 <strong>Powód korekty:</strong> {{ data_get($invoice->metadata, 'correction_reason', 'Zwrot towaru') }}
             </div>
         @endif
@@ -316,15 +342,84 @@
             </tr>
         </table>
 
-        <div class="section-title">Pozycje faktury</div>
+        @if ($hasCorrectionComparison)
+            <div class="section-title">Pozycje przed korektą</div>
+            <table class="items-table compact-items">
+                <thead>
+                    <tr>
+                        <th style="width: 24px;">Lp.</th>
+                        <th style="width: 245px;">Nazwa towaru/usługi</th>
+                        <th class="right nowrap" style="width: 58px;">Ilość / jm</th>
+                        <th class="right nowrap" style="width: 64px;">Cena j. netto</th>
+                        <th class="right nowrap" style="width: 64px;">Wartość netto</th>
+                        <th class="right nowrap" style="width: 40px;">VAT</th>
+                        <th class="right nowrap" style="width: 64px;">Kwota VAT</th>
+                        <th class="right nowrap" style="width: 64px;">Brutto</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach ($correctionComparisonRows as $row)
+                        @php($before = $row['before'])
+                        <tr>
+                            <td>{{ $loop->iteration }}</td>
+                            <td>
+                                <div class="item-name">{{ $before['name'] ?? $row['line']->name }}</div>
+                                <div class="item-sku">SKU: {{ ($before['sku'] ?? $row['line']->sku) ?: '-' }}</div>
+                            </td>
+                            <td class="right nowrap">{{ $qty($before['quantity'] ?? 0) }} {{ ($before['unit'] ?? $row['line']->unit) ?: 'szt' }}</td>
+                            <td class="right nowrap">{{ $money($before['unit_net_price'] ?? 0) }}</td>
+                            <td class="right nowrap">{{ $money($before['net_total'] ?? 0) }}</td>
+                            <td class="right nowrap">{{ $money($before['vat_rate'] ?? 0) }}%</td>
+                            <td class="right nowrap">{{ $money($before['vat_total'] ?? 0) }}</td>
+                            <td class="right nowrap">{{ $money($before['gross_total'] ?? 0) }}</td>
+                        </tr>
+                    @endforeach
+                </tbody>
+            </table>
+
+            <div class="section-title">Pozycje po korekcie</div>
+            <table class="items-table compact-items">
+                <thead>
+                    <tr>
+                        <th style="width: 24px;">Lp.</th>
+                        <th style="width: 245px;">Nazwa towaru/usługi</th>
+                        <th class="right nowrap" style="width: 58px;">Ilość / jm</th>
+                        <th class="right nowrap" style="width: 64px;">Cena j. netto</th>
+                        <th class="right nowrap" style="width: 64px;">Wartość netto</th>
+                        <th class="right nowrap" style="width: 40px;">VAT</th>
+                        <th class="right nowrap" style="width: 64px;">Kwota VAT</th>
+                        <th class="right nowrap" style="width: 64px;">Brutto</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach ($correctionComparisonRows as $row)
+                        @php($after = $row['after'])
+                        <tr>
+                            <td>{{ $loop->iteration }}</td>
+                            <td>
+                                <div class="item-name">{{ $after['name'] ?? $row['line']->name }}</div>
+                                <div class="item-sku">SKU: {{ ($after['sku'] ?? $row['line']->sku) ?: '-' }}</div>
+                            </td>
+                            <td class="right nowrap">{{ $qty($after['quantity'] ?? 0) }} {{ ($after['unit'] ?? $row['line']->unit) ?: 'szt' }}</td>
+                            <td class="right nowrap">{{ $money($after['unit_net_price'] ?? 0) }}</td>
+                            <td class="right nowrap">{{ $money($after['net_total'] ?? 0) }}</td>
+                            <td class="right nowrap">{{ $money($after['vat_rate'] ?? 0) }}%</td>
+                            <td class="right nowrap">{{ $money($after['vat_total'] ?? 0) }}</td>
+                            <td class="right nowrap">{{ $money($after['gross_total'] ?? 0) }}</td>
+                        </tr>
+                    @endforeach
+                </tbody>
+            </table>
+        @else
+        <div class="section-title">{{ $isCorrection ? 'Pozycje korekty' : 'Pozycje faktury' }}</div>
         <table class="items-table">
             <thead>
                 <tr>
                     <th style="width: 24px;">Lp.</th>
                     <th style="width: 222px;">Nazwa towaru/usługi</th>
                     <th class="right nowrap" style="width: 54px;">Ilość / jm</th>
-                    <th class="right nowrap" style="width: 62px;">Cena netto</th>
-                    <th class="right nowrap" style="width: 56px;">Netto</th>
+                    <th class="right nowrap" style="width: 62px;">Cena j. netto</th>
+                    <th class="right nowrap" style="width: 56px;">Wartość netto</th>
                     <th class="right nowrap" style="width: 40px;">VAT</th>
                     <th class="right nowrap" style="width: 62px;">Kwota VAT</th>
                     <th class="right nowrap" style="width: 64px;">Brutto</th>
@@ -348,6 +443,7 @@
                 @endforeach
             </tbody>
         </table>
+        @endif
 
         <table class="totals-layout">
             <tr>
@@ -428,7 +524,12 @@
         </table>
 
         <div class="footer">
-            Dokument wystawiony elektronicznie w Sempre ERP.
+            <table class="footer-table">
+                <tr>
+                    <td>Dokument wystawiony elektronicznie w Sempre ERP.</td>
+                    <td class="footer-issued-by">Wystawił: {{ $issuedBy }}</td>
+                </tr>
+            </table>
         </div>
     </main>
 </body>

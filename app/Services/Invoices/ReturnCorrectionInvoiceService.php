@@ -184,6 +184,10 @@ final class ReturnCorrectionInvoiceService
                 $netTotal = round($quantity * $unitNet, 2);
                 $vatTotal = round($netTotal * ($vatRate / 100), 2);
                 $grossTotal = round($netTotal + $vatTotal, 2);
+                $beforeQuantity = (float) $invoiceLine->quantity;
+                $beforeNetTotal = (float) $invoiceLine->net_total;
+                $beforeVatTotal = (float) $invoiceLine->vat_total;
+                $beforeGrossTotal = (float) $invoiceLine->gross_total;
 
                 return [
                     'product_id' => $invoiceLine->product_id,
@@ -201,6 +205,28 @@ final class ReturnCorrectionInvoiceService
                         'return_case_line_id' => $returnLine->id,
                         'external_order_line_id' => $returnLine->externalOrderLine?->external_line_id,
                         'corrected_invoice_line_id' => $invoiceLine->id,
+                        'before_correction' => [
+                            'name' => $invoiceLine->name,
+                            'sku' => $invoiceLine->sku,
+                            'unit' => $invoiceLine->unit,
+                            'quantity' => $beforeQuantity,
+                            'unit_net_price' => $unitNet,
+                            'net_total' => $beforeNetTotal,
+                            'vat_rate' => $vatRate,
+                            'vat_total' => $beforeVatTotal,
+                            'gross_total' => $beforeGrossTotal,
+                        ],
+                        'after_correction' => [
+                            'name' => $invoiceLine->name,
+                            'sku' => $invoiceLine->sku,
+                            'unit' => $invoiceLine->unit,
+                            'quantity' => round($beforeQuantity + $quantity, 4),
+                            'unit_net_price' => $unitNet,
+                            'net_total' => round($beforeNetTotal + $netTotal, 2),
+                            'vat_rate' => $vatRate,
+                            'vat_total' => round($beforeVatTotal + $vatTotal, 2),
+                            'gross_total' => round($beforeGrossTotal + $grossTotal, 2),
+                        ],
                     ],
                 ];
             })

@@ -16,7 +16,7 @@ use Throwable;
 final class InvoiceTemplateService
 {
     private const DEFAULT_TEMPLATE_SOURCE = 'resources/views/invoices/print.blade.php';
-    private const DEFAULT_TEMPLATE_VERSION = '2026-06-13-managed-business-invoice-v5';
+    private const DEFAULT_TEMPLATE_VERSION = '2026-06-13-managed-business-invoice-v6';
 
     public function defaultTemplate(): InvoiceTemplate
     {
