@@ -1,0 +1,487 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature;
+
+use App\Jobs\ImportWooCommerceOrdersJob;
+use App\Jobs\ImportWooCommerceProductsJob;
+use App\Models\IntegrationSyncLog;
+use App\Models\SalesChannel;
+use App\Models\WordpressIntegration;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Queue;
+use Tests\TestCase;
+
+class IntegrationRetryWorkflowTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_failed_product_import_can_be_retried_from_integration_logs(): void
+    {
+        Queue::fake();
+
+        [$integration] = $this->createIntegration();
+        $failedLog = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_products',
+            'status' => 'failed',
+            'error_message' => 'WooCommerce timeout',
+            'attempts' => 2,
+            'started_at' => now()->subMinutes(10),
+            'finished_at' => now()->subMinutes(9),
+        ]);
+
+        $this->get(route('integrations.index'))
+            ->assertOk()
+            ->assertSee('WooCommerce timeout')
+            ->assertSee('Ponów import');
+
+        $this->post(route('integrations.logs.retry', $failedLog))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Import został ponownie dodany do kolejki.');
+
+        $failedLog->refresh();
+        $this->assertSame('failed', $failedLog->status);
+        $this->assertSame('WooCommerce timeout', $failedLog->error_message);
+
+        $retryLog = IntegrationSyncLog::query()
+            ->where('operation', 'import_products')
+            ->where('status', 'queued')
+            ->whereKeyNot($failedLog->id)
+            ->firstOrFail();
+
+        $this->assertSame($failedLog->id, $retryLog->request_payload['retry_of_log_id']);
+
+        Queue::assertPushed(ImportWooCommerceProductsJob::class);
+        Queue::assertNotPushed(ImportWooCommerceOrdersJob::class);
+
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'integration_sync.retry_requested',
+            'auditable_type' => IntegrationSyncLog::class,
+            'auditable_id' => $retryLog->id,
+        ]);
+    }
+
+    public function test_failed_order_import_can_be_retried_and_non_failed_log_is_rejected(): void
+    {
+        Queue::fake();
+
+        [$integration] = $this->createIntegration();
+        $failedLog = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'failed',
+            'error_message' => 'Błąd API zamówień',
+            'attempts' => 1,
+            'started_at' => now()->subMinutes(6),
+            'finished_at' => now()->subMinutes(5),
+        ]);
+        $successLog = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'success',
+            'attempts' => 1,
+            'started_at' => now()->subMinute(),
+            'finished_at' => now(),
+        ]);
+
+        $this->post(route('integrations.logs.retry', $successLog))
+            ->assertRedirect()
+            ->assertSessionHas('error', 'Ponowić można tylko nieudany import.');
+
+        $this->post(route('integrations.logs.retry', $failedLog))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Import został ponownie dodany do kolejki.');
+
+        Queue::assertPushed(ImportWooCommerceOrdersJob::class);
+    }
+
+    public function test_import_buttons_do_not_duplicate_active_jobs(): void
+    {
+        Queue::fake();
+
+        [$integration] = $this->createIntegration();
+
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_products',
+            'status' => 'queued',
+            'attempts' => 1,
+            'started_at' => now()->subMinute(),
+        ]);
+
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'running',
+            'attempts' => 1,
+            'started_at' => now()->subMinute(),
+        ]);
+
+        $this->post(route('integrations.import-products', $integration))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Import produktów dla tej integracji jest już w kolejce albo w toku.');
+
+        $this->post(route('integrations.import-orders', $integration))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Import zamówień dla tej integracji jest już w kolejce albo w toku.');
+
+        $this->assertSame(1, IntegrationSyncLog::query()->where('operation', 'import_products')->count());
+        $this->assertSame(1, IntegrationSyncLog::query()->where('operation', 'import_orders')->count());
+
+        Queue::assertNotPushed(ImportWooCommerceProductsJob::class);
+        Queue::assertNotPushed(ImportWooCommerceOrdersJob::class);
+    }
+
+    public function test_stale_running_import_is_released_when_operator_queues_same_import(): void
+    {
+        Queue::fake();
+
+        [$integration] = $this->createIntegration();
+
+        $staleLog = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_products',
+            'status' => 'running',
+            'attempts' => 1,
+            'started_at' => now()->subMinutes(75),
+        ]);
+
+        $this->post(route('integrations.import-products', $integration))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Import produktów został dodany do kolejki. Status będzie widoczny w logach synchronizacji.');
+
+        $staleLog->refresh();
+        $this->assertSame('failed', $staleLog->status);
+        $this->assertStringContainsString('przerwany po 60 minut', (string) $staleLog->error_message);
+        $this->assertSame(60, data_get($staleLog->response_payload, 'stale_recovery.stale_after_minutes'));
+
+        $retryLog = IntegrationSyncLog::query()
+            ->where('operation', 'import_products')
+            ->where('status', 'queued')
+            ->whereKeyNot($staleLog->id)
+            ->firstOrFail();
+
+        $this->assertSame('erp_panel', $retryLog->request_payload['source']);
+        Queue::assertPushed(ImportWooCommerceProductsJob::class);
+        Queue::assertNotPushed(ImportWooCommerceOrdersJob::class);
+    }
+
+    public function test_console_command_releases_stale_running_imports(): void
+    {
+        [$integration] = $this->createIntegration();
+
+        $staleLog = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'running',
+            'attempts' => 1,
+            'started_at' => now()->subMinutes(45),
+        ]);
+
+        $freshLog = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_products',
+            'status' => 'running',
+            'attempts' => 1,
+            'started_at' => now()->subMinutes(5),
+        ]);
+
+        $this->artisan('erp:release-stale-woocommerce-imports', ['--minutes' => 30])
+            ->expectsOutput('WooCommerce stale imports released: 1, threshold: 30 minutes.')
+            ->assertExitCode(0);
+
+        $this->assertSame('failed', $staleLog->refresh()->status);
+        $this->assertSame(30, data_get($staleLog->response_payload, 'stale_recovery.stale_after_minutes'));
+        $this->assertSame('running', $freshLog->refresh()->status);
+    }
+
+    public function test_scheduler_registers_woocommerce_import_maintenance_tasks(): void
+    {
+        Artisan::call('schedule:list');
+
+        $output = Artisan::output();
+
+        $this->assertStringContainsString('erp:queue-woocommerce-imports --orders', $output);
+        $this->assertStringContainsString('erp:release-stale-woocommerce-imports --minutes=60', $output);
+    }
+
+    public function test_console_command_queues_enabled_woocommerce_imports_without_duplicates(): void
+    {
+        Queue::fake();
+
+        [$mainIntegration] = $this->createIntegration();
+
+        $ordersOnlyChannel = SalesChannel::query()->create([
+            'code' => 'B2B',
+            'name' => 'Sklep B2B',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $ordersOnlyIntegration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $ordersOnlyChannel->id,
+            'name' => 'Sempre B2B Woo',
+            'base_url' => 'https://b2b.shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_b2b'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_b2b'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => false,
+            'invoice_upload_enabled' => true,
+        ]);
+
+        $productsOnlyChannel = SalesChannel::query()->create([
+            'code' => 'B2C_PRODUCTS',
+            'name' => 'Sklep tylko produkty',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $productsOnlyIntegration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $productsOnlyChannel->id,
+            'name' => 'Sempre Products Woo',
+            'base_url' => 'https://products.shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_products'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_products'),
+            'order_import_enabled' => false,
+            'stock_export_enabled' => false,
+            'invoice_upload_enabled' => false,
+        ]);
+
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $mainIntegration->sales_channel_id,
+            'wordpress_integration_id' => $mainIntegration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'queued',
+            'attempts' => 1,
+            'started_at' => now()->subMinute(),
+        ]);
+
+        $this->artisan('erp:queue-woocommerce-imports', ['--all' => true])
+            ->assertExitCode(0);
+
+        $this->assertSame(5, IntegrationSyncLog::query()->count());
+        $this->assertSame(3, IntegrationSyncLog::query()->where('operation', 'import_products')->count());
+        $this->assertSame(2, IntegrationSyncLog::query()->where('operation', 'import_orders')->count());
+
+        $this->assertDatabaseHas('integration_sync_logs', [
+            'wordpress_integration_id' => $ordersOnlyIntegration->id,
+            'operation' => 'import_orders',
+            'status' => 'queued',
+        ]);
+        $this->assertDatabaseHas('integration_sync_logs', [
+            'wordpress_integration_id' => $productsOnlyIntegration->id,
+            'operation' => 'import_products',
+            'status' => 'queued',
+        ]);
+
+        $scheduledLogs = IntegrationSyncLog::query()
+            ->whereNotNull('request_payload')
+            ->get();
+
+        $this->assertCount(4, $scheduledLogs);
+        $this->assertTrue($scheduledLogs->every(
+            fn (IntegrationSyncLog $log): bool => data_get($log->request_payload, 'source') === 'scheduled_command',
+        ));
+
+        Queue::assertPushed(ImportWooCommerceProductsJob::class, 3);
+        Queue::assertPushed(ImportWooCommerceOrdersJob::class, 1);
+
+        $this->artisan('erp:queue-woocommerce-imports', ['--all' => true])
+            ->assertExitCode(0);
+
+        $this->assertSame(5, IntegrationSyncLog::query()->count());
+    }
+
+    public function test_retry_does_not_duplicate_active_import(): void
+    {
+        Queue::fake();
+
+        [$integration] = $this->createIntegration();
+
+        $failedLog = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_products',
+            'status' => 'failed',
+            'error_message' => 'Poprzedni import nie przeszedł',
+            'attempts' => 1,
+            'started_at' => now()->subMinutes(10),
+            'finished_at' => now()->subMinutes(9),
+        ]);
+
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_products',
+            'status' => 'queued',
+            'attempts' => 1,
+            'started_at' => now()->subMinute(),
+        ]);
+
+        $this->post(route('integrations.logs.retry', $failedLog))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Taki import jest już w kolejce albo w toku. Nie dodano duplikatu.');
+
+        $this->assertSame(2, IntegrationSyncLog::query()->where('operation', 'import_products')->count());
+        $this->assertFalse(IntegrationSyncLog::query()
+            ->get()
+            ->contains(fn (IntegrationSyncLog $log): bool => data_get($log->request_payload, 'retry_of_log_id') === $failedLog->id));
+        $this->assertDatabaseMissing('audit_logs', [
+            'action' => 'integration_sync.retry_requested',
+        ]);
+
+        Queue::assertNotPushed(ImportWooCommerceProductsJob::class);
+    }
+
+    public function test_integration_delete_is_blocked_during_active_import_and_audited_afterwards(): void
+    {
+        [$integration] = $this->createIntegration();
+
+        $activeLog = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_products',
+            'status' => 'queued',
+            'attempts' => 1,
+            'started_at' => now()->subMinute(),
+        ]);
+
+        $this->delete(route('integrations.destroy', $integration))
+            ->assertRedirect()
+            ->assertSessionHas('error', 'Nie można usunąć integracji, gdy import jest w kolejce albo w toku.');
+
+        $this->assertNotSoftDeleted('wordpress_integrations', ['id' => $integration->id]);
+
+        $activeLog->update([
+            'status' => 'failed',
+            'error_message' => 'Przerwany import testowy',
+            'finished_at' => now(),
+        ]);
+
+        $this->delete(route('integrations.destroy', $integration))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Integracja została usunięta.');
+
+        $this->assertSoftDeleted('wordpress_integrations', ['id' => $integration->id]);
+
+        $deleted = WordpressIntegration::withTrashed()->findOrFail($integration->id);
+        $this->assertFalse($deleted->order_import_enabled);
+        $this->assertFalse($deleted->stock_export_enabled);
+        $this->assertFalse($deleted->invoice_upload_enabled);
+
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'integration.deleted',
+            'auditable_type' => WordpressIntegration::class,
+            'auditable_id' => $integration->id,
+        ]);
+    }
+
+    public function test_operator_can_edit_integration_without_recreating_channel_or_secrets(): void
+    {
+        [$integration, $channel] = $this->createIntegration();
+
+        $originalSecret = $integration->consumer_secret_encrypted;
+
+        $this->get(route('integrations.index'))
+            ->assertOk()
+            ->assertSee('Edytuj')
+            ->assertSee('Statusy Woo');
+
+        $this->put(route('integrations.update', $integration), [
+            'channel_code' => 'b2b',
+            'channel_name' => 'Sklep B2B',
+            'name' => 'Sempre B2B Woo',
+            'base_url' => 'https://b2b.shop.test/',
+            'consumer_key' => 'ck_new',
+            'consumer_secret' => '',
+            'order_import_enabled' => '1',
+            'invoice_upload_enabled' => '1',
+        ])->assertRedirect()
+            ->assertSessionHas('status', 'Konfiguracja integracji WooCommerce została zapisana.');
+
+        $integration->refresh();
+        $channel->refresh();
+
+        $this->assertSame('B2B', $channel->code);
+        $this->assertSame('Sklep B2B', $channel->name);
+        $this->assertSame('Sempre B2B Woo', $integration->name);
+        $this->assertSame('https://b2b.shop.test', $integration->base_url);
+        $this->assertTrue($integration->order_import_enabled);
+        $this->assertFalse($integration->stock_export_enabled);
+        $this->assertTrue($integration->invoice_upload_enabled);
+        $this->assertSame('ck_new', Crypt::decryptString($integration->consumer_key_encrypted));
+        $this->assertSame($originalSecret, $integration->consumer_secret_encrypted);
+
+        $this->put(route('integrations.order-statuses.update', $integration), [
+            'ready_to_ship_status' => 'gotowe-do-wysylki',
+            'shipped_status' => 'wyslane',
+            'packing_rollback_status' => 'processing',
+        ])->assertRedirect()
+            ->assertSessionHas('status', 'Statusy WooCommerce dla pakowania zostały zapisane.');
+
+        $this->assertSame([
+            'ready_to_ship' => 'gotowe-do-wysylki',
+            'shipped' => 'wyslane',
+            'packing_rollback' => 'processing',
+        ], $integration->refresh()->orderStatusSettings());
+
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'integration.updated',
+            'auditable_type' => WordpressIntegration::class,
+            'auditable_id' => $integration->id,
+        ]);
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'integration.order_statuses_updated',
+            'auditable_type' => WordpressIntegration::class,
+            'auditable_id' => $integration->id,
+        ]);
+    }
+
+    /**
+     * @return array{0:WordpressIntegration,1:SalesChannel}
+     */
+    private function createIntegration(): array
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Sempre Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+            'invoice_upload_enabled' => true,
+        ]);
+
+        return [$integration, $channel];
+    }
+}

@@ -1,0 +1,463 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature;
+
+use App\Models\Invoice;
+use App\Models\InvoiceFile;
+use App\Models\InvoiceTemplate;
+use App\Services\Invoices\InvoiceNumberService;
+use App\Services\Invoices\InvoiceTemplateService;
+use App\Services\Invoices\InvoiceValidationService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\File;
+use Tests\TestCase;
+
+class InvoiceTemplateWorkflowTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_operator_can_edit_invoice_template_preview_and_regenerate_files(): void
+    {
+        $invoice = $this->createInvoice();
+
+        $this->get(route('invoices.index'))
+            ->assertOk()
+            ->assertSee('Edytuj szablon faktury')
+            ->assertSee('Ustawienia faktur')
+            ->assertSee('Dane sprzedawcy')
+            ->assertSee($invoice->number);
+
+        $this->put(route('invoices.seller.update'), [
+            'name' => 'Sempre Love sp. z o.o.',
+            'tax_id' => '5261040828',
+            'address_1' => 'Testowa 1',
+            'postcode' => '00-001',
+            'city' => 'Warszawa',
+            'country' => 'PL',
+            'email' => 'biuro@example.test',
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $body = <<<'BLADE'
+<!DOCTYPE html>
+<html lang="pl">
+<body>
+    <h1>Niestandardowy szablon Sempre</h1>
+    <p>Faktura: {{ $invoice->number }}</p>
+    <p>Nabywca: {{ $invoice->buyer_data['name'] ?? '-' }}</p>
+</body>
+</html>
+BLADE;
+
+        $this->put(route('invoices.template.update'), [
+            'name' => 'Sempre custom',
+            'template_body' => $body,
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $template = InvoiceTemplate::query()->firstOrFail();
+        $this->assertSame('Sempre custom', $template->name);
+        $this->assertTrue($template->is_default);
+
+        $this->get(route('invoices.preview', $invoice))
+            ->assertOk()
+            ->assertSee('Niestandardowy szablon Sempre')
+            ->assertSee('Faktura: FV/2026/000010');
+
+        $this->post(route('invoices.regenerate', $invoice))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $invoice->refresh();
+        $this->assertSame($template->id, $invoice->invoice_template_id);
+        $this->assertSame(2, InvoiceFile::query()->where('invoice_id', $invoice->id)->count());
+
+        $htmlFile = InvoiceFile::query()
+            ->where('invoice_id', $invoice->id)
+            ->where('type', 'html')
+            ->firstOrFail();
+
+        $this->assertSame($template->id, $htmlFile->metadata['template_id']);
+        $this->assertStringContainsString('Niestandardowy szablon Sempre', File::get(storage_path('app/' . $htmlFile->path)));
+
+        $pdfFile = InvoiceFile::query()
+            ->where('invoice_id', $invoice->id)
+            ->where('type', 'pdf')
+            ->firstOrFail();
+
+        $this->get(route('invoices.files.download', [$invoice, $htmlFile]))
+            ->assertOk()
+            ->assertDownload('FV-2026-000010.html');
+
+        $this->get(route('invoices.files.download', [$invoice, $pdfFile]))
+            ->assertOk()
+            ->assertDownload('FV-2026-000010.pdf');
+
+        $this->get('/modul/invoices')->assertRedirect('/invoices');
+    }
+
+    public function test_invalid_invoice_template_is_not_saved(): void
+    {
+        $this->createInvoice();
+
+        $default = app(InvoiceTemplateService::class)->defaultTemplate();
+        $originalBody = $default->template_body;
+
+        $invalidBody = <<<'BLADE'
+<!DOCTYPE html>
+<html lang="pl">
+<body>
+    {{ $invoice->lines->first()->methodThatDoesNotExistForValidation() }}
+</body>
+</html>
+BLADE;
+
+        $this->put(route('invoices.template.update'), [
+            'name' => 'Popsuty szablon',
+            'template_body' => $invalidBody,
+        ])
+            ->assertRedirect()
+            ->assertSessionHas('error', fn (string $message): bool => str_contains($message, 'Nie zapisano szablonu faktury')
+                && str_contains($message, 'Szablon faktury nie może zostać wyrenderowany'));
+
+        $default->refresh();
+
+        $this->assertNotSame('Popsuty szablon', $default->name);
+        $this->assertSame($originalBody, $default->template_body);
+    }
+
+    public function test_invalid_stored_invoice_template_does_not_delete_existing_files(): void
+    {
+        $invoice = $this->createInvoice();
+
+        $this->post(route('invoices.regenerate', $invoice))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $invoice->refresh()->load(['files', 'invoiceTemplate']);
+        $this->assertSame(2, $invoice->files->count());
+        $paths = $invoice->files->pluck('path')->all();
+
+        $template = $invoice->invoiceTemplate;
+        $this->assertInstanceOf(InvoiceTemplate::class, $template);
+        $template->update([
+            'template_body' => <<<'BLADE'
+<!DOCTYPE html>
+<html lang="pl">
+<body>
+    {{ $invoice->lines->first()->methodThatDoesNotExistForRegeneration() }}
+</body>
+</html>
+BLADE,
+        ]);
+
+        $this->get(route('invoices.preview', $invoice))
+            ->assertStatus(422)
+            ->assertSee('Błąd szablonu faktury')
+            ->assertSee('Szablon faktury nie może zostać wyrenderowany');
+
+        $this->post(route('invoices.regenerate', $invoice))
+            ->assertRedirect()
+            ->assertSessionHas('error', fn (string $message): bool => str_contains($message, 'Nie wygenerowano plików faktury')
+                && str_contains($message, 'Szablon faktury nie może zostać wyrenderowany'));
+
+        $this->assertSame(2, InvoiceFile::query()->where('invoice_id', $invoice->id)->count());
+
+        foreach ($paths as $path) {
+            $this->assertFileExists(storage_path('app/' . $path));
+        }
+    }
+
+    public function test_operator_can_configure_invoice_numbering_series(): void
+    {
+        $this->put(route('invoices.settings.update'), [
+            'sales_prefix' => 'FV/ERP',
+            'correction_prefix' => 'FK/ERP',
+            'pattern' => '{PREFIX}/{YYYY}/{SEQ}',
+            'padding' => 4,
+            'payment_due_days' => 14,
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $this->get(route('invoices.index'))
+            ->assertOk()
+            ->assertSee('FV/ERP')
+            ->assertSee('FK/ERP')
+            ->assertSee('{PREFIX}/{YYYY}/{SEQ}')
+            ->assertSee('14');
+
+        $invoice = $this->createInvoice();
+        $invoice->update(['number' => 'FV/ERP/' . now()->format('Y') . '/0009']);
+
+        $numbers = app(InvoiceNumberService::class);
+
+        $this->assertSame('FV/ERP/' . now()->format('Y') . '/0010', $numbers->next());
+        $this->assertSame('FK/ERP/' . now()->format('Y') . '/0001', $numbers->next('FK'));
+
+        $this->put(route('invoices.settings.update'), [
+            'sales_prefix' => 'FV/ERP',
+            'correction_prefix' => 'FK/ERP',
+            'pattern' => '{PREFIX}/{MM}/{YYYY}/{SEQ}',
+            'padding' => 3,
+            'payment_due_days' => 14,
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $this->assertSame('FV/ERP/' . now()->format('m/Y') . '/001', $numbers->next());
+    }
+
+    public function test_generated_invoice_pdf_uses_unicode_renderer_for_polish_text(): void
+    {
+        $invoice = $this->createInvoice();
+        $invoice->update([
+            'seller_data' => [
+                'name' => 'Zażółć sp. z o.o.',
+                'tax_id' => '5261040828',
+                'address_1' => 'Łąkowa 1',
+                'postcode' => '00-001',
+                'city' => 'Łódź',
+                'country' => 'PL',
+            ],
+            'buyer_data' => [
+                'name' => 'Gęślą Jaźń',
+                'tax_id' => '1111111111',
+                'address_1' => 'Śliwkowa 2',
+                'postcode' => '00-002',
+                'city' => 'Żyrardów',
+                'country' => 'PL',
+            ],
+        ]);
+        $invoice->lines()->firstOrFail()->update([
+            'name' => 'Koszula ŁÓDŹ śliwkowa',
+        ]);
+
+        $this->post(route('invoices.regenerate', $invoice))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $htmlFile = InvoiceFile::query()
+            ->where('invoice_id', $invoice->id)
+            ->where('type', 'html')
+            ->firstOrFail();
+        $pdfFile = InvoiceFile::query()
+            ->where('invoice_id', $invoice->id)
+            ->where('type', 'pdf')
+            ->firstOrFail();
+
+        $this->assertStringContainsString('Koszula ŁÓDŹ śliwkowa', File::get(storage_path('app/' . $htmlFile->path)));
+        $this->assertStringStartsWith('%PDF-1.4', File::get(storage_path('app/' . $pdfFile->path)));
+        $this->assertSame('gd_raster_pdf', $pdfFile->metadata['renderer']);
+        $this->assertTrue($pdfFile->metadata['unicode_text']);
+    }
+
+    public function test_operator_can_fix_invoice_data_and_regenerate_files(): void
+    {
+        $invoice = $this->createInvoice();
+        $invoice->update([
+            'metadata' => [
+                'woocommerce_upload' => [
+                    'status' => 'success',
+                    'requires_resend' => false,
+                    'uploaded_at' => now()->subDay()->toISOString(),
+                ],
+            ],
+        ]);
+
+        $this->get(route('invoices.edit', $invoice))
+            ->assertOk()
+            ->assertSee('Edycja faktury')
+            ->assertSee('Walidacja faktury: OK');
+
+        $this->put(route('invoices.data.update', $invoice), [
+            'issue_date' => '2026-06-02',
+            'sale_date' => '2026-06-01',
+            'payment_due_date' => '2026-06-16',
+            'currency' => 'PLN',
+            'payment_method' => 'Przelew',
+            'seller' => [
+                'name' => 'Sempre Love sp. z o.o.',
+                'tax_id' => '5261040828',
+                'address_1' => 'Łąkowa 1',
+                'address_2' => '',
+                'postcode' => '00-001',
+                'city' => 'Warszawa',
+                'country' => 'PL',
+                'email' => 'biuro@example.test',
+                'phone' => '+48123123123',
+                'bank_account' => 'PL00111122223333444455556666',
+            ],
+            'buyer' => [
+                'name' => 'Poprawiony klient',
+                'tax_id' => '1111111111',
+                'address_1' => 'Kupująca 22',
+                'address_2' => '',
+                'postcode' => '00-002',
+                'city' => 'Łódź',
+                'country' => 'PL',
+                'email' => 'klient@example.test',
+                'phone' => '+48555111222',
+            ],
+        ])
+            ->assertRedirect(route('invoices.edit', $invoice))
+            ->assertSessionHas('status');
+
+        $invoice->refresh();
+
+        $this->assertSame('2026-06-02', $invoice->issue_date->toDateString());
+        $this->assertSame('Poprawiony klient', $invoice->buyer_data['name']);
+        $this->assertSame('Łódź', $invoice->buyer_data['city']);
+        $this->assertSame('stale', data_get($invoice->metadata, 'woocommerce_upload.status'));
+        $this->assertTrue(data_get($invoice->metadata, 'woocommerce_upload.requires_resend'));
+        $this->assertSame(2, InvoiceFile::query()->where('invoice_id', $invoice->id)->count());
+
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'invoice.data_updated',
+            'auditable_id' => $invoice->id,
+        ]);
+
+        $this->get(route('invoices.index'))
+            ->assertOk()
+            ->assertSee('Do ponownej wysyłki')
+            ->assertSee('Edytuj dane');
+    }
+
+    public function test_invoice_index_summarizes_validation_states_and_shows_visible_messages(): void
+    {
+        $this->createInvoice('FV/2026/000010');
+
+        $blockingInvoice = $this->createInvoice('FV/2026/000011');
+        $blockingInvoice->update([
+            'seller_data' => [
+                'name' => '',
+                'tax_id' => '',
+                'address_1' => '',
+                'country' => '',
+            ],
+        ]);
+
+        $warningInvoice = $this->createInvoice('FV/2026/000012');
+        $warningInvoice->update([
+            'buyer_data' => [
+                'name' => 'Klient testowy',
+                'tax_id' => '123',
+                'address_1' => 'Kupująca 2',
+                'postcode' => '00-002',
+                'city' => 'Warszawa',
+                'country' => 'PL',
+            ],
+        ]);
+
+        $this->get(route('invoices.index'))
+            ->assertOk()
+            ->assertSee('Gotowe do wysyłki')
+            ->assertSee('Do poprawy')
+            ->assertSee('Z ostrzeżeniami')
+            ->assertSee('Komunikaty walidacji')
+            ->assertSee('Komunikaty (4)')
+            ->assertSee('Komunikaty (1)')
+            ->assertSee('Brakuje NIP sprzedawcy.')
+            ->assertSee('NIP nabywcy wygląda nietypowo. Sprawdź przed wysyłką do KSeF.');
+    }
+
+    public function test_polish_nip_checksum_is_validated_for_invoice_parties(): void
+    {
+        $invoice = $this->createInvoice();
+        $invoice->update([
+            'seller_data' => [
+                'name' => 'Sempre Love sp. z o.o.',
+                'tax_id' => '1234567890',
+                'address_1' => 'Testowa 1',
+                'country' => 'PL',
+            ],
+            'buyer_data' => [
+                'name' => 'Klient testowy',
+                'tax_id' => '1234567890',
+                'address_1' => 'Kupująca 2',
+                'postcode' => '00-002',
+                'city' => 'Warszawa',
+                'country' => 'PL',
+            ],
+        ]);
+
+        $result = app(InvoiceValidationService::class)->validate($invoice);
+
+        $this->assertTrue($result['is_blocking']);
+        $this->assertContains('NIP sprzedawcy ma niepoprawny format.', $result['errors']);
+        $this->assertContains('NIP nabywcy wygląda nietypowo. Sprawdź przed wysyłką do KSeF.', $result['warnings']);
+    }
+
+    public function test_ksef_accepted_invoice_data_cannot_be_edited(): void
+    {
+        $invoice = $this->createInvoice();
+        $invoice->update(['ksef_number' => 'KSEF-ACCEPTED-1']);
+
+        $this->get(route('invoices.edit', $invoice))
+            ->assertOk()
+            ->assertSee('nie może być edytowana');
+
+        $this->put(route('invoices.data.update', $invoice), [
+            'issue_date' => '2026-06-02',
+            'sale_date' => '2026-06-01',
+            'payment_due_date' => '2026-06-16',
+            'currency' => 'PLN',
+            'seller' => [
+                'name' => 'Inna spółka',
+                'tax_id' => '5261040828',
+                'address_1' => 'Testowa 1',
+                'country' => 'PL',
+            ],
+            'buyer' => [
+                'name' => 'Klient testowy',
+                'address_1' => 'Kupująca 2',
+                'country' => 'PL',
+            ],
+        ])
+            ->assertRedirect()
+            ->assertSessionHas('error');
+
+        $this->assertSame('Sempre Love sp. z o.o.', $invoice->refresh()->seller_data['name']);
+    }
+
+    private function createInvoice(string $number = 'FV/2026/000010'): Invoice
+    {
+        $invoice = Invoice::query()->create([
+            'number' => $number,
+            'type' => 'vat',
+            'status' => 'issued',
+            'issue_date' => '2026-06-01',
+            'sale_date' => '2026-06-01',
+            'payment_due_date' => '2026-06-08',
+            'currency' => 'PLN',
+            'seller_data' => [
+                'name' => 'Sempre Love sp. z o.o.',
+                'tax_id' => '5261040828',
+                'address_1' => 'Testowa 1',
+                'country' => 'PL',
+            ],
+            'buyer_data' => [
+                'name' => 'Klient testowy',
+                'tax_id' => '1111111111',
+                'address_1' => 'Kupująca 2',
+                'postcode' => '00-002',
+                'city' => 'Warszawa',
+                'country' => 'PL',
+            ],
+            'net_total' => 100,
+            'vat_total' => 23,
+            'gross_total' => 123,
+            'issued_at' => now(),
+        ]);
+
+        $invoice->lines()->create([
+            'name' => 'Produkt fakturowany',
+            'sku' => 'SKU-FV',
+            'unit' => 'szt',
+            'quantity' => 1,
+            'unit_net_price' => 100,
+            'net_total' => 100,
+            'vat_rate' => 23,
+            'vat_total' => 23,
+            'gross_total' => 123,
+        ]);
+
+        return $invoice;
+    }
+}

@@ -1,0 +1,230 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Services\Invoices;
+
+use App\Models\Invoice;
+use App\Models\InvoiceLine;
+use App\Models\ReturnCase;
+use App\Models\ReturnCaseLine;
+use App\Services\Automation\InvoiceKsefAutomationService;
+use App\Services\Audit\AuditLogService;
+use Illuminate\Support\Facades\DB;
+use RuntimeException;
+
+final class ReturnCorrectionInvoiceService
+{
+    public function __construct(
+        private readonly InvoiceNumberService $numbers,
+        private readonly InvoiceTemplateService $templates,
+        private readonly OrderInvoiceService $files,
+        private readonly InvoiceSettingsService $settings,
+        private readonly AuditLogService $audit,
+        private readonly InvoiceKsefAutomationService $ksefAutomation,
+    ) {
+    }
+
+    public function createForReturn(ReturnCase $returnCase): Invoice
+    {
+        $createdInvoiceId = null;
+
+        $invoice = DB::transaction(function () use ($returnCase, &$createdInvoiceId): Invoice {
+            $returnCase = ReturnCase::query()
+                ->with([
+                    'lines.externalOrderLine',
+                    'lines.warehouseDocument',
+                    'externalOrder.invoices.lines',
+                    'warehouseDocument',
+                    'correctionInvoice.lines',
+                ])
+                ->lockForUpdate()
+                ->findOrFail($returnCase->id);
+
+            if ($returnCase->correctionInvoice instanceof Invoice) {
+                return $this->files->ensureFiles($returnCase->correctionInvoice->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']));
+            }
+
+            $returnDocuments = $this->returnDocuments($returnCase);
+
+            if ($returnDocuments->isEmpty() || ! $returnDocuments->every(fn ($document): bool => $document->status === 'posted')) {
+                throw new RuntimeException('Najpierw zaksięguj wszystkie RX dla tego zwrotu.');
+            }
+
+            if ($returnCase->externalOrder === null) {
+                throw new RuntimeException('Faktura korygująca wymaga zwrotu powiązanego z zamówieniem.');
+            }
+
+            $originalInvoice = $returnCase->externalOrder->invoices
+                ->where('type', 'vat')
+                ->where('status', 'issued')
+                ->sortByDesc('id')
+                ->first();
+
+            if (! $originalInvoice instanceof Invoice) {
+                throw new RuntimeException('Nie znaleziono pierwotnej faktury sprzedaży do tego zamówienia.');
+            }
+
+            $sellerStatus = $this->settings->sellerConfigurationStatus($originalInvoice->seller_data ?? []);
+
+            if (! $sellerStatus['is_ready']) {
+                throw new RuntimeException(
+                    'Faktura pierwotna ma niekompletne dane sprzedawcy. Uzupełnij dane sprzedawcy na fakturze pierwotnej przed wystawieniem korekty. '
+                    . implode(' ', $sellerStatus['errors']),
+                );
+            }
+
+            $correctionLines = $this->correctionLines($returnCase, $originalInvoice);
+
+            if ($correctionLines === []) {
+                throw new RuntimeException('Zwrot nie ma pozycji, które można skorygować na fakturze.');
+            }
+
+            $template = $this->templates->defaultTemplate();
+            $netTotal = round(collect($correctionLines)->sum('net_total'), 2);
+            $vatTotal = round(collect($correctionLines)->sum('vat_total'), 2);
+            $grossTotal = round(collect($correctionLines)->sum('gross_total'), 2);
+
+            $invoice = Invoice::query()->create([
+                'number' => $this->numbers->next('FK'),
+                'type' => 'correction',
+                'status' => 'issued',
+                'external_order_id' => $returnCase->external_order_id,
+                'invoice_template_id' => $template->id,
+                'issue_date' => now()->toDateString(),
+                'sale_date' => $originalInvoice->sale_date?->toDateString(),
+                'payment_due_date' => $this->settings->paymentDueDate(),
+                'currency' => $originalInvoice->currency,
+                'seller_data' => $originalInvoice->seller_data,
+                'buyer_data' => $originalInvoice->buyer_data,
+                'net_total' => $netTotal,
+                'vat_total' => $vatTotal,
+                'gross_total' => $grossTotal,
+                'payment_method' => $originalInvoice->payment_method,
+                'issued_at' => now(),
+                'metadata' => [
+                    'source' => 'return_case',
+                    'return_case_id' => $returnCase->id,
+                    'return_case_number' => $returnCase->number,
+                    'correction_reason' => $returnCase->reason ?: 'Zwrot towaru',
+                    'corrected_invoice_id' => $originalInvoice->id,
+                    'corrected_invoice_number' => $originalInvoice->number,
+                    'corrected_invoice_issue_date' => $originalInvoice->issue_date?->toDateString(),
+                    'warehouse_document_id' => $returnCase->warehouse_document_id,
+                    'warehouse_document_number' => $returnCase->warehouseDocument?->number,
+                    'warehouse_document_ids' => $returnDocuments->pluck('id')->values()->all(),
+                    'warehouse_document_numbers' => $returnDocuments->pluck('number')->values()->all(),
+                    'legal_review_required' => true,
+                ],
+            ]);
+
+            foreach ($correctionLines as $line) {
+                $invoice->lines()->create($line);
+            }
+
+            $returnCase->update([
+                'correction_invoice_id' => $invoice->id,
+                'status' => 'corrected',
+                'metadata' => array_merge($returnCase->metadata ?? [], [
+                    'correction_invoice_id' => $invoice->id,
+                    'correction_invoice_number' => $invoice->number,
+                    'corrected_at' => now()->toISOString(),
+                ]),
+            ]);
+
+            $this->audit->record('return.correction_invoice_issued', $invoice, null, [
+                'invoice_number' => $invoice->number,
+                'return_case_number' => $returnCase->number,
+                'gross_total' => (string) $invoice->gross_total,
+            ], [
+                'return_case_id' => $returnCase->id,
+                'corrected_invoice_id' => $originalInvoice->id,
+            ]);
+
+            $createdInvoiceId = (int) $invoice->id;
+
+            return $this->files->ensureFiles($invoice->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']));
+        });
+
+        if ($createdInvoiceId !== null) {
+            $this->ksefAutomation->queueAfterInvoiceIssued($invoice);
+        }
+
+        return $invoice->refresh()->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']);
+    }
+
+    private function returnDocuments(ReturnCase $returnCase): \Illuminate\Support\Collection
+    {
+        return $returnCase->lines
+            ->map(fn (ReturnCaseLine $line) => $line->warehouseDocument)
+            ->filter()
+            ->push($returnCase->warehouseDocument)
+            ->filter()
+            ->unique('id')
+            ->values();
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function correctionLines(ReturnCase $returnCase, Invoice $originalInvoice): array
+    {
+        return $returnCase->lines
+            ->filter(fn (ReturnCaseLine $line): bool => (float) $line->quantity_accepted > 0)
+            ->map(function (ReturnCaseLine $returnLine) use ($originalInvoice): ?array {
+                $invoiceLine = $this->matchingInvoiceLine($originalInvoice, $returnLine);
+
+                if (! $invoiceLine instanceof InvoiceLine) {
+                    return null;
+                }
+
+                $quantity = -1 * min((float) $returnLine->quantity_accepted, abs((float) $invoiceLine->quantity));
+                $unitNet = (float) $invoiceLine->unit_net_price;
+                $vatRate = (float) $invoiceLine->vat_rate;
+                $netTotal = round($quantity * $unitNet, 2);
+                $vatTotal = round($netTotal * ($vatRate / 100), 2);
+                $grossTotal = round($netTotal + $vatTotal, 2);
+
+                return [
+                    'product_id' => $invoiceLine->product_id,
+                    'name' => 'Korekta zwrotu: ' . $invoiceLine->name,
+                    'sku' => $invoiceLine->sku,
+                    'unit' => $invoiceLine->unit,
+                    'quantity' => $quantity,
+                    'unit_net_price' => $unitNet,
+                    'net_total' => $netTotal,
+                    'vat_rate' => $vatRate,
+                    'vat_total' => $vatTotal,
+                    'gross_total' => $grossTotal,
+                    'metadata' => [
+                        'source' => 'return_case_line',
+                        'return_case_line_id' => $returnLine->id,
+                        'external_order_line_id' => $returnLine->externalOrderLine?->external_line_id,
+                        'corrected_invoice_line_id' => $invoiceLine->id,
+                    ],
+                ];
+            })
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    private function matchingInvoiceLine(Invoice $invoice, ReturnCaseLine $returnLine): ?InvoiceLine
+    {
+        $externalLineId = $returnLine->externalOrderLine?->external_line_id;
+
+        if (filled($externalLineId)) {
+            $byExternalLine = $invoice->lines->first(
+                fn (InvoiceLine $line): bool => (string) data_get($line->metadata, 'external_line_id') === (string) $externalLineId,
+            );
+
+            if ($byExternalLine instanceof InvoiceLine) {
+                return $byExternalLine;
+            }
+        }
+
+        return $invoice->lines->first(
+            fn (InvoiceLine $line): bool => $returnLine->product_id !== null && $line->product_id === $returnLine->product_id,
+        );
+    }
+}

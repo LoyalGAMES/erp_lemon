@@ -1,0 +1,1026 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature;
+
+use App\Models\ExternalOrder;
+use App\Models\Invoice;
+use App\Models\PackingTask;
+use App\Models\Product;
+use App\Models\SalesChannel;
+use App\Models\ShippingLabel;
+use App\Models\StockBalance;
+use App\Models\StockReservation;
+use App\Models\Warehouse;
+use App\Models\WarehouseDocument;
+use App\Models\WordpressIntegration;
+use App\Services\Invoices\InvoiceSettingsService;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
+use Tests\TestCase;
+
+class PackingWorkflowTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_processing_order_creates_packing_task_and_scanner_marks_it_picked(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-PACK',
+            'ean' => '5901234567890',
+            'name' => 'Koszula VIVIEN Biała - M',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'woocommerce_variation_attributes' => [
+                    ['name' => 'Rozmiar', 'option' => 'M'],
+                ],
+            ],
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '501',
+            'external_number' => '501',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 199,
+            'billing_data' => [
+                'first_name' => 'Anna',
+                'last_name' => 'Kowalska',
+                'email' => 'anna@example.test',
+                'phone' => '+48123123123',
+                'address_1' => 'ul. Faktury 10',
+                'postcode' => '00-001',
+                'city' => 'Warszawa',
+                'country' => 'PL',
+            ],
+            'shipping_data' => [
+                'first_name' => 'Anna',
+                'last_name' => 'Kowalska',
+                'address_1' => 'ul. Magazynowa 5',
+                'postcode' => '30-001',
+                'city' => 'Kraków',
+                'country' => 'PL',
+            ],
+            'raw_payload' => [
+                'customer_note' => 'Proszę zapakować na prezent.',
+                'payment_method_title' => 'Przelewy24',
+                'shipping_lines' => [
+                    ['method_title' => 'DPD Pickup'],
+                ],
+                'erp_imported_order_notes' => [
+                    ['note' => 'Notatka z WooCommerce', 'author' => 'admin'],
+                ],
+            ],
+            'external_created_at' => now()->subDay(),
+        ]);
+
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => '9001',
+            'sku' => $product->sku,
+            'name' => 'Koszula VIVIEN Biała',
+            'quantity' => 2,
+            'raw_payload' => [
+                'meta_data' => [
+                    ['display_key' => 'Rozmiar', 'display_value' => 'M'],
+                ],
+            ],
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'collect']))
+            ->assertOk()
+            ->assertSee('Kompletacja')
+            ->assertSee('Koszula VIVIEN Biała - M')
+            ->assertSee('Rozmiar')
+            ->assertSee('DPD Pickup');
+
+        $task = PackingTask::query()->firstOrFail();
+        $this->assertSame('open', $task->status);
+        $this->assertSame('2.0000', (string) $task->quantity_required);
+        $this->assertSame('M', $task->size_label);
+
+        $this->post(route('packing.scan'), ['code' => 'SKU-PACK'])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $task->refresh();
+        $this->assertSame('open', $task->status);
+        $this->assertSame('1.0000', (string) $task->quantity_picked);
+
+        $this->post(route('packing.scan'), ['code' => '5901234567890'])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $task->refresh();
+        $this->assertSame('picked', $task->status);
+        $this->assertSame('2.0000', (string) $task->quantity_picked);
+        $this->assertNotNull($task->picked_at);
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('Zamówienie 501')
+            ->assertSee('Spakuj')
+            ->assertSee('Uwagi z WooCommerce')
+            ->assertSee('Notatka z WooCommerce')
+            ->assertSee('Proszę zapakować na prezent.')
+            ->assertSee('Dane wysyłki i płatności')
+            ->assertSee('Przelewy24')
+            ->assertSee('anna@example.test')
+            ->assertSee('ul. Magazynowa 5')
+            ->assertSee('199,00 PLN');
+
+        $this->post(route('packing.orders.label', $order))
+            ->assertRedirect()
+            ->assertSessionHas('error');
+
+        $this->post(route('packing.tasks.pack', $task))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $task->refresh();
+        $this->assertSame('packed', $task->status);
+        $this->assertNotNull($task->packed_at);
+    }
+
+    public function test_operator_can_pick_without_scanner_and_pack_whole_order(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-MANUAL',
+            'name' => 'Komplet ARIEL Różowy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'stock' => [
+                        'location' => 'A-01-03',
+                    ],
+                    'media' => [
+                        ['src' => 'https://cdn.example.test/ariel.jpg', 'alt' => 'Komplet ARIEL'],
+                    ],
+                ],
+            ],
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '601',
+            'external_number' => '601',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 369,
+            'billing_data' => [
+                'first_name' => 'Maria',
+                'last_name' => 'Nowak',
+                'email' => 'maria@example.test',
+            ],
+            'shipping_data' => [
+                'first_name' => 'Maria',
+                'last_name' => 'Nowak',
+                'address_1' => 'ul. Szybka 3',
+                'postcode' => '61-001',
+                'city' => 'Poznań',
+                'country' => 'PL',
+            ],
+            'raw_payload' => [
+                'shipping_lines' => [
+                    ['method_title' => 'InPost Kurier'],
+                ],
+            ],
+            'external_created_at' => now()->subHours(3),
+        ]);
+
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'manual-1',
+            'sku' => $product->sku,
+            'name' => 'Komplet ARIEL Różowy',
+            'quantity' => 1,
+            'raw_payload' => [
+                'meta_data' => [
+                    ['display_key' => 'Rozmiar', 'display_value' => 'M'],
+                ],
+            ],
+        ]);
+
+        $this->post(route('packing.mode'), ['mode' => 'manual'])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $this->get(route('packing.index', ['view' => 'collect']))
+            ->assertOk()
+            ->assertSee('Kompletacja')
+            ->assertSee('Komplet ARIEL Różowy')
+            ->assertSee('Lok. A-01-03')
+            ->assertSee('Zebrane')
+            ->assertDontSee('Skaner SKU/EAN');
+
+        $task = PackingTask::query()->firstOrFail();
+        $this->assertSame('A-01-03', data_get($task->metadata, 'warehouse_location'));
+
+        $this->post(route('packing.groups.pick'), ['task_ids' => [$task->id]])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $task->refresh();
+        $this->assertSame('picked', $task->status);
+        $this->assertSame('1.0000', (string) $task->quantity_picked);
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('Pakowanie')
+            ->assertSee('Zamówienie 601')
+            ->assertSee('Spakuj');
+
+        $this->post(route('packing.orders.pack', $order))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $task->refresh();
+        $this->assertSame('packed', $task->status);
+        $this->assertNotNull($task->packed_at);
+    }
+
+    public function test_packing_home_collect_and_pack_views_are_separated(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-CLEAN',
+            'name' => 'Sukienka AURELIA Fango',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '611',
+            'external_number' => '611',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 299,
+            'raw_payload' => [
+                'shipping_lines' => [
+                    ['method_title' => 'DPD'],
+                ],
+            ],
+            'external_created_at' => now(),
+        ]);
+
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'clean-1',
+            'sku' => $product->sku,
+            'name' => 'Sukienka AURELIA Fango',
+            'quantity' => 1,
+            'raw_payload' => [
+                'meta_data' => [
+                    ['display_key' => 'Rozmiar', 'display_value' => 'M'],
+                ],
+            ],
+        ]);
+
+        $this->get(route('packing.index'))
+            ->assertOk()
+            ->assertSee('Ustawienia')
+            ->assertSee('Do zebrania')
+            ->assertSee('Kompletacja')
+            ->assertSee('Pakowanie')
+            ->assertDontSee('Sukienka AURELIA Fango');
+
+        $this->get(route('packing.index', ['view' => 'collect']))
+            ->assertOk()
+            ->assertSee('Sukienka AURELIA Fango')
+            ->assertSee('Rozmiar')
+            ->assertSee('Historia kompletacji')
+            ->assertDontSee('Ustawienia sposobu pracy')
+            ->assertDontSee('Spakowane dzisiaj')
+            ->assertDontSee('Wybierz etap pracy');
+
+        $task = PackingTask::query()->firstOrFail();
+
+        $this->post(route('packing.groups.pick'), ['task_ids' => [$task->id]])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('Zamówienie 611')
+            ->assertSee('Oczekuje na kuriera')
+            ->assertDontSee('Spakowane dzisiaj')
+            ->assertDontSee('Ustawienia sposobu pracy');
+    }
+
+    public function test_packed_order_generates_label_wz_invoice_status_and_courier_queue(): void
+    {
+        Storage::fake('local');
+
+        Http::fake(function ($request) {
+            $url = $request->url();
+
+            if ($url === 'https://shop.test/wp-json/ship/v1/orders/801/label') {
+                return Http::response(
+                    '%PDF-1.4 generated label',
+                    200,
+                    [
+                        'Content-Type' => 'application/pdf',
+                        'Content-Disposition' => 'attachment; filename="label-801.pdf"',
+                    ],
+                );
+            }
+
+            if ($url === 'https://shop.test/wp-json/wp/v2/media') {
+                return Http::response([
+                    'id' => 8101,
+                    'source_url' => 'https://shop.test/wp-content/uploads/2026/06/fv-801.pdf',
+                ]);
+            }
+
+            if ($url === 'https://shop.test/wp-json/wc/v3/orders/801/notes') {
+                return Http::response(['id' => 8201]);
+            }
+
+            if ($url === 'https://shop.test/wp-json/wc/v3/orders/801') {
+                $data = $request->data();
+
+                return Http::response([
+                    'id' => 801,
+                    'status' => $data['status'] ?? 'processing',
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        app(InvoiceSettingsService::class)->updateSellerData([
+            'name' => 'Sempre Love sp. z o.o.',
+            'tax_id' => '5261040828',
+            'address_1' => 'Testowa 1',
+            'postcode' => '00-001',
+            'city' => 'Warszawa',
+            'country' => 'PL',
+            'email' => 'biuro@example.test',
+            'phone' => '+48123123123',
+            'bank_account' => 'PL00111122223333444455556666',
+        ]);
+        app(InvoiceSettingsService::class)->updateNumberingData([
+            'sales_prefix' => 'FV/ERP',
+            'correction_prefix' => 'FK/ERP',
+            'padding' => 5,
+            'payment_due_days' => 7,
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Sempre WooCommerce',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'wp_api_username' => 'erp',
+            'wp_api_password_encrypted' => Crypt::encryptString('app-password'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+            'invoice_upload_enabled' => true,
+            'settings' => [
+                'shipping_labels' => [
+                    'enabled' => true,
+                    'endpoint' => '/wp-json/ship/v1/orders/{order_id}/label',
+                    'method' => 'POST',
+                    'auth' => 'woocommerce',
+                ],
+                'order_statuses' => [
+                    'ready_to_ship' => 'ready-to-ship',
+                    'shipped' => 'completed',
+                ],
+            ],
+        ]);
+
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Magazyn główny',
+            'type' => 'internal',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-AUTO',
+            'name' => 'Koszula AURA Czarno-ecru',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 3,
+            'quantity_reserved' => 1,
+            'quantity_available' => 2,
+            'recalculated_at' => now(),
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '801',
+            'external_number' => '801',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 123,
+            'billing_data' => [
+                'first_name' => 'Jan',
+                'last_name' => 'Kowalski',
+                'address_1' => 'Testowa 1',
+                'postcode' => '00-001',
+                'city' => 'Warszawa',
+                'country' => 'PL',
+                'email' => 'jan@example.test',
+            ],
+            'shipping_data' => [
+                'first_name' => 'Jan',
+                'last_name' => 'Kowalski',
+                'address_1' => 'Magazynowa 8',
+                'postcode' => '00-003',
+                'city' => 'Warszawa',
+                'country' => 'PL',
+            ],
+            'raw_payload' => [
+                'payment_method_title' => 'Przelew online',
+                'shipping_lines' => [
+                    ['method_title' => 'DPD'],
+                ],
+            ],
+            'external_created_at' => now()->subHour(),
+        ]);
+
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'auto-1',
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'quantity' => 1,
+            'unit_net_price' => 100,
+            'unit_gross_price' => 123,
+            'raw_payload' => [
+                'total' => '100.00',
+                'total_tax' => '23.00',
+                'meta_data' => [
+                    ['display_key' => 'Rozmiar', 'display_value' => 'M'],
+                ],
+            ],
+        ]);
+
+        StockReservation::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_order_id' => $order->external_id,
+            'quantity' => 1,
+            'status' => 'active',
+            'reserved_at' => now(),
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'collect']))->assertOk();
+        $task = PackingTask::query()->firstOrFail();
+
+        $this->post(route('packing.groups.pick'), ['task_ids' => [$task->id]])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $this->post(route('packing.orders.pack', $order))
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'Spakowano zamówienie 801')
+                && str_contains($message, 'oczekujących na kuriera'));
+
+        $task->refresh();
+        $order->refresh();
+
+        $this->assertSame('packed', $task->status);
+        $this->assertSame('ready-to-ship', $order->status);
+        $this->assertSame(1, ShippingLabel::query()->count());
+        $this->assertSame(1, Invoice::query()->count());
+
+        $document = WarehouseDocument::query()->where('type', 'WZ')->firstOrFail();
+        $this->assertSame('posted', $document->status);
+        $this->assertSame('released', StockReservation::query()->firstOrFail()->status);
+        $this->assertSame('2.0000', (string) StockBalance::query()->firstOrFail()->quantity_on_hand);
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('Oczekuje na kuriera')
+            ->assertSee('DPD')
+            ->assertSee('Odebrano');
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/ship/v1/orders/801/label');
+
+        Http::assertSent(function ($request): bool {
+            $data = $request->data();
+
+            return $request->method() === 'PUT'
+                && $request->url() === 'https://shop.test/wp-json/wc/v3/orders/801'
+                && ($data['status'] ?? null) === 'ready-to-ship';
+        });
+
+        $this->post(route('packing.couriers.pickup'), ['courier' => 'DPD'])
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'Oznaczono odbiór kuriera DPD')
+                && str_contains($message, 'Status w WooCommerce zmieniono na wysłano'));
+
+        $task->refresh();
+        $order->refresh();
+
+        $this->assertSame('shipped', $task->status);
+        $this->assertSame('completed', $order->status);
+
+        Http::assertSent(function ($request): bool {
+            $data = $request->data();
+
+            return $request->method() === 'PUT'
+                && $request->url() === 'https://shop.test/wp-json/wc/v3/orders/801'
+                && ($data['status'] ?? null) === 'completed';
+        });
+    }
+
+    public function test_operator_can_undo_packed_order_before_courier_pickup(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/orders/901' => Http::response(['status' => 'processing'], 200),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Sempre WooCommerce',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+            'invoice_upload_enabled' => true,
+            'settings' => [
+                'order_statuses' => [
+                    'ready_to_ship' => 'ready-to-ship',
+                    'shipped' => 'completed',
+                    'packing_rollback' => 'processing',
+                ],
+            ],
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-UNDO',
+            'name' => 'Sukienka AURELIA Fango',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '901',
+            'external_number' => '901',
+            'status' => 'ready-to-ship',
+            'currency' => 'PLN',
+            'total_gross' => 289,
+            'raw_payload' => [
+                'shipping_lines' => [
+                    ['method_title' => 'DPD'],
+                ],
+            ],
+            'external_created_at' => now()->subMinutes(40),
+        ]);
+
+        $line = $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'undo-1',
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'quantity' => 1,
+        ]);
+
+        $task = PackingTask::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_order_id' => $order->id,
+            'external_order_line_id' => $line->id,
+            'product_id' => $product->id,
+            'external_line_id' => 'undo-1',
+            'order_number' => '901',
+            'customer_name' => 'Anna Kowalska',
+            'sku' => $product->sku,
+            'product_name' => $product->name,
+            'quantity_required' => 1,
+            'quantity_picked' => 1,
+            'status' => 'packed',
+            'courier' => 'DPD',
+            'size_label' => 'M',
+            'order_date' => now()->subMinutes(40),
+            'picked_at' => now()->subMinutes(30),
+            'packed_at' => now()->subMinutes(10),
+            'metadata' => [
+                'packing_completion' => [
+                    'label_id' => 10,
+                    'invoice_id' => 11,
+                    'completed_at' => now()->subMinutes(10)->toISOString(),
+                ],
+            ],
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('Oczekuje na kuriera')
+            ->assertSee('Zamówienie 901')
+            ->assertSee('Cofnij');
+
+        $this->post(route('packing.orders.unpack', $order), [
+            'reason' => 'Błąd pakowania',
+        ])
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'Cofnięto pakowanie zamówienia 901')
+                && str_contains($message, 'WZ, faktura i etykieta pozostają w historii'));
+
+        $task->refresh();
+        $order->refresh();
+
+        $this->assertSame('picked', $task->status);
+        $this->assertNull($task->packed_at);
+        $this->assertSame('Błąd pakowania', data_get($task->metadata, 'packing_rollback.reason'));
+        $this->assertSame(10, data_get($task->metadata, 'packing_rollback.previous_packing_completion.label_id'));
+        $this->assertSame('processing', $order->status);
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('Zamówienie 901')
+            ->assertSee('Spakuj');
+
+        Http::assertSent(function ($request): bool {
+            $data = $request->data();
+
+            return $request->method() === 'PUT'
+                && $request->url() === 'https://shop.test/wp-json/wc/v3/orders/901'
+                && ($data['status'] ?? null) === 'processing';
+        });
+    }
+
+    public function test_operator_can_filter_packing_history_by_date(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-HISTORY',
+            'name' => 'Komplet AMORA Kremowy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $todayOrder = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '911',
+            'external_number' => '911',
+            'status' => 'ready-to-ship',
+            'currency' => 'PLN',
+            'total_gross' => 819,
+        ]);
+
+        $oldOrder = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '912',
+            'external_number' => '912',
+            'status' => 'completed',
+            'currency' => 'PLN',
+            'total_gross' => 819,
+        ]);
+
+        PackingTask::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_order_id' => $todayOrder->id,
+            'product_id' => $product->id,
+            'external_line_id' => 'history-1',
+            'order_number' => '911',
+            'customer_name' => 'Maria Nowak',
+            'sku' => $product->sku,
+            'product_name' => $product->name,
+            'quantity_required' => 1,
+            'quantity_picked' => 1,
+            'status' => 'packed',
+            'courier' => 'InPost',
+            'size_label' => 'M/L',
+            'order_date' => now()->subDay(),
+            'picked_at' => now()->subHours(2),
+            'packed_at' => now()->setTime(9, 15),
+        ]);
+
+        PackingTask::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_order_id' => $oldOrder->id,
+            'product_id' => $product->id,
+            'external_line_id' => 'history-2',
+            'order_number' => '912',
+            'customer_name' => 'Jan Nowak',
+            'sku' => $product->sku,
+            'product_name' => $product->name,
+            'quantity_required' => 1,
+            'quantity_picked' => 1,
+            'status' => 'shipped',
+            'courier' => 'DPD',
+            'size_label' => 'S/M',
+            'order_date' => now()->subDays(3),
+            'picked_at' => now()->subDays(2),
+            'packed_at' => now()->subDay()->setTime(11, 0),
+            'metadata' => [
+                'courier_pickup' => [
+                    'picked_up_at' => now()->subDay()->setTime(16, 0)->toISOString(),
+                ],
+            ],
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'history', 'date' => now()->toDateString()]))
+            ->assertOk()
+            ->assertSee('Historia pakowania')
+            ->assertSee('Zamówienie 911')
+            ->assertSee('Komplet AMORA Kremowy')
+            ->assertSee('Cofnij pakowanie')
+            ->assertDontSee('Zamówienie 912');
+    }
+
+    public function test_operator_can_move_pick_group_to_problem_queue_and_restore_it(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-PROBLEM',
+            'name' => 'Koszula AURA Czarno-ecru',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '701',
+            'external_number' => '701',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 149,
+            'raw_payload' => [
+                'shipping_lines' => [
+                    ['method_title' => 'DPD'],
+                ],
+            ],
+            'external_created_at' => now()->subHour(),
+        ]);
+
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'problem-1',
+            'sku' => $product->sku,
+            'name' => 'Koszula AURA Czarno-ecru',
+            'quantity' => 1,
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'collect']))->assertOk();
+
+        $task = PackingTask::query()->firstOrFail();
+
+        $this->post(route('packing.groups.problem'), [
+            'task_ids' => [$task->id],
+            'reason' => 'Brak produktu na półce',
+        ])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $task->refresh();
+        $this->assertSame('problem', $task->status);
+        $this->assertSame('Brak produktu na półce', data_get($task->metadata, 'packing_problem.reason'));
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('Do wyjaśnienia')
+            ->assertSee('Brak produktu na półce')
+            ->assertSee('Przywróć do kolejki');
+
+        $this->post(route('packing.tasks.reopen', $task))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $task->refresh();
+        $this->assertSame('open', $task->status);
+        $this->assertNull(data_get($task->metadata, 'packing_problem'));
+    }
+
+    public function test_operator_can_move_ready_order_to_problem_queue(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-ORDER-PROBLEM',
+            'name' => 'Komplet AMORA Kremowy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '702',
+            'external_number' => '702',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 819,
+            'raw_payload' => [
+                'shipping_lines' => [
+                    ['method_title' => 'InPost Kurier'],
+                ],
+            ],
+            'external_created_at' => now(),
+        ]);
+
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'problem-order-1',
+            'sku' => $product->sku,
+            'name' => 'Komplet AMORA Kremowy',
+            'quantity' => 1,
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'collect']))->assertOk();
+
+        $task = PackingTask::query()->firstOrFail();
+
+        $this->post(route('packing.groups.pick'), ['task_ids' => [$task->id]])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $this->post(route('packing.orders.problem', $order), [
+            'reason' => 'Adres wymaga wyjaśnienia',
+        ])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $task->refresh();
+        $this->assertSame('problem', $task->status);
+        $this->assertSame('Adres wymaga wyjaśnienia', data_get($task->metadata, 'packing_problem.reason'));
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('Do wyjaśnienia')
+            ->assertSee('Adres wymaga wyjaśnienia');
+    }
+
+    public function test_on_hold_order_is_not_available_for_mobile_picking(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '777',
+            'external_number' => '777',
+            'status' => 'on-hold',
+            'currency' => 'PLN',
+            'total_gross' => 99,
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'collect']))
+            ->assertOk()
+            ->assertSee('Brak produktów do zebrania.');
+
+        $this->assertSame(0, PackingTask::query()->count());
+    }
+
+    public function test_operator_can_generate_and_download_shipping_label_for_order(): void
+    {
+        Storage::fake('local');
+
+        Http::fake([
+            'https://shop.test/wp-json/ship/v1/orders/501/label' => Http::response(
+                '%PDF-1.4 generated label',
+                200,
+                [
+                    'Content-Type' => 'application/pdf',
+                    'Content-Disposition' => 'attachment; filename="label-501.pdf"',
+                ],
+            ),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Sempre WooCommerce',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+            'invoice_upload_enabled' => true,
+            'settings' => [
+                'shipping_labels' => [
+                    'enabled' => true,
+                    'endpoint' => '/wp-json/ship/v1/orders/{order_id}/label',
+                    'method' => 'POST',
+                    'auth' => 'woocommerce',
+                ],
+            ],
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '501',
+            'external_number' => '501',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 199,
+            'external_created_at' => now(),
+        ]);
+
+        $this->post(route('packing.orders.label', $order))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $label = ShippingLabel::query()->firstOrFail();
+
+        $this->assertSame($order->id, $label->external_order_id);
+        $this->assertSame('application/pdf', $label->mime_type);
+        $this->assertSame('generated', $label->status);
+
+        Storage::disk('local')->assertExists($label->path);
+
+        $this->get(route('packing.labels.download', $label))
+            ->assertOk()
+            ->assertHeader('content-type', 'application/pdf');
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/ship/v1/orders/501/label');
+    }
+}
