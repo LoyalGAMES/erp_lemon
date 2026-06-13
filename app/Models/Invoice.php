@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Casts\Attribute;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -71,8 +72,18 @@ class Invoice extends Model
         return $this->belongsTo(InvoiceTemplate::class);
     }
 
+    public function correctedInvoice(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'corrected_invoice_id');
+    }
+
     public function externalOrder(): BelongsTo
     {
         return $this->belongsTo(ExternalOrder::class);
+    }
+
+    protected function correctedInvoiceId(): Attribute
+    {
+        return Attribute::get(fn (): mixed => data_get($this->metadata, 'corrected_invoice_id'));
     }
 }

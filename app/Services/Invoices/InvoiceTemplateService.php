@@ -133,14 +133,17 @@ final class InvoiceTemplateService
         }
 
         $correctedInvoiceId = data_get($invoice->metadata, 'corrected_invoice_id');
+        $query = Invoice::query()->with('lines');
 
-        if (! is_numeric($correctedInvoiceId)) {
-            return;
+        if (method_exists($query, 'withTrashed')) {
+            $query->withTrashed();
         }
 
-        $correctedInvoice = Invoice::query()
-            ->with('lines')
-            ->find((int) $correctedInvoiceId);
+        $correctedInvoice = is_numeric($correctedInvoiceId)
+            ? $query->find((int) $correctedInvoiceId)
+            : $query
+                ->where('number', (string) data_get($invoice->metadata, 'corrected_invoice_number', ''))
+                ->first();
 
         if ($correctedInvoice instanceof Invoice) {
             $invoice->setRelation('correctedInvoice', $correctedInvoice);
