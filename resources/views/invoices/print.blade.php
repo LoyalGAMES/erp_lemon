@@ -57,7 +57,6 @@
         }
         table { border-collapse: collapse; }
         .page { width: 100%; padding-bottom: 18mm; }
-        .top-rule { border-top: 1px solid #b8bdc3; margin-bottom: 10px; }
         .header-table, .meta-table, .party-table, .items-table, .summary-table, .vat-table, .payment-table, .totals-layout { width: 100%; }
         .header-table td { vertical-align: top; padding: 0; }
         .brand-cell { width: 42%; padding-right: 18px; }
@@ -237,8 +236,6 @@
 </head>
 <body>
     <main class="page">
-        <div class="top-rule"></div>
-
         <table class="header-table">
             <tr>
                 <td class="brand-cell">
