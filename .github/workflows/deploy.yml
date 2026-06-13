@@ -1,0 +1,87 @@
+name: Deploy ERP to Hetzner
+
+on:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: erp-semprelove-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Skonfiguruj SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Wyślij pliki na serwer
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          rsync -az \
+            --delete \
+            --exclude=".git/" \
+            --exclude=".github/" \
+            --exclude=".env" \
+            --exclude="vendor/" \
+            --exclude="node_modules/" \
+            --exclude="storage/logs/*" \
+            --exclude="storage/framework/cache/*" \
+            --exclude="storage/framework/sessions/*" \
+            --exclude="storage/framework/views/*" \
+            --exclude="public/uploads/*" \
+            -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT" \
+            ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+
+      - name: Uruchom komendy Laravel
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          ssh \
+            -i ~/.ssh/deploy_key \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "cd '$DEPLOY_PATH' && \
+             composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader && \
+             php artisan migrate --force && \
+             php artisan optimize:clear && \
+             php artisan config:cache && \
+             php artisan route:cache && \
+             php artisan view:cache"
+
+      - name: Ustaw uprawnienia Laravel
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          ssh \
+            -i ~/.ssh/deploy_key \
+            -p "$SSH_PORT" \
+            "$SSH_USER@$SSH_HOST" \
+            "chmod -R 775 '$DEPLOY_PATH/storage' '$DEPLOY_PATH/bootstrap/cache'"
