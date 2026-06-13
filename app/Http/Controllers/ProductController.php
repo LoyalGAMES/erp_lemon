@@ -102,6 +102,8 @@ class ProductController extends Controller
                 ->whereHas('salesChannel', fn ($query) => $query->where('is_active', true))
                 ->orderBy('name')
                 ->get(),
+            'categoryOptions' => $this->categoryOptions(),
+            'catalogOptions' => $this->catalogOptions(),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
             'module' => 'products',
             'title' => $product->name,

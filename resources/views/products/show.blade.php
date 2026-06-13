@@ -13,6 +13,30 @@
         .product-section { margin-bottom: 16px; }
         .product-section[hidden] { display: none; }
         .product-section-body { padding: 16px; display: grid; gap: 16px; }
+        .product-panel-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; color: var(--muted); font-size: 13px; }
+        .product-edit-icon-button { width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--green-dark); cursor: pointer; display: inline-grid; place-items: center; padding: 0; flex: 0 0 auto; }
+        .product-edit-icon-button:hover { background: var(--green-soft); border-color: rgba(134, 115, 100, .36); }
+        .product-edit-icon-button svg { width: 17px; height: 17px; display: block; }
+        .product-quick-edit-drawer { width: min(860px, 96vw); z-index: 100; }
+        .product-quick-edit-form { padding: 0; }
+        .product-quick-edit-nav { display: flex; gap: 8px; flex-wrap: wrap; padding: 14px 16px 0; }
+        .product-quick-edit-nav button { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: var(--text); background: var(--surface); font: inherit; font-weight: 760; cursor: pointer; }
+        .product-quick-edit-nav button.active { color: var(--green-dark); background: var(--green-soft); border-color: rgba(134, 115, 100, .34); }
+        .product-quick-edit-step[hidden] { display: none; }
+        .product-quick-edit-body { padding: 16px; display: grid; gap: 16px; }
+        .product-quick-form-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+        .product-quick-form-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .product-quick-form-grid .wide { grid-column: 1 / -1; }
+        .product-quick-toggle-row { display: flex; gap: 8px; align-items: center; color: var(--text); font-weight: 760; }
+        .product-quick-repeat-table input { min-width: 180px; }
+        .product-quick-media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+        .product-quick-media-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fffdfb; display: grid; gap: 8px; }
+        .product-quick-media-item img { width: 100%; aspect-ratio: 4 / 5; object-fit: cover; border-radius: 7px; background: #f4f1ef; border: 1px solid var(--border); }
+        .product-quick-media-upload { border: 1px dashed rgba(134, 115, 100, .34); border-radius: 8px; padding: 16px; background: #fffdfb; display: grid; gap: 12px; }
+        .product-quick-step-actions { padding: 0 16px 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+        .product-quick-step-actions .inline-actions { justify-content: flex-end; }
+        textarea.product-html { min-height: 190px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.45; }
+        .button[disabled] { opacity: .55; cursor: not-allowed; }
         .detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
         .detail-item { border: 1px solid var(--border); border-radius: 8px; padding: 11px; background: #fffdfb; min-height: 70px; }
         .detail-item span { display: block; color: var(--muted); font-size: 12px; font-weight: 720; margin-bottom: 3px; }
@@ -48,6 +72,8 @@
             .product-hero { grid-template-columns: 1fr; }
             .product-photo-button { width: min(220px, 100%); }
             .variant-relation-form form { grid-template-columns: 1fr; }
+            .product-quick-form-grid, .product-quick-form-grid.two { grid-template-columns: 1fr; }
+            .product-quick-step-actions { align-items: stretch; flex-direction: column; }
         }
         @media (max-width: 640px) {
             .detail-grid { grid-template-columns: 1fr; }
@@ -89,10 +115,16 @@
         $externalId = $product->externalDisplayId();
     @endphp
 
+    @include('products._quick_edit_drawer', [
+        'product' => $product,
+        'categoryOptions' => $categoryOptions,
+        'catalogOptions' => $catalogOptions,
+    ])
+
     <div class="page-toolbar">
         <div class="inline-actions">
             <a class="button secondary" href="{{ route('products.index') }}">Wróć do produktów</a>
-            <a class="button" href="{{ route('products.edit', $product) }}">Edytuj dane ERP</a>
+            <button class="button" type="button" data-product-quick-edit-open="produkt">Edytuj dane ERP</button>
             @if (! $product->ean)
                 <button class="button secondary" type="button" data-gs1-open-modal>Wygeneruj EAN GS1</button>
             @endif
@@ -144,7 +176,10 @@
     </nav>
 
     <section class="card product-section" id="produkt" data-product-view-panel="produkt">
-        <div class="panel-header">Produkt</div>
+        <div class="panel-header">
+            <span>Produkt</span>
+            <span class="product-panel-actions">@include('products._quick_edit_button', ['section' => 'produkt'])</span>
+        </div>
         <div class="product-section-body">
             <div class="product-hero">
                 <button
@@ -184,7 +219,10 @@
     </section>
 
     <section class="card product-section" id="sprzedaz" data-product-view-panel="sprzedaz" hidden>
-        <div class="panel-header">Sprzedaż i magazyn</div>
+        <div class="panel-header">
+            <span>Sprzedaż i magazyn</span>
+            <span class="product-panel-actions">@include('products._quick_edit_button', ['section' => 'sprzedaz'])</span>
+        </div>
         <div class="product-section-body">
             <div class="detail-grid">
                 <div class="detail-item"><span>Cena hurt</span><strong>{{ $money(data_get($master, 'prices.wholesale_price_pln')) }}</strong></div>
@@ -236,7 +274,10 @@
     </section>
 
     <section class="card product-section" id="informacje" data-product-view-panel="informacje" hidden>
-        <div class="panel-header">Informacje</div>
+        <div class="panel-header">
+            <span>Informacje</span>
+            <span class="product-panel-actions">@include('products._quick_edit_button', ['section' => 'informacje'])</span>
+        </div>
         <div class="product-section-body">
             <div class="detail-grid">
                 <div class="detail-item"><span>Nazwa PL</span><strong>{{ data_get($master, 'content.pl.name') ?: $product->name }}</strong></div>
@@ -292,7 +333,10 @@
     <section class="card product-section" id="media" data-product-view-panel="media" hidden>
         <div class="panel-header">
             <span>Media</span>
-            <span>{{ count($images) }} zdjęć</span>
+            <span class="product-panel-actions">
+                <span>{{ count($images) }} zdjęć</span>
+                @include('products._quick_edit_button', ['section' => 'media'])
+            </span>
         </div>
         <div class="product-section-body">
             @if ($images === [])
@@ -312,7 +356,10 @@
     <section class="card product-section" id="warianty" data-product-view-panel="warianty" hidden>
         <div class="panel-header">
             <span>Warianty</span>
-            <span>{{ $relatedVariants->count() }} rekordów</span>
+            <span class="product-panel-actions">
+                <span>{{ $relatedVariants->count() }} rekordów</span>
+                @include('products._quick_edit_button', ['section' => 'produkt'])
+            </span>
         </div>
         <div class="table-scroll">
             <table class="dense-table">
@@ -414,7 +461,10 @@
     </section>
 
     <section class="card product-section" id="relacje" data-product-view-panel="relacje" hidden>
-        <div class="panel-header">Relacje i kanały</div>
+        <div class="panel-header">
+            <span>Relacje i kanały</span>
+            <span class="product-panel-actions">@include('products._quick_edit_button', ['section' => 'produkt'])</span>
+        </div>
         <div class="table-scroll">
             <table class="dense-table">
                 <thead>
@@ -456,7 +506,10 @@
     <section class="card product-section" id="ruchy" data-product-view-panel="ruchy" hidden>
         <div class="panel-header">
             <span>Ostatnie ruchy magazynowe</span>
-            <span>{{ $ledgerEntries->count() }} wpisów</span>
+            <span class="product-panel-actions">
+                <span>{{ $ledgerEntries->count() }} wpisów</span>
+                @include('products._quick_edit_button', ['section' => 'sprzedaz'])
+            </span>
         </div>
         <div class="table-scroll">
             <table class="dense-table">
@@ -525,6 +578,72 @@
         });
         showProductViewPanel(productViewTabs[0]?.dataset.productViewTab);
 
+        const productQuickEditToggle = document.querySelector('[data-product-quick-edit-toggle]');
+        const productQuickEditTabs = Array.from(document.querySelectorAll('[data-product-quick-edit-tab]'));
+        const productQuickEditSteps = Array.from(document.querySelectorAll('[data-product-quick-edit-step]'));
+        const productQuickEditStepInput = document.querySelector('[data-product-quick-edit-step-input]');
+        const productQuickEditPrevButton = document.querySelector('[data-product-quick-edit-prev]');
+        const productQuickEditNextButton = document.querySelector('[data-product-quick-edit-next]');
+        let activeQuickEditStepIndex = 0;
+
+        function showProductQuickEditStep(step) {
+            if (productQuickEditSteps.length === 0) {
+                return;
+            }
+
+            const requestedIndex = typeof step === 'number'
+                ? step
+                : productQuickEditSteps.findIndex((item) => item.dataset.productQuickEditStep === step);
+            activeQuickEditStepIndex = Math.max(0, Math.min(requestedIndex >= 0 ? requestedIndex : 0, productQuickEditSteps.length - 1));
+            const activeStep = productQuickEditSteps[activeQuickEditStepIndex]?.dataset.productQuickEditStep;
+
+            productQuickEditSteps.forEach((item, index) => {
+                item.hidden = index !== activeQuickEditStepIndex;
+            });
+
+            productQuickEditTabs.forEach((tab) => {
+                const active = tab.dataset.productQuickEditTab === activeStep;
+                tab.classList.toggle('active', active);
+                tab.setAttribute('aria-selected', active ? 'true' : 'false');
+            });
+
+            if (productQuickEditStepInput && activeStep) {
+                productQuickEditStepInput.value = activeStep;
+            }
+
+            if (productQuickEditPrevButton) {
+                productQuickEditPrevButton.disabled = activeQuickEditStepIndex === 0;
+            }
+
+            if (productQuickEditNextButton) {
+                productQuickEditNextButton.hidden = activeQuickEditStepIndex === productQuickEditSteps.length - 1;
+            }
+        }
+
+        function openProductQuickEdit(step) {
+            showProductQuickEditStep(step || 'produkt');
+
+            if (productQuickEditToggle) {
+                productQuickEditToggle.checked = true;
+            }
+
+            window.requestAnimationFrame(() => {
+                const activePanel = productQuickEditSteps[activeQuickEditStepIndex];
+                const firstField = activePanel?.querySelector('input:not([type="hidden"]), select, textarea');
+                firstField?.focus({ preventScroll: true });
+            });
+        }
+
+        productQuickEditTabs.forEach((tab) => {
+            tab.addEventListener('click', () => showProductQuickEditStep(tab.dataset.productQuickEditTab));
+        });
+        productQuickEditPrevButton?.addEventListener('click', () => showProductQuickEditStep(activeQuickEditStepIndex - 1));
+        productQuickEditNextButton?.addEventListener('click', () => showProductQuickEditStep(activeQuickEditStepIndex + 1));
+        document.querySelectorAll('[data-product-quick-edit-open]').forEach((button) => {
+            button.addEventListener('click', () => openProductQuickEdit(button.dataset.productQuickEditOpen));
+        });
+        showProductQuickEditStep(productQuickEditStepInput?.value || productQuickEditTabs[0]?.dataset.productQuickEditTab);
+
         const productImageModal = document.querySelector('[data-product-image-modal]');
         const productImageLarge = document.querySelector('[data-product-image-large]');
         const productImageTitle = document.querySelector('[data-product-image-title]');
@@ -564,6 +683,9 @@
         });
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') {
+                if (productQuickEditToggle?.checked) {
+                    productQuickEditToggle.checked = false;
+                }
                 closeProductImageModal();
             }
         });
