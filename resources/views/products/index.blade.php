@@ -466,6 +466,7 @@
                             $rowKey = 'product-' . $product->id;
                             $familyProducts = collect([$product])->merge($variants);
                             $imageUrl = $product->imageUrl();
+                            $thumbnailUrl = $product->thumbnailUrl();
                             $stock = $stockTotals($familyProducts);
                             $warehouses = $warehouseTiles($familyProducts);
                             $channelNames = $channels($familyProducts);
@@ -485,7 +486,7 @@
                                         aria-label="{{ $imageUrl ? 'Powiększ zdjęcie produktu ' . $product->sku : 'Brak zdjęcia produktu ' . $product->sku }}"
                                     >
                                         @if ($imageUrl)
-                                            <img src="{{ $imageUrl }}" alt="{{ $product->name }}" loading="lazy" referrerpolicy="no-referrer">
+                                            <img src="{{ $thumbnailUrl ?: $imageUrl }}" alt="{{ $product->name }}" width="58" height="72" loading="lazy" decoding="async" referrerpolicy="no-referrer">
                                         @else
                                             Brak
                                         @endif
@@ -568,6 +569,7 @@
                         @foreach ($variants as $variant)
                             @php
                                 $variantImage = $variant->imageUrl();
+                                $variantThumbnailUrl = $variant->thumbnailUrl(88, 112);
                                 $variantStock = $stockTotals(collect([$variant]));
                                 $variantWarehouses = $warehouseTiles(collect([$variant]));
                                 $variantChannels = $channels(collect([$variant]));
@@ -599,7 +601,7 @@
                                             data-image-title="{{ $variant->sku }} - {{ $variant->name }}"
                                         >
                                             @if ($variantImage)
-                                                <img src="{{ $variantImage }}" alt="{{ $variant->name }}" loading="lazy" referrerpolicy="no-referrer">
+                                                <img src="{{ $variantThumbnailUrl ?: $variantImage }}" alt="{{ $variant->name }}" width="44" height="56" loading="lazy" decoding="async" referrerpolicy="no-referrer">
                                             @else
                                                 Brak
                                             @endif

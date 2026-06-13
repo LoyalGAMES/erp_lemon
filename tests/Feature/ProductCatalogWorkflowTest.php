@@ -17,6 +17,8 @@ use App\Models\AuditLog;
 use App\Models\WordpressIntegration;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
 class ProductCatalogWorkflowTest extends TestCase
@@ -129,6 +131,8 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('data-create-step="media"', false)
             ->assertSee('Dodaj zdjęcia z komputera')
             ->assertSee('https://cdn.test/koszula.jpg')
+            ->assertSee('/products/image-thumbnail?src=', false)
+            ->assertDontSee('src="https://cdn.test/koszula.jpg"', false)
             ->assertSee('Szczegóły')
             ->assertSee('Edytuj')
             ->assertSee('Ogółem')
@@ -317,7 +321,57 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertStringStartsWith('/uploads/testing-products/' . $product->id . '/', $mediaSrc);
         $this->assertFileExists(public_path(ltrim($mediaSrc, '/')));
 
+        $thumbnailUrl = $product->thumbnailUrl(116, 144);
+        $this->assertIsString($thumbnailUrl);
+        $this->assertStringStartsWith('/uploads/testing-product-thumbnails/116x144/', $thumbnailUrl);
+
+        $thumbnailPath = public_path(ltrim($thumbnailUrl, '/'));
+        $this->assertFileExists($thumbnailPath);
+        $this->assertLessThan(filesize(public_path(ltrim($mediaSrc, '/'))), filesize($thumbnailPath));
+        $this->assertSame([116, 144], array_slice(getimagesize($thumbnailPath) ?: [], 0, 2));
+
         @unlink(public_path(ltrim($mediaSrc, '/')));
+        File::deleteDirectory(public_path('uploads/testing-product-thumbnails'));
+    }
+
+    public function test_product_thumbnail_route_caches_remote_images(): void
+    {
+        $remoteImage = UploadedFile::fake()->image('remote-product.jpg', 600, 800);
+        Http::fake([
+            'cdn.test/*' => Http::response((string) file_get_contents($remoteImage->getRealPath()), 200, [
+                'Content-Type' => 'image/jpeg',
+            ]),
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-REMOTE',
+            'name' => 'Produkt z CDN',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'woocommerce_image' => [
+                    'src' => 'https://cdn.test/products/remote-product.jpg',
+                    'alt' => 'Produkt z CDN',
+                ],
+            ],
+        ]);
+
+        $thumbnailUrl = $product->thumbnailUrl(116, 144);
+        $this->assertIsString($thumbnailUrl);
+        $this->assertStringStartsWith('/products/image-thumbnail?src=', $thumbnailUrl);
+
+        $this->get($thumbnailUrl)
+            ->assertOk()
+            ->assertHeader('Content-Type', 'image/jpeg');
+
+        Http::assertSentCount(1);
+
+        $this->get($thumbnailUrl)->assertOk();
+        Http::assertSentCount(1);
+
+        File::deleteDirectory(public_path('uploads/testing-product-thumbnails'));
     }
 
     public function test_operator_can_edit_product_master_data_in_erp(): void

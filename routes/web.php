@@ -12,6 +12,7 @@ use App\Http\Controllers\LedgerController;
 use App\Http\Controllers\ModuleController;
 use App\Http\Controllers\PackingController;
 use App\Http\Controllers\ProductController;
+use App\Http\Controllers\ProductImageThumbnailController;
 use App\Http\Controllers\ReturnController;
 use App\Http\Controllers\SettingsController;
 use App\Http\Controllers\StockSyncController;
@@ -53,6 +54,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
 
     Route::middleware(EnsureErpRole::class . ':products')->group(function (): void {
         Route::get('/products', [ProductController::class, 'index'])->name('products.index');
+        Route::get('/products/image-thumbnail', ProductImageThumbnailController::class)->name('products.image-thumbnail');
         Route::post('/products', [ProductController::class, 'store'])->name('products.store');
         Route::get('/products/{product}/edit', [ProductController::class, 'edit'])->name('products.edit');
         Route::put('/products/{product}', [ProductController::class, 'update'])->name('products.update');
