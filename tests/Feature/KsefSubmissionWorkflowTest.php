@@ -48,6 +48,11 @@ class KsefSubmissionWorkflowTest extends TestCase
         $this->assertStringContainsString('<Podmiot2>', (string) $submission->xml_payload);
         $this->assertStringContainsString('<JST>2</JST>', (string) $submission->xml_payload);
         $this->assertStringContainsString('<GV>2</GV>', (string) $submission->xml_payload);
+        $this->assertStringContainsString('<P_19N>1</P_19N>', (string) $submission->xml_payload);
+        $this->assertStringContainsString('<P_22N>1</P_22N>', (string) $submission->xml_payload);
+        $this->assertStringContainsString('<P_PMarzyN>1</P_PMarzyN>', (string) $submission->xml_payload);
+        $this->assertStringNotContainsString('<Zwolnienie>2</Zwolnienie>', (string) $submission->xml_payload);
+        $this->assertStringNotContainsString('<NoweSrodkiTransportu>2</NoweSrodkiTransportu>', (string) $submission->xml_payload);
         $this->assertSame(KsefSettingsService::TEST_PUBLIC_KEY_ID, $submission->request_metadata['public_key_id']);
         $this->assertSame(KsefSettingsService::TEST_PUBLIC_KEY_SHA256, $submission->request_metadata['public_key_sha256']);
 

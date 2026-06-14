@@ -87,14 +87,7 @@ final class KsefXmlBuilder
         $this->addVatSummary($dom, $fa, $invoice);
         $this->text($dom, $fa, 'P_15', $this->money((float) $invoice->gross_total));
 
-        $adnotations = $this->element($dom, $fa, 'Adnotacje');
-        $this->text($dom, $adnotations, 'P_16', '2');
-        $this->text($dom, $adnotations, 'P_17', '2');
-        $this->text($dom, $adnotations, 'P_18', '2');
-        $this->text($dom, $adnotations, 'P_18A', '2');
-        $this->text($dom, $adnotations, 'Zwolnienie', '2');
-        $this->text($dom, $adnotations, 'NoweSrodkiTransportu', '2');
-        $this->text($dom, $adnotations, 'P_23', '2');
+        $this->addAnnotations($dom, $fa);
 
         $invoiceType = $this->invoiceType($invoice);
         $this->text($dom, $fa, 'RodzajFaktury', $invoiceType);
@@ -106,6 +99,26 @@ final class KsefXmlBuilder
         foreach ($invoice->lines->values() as $index => $line) {
             $this->addLine($dom, $fa, $line, $index + 1);
         }
+    }
+
+    private function addAnnotations(DOMDocument $dom, DOMElement $fa): void
+    {
+        $annotations = $this->element($dom, $fa, 'Adnotacje');
+        $this->text($dom, $annotations, 'P_16', '2');
+        $this->text($dom, $annotations, 'P_17', '2');
+        $this->text($dom, $annotations, 'P_18', '2');
+        $this->text($dom, $annotations, 'P_18A', '2');
+
+        $exemption = $this->element($dom, $annotations, 'Zwolnienie');
+        $this->text($dom, $exemption, 'P_19N', '1');
+
+        $newMeansOfTransport = $this->element($dom, $annotations, 'NoweSrodkiTransportu');
+        $this->text($dom, $newMeansOfTransport, 'P_22N', '1');
+
+        $this->text($dom, $annotations, 'P_23', '2');
+
+        $marginScheme = $this->element($dom, $annotations, 'PMarzy');
+        $this->text($dom, $marginScheme, 'P_PMarzyN', '1');
     }
 
     private function addLine(DOMDocument $dom, DOMElement $fa, InvoiceLine $line, int $number): void
