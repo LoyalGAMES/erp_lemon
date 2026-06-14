@@ -159,6 +159,7 @@ class KsefSubmissionWorkflowTest extends TestCase
             ->assertOk()
             ->assertJsonPath('code_marker', 'native-ksef-2.0-online-session')
             ->assertJsonPath('native_client_active', true)
+            ->assertJsonPath('manual_ksef_submit_mode', 'sync-web')
             ->assertJsonPath('queue_connection', 'database')
             ->assertJsonPath('legacy_gateway_error_count', 1)
             ->assertJsonPath('latest_submissions.0.last_error_is_legacy_gateway_error', true)
@@ -543,7 +544,7 @@ class KsefSubmissionWorkflowTest extends TestCase
 
         $this->post(route('ksef.submissions.retry', $submission))
             ->assertRedirect()
-            ->assertSessionHas('status', 'Zgłoszenie KSeF zostało ponownie dodane do kolejki.');
+            ->assertSessionHas('status', 'Faktura FV/2026/000001 została przyjęta przez KSeF.');
 
         $submission->refresh();
 

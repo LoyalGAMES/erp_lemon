@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Jobs\SubmitInvoiceToKsefJob;
 use App\Models\Invoice;
 use App\Models\KsefSubmission;
 use App\Services\Audit\AuditLogService;
@@ -42,6 +41,7 @@ class KsefController extends Controller
             return response()->json([
                 'code_marker' => 'native-ksef-2.0-online-session',
                 'native_client_active' => method_exists($client, 'sendNative'),
+                'manual_ksef_submit_mode' => 'sync-web',
                 'queue_connection' => (string) config('queue.default'),
                 'server_time' => now()->toISOString(),
                 'configuration' => $client->configurationStatus(),
@@ -125,11 +125,11 @@ class KsefController extends Controller
             return back()->with('error', $exception->getMessage());
         }
 
-        if (! in_array($submission->status, ['submitted', 'accepted'], true)) {
-            SubmitInvoiceToKsefJob::dispatch($submission->id);
-        }
+        $submission = ! in_array($submission->status, ['submitted', 'accepted'], true)
+            ? $submissions->submit($submission)
+            : $submission;
 
-        return back()->with('status', "Faktura {$invoice->number} została dodana do kolejki KSeF.");
+        return back()->with('status', $this->submitStatusMessage($invoice->number, $submission));
     }
 
     public function retry(
@@ -162,9 +162,9 @@ class KsefController extends Controller
             ],
         );
 
-        SubmitInvoiceToKsefJob::dispatch($submission->id);
+        $submission = $submissions->submit($submission);
 
-        return back()->with('status', 'Zgłoszenie KSeF zostało ponownie dodane do kolejki.');
+        return back()->with('status', $this->submitStatusMessage($submission->invoice?->number ?? 'faktury', $submission));
     }
 
     public function refresh(
@@ -234,5 +234,14 @@ class KsefController extends Controller
         }
 
         return $state;
+    }
+
+    private function submitStatusMessage(string $invoiceNumber, KsefSubmission $submission): string
+    {
+        return match ($submission->status) {
+            'accepted' => "Faktura {$invoiceNumber} została przyjęta przez KSeF.",
+            'submitted' => "Faktura {$invoiceNumber} została wysłana do KSeF. Odśwież status po zakończeniu przetwarzania.",
+            default => "Próba wysyłki faktury {$invoiceNumber} do KSeF zakończyła się statusem: {$submission->status}. Sprawdź historię KSeF.",
+        };
     }
 }
