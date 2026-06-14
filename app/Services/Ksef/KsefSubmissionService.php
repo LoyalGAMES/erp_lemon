@@ -286,10 +286,6 @@ final class KsefSubmissionService
             return 'missing_configuration';
         }
 
-        if (str_contains($message, 'Skonfiguruj bramkę') || str_contains($message, 'etap szyfrowania')) {
-            return 'requires_configuration';
-        }
-
         return 'failed';
     }
 
