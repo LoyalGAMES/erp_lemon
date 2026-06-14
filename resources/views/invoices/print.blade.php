@@ -452,7 +452,9 @@
                 </thead>
                 <tbody>
                     @foreach ($correctionBeforeRows as $row)
-                        @php($before = $row['values'])
+                        @php
+                            $before = $row['values'];
+                        @endphp
                         <tr>
                             <td>{{ $loop->iteration }}</td>
                             <td>
@@ -486,7 +488,9 @@
                 </thead>
                 <tbody>
                     @foreach ($correctionAfterRows as $row)
-                        @php($after = $row['values'])
+                        @php
+                            $after = $row['values'];
+                        @endphp
                         <tr>
                             <td>{{ $loop->iteration }}</td>
                             <td>

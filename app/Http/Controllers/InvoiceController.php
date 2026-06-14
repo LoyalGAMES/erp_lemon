@@ -16,7 +16,9 @@ use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
@@ -77,6 +79,7 @@ class InvoiceController extends Controller
             'sellerRepairableCount' => $sellerRepairableCount,
             'woocommercePendingCount' => $woocommercePendingCount,
             'numbering' => $settings->numberingData(),
+            'invoiceKsef' => $settings->ksefData(),
         ]);
     }
 
@@ -140,11 +143,13 @@ class InvoiceController extends Controller
             'pattern' => ['required', 'string', 'max:120', 'regex:/^[A-Za-z0-9_\/{}-]+$/'],
             'padding' => ['required', 'integer', 'min:3', 'max:9'],
             'payment_due_days' => ['required', 'integer', 'min:0', 'max:365'],
+            'default_ksef_policy' => ['required', 'string', 'in:auto,send,skip'],
         ]);
 
         $settings->updateNumberingData($validated);
+        $settings->updateKsefData($validated);
 
-        return back()->with('status', 'Ustawienia numeracji i płatności faktur zostały zapisane.');
+        return back()->with('status', 'Ustawienia numeracji, płatności i KSeF faktur zostały zapisane.');
     }
 
     public function edit(
@@ -172,7 +177,7 @@ class InvoiceController extends Controller
         AuditLogService $audit,
         KsefEligibilityService $eligibility,
     ): RedirectResponse {
-        $invoice->load(['ksefSubmissions']);
+        $invoice->load(['lines', 'ksefSubmissions']);
 
         if ($this->isKsefAccepted($invoice)) {
             return back()->with('error', 'Faktura przyjęta przez KSeF nie może być edytowana. Wystaw fakturę korygującą.');
@@ -204,22 +209,30 @@ class InvoiceController extends Controller
             'buyer.country' => ['required', 'string', 'size:2'],
             'buyer.email' => ['nullable', 'email', 'max:255'],
             'buyer.phone' => ['nullable', 'string', 'max:64'],
+            'lines' => ['nullable', 'array'],
+            'lines.*.id' => ['required', 'integer'],
+            'lines.*.name' => ['required', 'string', 'max:255'],
+            'lines.*.sku' => ['nullable', 'string', 'max:120'],
+            'lines.*.unit' => ['required', 'string', 'max:32'],
+            'lines.*.quantity' => ['required', 'numeric'],
+            'lines.*.unit_net_price' => ['required', 'numeric'],
+            'lines.*.net_total' => ['required', 'numeric'],
+            'lines.*.vat_rate' => ['required', 'numeric', 'min:0', 'max:100'],
+            'lines.*.vat_total' => ['required', 'numeric'],
+            'lines.*.gross_total' => ['required', 'numeric'],
         ]);
 
-        $before = $invoice->only([
-            'issue_date',
-            'sale_date',
-            'payment_due_date',
-            'currency',
-            'payment_method',
-            'seller_data',
-            'buyer_data',
-            'metadata',
-        ]);
+        $linePayloads = $this->cleanInvoiceLinePayloads($invoice, $validated['lines'] ?? null);
+        $before = $this->editableInvoiceSnapshot($invoice);
 
         $metadata = $invoice->metadata ?? [];
         $metadata['last_data_edit_at'] = now()->toISOString();
         $metadata['legal_review_required'] = true;
+
+        if ($linePayloads !== null) {
+            $metadata['manual_line_edit_at'] = now()->toISOString();
+        }
+
         $metadata = $eligibility->metadataWithPolicy($metadata, $validated['ksef_policy']);
 
         if (data_get($metadata, 'woocommerce_upload.status') === 'success') {
@@ -228,29 +241,35 @@ class InvoiceController extends Controller
             data_set($metadata, 'woocommerce_upload.stale_since', now()->toISOString());
         }
 
-        $invoice->update([
-            'issue_date' => $validated['issue_date'],
-            'sale_date' => $validated['sale_date'],
-            'payment_due_date' => $validated['payment_due_date'] ?? null,
-            'currency' => strtoupper($validated['currency']),
-            'payment_method' => filled($validated['payment_method'] ?? null) ? $validated['payment_method'] : null,
-            'seller_data' => $this->cleanPartyData($validated['seller']),
-            'buyer_data' => $this->cleanPartyData($validated['buyer']),
-            'metadata' => $metadata,
-        ]);
+        DB::transaction(function () use ($invoice, $validated, $metadata, $linePayloads): void {
+            $invoicePayload = [
+                'issue_date' => $validated['issue_date'],
+                'sale_date' => $validated['sale_date'],
+                'payment_due_date' => $validated['payment_due_date'] ?? null,
+                'currency' => strtoupper($validated['currency']),
+                'payment_method' => filled($validated['payment_method'] ?? null) ? $validated['payment_method'] : null,
+                'seller_data' => $this->cleanPartyData($validated['seller']),
+                'buyer_data' => $this->cleanPartyData($validated['buyer']),
+                'metadata' => $metadata,
+            ];
 
+            if ($linePayloads !== null) {
+                foreach ($invoice->lines as $line) {
+                    $line->update($linePayloads[(int) $line->id]);
+                }
+
+                $invoicePayload['net_total'] = round(array_sum(array_map(fn (array $line): float => $line['net_total'], $linePayloads)), 2);
+                $invoicePayload['vat_total'] = round(array_sum(array_map(fn (array $line): float => $line['vat_total'], $linePayloads)), 2);
+                $invoicePayload['gross_total'] = round(array_sum(array_map(fn (array $line): float => $line['gross_total'], $linePayloads)), 2);
+            }
+
+            $invoice->update($invoicePayload);
+        });
+
+        $invoice->refresh()->load(['lines', 'files', 'externalOrder', 'invoiceTemplate', 'ksefSubmissions']);
         $invoice = $invoices->regenerateFiles($invoice);
 
-        $audit->record('invoice.data_updated', $invoice, $before, $invoice->only([
-            'issue_date',
-            'sale_date',
-            'payment_due_date',
-            'currency',
-            'payment_method',
-            'seller_data',
-            'buyer_data',
-            'metadata',
-        ]));
+        $audit->record('invoice.data_updated', $invoice, $before, $this->editableInvoiceSnapshot($invoice->load('lines')));
 
         return redirect()
             ->route('invoices.edit', $invoice)
@@ -452,6 +471,101 @@ class InvoiceController extends Controller
         return response()->download($absolutePath, $filename, [
             'Content-Type' => $file->mime_type ?? 'application/octet-stream',
         ]);
+    }
+
+    /**
+     * @param  array<int|string, array<string, mixed>>|null  $lines
+     * @return array<int, array{name:string,sku:?string,unit:string,quantity:float,unit_net_price:float,net_total:float,vat_rate:float,vat_total:float,gross_total:float}>|null
+     *
+     * @throws ValidationException
+     */
+    private function cleanInvoiceLinePayloads(Invoice $invoice, ?array $lines): ?array
+    {
+        if ($lines === null) {
+            return null;
+        }
+
+        $invoiceLineIds = $invoice->lines
+            ->pluck('id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->sort()
+            ->values()
+            ->all();
+        $payloadIds = collect($lines)
+            ->map(fn (array $line): int => (int) ($line['id'] ?? 0))
+            ->sort()
+            ->values()
+            ->all();
+
+        if ($payloadIds !== $invoiceLineIds) {
+            throw ValidationException::withMessages([
+                'lines' => 'Pozycje faktury nie pasują do edytowanej faktury.',
+            ]);
+        }
+
+        $payloads = [];
+
+        foreach ($lines as $line) {
+            $id = (int) $line['id'];
+            $name = trim((string) ($line['name'] ?? ''));
+            $unit = trim((string) ($line['unit'] ?? ''));
+            $sku = trim((string) ($line['sku'] ?? ''));
+
+            if ($name === '' || $unit === '') {
+                throw ValidationException::withMessages([
+                    'lines' => 'Nazwa i jednostka pozycji faktury są wymagane.',
+                ]);
+            }
+
+            $payloads[$id] = [
+                'name' => $name,
+                'sku' => $sku !== '' ? $sku : null,
+                'unit' => $unit,
+                'quantity' => round((float) $line['quantity'], 4),
+                'unit_net_price' => round((float) $line['unit_net_price'], 4),
+                'net_total' => round((float) $line['net_total'], 2),
+                'vat_rate' => round((float) $line['vat_rate'], 2),
+                'vat_total' => round((float) $line['vat_total'], 2),
+                'gross_total' => round((float) $line['gross_total'], 2),
+            ];
+        }
+
+        return $payloads;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function editableInvoiceSnapshot(Invoice $invoice): array
+    {
+        return [
+            'issue_date' => $invoice->issue_date,
+            'sale_date' => $invoice->sale_date,
+            'payment_due_date' => $invoice->payment_due_date,
+            'currency' => $invoice->currency,
+            'payment_method' => $invoice->payment_method,
+            'seller_data' => $invoice->seller_data,
+            'buyer_data' => $invoice->buyer_data,
+            'net_total' => $invoice->net_total,
+            'vat_total' => $invoice->vat_total,
+            'gross_total' => $invoice->gross_total,
+            'metadata' => $invoice->metadata,
+            'lines' => $invoice->lines
+                ->map(fn ($line): array => [
+                    'id' => $line->id,
+                    'name' => $line->name,
+                    'sku' => $line->sku,
+                    'unit' => $line->unit,
+                    'quantity' => $line->quantity,
+                    'unit_net_price' => $line->unit_net_price,
+                    'net_total' => $line->net_total,
+                    'vat_rate' => $line->vat_rate,
+                    'vat_total' => $line->vat_total,
+                    'gross_total' => $line->gross_total,
+                ])
+                ->values()
+                ->all(),
+        ];
     }
 
     /**

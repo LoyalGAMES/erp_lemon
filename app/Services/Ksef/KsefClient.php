@@ -12,8 +12,7 @@ final class KsefClient
 {
     public function __construct(
         private readonly KsefSettingsService $settings,
-    ) {
-    }
+    ) {}
 
     public function configurationStatus(): array
     {
@@ -27,9 +26,12 @@ final class KsefClient
             'api_version' => $this->apiVersion(),
             'base_url' => $this->baseUrl($environment),
             'status_url' => $statusUrl,
+            'public_key_id' => $this->publicKeyId($environment),
+            'public_key_sha256' => $this->publicKeySha256($environment),
             'has_access_token' => $hasAccessToken,
             'has_gateway_url' => $hasGatewayUrl,
             'has_status_url' => $statusUrl !== '',
+            'has_public_key' => $this->publicKeyId($environment) !== '' && $this->publicKeySha256($environment) !== '',
             'direct_online_send_ready' => $hasAccessToken && $hasGatewayUrl,
         ];
     }
@@ -62,6 +64,8 @@ final class KsefClient
                 'invoice_xml' => $submission->xml_payload,
                 'invoice_hash_sha256' => base64_encode(hash('sha256', (string) $submission->xml_payload, true)),
                 'invoice_size' => strlen((string) $submission->xml_payload),
+                'public_key_id' => $this->publicKeyId($submission->environment),
+                'public_key_sha256' => $this->publicKeySha256($submission->environment),
             ]);
 
         if ($response->failed()) {
@@ -142,6 +146,24 @@ final class KsefClient
         };
     }
 
+    private function publicKeyId(?string $environment = null): string
+    {
+        return $this->setting(
+            'public_key_id',
+            'KSEF_PUBLIC_KEY_ID',
+            $this->defaultPublicKeyId($environment ?? $this->environment()),
+        );
+    }
+
+    private function publicKeySha256(?string $environment = null): string
+    {
+        return strtolower($this->setting(
+            'public_key_sha256',
+            'KSEF_PUBLIC_KEY_SHA256',
+            $this->defaultPublicKeySha256($environment ?? $this->environment()),
+        ));
+    }
+
     private function accessToken(): string
     {
         return $this->setting('access_token', 'KSEF_ACCESS_TOKEN', '');
@@ -176,7 +198,17 @@ final class KsefClient
             return preg_replace('#/submit/?$#', '/status', $gatewayUrl) ?? '';
         }
 
-        return rtrim($gatewayUrl, '/') . '/status';
+        return rtrim($gatewayUrl, '/').'/status';
+    }
+
+    private function defaultPublicKeyId(string $environment): string
+    {
+        return $environment === 'test' ? KsefSettingsService::TEST_PUBLIC_KEY_ID : '';
+    }
+
+    private function defaultPublicKeySha256(string $environment): string
+    {
+        return $environment === 'test' ? KsefSettingsService::TEST_PUBLIC_KEY_SHA256 : '';
     }
 
     private function setting(string $configKey, string $envKey, string $default): string

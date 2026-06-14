@@ -5,6 +5,19 @@
     $buyer = $invoice->buyer_data ?? [];
 @endphp
 
+@push('styles')
+    <style>
+        .invoice-line-table { min-width: 1120px; }
+        .invoice-line-table th,
+        .invoice-line-table td { vertical-align: top; }
+        .invoice-line-table input { width: 100%; min-width: 78px; padding: 8px 9px; font-size: 13px; }
+        .invoice-line-table .invoice-line-name { min-width: 260px; }
+        .invoice-line-table .invoice-line-sku { min-width: 150px; }
+        .invoice-line-table .invoice-line-unit { min-width: 70px; }
+        .invoice-line-table .invoice-line-number { text-align: right; }
+    </style>
+@endpush
+
 @section('content')
     <section class="page-toolbar">
         <div class="toolbar-note">Faktura {{ $invoice->number }} | {{ number_format((float) $invoice->gross_total, 2, ',', ' ') }} {{ $invoice->currency }}</div>
@@ -70,7 +83,9 @@
             <div class="form-grid">
                 <label>Kwalifikacja wysyłki
                     <select name="ksef_policy" @disabled($isKsefAccepted)>
-                        @php($selectedKsefPolicy = old('ksef_policy', $ksefEligibility['policy']))
+                        @php
+                            $selectedKsefPolicy = old('ksef_policy', $ksefEligibility['policy']);
+                        @endphp
                         <option value="auto" @selected($selectedKsefPolicy === 'auto')>Automatycznie: B2B wysyłaj, B2C pomiń</option>
                         <option value="send" @selected($selectedKsefPolicy === 'send')>Wyślij do KSeF</option>
                         <option value="skip" @selected($selectedKsefPolicy === 'skip')>Nie wysyłaj do KSeF</option>
@@ -128,32 +143,60 @@
                 <span>{{ $invoice->lines->count() }} pozycji</span>
             </div>
             <div class="table-scroll">
-                <table class="dense-table">
+                <table class="dense-table invoice-line-table">
                     <thead>
                         <tr>
                             <th>Nazwa</th>
                             <th>SKU</th>
                             <th>Ilość</th>
-                            <th>Netto</th>
-                            <th>VAT</th>
+                            <th>JM</th>
+                            <th>Cena j. netto</th>
+                            <th>Wartość netto</th>
+                            <th>VAT %</th>
+                            <th>Kwota VAT</th>
                             <th>Brutto</th>
                         </tr>
                     </thead>
                     <tbody>
                         @foreach ($invoice->lines as $line)
+                            @php
+                                $lineId = (int) $line->id;
+                            @endphp
                             <tr>
-                                <td>{{ $line->name }}</td>
-                                <td>{{ $line->sku ?? '-' }}</td>
-                                <td>{{ number_format((float) $line->quantity, 4, ',', ' ') }} {{ $line->unit }}</td>
-                                <td>{{ number_format((float) $line->net_total, 2, ',', ' ') }}</td>
-                                <td>{{ number_format((float) $line->vat_rate, 2, ',', ' ') }}%</td>
-                                <td>{{ number_format((float) $line->gross_total, 2, ',', ' ') }}</td>
+                                <td class="invoice-line-name">
+                                    <input type="hidden" name="lines[{{ $lineId }}][id]" value="{{ $lineId }}">
+                                    <input name="lines[{{ $lineId }}][name]" value="{{ old("lines.$lineId.name", $line->name) }}" required @disabled($isKsefAccepted)>
+                                </td>
+                                <td class="invoice-line-sku">
+                                    <input name="lines[{{ $lineId }}][sku]" value="{{ old("lines.$lineId.sku", $line->sku) }}" @disabled($isKsefAccepted)>
+                                </td>
+                                <td>
+                                    <input class="invoice-line-number" name="lines[{{ $lineId }}][quantity]" type="number" step="0.0001" value="{{ old("lines.$lineId.quantity", $line->quantity) }}" required @disabled($isKsefAccepted)>
+                                </td>
+                                <td class="invoice-line-unit">
+                                    <input name="lines[{{ $lineId }}][unit]" value="{{ old("lines.$lineId.unit", $line->unit) }}" required @disabled($isKsefAccepted)>
+                                </td>
+                                <td>
+                                    <input class="invoice-line-number" name="lines[{{ $lineId }}][unit_net_price]" type="number" step="0.0001" value="{{ old("lines.$lineId.unit_net_price", $line->unit_net_price) }}" required @disabled($isKsefAccepted)>
+                                </td>
+                                <td>
+                                    <input class="invoice-line-number" name="lines[{{ $lineId }}][net_total]" type="number" step="0.01" value="{{ old("lines.$lineId.net_total", $line->net_total) }}" required @disabled($isKsefAccepted)>
+                                </td>
+                                <td>
+                                    <input class="invoice-line-number" name="lines[{{ $lineId }}][vat_rate]" type="number" step="0.01" min="0" max="100" value="{{ old("lines.$lineId.vat_rate", $line->vat_rate) }}" required @disabled($isKsefAccepted)>
+                                </td>
+                                <td>
+                                    <input class="invoice-line-number" name="lines[{{ $lineId }}][vat_total]" type="number" step="0.01" value="{{ old("lines.$lineId.vat_total", $line->vat_total) }}" required @disabled($isKsefAccepted)>
+                                </td>
+                                <td>
+                                    <input class="invoice-line-number" name="lines[{{ $lineId }}][gross_total]" type="number" step="0.01" value="{{ old("lines.$lineId.gross_total", $line->gross_total) }}" required @disabled($isKsefAccepted)>
+                                </td>
                             </tr>
                         @endforeach
                     </tbody>
                 </table>
             </div>
-            <p class="muted">Pozycji nie edytujemy tutaj, bo wynikają z zamówienia/WZ albo korekty. Jeśli kwoty są błędne, trzeba poprawić źródło dokumentu albo wystawić korektę.</p>
+            <p class="muted">Kwoty faktury zostaną przeliczone z wartości pozycji po zapisie.</p>
         </article>
 
         <button class="button" type="submit" @disabled($isKsefAccepted)>Zapisz i wygeneruj pliki ponownie</button>

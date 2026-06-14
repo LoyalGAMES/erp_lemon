@@ -125,6 +125,12 @@
                 <label>Adres statusu KSeF
                     <input name="status_url" value="{{ old('status_url', $ksefSettings['status_url']) }}" placeholder="np. https://.../status">
                 </label>
+                <label>Identyfikator klucza KSeF
+                    <input name="public_key_id" value="{{ old('public_key_id', $ksefSettings['public_key_id']) }}" placeholder="Dla test: 5855a4">
+                </label>
+                <label>SHA256 klucza KSeF
+                    <input name="public_key_sha256" value="{{ old('public_key_sha256', $ksefSettings['public_key_sha256']) }}" maxlength="64" placeholder="64 znaki hex">
+                </label>
             </div>
             <label>Token dostępu
                 <input name="access_token" type="password" autocomplete="new-password" placeholder="{{ $ksefSettings['has_access_token'] ? 'Token jest zapisany; wpisz nowy tylko jeśli chcesz go zmienić' : 'Wpisz token KSeF' }}">
@@ -138,6 +144,8 @@
             <div class="toolbar-note">
                 Aktualnie: KSeF API {{ $ksefConfiguration['api_version'] }} | środowisko: {{ $ksefConfiguration['environment'] }} | {{ $ksefConfiguration['base_url'] }}.
                 Status: {{ $ksefConfiguration['status_url'] ?: 'automatycznie z adresu bramki' }}.
+                Klucz: {{ $ksefConfiguration['public_key_id'] ?: 'brak' }} / SHA256: {{ $ksefConfiguration['public_key_sha256'] ?: 'brak' }}.
+                Dla środowiska testowego domyślnie używane są ID 5855a4 i SHA256 d38f31638bb72c435d03b34115f977ccb1e1c406b7abfb2852bd55f185217187.
                 Token jest przechowywany zaszyfrowany. Realna wysyłka wymaga skonfigurowanej bramki/sesji szyfrującej.
             </div>
             <div class="inline-actions">

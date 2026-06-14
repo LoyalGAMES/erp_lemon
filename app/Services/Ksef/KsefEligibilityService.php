@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Ksef;
 
 use App\Models\Invoice;
+use App\Services\Invoices\InvoiceSettingsService;
 
 final class KsefEligibilityService
 {
@@ -14,6 +15,8 @@ final class KsefEligibilityService
 
     public const POLICY_SKIP = 'skip';
 
+    public function __construct(private readonly InvoiceSettingsService $settings) {}
+
     /**
      * @return array{policy:string, should_send:bool, label:string, reason:string, tone:string}
      */
@@ -21,13 +24,16 @@ final class KsefEligibilityService
     {
         $policy = $this->policy($invoice);
         $hasBuyerTaxId = $this->hasBuyerTaxId($invoice);
+        $hasInvoicePolicy = $this->hasInvoicePolicy($invoice);
 
         if ($policy === self::POLICY_SKIP) {
             return [
                 'policy' => $policy,
                 'should_send' => false,
                 'label' => 'Nie wysyłać',
-                'reason' => 'Ręcznie wyłączono wysyłkę tej faktury do KSeF.',
+                'reason' => $hasInvoicePolicy
+                    ? 'Ręcznie wyłączono wysyłkę tej faktury do KSeF.'
+                    : 'Domyślna konfiguracja faktur wyłącza wysyłkę do KSeF.',
                 'tone' => 'orange',
             ];
         }
@@ -37,9 +43,7 @@ final class KsefEligibilityService
                 'policy' => $policy,
                 'should_send' => true,
                 'label' => 'Wysyłać',
-                'reason' => $hasBuyerTaxId
-                    ? 'Ręcznie oznaczono fakturę do wysyłki; nabywca ma identyfikator podatkowy.'
-                    : 'Ręcznie oznaczono fakturę do dobrowolnej wysyłki mimo braku NIP nabywcy.',
+                'reason' => $this->sendReason($hasBuyerTaxId, $hasInvoicePolicy),
                 'tone' => '',
             ];
         }
@@ -70,7 +74,11 @@ final class KsefEligibilityService
 
     public function policy(Invoice $invoice): string
     {
-        return $this->normalizePolicy(data_get($invoice->metadata, 'ksef.send_policy'));
+        if ($this->hasInvoicePolicy($invoice)) {
+            return $this->normalizePolicy(data_get($invoice->metadata, 'ksef.send_policy'));
+        }
+
+        return $this->normalizePolicy($this->settings->ksefData()['default_send_policy'] ?? self::POLICY_AUTO);
     }
 
     public function normalizePolicy(mixed $policy): string
@@ -85,6 +93,26 @@ final class KsefEligibilityService
     public function hasBuyerTaxId(Invoice $invoice): bool
     {
         return preg_replace('/\D+/', '', (string) data_get($invoice->buyer_data, 'tax_id', '')) !== '';
+    }
+
+    private function hasInvoicePolicy(Invoice $invoice): bool
+    {
+        $policy = data_get($invoice->metadata, 'ksef.send_policy');
+
+        return is_string($policy) && trim($policy) !== '';
+    }
+
+    private function sendReason(bool $hasBuyerTaxId, bool $hasInvoicePolicy): string
+    {
+        if ($hasInvoicePolicy) {
+            return $hasBuyerTaxId
+                ? 'Ręcznie oznaczono fakturę do wysyłki; nabywca ma identyfikator podatkowy.'
+                : 'Ręcznie oznaczono fakturę do dobrowolnej wysyłki mimo braku NIP nabywcy.';
+        }
+
+        return $hasBuyerTaxId
+            ? 'Domyślna konfiguracja faktur wymusza wysyłkę do KSeF; nabywca ma identyfikator podatkowy.'
+            : 'Domyślna konfiguracja faktur wymusza dobrowolną wysyłkę mimo braku NIP nabywcy.';
     }
 
     /**

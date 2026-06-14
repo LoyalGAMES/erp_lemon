@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Lemon ERP for WooCommerce
  * Description: Adds Lemon ERP checkout fields and invoice metadata endpoints for WooCommerce orders.
- * Version: 0.1.0
+ * Version: 0.1.1
  * Author: Lemon ERP
  * Requires PHP: 8.0
  * Requires Plugins: woocommerce
@@ -251,37 +251,48 @@ final class Lemon_Erp_WooCommerce
 
     public function renderCustomerInvoiceLink(WC_Order $order): void
     {
-        $url = $this->invoiceFileUrl($order, self::INVOICE_PREFIX);
-        $number = (string) $order->get_meta(self::INVOICE_PREFIX.'number');
+        $links = $this->invoiceLinks($order);
 
-        if ($url === '') {
+        if ($links === []) {
             return;
         }
 
         echo '<section class="woocommerce-order-details lemon-erp-invoice">';
-        echo '<h2>'.esc_html__('Faktura', 'lemon-erp-woocommerce').'</h2>';
-        echo '<p><a class="button" href="'.esc_url($url).'" target="_blank" rel="noopener">';
-        echo esc_html($number !== '' ? sprintf(__('Pobierz fakturę %s', 'lemon-erp-woocommerce'), $number) : __('Pobierz fakturę', 'lemon-erp-woocommerce'));
-        echo '</a></p>';
+        echo '<h2>'.esc_html__('Faktury', 'lemon-erp-woocommerce').'</h2>';
+
+        foreach ($links as $link) {
+            echo '<p><a class="button" href="'.esc_url($link['url']).'" target="_blank" rel="noopener">';
+            echo esc_html($link['label']);
+            echo '</a></p>';
+        }
+
         echo '</section>';
     }
 
     public function renderEmailInvoiceLink(WC_Order $order, bool $sentToAdmin, bool $plainText, WC_Email $email): void
     {
-        $url = $this->invoiceFileUrl($order, self::INVOICE_PREFIX);
-        $number = (string) $order->get_meta(self::INVOICE_PREFIX.'number');
+        $links = $this->invoiceLinks($order);
 
-        if ($url === '') {
+        if ($links === []) {
             return;
         }
 
         if ($plainText) {
-            echo "\n".sprintf(__('Faktura %s: %s', 'lemon-erp-woocommerce'), $number, $url)."\n";
+            foreach ($links as $link) {
+                echo "\n".$link['title'].($link['number'] !== '' ? ' '.$link['number'] : '').': '.$link['url']."\n";
+            }
 
             return;
         }
 
-        echo '<p><strong>'.esc_html__('Faktura', 'lemon-erp-woocommerce').':</strong> <a href="'.esc_url($url).'">'.esc_html($number !== '' ? $number : __('Pobierz PDF', 'lemon-erp-woocommerce')).'</a></p>';
+        echo '<p><strong>'.esc_html__('Faktury', 'lemon-erp-woocommerce').':</strong></p>';
+        echo '<ul>';
+
+        foreach ($links as $link) {
+            echo '<li><a href="'.esc_url($link['url']).'">'.esc_html($link['label']).'</a></li>';
+        }
+
+        echo '</ul>';
     }
 
     public function registerRestRoutes(): void
@@ -606,6 +617,59 @@ final class Lemon_Erp_WooCommerce
             ?: $order->get_meta(self::LEGACY_BILLING_NIP_META)
             ?: $order->get_meta('billing_nip')
         );
+    }
+
+    /**
+     * @return list<array{title:string,number:string,label:string,url:string}>
+     */
+    private function invoiceLinks(WC_Order $order): array
+    {
+        $links = [];
+        $invoice = $this->invoiceLink(
+            $order,
+            self::INVOICE_PREFIX,
+            __('Faktura', 'lemon-erp-woocommerce'),
+            __('Pobierz fakturę %s', 'lemon-erp-woocommerce'),
+            __('Pobierz fakturę', 'lemon-erp-woocommerce'),
+        );
+        $correction = $this->invoiceLink(
+            $order,
+            self::CORRECTION_PREFIX,
+            __('Faktura korygująca', 'lemon-erp-woocommerce'),
+            __('Pobierz korektę %s', 'lemon-erp-woocommerce'),
+            __('Pobierz korektę', 'lemon-erp-woocommerce'),
+        );
+
+        if ($invoice !== null) {
+            $links[] = $invoice;
+        }
+
+        if ($correction !== null) {
+            $links[] = $correction;
+        }
+
+        return $links;
+    }
+
+    /**
+     * @return array{title:string,number:string,label:string,url:string}|null
+     */
+    private function invoiceLink(WC_Order $order, string $prefix, string $title, string $numberedLabel, string $emptyLabel): ?array
+    {
+        $url = $this->invoiceFileUrl($order, $prefix);
+
+        if ($url === '') {
+            return null;
+        }
+
+        $number = (string) $order->get_meta($prefix.'number');
+
+        return [
+            'title' => $title,
+            'number' => $number,
+            'label' => $number !== '' ? sprintf($numberedLabel, $number) : $emptyLabel,
+            'url' => $url,
+        ];
     }
 
     private function invoiceFileUrl(WC_Order $order, string $prefix): string

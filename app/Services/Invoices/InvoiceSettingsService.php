@@ -9,7 +9,10 @@ use App\Models\AppSetting;
 final class InvoiceSettingsService
 {
     private const SELLER_KEY = 'invoice_seller';
+
     private const NUMBERING_KEY = 'invoice_numbering';
+
+    private const KSEF_KEY = 'invoice_ksef_settings';
 
     /**
      * @return array<string, string>
@@ -24,7 +27,7 @@ final class InvoiceSettingsService
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      * @return array<string, string>
      */
     public function updateSellerData(array $data): array
@@ -68,7 +71,7 @@ final class InvoiceSettingsService
             'country' => 'kraju',
         ] as $key => $label) {
             if (! filled($seller[$key] ?? null)) {
-                $errors[] = 'Brakuje ' . $label . ' sprzedawcy.';
+                $errors[] = 'Brakuje '.$label.' sprzedawcy.';
             }
         }
 
@@ -115,7 +118,7 @@ final class InvoiceSettingsService
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      * @return array{sales_prefix: string, correction_prefix: string, pattern: string, padding: int, payment_due_days: int}
      */
     public function updateNumberingData(array $data): array
@@ -139,6 +142,40 @@ final class InvoiceSettingsService
     public function paymentDueDate(): string
     {
         return now()->addDays($this->numberingData()['payment_due_days'])->toDateString();
+    }
+
+    /**
+     * @return array{default_send_policy: string}
+     */
+    public function ksefData(): array
+    {
+        $stored = AppSetting::query()
+            ->where('key', self::KSEF_KEY)
+            ->value('value');
+
+        $data = array_merge($this->defaultKsefData(), is_array($stored) ? $stored : []);
+
+        return [
+            'default_send_policy' => $this->cleanKsefPolicy((string) ($data['default_send_policy'] ?? 'auto')),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     * @return array{default_send_policy: string}
+     */
+    public function updateKsefData(array $data): array
+    {
+        $payload = [
+            'default_send_policy' => $this->cleanKsefPolicy((string) ($data['default_ksef_policy'] ?? $data['default_send_policy'] ?? 'auto')),
+        ];
+
+        AppSetting::query()->updateOrCreate(
+            ['key' => self::KSEF_KEY],
+            ['value' => $payload],
+        );
+
+        return $payload;
     }
 
     /**
@@ -174,6 +211,16 @@ final class InvoiceSettingsService
         ];
     }
 
+    /**
+     * @return array{default_send_policy: string}
+     */
+    private function defaultKsefData(): array
+    {
+        return [
+            'default_send_policy' => env('INVOICE_KSEF_DEFAULT_SEND_POLICY', 'auto'),
+        ];
+    }
+
     private function cleanPrefix(string $value, string $fallback): string
     {
         $value = trim($value, " \t\n\r\0\x0B/");
@@ -193,10 +240,17 @@ final class InvoiceSettingsService
         $value = preg_replace('/[^A-Za-z0-9_\/{}-]+/', '', $value) ?? '';
 
         if (! str_contains($value, '{SEQ}')) {
-            $value = rtrim($value, '/') . '/{SEQ}';
+            $value = rtrim($value, '/').'/{SEQ}';
         }
 
         return $value !== '' ? $value : '{PREFIX}/{YYYY}/{SEQ}';
+    }
+
+    private function cleanKsefPolicy(string $value): string
+    {
+        $value = strtolower(trim($value));
+
+        return in_array($value, ['auto', 'send', 'skip'], true) ? $value : 'auto';
     }
 
     private function cleanTaxId(string $value): string

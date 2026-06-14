@@ -8,6 +8,7 @@ use App\Models\Invoice;
 use App\Models\InvoiceFile;
 use App\Models\InvoiceTemplate;
 use App\Services\Invoices\InvoiceNumberService;
+use App\Services\Invoices\InvoiceSettingsService;
 use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Invoices\InvoiceValidationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -80,7 +81,7 @@ BLADE;
             ->firstOrFail();
 
         $this->assertSame($template->id, $htmlFile->metadata['template_id']);
-        $this->assertStringContainsString('Niestandardowy szablon Sempre', File::get(storage_path('app/' . $htmlFile->path)));
+        $this->assertStringContainsString('Niestandardowy szablon Sempre', File::get(storage_path('app/'.$htmlFile->path)));
 
         $pdfFile = InvoiceFile::query()
             ->where('invoice_id', $invoice->id)
@@ -200,7 +201,7 @@ BLADE,
         $this->assertSame(2, InvoiceFile::query()->where('invoice_id', $invoice->id)->count());
 
         foreach ($paths as $path) {
-            $this->assertFileExists(storage_path('app/' . $path));
+            $this->assertFileExists(storage_path('app/'.$path));
         }
     }
 
@@ -212,22 +213,26 @@ BLADE,
             'pattern' => '{PREFIX}/{YYYY}/{SEQ}',
             'padding' => 4,
             'payment_due_days' => 14,
+            'default_ksef_policy' => 'skip',
         ])->assertRedirect()->assertSessionHas('status');
+
+        $this->assertSame('skip', app(InvoiceSettingsService::class)->ksefData()['default_send_policy']);
 
         $this->get(route('invoices.index'))
             ->assertOk()
             ->assertSee('FV/ERP')
             ->assertSee('FK/ERP')
             ->assertSee('{PREFIX}/{YYYY}/{SEQ}')
-            ->assertSee('14');
+            ->assertSee('14')
+            ->assertSee('Domyślnie nie wysyłaj do KSeF');
 
         $invoice = $this->createInvoice();
-        $invoice->update(['number' => 'FV/ERP/' . now()->format('Y') . '/0009']);
+        $invoice->update(['number' => 'FV/ERP/'.now()->format('Y').'/0009']);
 
         $numbers = app(InvoiceNumberService::class);
 
-        $this->assertSame('FV/ERP/' . now()->format('Y') . '/0010', $numbers->next());
-        $this->assertSame('FK/ERP/' . now()->format('Y') . '/0001', $numbers->next('FK'));
+        $this->assertSame('FV/ERP/'.now()->format('Y').'/0010', $numbers->next());
+        $this->assertSame('FK/ERP/'.now()->format('Y').'/0001', $numbers->next('FK'));
 
         $this->put(route('invoices.settings.update'), [
             'sales_prefix' => 'FV/ERP',
@@ -235,9 +240,10 @@ BLADE,
             'pattern' => '{PREFIX}/{MM}/{YYYY}/{SEQ}',
             'padding' => 3,
             'payment_due_days' => 14,
+            'default_ksef_policy' => 'auto',
         ])->assertRedirect()->assertSessionHas('status');
 
-        $this->assertSame('FV/ERP/' . now()->format('m/Y') . '/001', $numbers->next());
+        $this->assertSame('FV/ERP/'.now()->format('m/Y').'/001', $numbers->next());
     }
 
     public function test_generated_invoice_pdf_uses_unicode_renderer_for_polish_text(): void
@@ -278,8 +284,8 @@ BLADE,
             ->where('type', 'pdf')
             ->firstOrFail();
 
-        $this->assertStringContainsString('Koszula ŁÓDŹ śliwkowa', File::get(storage_path('app/' . $htmlFile->path)));
-        $this->assertStringStartsWith('%PDF-', File::get(storage_path('app/' . $pdfFile->path)));
+        $this->assertStringContainsString('Koszula ŁÓDŹ śliwkowa', File::get(storage_path('app/'.$htmlFile->path)));
+        $this->assertStringStartsWith('%PDF-', File::get(storage_path('app/'.$pdfFile->path)));
         $this->assertSame('dompdf_html_pdf', $pdfFile->metadata['renderer']);
         $this->assertTrue($pdfFile->metadata['unicode_text']);
         $this->assertTrue($pdfFile->metadata['html_layout']);
@@ -383,6 +389,7 @@ BLADE,
     public function test_operator_can_fix_invoice_data_and_regenerate_files(): void
     {
         $invoice = $this->createInvoice();
+        $line = $invoice->lines()->firstOrFail();
         $invoice->update([
             'metadata' => [
                 'woocommerce_upload' => [
@@ -428,16 +435,37 @@ BLADE,
                 'email' => 'klient@example.test',
                 'phone' => '+48555111222',
             ],
+            'lines' => [
+                $line->id => [
+                    'id' => $line->id,
+                    'name' => 'Poprawiony produkt fakturowany',
+                    'sku' => 'SKU-FV-EDIT',
+                    'unit' => 'szt',
+                    'quantity' => '2',
+                    'unit_net_price' => '60',
+                    'net_total' => '120',
+                    'vat_rate' => '23',
+                    'vat_total' => '27.60',
+                    'gross_total' => '147.60',
+                ],
+            ],
         ])
             ->assertRedirect(route('invoices.edit', $invoice))
             ->assertSessionHas('status');
 
         $invoice->refresh();
+        $line->refresh();
 
         $this->assertSame('2026-06-02', $invoice->issue_date->toDateString());
         $this->assertSame('Poprawiony klient', $invoice->buyer_data['name']);
         $this->assertSame('Łódź', $invoice->buyer_data['city']);
+        $this->assertSame('120.00', (string) $invoice->net_total);
+        $this->assertSame('147.60', (string) $invoice->gross_total);
+        $this->assertSame('Poprawiony produkt fakturowany', $line->name);
+        $this->assertSame('2.0000', (string) $line->quantity);
+        $this->assertSame('147.60', (string) $line->gross_total);
         $this->assertSame('skip', data_get($invoice->metadata, 'ksef.send_policy'));
+        $this->assertNotEmpty(data_get($invoice->metadata, 'manual_line_edit_at'));
         $this->assertSame('stale', data_get($invoice->metadata, 'woocommerce_upload.status'));
         $this->assertTrue(data_get($invoice->metadata, 'woocommerce_upload.requires_resend'));
         $this->assertSame(2, InvoiceFile::query()->where('invoice_id', $invoice->id)->count());

@@ -4,11 +4,12 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
-use App\Models\Invoice;
 use App\Models\AppSetting;
 use App\Models\AuditLog;
+use App\Models\Invoice;
 use App\Models\KsefSubmission;
 use App\Services\Invoices\InvoiceTemplateService;
+use App\Services\Ksef\KsefSettingsService;
 use App\Services\Ksef\KsefSubmissionService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -43,6 +44,8 @@ class KsefSubmissionWorkflowTest extends TestCase
         $this->assertStringContainsString('<KodFormularza kodSystemowy="FA (3)" wersjaSchemy="1-0E">FA</KodFormularza>', (string) $submission->xml_payload);
         $this->assertStringContainsString('<P_2>FV/2026/000001</P_2>', (string) $submission->xml_payload);
         $this->assertStringContainsString('<P_7>Produkt KSeF</P_7>', (string) $submission->xml_payload);
+        $this->assertSame(KsefSettingsService::TEST_PUBLIC_KEY_ID, $submission->request_metadata['public_key_id']);
+        $this->assertSame(KsefSettingsService::TEST_PUBLIC_KEY_SHA256, $submission->request_metadata['public_key_sha256']);
 
         $this->get(route('ksef.index'))
             ->assertOk()
@@ -91,6 +94,8 @@ class KsefSubmissionWorkflowTest extends TestCase
             && $request->url() === 'https://ksef-gateway.test/submit'
             && $request->hasHeader('Authorization', 'Bearer test-token')
             && str_contains((string) $request['invoice_xml'], '<P_2>FV/2026/000001</P_2>')
+            && $request['public_key_id'] === KsefSettingsService::TEST_PUBLIC_KEY_ID
+            && $request['public_key_sha256'] === KsefSettingsService::TEST_PUBLIC_KEY_SHA256
             && $request['invoice_size'] > 0);
     }
 
@@ -138,6 +143,40 @@ class KsefSubmissionWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee('B2C / pomiń')
             ->assertSee('Zmień KSeF');
+    }
+
+    public function test_global_invoice_ksef_policy_can_force_b2c_submission(): void
+    {
+        config([
+            'queue.default' => 'sync',
+            'services.ksef.access_token' => '',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.environment' => 'test',
+        ]);
+
+        AppSetting::query()->updateOrCreate(
+            ['key' => 'invoice_ksef_settings'],
+            ['value' => ['default_send_policy' => 'send']],
+        );
+
+        $invoice = $this->createInvoice();
+        $buyer = $invoice->buyer_data;
+        $buyer['tax_id'] = '';
+        $invoice->update(['buyer_data' => $buyer]);
+
+        $this->post(route('ksef.invoices.submit', $invoice))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $submission = KsefSubmission::query()->firstOrFail();
+
+        $this->assertSame($invoice->id, $submission->invoice_id);
+        $this->assertSame('missing_configuration', $submission->status);
+
+        $this->get(route('ksef.index'))
+            ->assertOk()
+            ->assertSee('Wysyłać')
+            ->assertSee('Domyślna konfiguracja faktur wymusza dobrowolną wysyłkę');
     }
 
     public function test_operator_can_force_b2c_invoice_to_ksef(): void
@@ -295,6 +334,52 @@ class KsefSubmissionWorkflowTest extends TestCase
         $this->assertDatabaseHas('audit_logs', [
             'action' => 'ksef.configuration_updated',
         ]);
+    }
+
+    public function test_operator_can_use_default_test_public_key_profile_for_ksef(): void
+    {
+        config([
+            'services.ksef.access_token' => '',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.environment' => '',
+            'services.ksef.api_version' => '',
+        ]);
+
+        $this->put(route('integrations.ksef.configuration.update'), [
+            'environment' => 'test',
+            'api_version' => '2.6.0',
+            'base_url' => '',
+            'gateway_url' => '',
+            'status_url' => '',
+            'public_key_id' => '',
+            'public_key_sha256' => '',
+        ])
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Konfiguracja KSeF została zapisana.');
+
+        $setting = AppSetting::query()->where('key', 'ksef_configuration')->firstOrFail();
+
+        $this->assertSame('test', $setting->value['environment']);
+        $this->assertSame(KsefSettingsService::TEST_PUBLIC_KEY_ID, $setting->value['public_key_id']);
+        $this->assertSame(KsefSettingsService::TEST_PUBLIC_KEY_SHA256, $setting->value['public_key_sha256']);
+
+        $this->get(route('integrations.index'))
+            ->assertOk()
+            ->assertSee(KsefSettingsService::TEST_PUBLIC_KEY_ID)
+            ->assertSee(KsefSettingsService::TEST_PUBLIC_KEY_SHA256);
+
+        $this->put(route('integrations.ksef.configuration.update'), [
+            'environment' => 'production',
+            'api_version' => '2.6.0',
+            'public_key_id' => KsefSettingsService::TEST_PUBLIC_KEY_ID,
+            'public_key_sha256' => KsefSettingsService::TEST_PUBLIC_KEY_SHA256,
+        ])->assertRedirect();
+
+        $setting->refresh();
+
+        $this->assertSame('production', $setting->value['environment']);
+        $this->assertSame('', $setting->value['public_key_id']);
+        $this->assertSame('', $setting->value['public_key_sha256']);
     }
 
     public function test_operator_can_clear_stored_ksef_token(): void

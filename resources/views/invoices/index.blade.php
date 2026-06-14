@@ -69,7 +69,7 @@
             <div class="drawer-header">
                 <div>
                     <div class="drawer-title">Ustawienia faktur</div>
-                    <div class="muted">Serie numeracji oraz domyślny termin płatności nowych faktur.</div>
+                    <div class="muted">Serie numeracji, płatności oraz domyślna kwalifikacja KSeF.</div>
                 </div>
                 <label class="drawer-close" for="invoice-settings-drawer">&times;</label>
             </div>
@@ -91,7 +91,18 @@
                 <label>Termin płatności (dni)
                     <input name="payment_due_days" value="{{ old('payment_due_days', $numbering['payment_due_days']) }}" type="number" min="0" max="365" required>
                 </label>
+                <label>Domyślna kwalifikacja KSeF
+                    @php
+                        $selectedDefaultKsefPolicy = old('default_ksef_policy', $invoiceKsef['default_send_policy']);
+                    @endphp
+                    <select name="default_ksef_policy" required>
+                        <option value="auto" @selected($selectedDefaultKsefPolicy === 'auto')>Automatycznie: B2B wysyłaj, B2C pomiń</option>
+                        <option value="send" @selected($selectedDefaultKsefPolicy === 'send')>Domyślnie wysyłaj do KSeF</option>
+                        <option value="skip" @selected($selectedDefaultKsefPolicy === 'skip')>Domyślnie nie wysyłaj do KSeF</option>
+                    </select>
+                </label>
                 <p class="muted">Tokeny: {PREFIX}, {YYYY}, {YY}, {MM}, {SEQ}. Przykład: {{ strtr($numbering['pattern'], ['{PREFIX}' => trim($numbering['sales_prefix'], '/'), '{YYYY}' => now()->format('Y'), '{YY}' => now()->format('y'), '{MM}' => now()->format('m'), '{SEQ}' => str_pad('1', (int) $numbering['padding'], '0', STR_PAD_LEFT)]) }}</p>
+                <p class="muted">To ustawienie działa jako domyślne dla nowych i istniejących faktur bez ręcznej decyzji KSeF. Ustawienie na konkretnej fakturze ma pierwszeństwo.</p>
                 <button class="button" type="submit">Zapisz ustawienia</button>
             </form>
         </aside>
@@ -247,7 +258,6 @@
                     @forelse ($invoices as $invoice)
                         @php
                             $latestKsef = $invoice->ksefSubmissions->sortByDesc('id')->first();
-                            $htmlFile = $invoice->files->firstWhere('type', 'html');
                             $pdfFile = $invoice->files->firstWhere('type', 'pdf');
                             $validationState = $validation->get($invoice->id, ['errors' => [], 'warnings' => [], 'is_blocking' => false]);
                             $hasSellerErrors = collect($validationState['errors'])
@@ -315,11 +325,6 @@
                             </td>
                             <td>{{ $invoice->invoiceTemplate?->name ?? $template->name }}</td>
                             <td>
-                                @if ($htmlFile)
-                                    <a class="status" href="{{ route('invoices.files.download', [$invoice, $htmlFile]) }}">HTML</a>
-                                @else
-                                    <span class="status red">HTML</span>
-                                @endif
                                 @if ($pdfFile)
                                     <a class="status" href="{{ route('invoices.files.download', [$invoice, $pdfFile]) }}">PDF</a>
                                 @else
