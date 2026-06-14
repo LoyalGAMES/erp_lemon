@@ -1,15 +1,12 @@
 <?php
 
+use App\Services\Ksef\KsefSubmissionService;
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
 {
-    private const LEGACY_ERROR = 'KSeF API 2.0 wymaga szyfrowanej sesji online i zaszyfrowanego XML. Skonfiguruj bramkę KSeF albo etap szyfrowania przed realną wysyłką.';
-
-    private const CURRENT_ERROR = 'Poprzednia próba wysyłki pochodzi sprzed natywnej obsługi KSeF 2.0. Ponów zgłoszenie, aby ERP wysłał fakturę przez szyfrowaną sesję online.';
-
     public function up(): void
     {
         if (! Schema::hasTable('ksef_submissions')) {
@@ -17,10 +14,10 @@ return new class extends Migration
         }
 
         DB::table('ksef_submissions')
-            ->where('last_error', self::LEGACY_ERROR)
+            ->where('last_error', KsefSubmissionService::LEGACY_GATEWAY_ERROR)
             ->update([
                 'status' => 'failed',
-                'last_error' => self::CURRENT_ERROR,
+                'last_error' => KsefSubmissionService::LEGACY_GATEWAY_CLEANUP_ERROR,
                 'updated_at' => now(),
             ]);
     }
@@ -32,10 +29,10 @@ return new class extends Migration
         }
 
         DB::table('ksef_submissions')
-            ->where('last_error', self::CURRENT_ERROR)
+            ->where('last_error', KsefSubmissionService::LEGACY_GATEWAY_CLEANUP_ERROR)
             ->update([
                 'status' => 'requires_configuration',
-                'last_error' => self::LEGACY_ERROR,
+                'last_error' => KsefSubmissionService::LEGACY_GATEWAY_ERROR,
                 'updated_at' => now(),
             ]);
     }

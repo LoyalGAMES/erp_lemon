@@ -13,6 +13,10 @@ use Throwable;
 
 final class KsefSubmissionService
 {
+    public const LEGACY_GATEWAY_ERROR = 'KSeF API 2.0 wymaga szyfrowanej sesji online i zaszyfrowanego XML. Skonfiguruj bramkę KSeF albo etap szyfrowania przed realną wysyłką.';
+
+    public const LEGACY_GATEWAY_CLEANUP_ERROR = 'Poprzednia próba wysyłki pochodzi sprzed natywnej obsługi KSeF 2.0. Ponów zgłoszenie, aby ERP wysłał fakturę przez szyfrowaną sesję online.';
+
     public function __construct(
         private readonly KsefXmlBuilder $xmlBuilder,
         private readonly KsefClient $client,
@@ -223,6 +227,17 @@ final class KsefSubmissionService
         }
 
         return $submission->refresh();
+    }
+
+    public function cleanupLegacyGatewayConfigurationErrors(): int
+    {
+        return KsefSubmission::query()
+            ->where('last_error', self::LEGACY_GATEWAY_ERROR)
+            ->update([
+                'status' => 'failed',
+                'last_error' => self::LEGACY_GATEWAY_CLEANUP_ERROR,
+                'updated_at' => now(),
+            ]);
     }
 
     /**

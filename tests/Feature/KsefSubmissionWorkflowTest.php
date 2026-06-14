@@ -101,6 +101,40 @@ class KsefSubmissionWorkflowTest extends TestCase
             ->assertDontSee('ucinania końcówki...');
     }
 
+    public function test_ksef_cleanup_url_replaces_legacy_gateway_error(): void
+    {
+        config([
+            'services.ksef.access_token' => '',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.environment' => 'test',
+        ]);
+
+        $invoice = $this->createInvoice();
+        $legacy = $invoice->ksefSubmissions()->create([
+            'environment' => 'test',
+            'api_version' => '2.6.0',
+            'status' => 'requires_configuration',
+            'last_error' => KsefSubmissionService::LEGACY_GATEWAY_ERROR,
+        ]);
+        $other = $invoice->ksefSubmissions()->create([
+            'environment' => 'test',
+            'api_version' => '2.6.0',
+            'status' => 'failed',
+            'last_error' => 'Inny błąd KSeF',
+        ]);
+
+        $this->get(route('ksef.index', ['cleanup_legacy_errors' => 1]))
+            ->assertRedirect(route('ksef.index'))
+            ->assertSessionHas('status', 'Wyczyszczono stare komunikaty KSeF: 1.');
+
+        $legacy->refresh();
+        $other->refresh();
+
+        $this->assertSame('failed', $legacy->status);
+        $this->assertSame(KsefSubmissionService::LEGACY_GATEWAY_CLEANUP_ERROR, $legacy->last_error);
+        $this->assertSame('Inny błąd KSeF', $other->last_error);
+    }
+
     public function test_configured_ksef_gateway_accepts_submission_and_updates_invoice_number(): void
     {
         config([

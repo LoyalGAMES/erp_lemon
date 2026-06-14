@@ -22,11 +22,21 @@ use RuntimeException;
 class KsefController extends Controller
 {
     public function index(
+        Request $request,
         KsefClient $client,
+        KsefSubmissionService $submissions,
         InvoiceValidationService $validation,
         KsefXmlBuilder $xmlBuilder,
         KsefEligibilityService $eligibility,
-    ): View {
+    ): View|RedirectResponse {
+        if ($request->boolean('cleanup_legacy_errors')) {
+            $updated = $submissions->cleanupLegacyGatewayConfigurationErrors();
+
+            return redirect()
+                ->route('ksef.index')
+                ->with('status', "Wyczyszczono stare komunikaty KSeF: {$updated}.");
+        }
+
         $invoices = Invoice::query()
             ->with(['lines', 'ksefSubmissions', 'externalOrder'])
             ->latest('issue_date')
