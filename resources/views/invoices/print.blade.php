@@ -190,6 +190,7 @@
             font-size: 7.5px;
             font-weight: 700;
             letter-spacing: .02em;
+            line-height: 1.15;
             text-align: left;
             text-transform: uppercase;
         }
@@ -199,8 +200,8 @@
             border: 1px solid #e0e4e8;
             vertical-align: top;
         }
-        .items-table.compact-items th { font-size: 7.1px; }
-        .items-table.compact-items td { font-size: 7.9px; }
+        .items-table.compact-items th { padding: 4px 3px; font-size: 6.8px; }
+        .items-table.compact-items td { padding: 4px 3px; font-size: 7.7px; }
         .items-table tbody tr:nth-child(even) td { background: #fafbfc; }
         .item-name { color: #202124; font-size: 8.4px; font-weight: 700; line-height: 1.25; word-break: break-word; overflow-wrap: anywhere; }
         .item-sku { margin-top: 2px; color: #5f666d; font-size: 7.5px; line-height: 1.2; word-break: break-word; overflow-wrap: anywhere; }
@@ -402,14 +403,14 @@
             <table class="items-table compact-items">
                 <thead>
                     <tr>
-                        <th style="width: 24px;">Lp.</th>
-                        <th style="width: 222px;">Nazwa towaru/usługi</th>
-                        <th class="right nowrap" style="width: 54px;">Ilość / jm</th>
-                        <th class="right nowrap" style="width: 62px;">Cena j. netto</th>
-                        <th class="right nowrap" style="width: 56px;">Wartość netto</th>
-                        <th class="right nowrap" style="width: 40px;">VAT</th>
-                        <th class="right nowrap" style="width: 62px;">Kwota VAT</th>
-                        <th class="right nowrap" style="width: 64px;">Brutto</th>
+                        <th style="width: 22px;">Lp.</th>
+                        <th style="width: 198px;">Nazwa towaru/usługi</th>
+                        <th class="right" style="width: 48px;">Ilość / jm</th>
+                        <th class="right" style="width: 58px;">Cena j. netto</th>
+                        <th class="right" style="width: 58px;">Wartość netto</th>
+                        <th class="right" style="width: 34px;">VAT</th>
+                        <th class="right" style="width: 58px;">Kwota VAT</th>
+                        <th class="right" style="width: 60px;">Brutto</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -436,14 +437,14 @@
             <table class="items-table compact-items">
                 <thead>
                     <tr>
-                        <th style="width: 24px;">Lp.</th>
-                        <th style="width: 222px;">Nazwa towaru/usługi</th>
-                        <th class="right nowrap" style="width: 54px;">Ilość / jm</th>
-                        <th class="right nowrap" style="width: 62px;">Cena j. netto</th>
-                        <th class="right nowrap" style="width: 56px;">Wartość netto</th>
-                        <th class="right nowrap" style="width: 40px;">VAT</th>
-                        <th class="right nowrap" style="width: 62px;">Kwota VAT</th>
-                        <th class="right nowrap" style="width: 64px;">Brutto</th>
+                        <th style="width: 22px;">Lp.</th>
+                        <th style="width: 198px;">Nazwa towaru/usługi</th>
+                        <th class="right" style="width: 48px;">Ilość / jm</th>
+                        <th class="right" style="width: 58px;">Cena j. netto</th>
+                        <th class="right" style="width: 58px;">Wartość netto</th>
+                        <th class="right" style="width: 34px;">VAT</th>
+                        <th class="right" style="width: 58px;">Kwota VAT</th>
+                        <th class="right" style="width: 60px;">Brutto</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -470,14 +471,14 @@
         <table class="items-table">
             <thead>
                 <tr>
-                    <th style="width: 24px;">Lp.</th>
-                    <th style="width: 222px;">Nazwa towaru/usługi</th>
-                    <th class="right nowrap" style="width: 54px;">Ilość / jm</th>
-                    <th class="right nowrap" style="width: 62px;">Cena j. netto</th>
-                    <th class="right nowrap" style="width: 56px;">Wartość netto</th>
-                    <th class="right nowrap" style="width: 40px;">VAT</th>
-                    <th class="right nowrap" style="width: 62px;">Kwota VAT</th>
-                    <th class="right nowrap" style="width: 64px;">Brutto</th>
+                    <th style="width: 22px;">Lp.</th>
+                    <th style="width: 198px;">Nazwa towaru/usługi</th>
+                    <th class="right" style="width: 48px;">Ilość / jm</th>
+                    <th class="right" style="width: 58px;">Cena j. netto</th>
+                    <th class="right" style="width: 58px;">Wartość netto</th>
+                    <th class="right" style="width: 34px;">VAT</th>
+                    <th class="right" style="width: 58px;">Kwota VAT</th>
+                    <th class="right" style="width: 60px;">Brutto</th>
                 </tr>
             </thead>
             <tbody>

@@ -16,7 +16,7 @@ use Throwable;
 final class InvoiceTemplateService
 {
     private const DEFAULT_TEMPLATE_SOURCE = 'resources/views/invoices/print.blade.php';
-    private const DEFAULT_TEMPLATE_VERSION = '2026-06-13-managed-business-invoice-v7';
+    private const DEFAULT_TEMPLATE_VERSION = '2026-06-14-managed-business-invoice-v8';
 
     public function defaultTemplate(): InvoiceTemplate
     {
@@ -116,6 +116,11 @@ final class InvoiceTemplateService
         $this->loadCorrectedInvoiceForTemplate($invoice);
 
         $template = $invoice->invoiceTemplate;
+
+        if ($template instanceof InvoiceTemplate && $template->is_active) {
+            $template = $this->refreshManagedDefaultTemplateIfNeeded($template);
+            $invoice->setRelation('invoiceTemplate', $template);
+        }
 
         if (! $template instanceof InvoiceTemplate || ! $template->is_active) {
             $template = $this->defaultTemplate();

@@ -128,6 +128,40 @@ BLADE;
         $this->assertSame($originalBody, $default->template_body);
     }
 
+    public function test_attached_managed_invoice_template_refreshes_from_current_source(): void
+    {
+        $oldTemplateBody = <<<'BLADE'
+<!DOCTYPE html>
+<html lang="pl">
+<body>STARY SZABLON {{ $invoice->number }}</body>
+</html>
+BLADE;
+
+        $template = InvoiceTemplate::query()->updateOrCreate(['code' => 'default_vat'], [
+            'name' => 'Sempre faktura VAT',
+            'renderer' => 'blade_pdf',
+            'template_body' => $oldTemplateBody,
+            'settings' => [
+                'source' => 'resources/views/invoices/print.blade.php',
+                'source_version' => '2026-06-03-managed-branded-invoice-v3',
+                'legal_review_required' => true,
+            ],
+            'is_default' => true,
+            'is_active' => true,
+        ]);
+
+        $invoice = $this->createInvoice();
+        $invoice->update(['invoice_template_id' => $template->id]);
+
+        $html = app(InvoiceTemplateService::class)->renderHtml($invoice->fresh());
+
+        $template->refresh();
+
+        $this->assertStringNotContainsString('STARY SZABLON', $html);
+        $this->assertStringContainsString('width: 198px', $html);
+        $this->assertNotSame('2026-06-03-managed-branded-invoice-v3', $template->settings['source_version']);
+    }
+
     public function test_invalid_stored_invoice_template_does_not_delete_existing_files(): void
     {
         $invoice = $this->createInvoice();
