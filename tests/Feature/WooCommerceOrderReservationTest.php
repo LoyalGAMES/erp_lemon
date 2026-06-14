@@ -78,8 +78,20 @@ class WooCommerceOrderReservationTest extends TestCase
         $this->assertSame(1, $stats['reserved']);
         $this->assertSame(0, $stats['released']);
         $this->assertSame(1, StockReservation::query()->where('status', 'active')->count());
+        $this->assertSame(1, StockReservation::query()->count());
 
         $balance = StockBalance::query()->firstOrFail();
+        $this->assertSame('2.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('8.0000', (string) $balance->quantity_available);
+
+        $stats = app(WooCommerceImportService::class)->importOrders($integration);
+
+        $this->assertSame(0, $stats['reserved']);
+        $this->assertSame(0, $stats['released']);
+        $this->assertSame(1, StockReservation::query()->where('status', 'active')->count());
+        $this->assertSame(1, StockReservation::query()->count());
+
+        $balance->refresh();
         $this->assertSame('2.0000', (string) $balance->quantity_reserved);
         $this->assertSame('8.0000', (string) $balance->quantity_available);
 

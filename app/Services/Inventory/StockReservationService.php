@@ -8,19 +8,24 @@ use App\Models\ExternalOrder;
 use App\Models\StockBalance;
 use App\Models\StockReservation;
 use App\Models\WarehouseDocument;
+use App\Services\Orders\OrderFulfillmentStatusService;
+use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 
 final class StockReservationService
 {
     private const RESERVING_STATUSES = ['pending', 'processing', 'on-hold'];
+
     private const ACTIVE_STATUS = 'active';
+
     private const WAITING_STATUS = 'waiting';
+
     private const RELEASED_STATUS = 'released';
 
     public function __construct(
         private readonly SalesChannelWarehouseResolver $warehouseResolver,
-    ) {
-    }
+        private readonly OrderFulfillmentStatusService $fulfillmentStatus,
+    ) {}
 
     /**
      * @return array{reserved:int,released:int,skipped:int}
@@ -33,17 +38,29 @@ final class StockReservationService
                 ->lockForUpdate()
                 ->findOrFail($order->id);
 
-            $releasedPairs = $this->releaseActiveReservations($order);
+            $openReservations = $this->openReservations($order);
             $reserved = 0;
-            $skipped = 0;
+            $skipped = $this->skippedReservationLines($order);
+            $releasedPairs = [];
             $newPairs = [];
 
-            if ($this->shouldReserve($order->status)) {
+            if (! $this->shouldReserve($order->status) || $this->fulfillmentStatus->hasPostedWz($order)) {
+                $releasedPairs = $this->releaseReservations($openReservations);
+            } else {
                 $warehouse = $this->warehouseResolver->resolve($order->sales_channel_id);
+
+                if ($this->openReservationsMatchOrder($order, $openReservations, (int) $warehouse->id)) {
+                    return [
+                        'reserved' => 0,
+                        'released' => 0,
+                        'skipped' => $skipped,
+                    ];
+                }
+
+                $releasedPairs = $this->releaseReservations($openReservations);
 
                 foreach ($order->lines as $line) {
                     if ($line->product_id === null || (float) $line->quantity <= 0) {
-                        $skipped++;
                         continue;
                     }
 
@@ -259,16 +276,23 @@ final class StockReservationService
     }
 
     /**
-     * @return list<array{0:int,1:int}>
+     * @return Collection<int, StockReservation>
      */
-    private function releaseActiveReservations(ExternalOrder $order): array
+    private function openReservations(ExternalOrder $order): Collection
     {
-        $reservations = StockReservation::query()
+        return StockReservation::query()
             ->where('sales_channel_id', $order->sales_channel_id)
             ->where('external_order_id', $order->external_id)
             ->whereIn('status', [self::ACTIVE_STATUS, self::WAITING_STATUS])
             ->get();
+    }
 
+    /**
+     * @param  Collection<int, StockReservation>  $reservations
+     * @return list<array{0:int,1:int}>
+     */
+    private function releaseReservations(Collection $reservations): array
+    {
         $pairs = [];
 
         foreach ($reservations as $reservation) {
@@ -283,7 +307,72 @@ final class StockReservationService
     }
 
     /**
-     * @param array<string, mixed> $metadata
+     * @param  Collection<int, StockReservation>  $reservations
+     */
+    private function openReservationsMatchOrder(ExternalOrder $order, Collection $reservations, int $warehouseId): bool
+    {
+        $desired = $this->reservableLineQuantities($order);
+
+        if ($desired === []) {
+            return $reservations->isEmpty();
+        }
+
+        $current = [];
+
+        foreach ($reservations as $reservation) {
+            if ((int) $reservation->warehouse_id !== $warehouseId) {
+                return false;
+            }
+
+            $productId = (int) $reservation->product_id;
+            $current[$productId] = ($current[$productId] ?? 0.0) + (float) $reservation->quantity;
+        }
+
+        ksort($current);
+
+        if (array_keys($desired) !== array_keys($current)) {
+            return false;
+        }
+
+        foreach ($desired as $productId => $quantity) {
+            if (abs($quantity - (float) ($current[$productId] ?? 0.0)) > 0.00005) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @return array<int, float>
+     */
+    private function reservableLineQuantities(ExternalOrder $order): array
+    {
+        $quantities = [];
+
+        foreach ($order->lines as $line) {
+            if ($line->product_id === null || (float) $line->quantity <= 0) {
+                continue;
+            }
+
+            $productId = (int) $line->product_id;
+            $quantities[$productId] = ($quantities[$productId] ?? 0.0) + (float) $line->quantity;
+        }
+
+        ksort($quantities);
+
+        return $quantities;
+    }
+
+    private function skippedReservationLines(ExternalOrder $order): int
+    {
+        return $order->lines
+            ->filter(fn ($line): bool => $line->product_id === null || (float) $line->quantity <= 0)
+            ->count();
+    }
+
+    /**
+     * @param  array<string, mixed>  $metadata
      */
     private function createReservation(
         int $warehouseId,
@@ -325,7 +414,7 @@ final class StockReservationService
     }
 
     /**
-     * @param list<array{0:int,1:int}> $pairs
+     * @param  list<array{0:int,1:int}>  $pairs
      * @return list<array{0:int,1:int}>
      */
     private function uniquePairs(array $pairs): array

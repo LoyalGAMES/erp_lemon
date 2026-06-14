@@ -12,6 +12,7 @@ use App\Models\StockLedgerEntry;
 use App\Models\StockReservation;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
+use App\Services\Inventory\StockReservationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -121,6 +122,13 @@ class WarehouseOrderFulfillmentTest extends TestCase
             ->assertSessionHas('status', "WZ {$document->number} jest już zaksięgowane dla tego zamówienia.");
 
         $this->assertSame(1, WarehouseDocument::query()->count());
+
+        $reservationStats = app(StockReservationService::class)->syncForOrder($order);
+
+        $this->assertSame(0, $reservationStats['reserved']);
+        $this->assertSame(0, $reservationStats['released']);
+        $this->assertSame(0, StockReservation::query()->where('status', 'active')->count());
+        $this->assertSame(1, StockReservation::query()->count());
     }
 
     public function test_posted_manual_wz_with_order_reference_blocks_next_wz_action(): void
@@ -168,7 +176,7 @@ class WarehouseOrderFulfillmentTest extends TestCase
         ]);
 
         $document = WarehouseDocument::query()->create([
-            'number' => 'WZ/' . now()->format('Y') . '/000009',
+            'number' => 'WZ/'.now()->format('Y').'/000009',
             'type' => 'WZ',
             'status' => 'posted',
             'source_warehouse_id' => $warehouse->id,
