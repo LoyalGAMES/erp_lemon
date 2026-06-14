@@ -8,6 +8,7 @@
         'requires_configuration' => 'Wymaga konfiguracji',
         'submitted' => 'Wysłana',
         'accepted' => 'Przyjęta',
+        'rejected' => 'Odrzucona',
         'failed' => 'Błąd',
     ];
     $invoiceStatusLabel = [
@@ -253,6 +254,8 @@
                                 ->contains(fn (string $message): bool => str_contains($message, 'sprzedawcy'));
                             $isKsefAccepted = filled($invoice->ksef_number)
                                 || $invoice->ksefSubmissions->contains(fn ($submission): bool => $submission->status === 'accepted');
+                            $ksefState = $ksefEligibility->get($invoice->id, ['label' => 'Auto', 'reason' => '', 'tone' => '']);
+                            $ksefTone = $ksefState['tone'] ?? '';
                         @endphp
                         <tr>
                             <td>{{ $invoice->number }}</td>
@@ -300,7 +303,16 @@
                                     -
                                 @endif
                             </td>
-                            <td>{{ $invoice->ksef_number ?? ($latestKsef ? ($ksefStatusLabel[$latestKsef->status] ?? $latestKsef->status) : '-') }}</td>
+                            <td>
+                                @if ($invoice->ksef_number)
+                                    <span class="status">Nr KSeF</span>
+                                    <div class="muted">{{ $invoice->ksef_number }}</div>
+                                @elseif ($latestKsef)
+                                    <span @class(['status', 'red' => in_array($latestKsef->status, ['failed', 'rejected'], true), 'orange' => in_array($latestKsef->status, ['missing_configuration', 'requires_configuration'], true)])>{{ $ksefStatusLabel[$latestKsef->status] ?? $latestKsef->status }}</span>
+                                @else
+                                    <span @class(['status', 'orange' => $ksefTone === 'orange', 'red' => $ksefTone === 'red', 'blue' => $ksefTone === 'blue']) title="{{ $ksefState['reason'] ?? '' }}">{{ $ksefState['label'] ?? '-' }}</span>
+                                @endif
+                            </td>
                             <td>{{ $invoice->invoiceTemplate?->name ?? $template->name }}</td>
                             <td>
                                 @if ($htmlFile)

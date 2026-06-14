@@ -11,6 +11,7 @@ use App\Services\Invoices\InvoiceSettingsService;
 use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Invoices\InvoiceValidationService;
 use App\Services\Invoices\OrderInvoiceService;
+use App\Services\Ksef\KsefEligibilityService;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -26,8 +27,8 @@ class InvoiceController extends Controller
         InvoiceTemplateService $templates,
         InvoiceSettingsService $settings,
         InvoiceValidationService $validation,
-    ): View
-    {
+        KsefEligibilityService $eligibility,
+    ): View {
         $invoices = Invoice::query()
             ->with(['lines', 'files', 'ksefSubmissions', 'invoiceTemplate', 'externalOrder'])
             ->latest('issue_date')
@@ -54,6 +55,9 @@ class InvoiceController extends Controller
             'module' => 'invoices',
             'invoices' => $invoices,
             'validation' => $validationStates,
+            'ksefEligibility' => $invoices->mapWithKeys(fn (Invoice $invoice): array => [
+                $invoice->id => $eligibility->state($invoice),
+            ]),
             'validationSummary' => [
                 'ready' => $validationStates
                     ->filter(fn (array $state): bool => ! $state['is_blocking'] && $state['warnings'] === [])
@@ -88,7 +92,7 @@ class InvoiceController extends Controller
         } catch (RuntimeException $exception) {
             return back()
                 ->withInput()
-                ->with('error', 'Nie zapisano szablonu faktury. ' . $exception->getMessage());
+                ->with('error', 'Nie zapisano szablonu faktury. '.$exception->getMessage());
         }
 
         return back()->with('status', "Szablon faktury {$template->name} został zapisany.");
@@ -114,7 +118,7 @@ class InvoiceController extends Controller
         if (! $sellerStatus['is_ready']) {
             return back()
                 ->withInput()
-                ->with('error', 'Nie zapisano danych sprzedawcy. ' . implode(' ', $sellerStatus['errors']));
+                ->with('error', 'Nie zapisano danych sprzedawcy. '.implode(' ', $sellerStatus['errors']));
         }
 
         $settings->updateSellerData($validated);
@@ -122,7 +126,7 @@ class InvoiceController extends Controller
         $message = 'Dane sprzedawcy do faktur zostały zapisane.';
 
         if ($sellerStatus['warnings'] !== []) {
-            $message .= ' Ostrzeżenia: ' . implode(' ', $sellerStatus['warnings']);
+            $message .= ' Ostrzeżenia: '.implode(' ', $sellerStatus['warnings']);
         }
 
         return back()->with('status', $message);
@@ -143,8 +147,11 @@ class InvoiceController extends Controller
         return back()->with('status', 'Ustawienia numeracji i płatności faktur zostały zapisane.');
     }
 
-    public function edit(Invoice $invoice, InvoiceValidationService $validation): View
-    {
+    public function edit(
+        Invoice $invoice,
+        InvoiceValidationService $validation,
+        KsefEligibilityService $eligibility,
+    ): View {
         $invoice->load(['lines', 'ksefSubmissions']);
 
         return view('invoices.edit', [
@@ -153,6 +160,7 @@ class InvoiceController extends Controller
             'module' => 'invoices',
             'invoice' => $invoice,
             'validationState' => $validation->validate($invoice),
+            'ksefEligibility' => $eligibility->state($invoice),
             'isKsefAccepted' => $this->isKsefAccepted($invoice),
         ]);
     }
@@ -162,6 +170,7 @@ class InvoiceController extends Controller
         Invoice $invoice,
         OrderInvoiceService $invoices,
         AuditLogService $audit,
+        KsefEligibilityService $eligibility,
     ): RedirectResponse {
         $invoice->load(['ksefSubmissions']);
 
@@ -175,6 +184,7 @@ class InvoiceController extends Controller
             'payment_due_date' => ['nullable', 'date'],
             'currency' => ['required', 'string', 'size:3'],
             'payment_method' => ['nullable', 'string', 'max:120'],
+            'ksef_policy' => ['required', 'string', 'in:auto,send,skip'],
             'seller.name' => ['required', 'string', 'max:255'],
             'seller.tax_id' => ['required', 'string', 'max:32'],
             'seller.address_1' => ['required', 'string', 'max:255'],
@@ -210,6 +220,7 @@ class InvoiceController extends Controller
         $metadata = $invoice->metadata ?? [];
         $metadata['last_data_edit_at'] = now()->toISOString();
         $metadata['legal_review_required'] = true;
+        $metadata = $eligibility->metadataWithPolicy($metadata, $validated['ksef_policy']);
 
         if (data_get($metadata, 'woocommerce_upload.status') === 'success') {
             data_set($metadata, 'woocommerce_upload.status', 'stale');
@@ -253,18 +264,18 @@ class InvoiceController extends Controller
         } catch (RuntimeException $exception) {
             return response(
                 '<!DOCTYPE html><html lang="pl"><meta charset="utf-8"><body><h1>Błąd szablonu faktury</h1><p>'
-                . e($exception->getMessage())
-                . '</p></body></html>',
+                .e($exception->getMessage())
+                .'</p></body></html>',
                 422,
                 ['Content-Type' => 'text/html; charset=UTF-8'],
             );
         }
 
-        $filename = str_replace(['/', '\\'], '-', $invoice->number) . '.pdf';
+        $filename = str_replace(['/', '\\'], '-', $invoice->number).'.pdf';
 
         return response($pdf, 200, [
             'Content-Type' => 'application/pdf',
-            'Content-Disposition' => 'inline; filename="' . $filename . '"',
+            'Content-Disposition' => 'inline; filename="'.$filename.'"',
         ]);
     }
 
@@ -283,13 +294,13 @@ class InvoiceController extends Controller
         $sellerStatus = $settings->sellerConfigurationStatus();
 
         if (! $sellerStatus['is_ready']) {
-            return back()->with('error', 'Najpierw uzupełnij dane sprzedawcy w ustawieniach faktur. ' . implode(' ', $sellerStatus['errors']));
+            return back()->with('error', 'Najpierw uzupełnij dane sprzedawcy w ustawieniach faktur. '.implode(' ', $sellerStatus['errors']));
         }
 
         try {
             $invoice = $this->applySellerSettingsToInvoice($invoice, $settings->sellerData(), $invoices, $audit);
         } catch (RuntimeException $exception) {
-            return back()->with('error', 'Dane sprzedawcy zapisano, ale nie wygenerowano plików faktury. ' . $exception->getMessage());
+            return back()->with('error', 'Dane sprzedawcy zapisano, ale nie wygenerowano plików faktury. '.$exception->getMessage());
         }
 
         return back()->with('status', "Uzupełniono dane sprzedawcy i wygenerowano ponownie pliki faktury {$invoice->number}.");
@@ -304,7 +315,7 @@ class InvoiceController extends Controller
         $sellerStatus = $settings->sellerConfigurationStatus();
 
         if (! $sellerStatus['is_ready']) {
-            return back()->with('error', 'Najpierw uzupełnij dane sprzedawcy w ustawieniach faktur. ' . implode(' ', $sellerStatus['errors']));
+            return back()->with('error', 'Najpierw uzupełnij dane sprzedawcy w ustawieniach faktur. '.implode(' ', $sellerStatus['errors']));
         }
 
         $sellerData = $settings->sellerData();
@@ -327,7 +338,7 @@ class InvoiceController extends Controller
                     $this->applySellerSettingsToInvoice($invoice, $sellerData, $invoices, $audit);
                     $updated++;
                 } catch (RuntimeException $exception) {
-                    $failed[] = $invoice->number . ': ' . $exception->getMessage();
+                    $failed[] = $invoice->number.': '.$exception->getMessage();
                 }
             });
 
@@ -335,11 +346,11 @@ class InvoiceController extends Controller
             return back()->with(
                 'error',
                 'Uzupełniono dane sprzedawcy na części faktur. Poprawione: '
-                . $updated
-                . ', pominięte: '
-                . $skipped
-                . '. Błędy: '
-                . implode(' ', $failed),
+                .$updated
+                .', pominięte: '
+                .$skipped
+                .'. Błędy: '
+                .implode(' ', $failed),
             );
         }
 
@@ -347,7 +358,7 @@ class InvoiceController extends Controller
             return back()->with('status', 'Nie znaleziono faktur wymagających uzupełnienia danych sprzedawcy.');
         }
 
-        return back()->with('status', 'Uzupełniono dane sprzedawcy i wygenerowano ponownie pliki faktur. Poprawione: ' . $updated . ', pominięte: ' . $skipped . '.');
+        return back()->with('status', 'Uzupełniono dane sprzedawcy i wygenerowano ponownie pliki faktur. Poprawione: '.$updated.', pominięte: '.$skipped.'.');
     }
 
     public function regenerate(Invoice $invoice, OrderInvoiceService $invoices): RedirectResponse
@@ -355,7 +366,7 @@ class InvoiceController extends Controller
         try {
             $invoice = $invoices->regenerateFiles($invoice);
         } catch (RuntimeException $exception) {
-            return back()->with('error', 'Nie wygenerowano plików faktury. ' . $exception->getMessage());
+            return back()->with('error', 'Nie wygenerowano plików faktury. '.$exception->getMessage());
         }
 
         return back()->with('status', "Pliki faktury {$invoice->number} zostały wygenerowane ponownie z aktualnego szablonu.");
@@ -368,7 +379,7 @@ class InvoiceController extends Controller
         try {
             $uploader->upload($invoice);
         } catch (RuntimeException $exception) {
-            return back()->with('error', 'Upload faktury do WooCommerce nie powiódł się: ' . $exception->getMessage());
+            return back()->with('error', 'Upload faktury do WooCommerce nie powiódł się: '.$exception->getMessage());
         }
 
         return back()->with('status', "Faktura {$invoice->number} została wysłana do zamówienia WooCommerce.");
@@ -405,7 +416,7 @@ class InvoiceController extends Controller
                     $uploader->upload($invoice);
                     $uploaded++;
                 } catch (RuntimeException $exception) {
-                    $failed[] = $invoice->number . ': ' . $exception->getMessage();
+                    $failed[] = $invoice->number.': '.$exception->getMessage();
                 }
             });
 
@@ -413,11 +424,11 @@ class InvoiceController extends Controller
             return back()->with(
                 'error',
                 'Wysłano część faktur do WooCommerce. Wysłane: '
-                . $uploaded
-                . ', pominięte: '
-                . $skipped
-                . '. Błędy: '
-                . implode(' ', $failed),
+                .$uploaded
+                .', pominięte: '
+                .$skipped
+                .'. Błędy: '
+                .implode(' ', $failed),
             );
         }
 
@@ -425,18 +436,18 @@ class InvoiceController extends Controller
             return back()->with('status', 'Nie znaleziono faktur oczekujących na wysyłkę do WooCommerce.');
         }
 
-        return back()->with('status', 'Wysłano zaległe faktury do WooCommerce. Wysłane: ' . $uploaded . ', pominięte: ' . $skipped . '.');
+        return back()->with('status', 'Wysłano zaległe faktury do WooCommerce. Wysłane: '.$uploaded.', pominięte: '.$skipped.'.');
     }
 
     public function downloadFile(Invoice $invoice, InvoiceFile $file): BinaryFileResponse
     {
-        $absolutePath = storage_path('app/' . $file->path);
+        $absolutePath = storage_path('app/'.$file->path);
 
         if ($file->invoice_id !== $invoice->id || $file->disk !== 'local' || ! File::exists($absolutePath)) {
             abort(404);
         }
 
-        $filename = str_replace(['/', '\\'], '-', $invoice->number) . '.' . ($file->type === 'pdf' ? 'pdf' : 'html');
+        $filename = str_replace(['/', '\\'], '-', $invoice->number).'.'.($file->type === 'pdf' ? 'pdf' : 'html');
 
         return response()->download($absolutePath, $filename, [
             'Content-Type' => $file->mime_type ?? 'application/octet-stream',
@@ -444,7 +455,7 @@ class InvoiceController extends Controller
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      * @return array<string, string>
      */
     private function cleanPartyData(array $data): array
@@ -470,7 +481,7 @@ class InvoiceController extends Controller
     }
 
     /**
-     * @param array{errors?: list<string>} $validationState
+     * @param  array{errors?: list<string>}  $validationState
      */
     private function hasSellerValidationErrors(array $validationState): bool
     {
@@ -496,7 +507,7 @@ class InvoiceController extends Controller
     }
 
     /**
-     * @param array<string, string> $sellerData
+     * @param  array<string, string>  $sellerData
      */
     private function applySellerSettingsToInvoice(
         Invoice $invoice,

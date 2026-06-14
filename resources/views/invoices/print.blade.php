@@ -2,6 +2,7 @@
     $seller = $invoice->seller_data ?? [];
     $buyer = $invoice->buyer_data ?? [];
     $logo = $assets['logo_data_uri'] ?? '';
+    $ksefQr = $ksefQr ?? null;
     $money = fn ($value): string => number_format((float) $value, 2, ',', ' ');
     $qty = fn ($value): string => number_format((float) $value, floor((float) $value) === (float) $value ? 0 : 2, ',', ' ');
     $isCorrection = $invoice->type === 'correction';
@@ -123,6 +124,35 @@
         .document-title { margin: 0 0 4px; color: #202124; font-size: 21px; line-height: 1.12; font-weight: 700; }
         .document-number { color: #3f454b; font-size: 11.2px; font-weight: 700; }
         .document-note { margin-top: 5px; color: #5f666d; font-size: 8.2px; }
+        .ksef-qr {
+            width: 96px;
+            margin-top: 8px;
+            color: #30363d;
+            font-size: 6.8px;
+            line-height: 1.2;
+            text-align: center;
+        }
+        .ksef-qr img {
+            display: block;
+            width: 54px;
+            height: 54px;
+            margin: 3px auto 2px;
+        }
+        .ksef-qr-label {
+            display: block;
+            color: #5f666d;
+            font-weight: 700;
+            letter-spacing: .02em;
+            text-transform: uppercase;
+        }
+        .ksef-qr-number {
+            display: block;
+            color: #202124;
+            font-size: 6.3px;
+            font-weight: 700;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
         .meta-shell {
             width: 100%;
             border: 1px solid #d3d7dc;
@@ -307,6 +337,13 @@
                     <div class="document-number">{{ $invoice->number }}</div>
                     @if ($invoice->ksef_number)
                         <div class="document-note">Nr KSeF: {{ $invoice->ksef_number }}</div>
+                    @endif
+                    @if (is_array($ksefQr))
+                        <div class="ksef-qr">
+                            <span class="ksef-qr-label">Sprawdź fakturę w KSeF</span>
+                            <img src="{{ $ksefQr['image_data_uri'] }}" alt="Kod QR KSeF">
+                            <span class="ksef-qr-number">{{ $ksefQr['label'] }}</span>
+                        </div>
                     @endif
                 </td>
                 <td>

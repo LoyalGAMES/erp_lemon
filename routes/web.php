@@ -169,6 +169,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
 
     Route::middleware(EnsureErpRole::class . ':ksef')->group(function (): void {
         Route::get('/ksef', [KsefController::class, 'index'])->name('ksef.index');
+        Route::put('/ksef/invoices/{invoice}/policy', [KsefController::class, 'updatePolicy'])->name('ksef.invoices.policy.update');
         Route::post('/ksef/invoices/{invoice}/submit', [KsefController::class, 'submit'])->name('ksef.invoices.submit');
         Route::post('/ksef/submissions/{submission}/retry', [KsefController::class, 'retry'])->name('ksef.submissions.retry');
         Route::post('/ksef/submissions/{submission}/refresh', [KsefController::class, 'refresh'])->name('ksef.submissions.refresh');

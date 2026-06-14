@@ -62,6 +62,27 @@
             </div>
         </article>
 
+        <article class="card">
+            <div class="panel-header">
+                <span>KSeF</span>
+                <span>{{ $ksefEligibility['label'] }}</span>
+            </div>
+            <div class="form-grid">
+                <label>Kwalifikacja wysyłki
+                    <select name="ksef_policy" @disabled($isKsefAccepted)>
+                        @php($selectedKsefPolicy = old('ksef_policy', $ksefEligibility['policy']))
+                        <option value="auto" @selected($selectedKsefPolicy === 'auto')>Automatycznie: B2B wysyłaj, B2C pomiń</option>
+                        <option value="send" @selected($selectedKsefPolicy === 'send')>Wyślij do KSeF</option>
+                        <option value="skip" @selected($selectedKsefPolicy === 'skip')>Nie wysyłaj do KSeF</option>
+                    </select>
+                </label>
+                <p class="muted">{{ $ksefEligibility['reason'] }}</p>
+                @if ($invoice->ksef_number)
+                    <p class="muted">Nr KSeF: {{ $invoice->ksef_number }}</p>
+                @endif
+            </div>
+        </article>
+
         <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px;">
             <article class="card">
                 <div class="panel-header">

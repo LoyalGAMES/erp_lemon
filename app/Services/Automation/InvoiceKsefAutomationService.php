@@ -7,6 +7,7 @@ namespace App\Services\Automation;
 use App\Jobs\SubmitInvoiceToKsefJob;
 use App\Models\Invoice;
 use App\Models\KsefSubmission;
+use App\Services\Ksef\KsefEligibilityService;
 use App\Services\Ksef\KsefSubmissionService;
 use RuntimeException;
 use Throwable;
@@ -16,12 +17,16 @@ final class InvoiceKsefAutomationService
     public function __construct(
         private readonly DocumentAutomationSettingsService $settings,
         private readonly KsefSubmissionService $submissions,
-    ) {
-    }
+        private readonly KsefEligibilityService $eligibility,
+    ) {}
 
     public function queueAfterInvoiceIssued(Invoice $invoice): ?KsefSubmission
     {
         if (! $this->settings->actionEnabled('invoice.issued', 'invoice.ksef.submit')) {
+            return null;
+        }
+
+        if (! $this->eligibility->shouldSend($invoice)) {
             return null;
         }
 

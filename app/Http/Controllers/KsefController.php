@@ -10,9 +10,11 @@ use App\Models\KsefSubmission;
 use App\Services\Audit\AuditLogService;
 use App\Services\Invoices\InvoiceValidationService;
 use App\Services\Ksef\KsefClient;
+use App\Services\Ksef\KsefEligibilityService;
 use App\Services\Ksef\KsefSubmissionService;
 use App\Services\Ksef\KsefXmlBuilder;
 use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\View\View;
 use RuntimeException;
@@ -23,8 +25,8 @@ class KsefController extends Controller
         KsefClient $client,
         InvoiceValidationService $validation,
         KsefXmlBuilder $xmlBuilder,
-    ): View
-    {
+        KsefEligibilityService $eligibility,
+    ): View {
         $invoices = Invoice::query()
             ->with(['lines', 'ksefSubmissions', 'externalOrder'])
             ->latest('issue_date')
@@ -39,12 +41,35 @@ class KsefController extends Controller
             'validation' => $invoices->mapWithKeys(fn (Invoice $invoice): array => [
                 $invoice->id => $this->ksefValidationState($invoice, $validation, $xmlBuilder),
             ]),
+            'eligibility' => $invoices->mapWithKeys(fn (Invoice $invoice): array => [
+                $invoice->id => $eligibility->state($invoice),
+            ]),
             'submissions' => KsefSubmission::query()
                 ->with('invoice')
                 ->latest()
                 ->limit(100)
                 ->get(),
         ]);
+    }
+
+    public function updatePolicy(
+        Request $request,
+        Invoice $invoice,
+        KsefEligibilityService $eligibility,
+        AuditLogService $audit,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'ksef_policy' => ['required', 'string', 'in:auto,send,skip'],
+        ]);
+
+        $before = ['metadata' => $invoice->metadata];
+        $metadata = $eligibility->metadataWithPolicy($invoice->metadata ?? [], $validated['ksef_policy']);
+
+        $invoice->update(['metadata' => $metadata]);
+
+        $audit->record('invoice.ksef_policy_updated', $invoice, $before, ['metadata' => $invoice->metadata]);
+
+        return back()->with('status', "Zmieniono kwalifikację KSeF faktury {$invoice->number}.");
     }
 
     public function submit(Invoice $invoice, KsefSubmissionService $submissions): RedirectResponse
@@ -140,7 +165,7 @@ class KsefController extends Controller
 
         return response($submission->xml_payload, 200, [
             'Content-Type' => 'application/xml; charset=UTF-8',
-            'Content-Disposition' => 'attachment; filename="' . $number . '-ksef.xml"',
+            'Content-Disposition' => 'attachment; filename="'.$number.'-ksef.xml"',
         ]);
     }
 
@@ -156,10 +181,10 @@ class KsefController extends Controller
         $unsupportedRates = $xmlBuilder->unsupportedVatRates($invoice);
 
         if ($unsupportedRates !== []) {
-            $state['errors'][] = 'KSeF FA(3): brak mapowania dla stawek VAT ' . implode(', ', array_map(
-                fn (float $rate): string => rtrim(rtrim(number_format($rate, 2, ',', ''), '0'), ',') . '%',
+            $state['errors'][] = 'KSeF FA(3): brak mapowania dla stawek VAT '.implode(', ', array_map(
+                fn (float $rate): string => rtrim(rtrim(number_format($rate, 2, ',', ''), '0'), ',').'%',
                 $unsupportedRates,
-            )) . '.';
+            )).'.';
             $state['is_blocking'] = true;
         }
 

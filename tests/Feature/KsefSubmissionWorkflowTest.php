@@ -8,6 +8,7 @@ use App\Models\Invoice;
 use App\Models\AppSetting;
 use App\Models\AuditLog;
 use App\Models\KsefSubmission;
+use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Ksef\KsefSubmissionService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -80,7 +81,11 @@ class KsefSubmissionWorkflowTest extends TestCase
         $this->assertSame('accepted', $submission->status);
         $this->assertSame('20260601-SEMPRE-REF', $submission->reference_number);
         $this->assertSame('20260601-SEMPRE-KSEF-0001', $submission->ksef_number);
-        $this->assertSame('20260601-SEMPRE-KSEF-0001', $invoice->refresh()->ksef_number);
+        $invoice->refresh();
+        $this->assertSame('20260601-SEMPRE-KSEF-0001', $invoice->ksef_number);
+        $this->assertStringStartsWith('https://qr-test.ksef.mf.gov.pl/invoice/5261040828/01-06-2026/', data_get($invoice->metadata, 'ksef.qr_url'));
+        $this->assertNotEmpty(data_get($invoice->metadata, 'ksef.invoice_hash_sha256_base64url'));
+        $this->assertStringContainsString('Sprawdź fakturę w KSeF', app(InvoiceTemplateService::class)->renderHtml($invoice));
 
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://ksef-gateway.test/submit'
@@ -106,6 +111,62 @@ class KsefSubmissionWorkflowTest extends TestCase
         $this->assertSame($first->id, $second->id);
         $this->assertSame(1, KsefSubmission::query()->count());
         $this->assertSame('queued', $second->status);
+    }
+
+    public function test_b2c_invoice_is_skipped_by_default_for_ksef_submission(): void
+    {
+        config([
+            'queue.default' => 'sync',
+            'services.ksef.access_token' => '',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.environment' => 'test',
+        ]);
+
+        $invoice = $this->createInvoice();
+        $buyer = $invoice->buyer_data;
+        $buyer['tax_id'] = '';
+        $invoice->update(['buyer_data' => $buyer]);
+
+        $this->post(route('ksef.invoices.submit', $invoice))
+            ->assertRedirect()
+            ->assertSessionHas('error', fn (string $message): bool => str_contains($message, 'nie jest przeznaczona do wysyłki do KSeF')
+                && str_contains($message, 'B2C'));
+
+        $this->assertSame(0, KsefSubmission::query()->count());
+
+        $this->get(route('ksef.index'))
+            ->assertOk()
+            ->assertSee('B2C / pomiń')
+            ->assertSee('Zmień KSeF');
+    }
+
+    public function test_operator_can_force_b2c_invoice_to_ksef(): void
+    {
+        config([
+            'queue.default' => 'sync',
+            'services.ksef.access_token' => '',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.environment' => 'test',
+        ]);
+
+        $invoice = $this->createInvoice();
+        $buyer = $invoice->buyer_data;
+        $buyer['tax_id'] = '';
+        $invoice->update(['buyer_data' => $buyer]);
+
+        $this->put(route('ksef.invoices.policy.update', $invoice), [
+            'ksef_policy' => 'send',
+        ])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $this->assertSame('send', data_get($invoice->refresh()->metadata, 'ksef.send_policy'));
+
+        $this->post(route('ksef.invoices.submit', $invoice))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $this->assertSame(1, KsefSubmission::query()->count());
     }
 
     public function test_failed_ksef_submission_can_be_retried_from_history(): void
@@ -134,7 +195,7 @@ class KsefSubmissionWorkflowTest extends TestCase
 
         $submission = KsefSubmission::query()->firstOrFail();
 
-        $this->assertSame('requires_configuration', $submission->status);
+        $this->assertSame('failed', $submission->status);
         $this->assertStringContainsString('HTTP 503', (string) $submission->last_error);
 
         $this->get(route('ksef.index'))
@@ -163,7 +224,7 @@ class KsefSubmissionWorkflowTest extends TestCase
         ]);
 
         $audit = AuditLog::query()->where('action', 'ksef.submission_retried')->firstOrFail();
-        $this->assertSame('requires_configuration', $audit->before['status']);
+        $this->assertSame('failed', $audit->before['status']);
         $this->assertSame('queued', $audit->after['status']);
         $this->assertSame(1, $audit->after['retry_count']);
 
@@ -407,6 +468,7 @@ class KsefSubmissionWorkflowTest extends TestCase
             ],
             'buyer_data' => [
                 'name' => 'Jan Kowalski',
+                'tax_id' => '5261040828',
                 'address_1' => 'Kupująca 2',
                 'postcode' => '00-002',
                 'city' => 'Warszawa',

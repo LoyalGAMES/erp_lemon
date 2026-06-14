@@ -17,8 +17,9 @@ final class KsefSubmissionService
         private readonly KsefXmlBuilder $xmlBuilder,
         private readonly KsefClient $client,
         private readonly InvoiceValidationService $validation,
-    ) {
-    }
+        private readonly KsefEligibilityService $eligibility,
+        private readonly KsefQrCodeService $qrCodes,
+    ) {}
 
     public function prepare(Invoice $invoice): KsefSubmission
     {
@@ -27,6 +28,12 @@ final class KsefSubmissionService
                 ->with(['lines', 'ksefSubmissions'])
                 ->lockForUpdate()
                 ->findOrFail($invoice->id);
+
+            $eligibility = $this->eligibility->state($invoice);
+
+            if (! $eligibility['should_send']) {
+                throw new RuntimeException('Faktura nie jest przeznaczona do wysyłki do KSeF. '.$eligibility['reason']);
+            }
 
             $this->validation->assertValidForExternalSend($invoice);
 
@@ -51,10 +58,10 @@ final class KsefSubmissionService
 
             $unsupportedRates = $this->xmlBuilder->unsupportedVatRates($invoice);
             if ($unsupportedRates !== []) {
-                throw new RuntimeException('Faktura ma stawki VAT bez mapowania KSeF FA(3): ' . implode(', ', array_map(
-                    fn (float $rate): string => rtrim(rtrim(number_format($rate, 2, '.', ''), '0'), '.') . '%',
+                throw new RuntimeException('Faktura ma stawki VAT bez mapowania KSeF FA(3): '.implode(', ', array_map(
+                    fn (float $rate): string => rtrim(rtrim(number_format($rate, 2, '.', ''), '0'), '.').'%',
                     $unsupportedRates,
-                )) . '.');
+                )).'.');
             }
 
             $configuration = $this->client->configurationStatus();
@@ -291,14 +298,19 @@ final class KsefSubmissionService
 
         $metadata = $invoice->metadata ?? [];
         $acceptedAt = ($submission->accepted_at ?? now())->toISOString();
+        $xml = (string) ($submission->xml_payload ?? '');
+        $qrUrl = $xml !== '' ? $this->qrCodes->invoiceVerificationUrl($invoice, $xml, $submission->environment) : null;
+        $existingKsefMetadata = (array) data_get($metadata, 'ksef', []);
 
-        $metadata['ksef'] = array_filter([
+        $metadata['ksef'] = array_filter(array_merge($existingKsefMetadata, [
             'number' => $ksefNumber,
             'reference_number' => $submission->reference_number,
             'submission_id' => $submission->id,
             'accepted_at' => $acceptedAt,
             'environment' => $submission->environment,
-        ], fn ($value): bool => $value !== null && $value !== '');
+            'qr_url' => $qrUrl,
+            'invoice_hash_sha256_base64url' => $xml !== '' ? $this->qrCodes->invoiceHash($xml) : null,
+        ]), fn ($value): bool => $value !== null && $value !== '');
 
         if (
             filled($invoice->external_order_id)
@@ -319,7 +331,7 @@ final class KsefSubmissionService
     }
 
     /**
-     * @param array<string, mixed> $response
+     * @param  array<string, mixed>  $response
      */
     private function resolveRemoteStatus(array $response): string
     {

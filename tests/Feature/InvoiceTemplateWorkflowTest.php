@@ -404,6 +404,7 @@ BLADE,
             'payment_due_date' => '2026-06-16',
             'currency' => 'PLN',
             'payment_method' => 'Przelew',
+            'ksef_policy' => 'skip',
             'seller' => [
                 'name' => 'Sempre Love sp. z o.o.',
                 'tax_id' => '5261040828',
@@ -436,6 +437,7 @@ BLADE,
         $this->assertSame('2026-06-02', $invoice->issue_date->toDateString());
         $this->assertSame('Poprawiony klient', $invoice->buyer_data['name']);
         $this->assertSame('Łódź', $invoice->buyer_data['city']);
+        $this->assertSame('skip', data_get($invoice->metadata, 'ksef.send_policy'));
         $this->assertSame('stale', data_get($invoice->metadata, 'woocommerce_upload.status'));
         $this->assertTrue(data_get($invoice->metadata, 'woocommerce_upload.requires_resend'));
         $this->assertSame(2, InvoiceFile::query()->where('invoice_id', $invoice->id)->count());

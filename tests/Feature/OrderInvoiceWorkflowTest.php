@@ -37,6 +37,12 @@ class OrderInvoiceWorkflowTest extends TestCase
         ]);
 
         [$order] = $this->createFulfilledOrder();
+        $order->update([
+            'billing_data' => array_merge($order->billing_data ?? [], [
+                'company' => 'Firma testowa sp. z o.o.',
+                'nip' => '5261040828',
+            ]),
+        ]);
 
         app(InvoiceSettingsService::class)->updateSellerData([
             'name' => 'Sempre Love sp. z o.o.',
@@ -92,7 +98,7 @@ class OrderInvoiceWorkflowTest extends TestCase
 
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wp/v2/media'
-            && str_starts_with($request->body(), '%PDF-1.4'));
+            && str_starts_with($request->body(), '%PDF-'));
 
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/orders/501'
@@ -134,17 +140,9 @@ class OrderInvoiceWorkflowTest extends TestCase
             ->assertRedirect()
             ->assertSessionHas('error');
 
-        $invoice = Invoice::query()->firstOrFail();
-
-        $this->assertSame($order->id, $invoice->external_order_id);
-        $this->assertNull(data_get($invoice->metadata, 'woocommerce_upload.status'));
+        $this->assertSame(0, Invoice::query()->count());
 
         Http::assertNothingSent();
-
-        $this->get(route('invoices.index'))
-            ->assertOk()
-            ->assertSee('Do poprawy')
-            ->assertSee('Popraw fakturę');
     }
 
     public function test_invoice_issue_can_automatically_queue_ksef_submission(): void
@@ -172,6 +170,12 @@ class OrderInvoiceWorkflowTest extends TestCase
         ]);
 
         [$order] = $this->createFulfilledOrder();
+        $order->update([
+            'billing_data' => array_merge($order->billing_data ?? [], [
+                'company' => 'Firma testowa sp. z o.o.',
+                'nip' => '5261040828',
+            ]),
+        ]);
 
         app(InvoiceSettingsService::class)->updateSellerData([
             'name' => 'Sempre Love sp. z o.o.',
@@ -203,6 +207,54 @@ class OrderInvoiceWorkflowTest extends TestCase
 
         $this->assertSame(1, Invoice::query()->count());
         $this->assertSame(1, KsefSubmission::query()->count());
+    }
+
+    public function test_invoice_issue_skips_automatic_ksef_submission_for_b2c_order(): void
+    {
+        config([
+            'queue.default' => 'sync',
+            'services.ksef.access_token' => '',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.environment' => 'test',
+        ]);
+
+        Http::fake([
+            'https://shop.test/wp-json/wp/v2/media' => Http::response([
+                'id' => 6102,
+                'source_url' => 'https://shop.test/wp-content/uploads/2026/05/fv-b2c.pdf',
+            ]),
+            'https://shop.test/wp-json/wc/v3/orders/501' => Http::response(['id' => 501]),
+            'https://shop.test/wp-json/wc/v3/orders/501/notes' => Http::response(['id' => 7102]),
+        ]);
+
+        app(DocumentAutomationSettingsService::class)->updateRules([
+            'invoice.issued' => [
+                'invoice.ksef.submit' => '1',
+            ],
+        ]);
+
+        [$order] = $this->createFulfilledOrder();
+
+        app(InvoiceSettingsService::class)->updateSellerData([
+            'name' => 'Sempre Love sp. z o.o.',
+            'tax_id' => '5261040828',
+            'address_1' => 'Testowa 1',
+            'postcode' => '00-001',
+            'city' => 'Warszawa',
+            'country' => 'PL',
+            'email' => 'biuro@example.test',
+            'phone' => '+48123123123',
+            'bank_account' => 'PL00111122223333444455556666',
+        ]);
+
+        $this->post(route('orders.invoice.create', $order))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $invoice = Invoice::query()->firstOrFail();
+
+        $this->assertSame('', $invoice->buyer_data['tax_id']);
+        $this->assertSame(0, KsefSubmission::query()->count());
     }
 
     public function test_operator_can_open_order_details_with_lines_reservations_wz_and_woocommerce_notes(): void

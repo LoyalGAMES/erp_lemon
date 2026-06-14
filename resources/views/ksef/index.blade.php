@@ -67,6 +67,7 @@
                         <th>Numer</th>
                         <th>Status faktury</th>
                         <th>Walidacja</th>
+                        <th>Kwalifikacja</th>
                         <th>Brutto</th>
                         <th>WooCommerce</th>
                         <th>KSeF</th>
@@ -79,6 +80,8 @@
                             $latest = $invoice->ksefSubmissions->sortByDesc('id')->first();
                             $status = $latest?->status;
                             $validationState = $validation->get($invoice->id, ['errors' => [], 'warnings' => [], 'is_blocking' => false]);
+                            $eligibilityState = $eligibility->get($invoice->id, ['policy' => 'auto', 'should_send' => true, 'label' => 'Auto', 'reason' => '', 'tone' => '']);
+                            $eligibilityTone = $eligibilityState['tone'] ?? '';
                         @endphp
                         <tr>
                             <td>{{ $invoice->number }}</td>
@@ -106,6 +109,21 @@
                                     </details>
                                 @endif
                             </td>
+                            <td>
+                                <span @class(['status', 'orange' => $eligibilityTone === 'orange', 'red' => $eligibilityTone === 'red', 'blue' => $eligibilityTone === 'blue']) title="{{ $eligibilityState['reason'] ?? '' }}">
+                                    {{ $eligibilityState['label'] ?? 'Auto' }}
+                                </span>
+                                <form class="inline-actions" method="POST" action="{{ route('ksef.invoices.policy.update', $invoice) }}" style="margin-top: 6px;">
+                                    @csrf
+                                    @method('PUT')
+                                    <select name="ksef_policy" aria-label="Kwalifikacja KSeF {{ $invoice->number }}">
+                                        <option value="auto" @selected(($eligibilityState['policy'] ?? 'auto') === 'auto')>Auto</option>
+                                        <option value="send" @selected(($eligibilityState['policy'] ?? 'auto') === 'send')>Wyślij</option>
+                                        <option value="skip" @selected(($eligibilityState['policy'] ?? 'auto') === 'skip')>Pomiń</option>
+                                    </select>
+                                    <button class="button secondary" type="submit">Zapisz</button>
+                                </form>
+                            </td>
                             <td>{{ number_format((float) $invoice->gross_total, 2, ',', ' ') }} {{ $invoice->currency }}</td>
                             <td>{{ data_get($invoice->metadata, 'woocommerce_upload.status') === 'success' ? 'Wysłana' : '-' }}</td>
                             <td>
@@ -118,7 +136,9 @@
                             <td>
                                 <div class="inline-actions">
                                     @if ($status !== 'accepted')
-                                        @if ($validationState['is_blocking'])
+                                        @if (! $eligibilityState['should_send'])
+                                            <a class="button secondary" href="{{ route('invoices.edit', $invoice) }}">Zmień KSeF</a>
+                                        @elseif ($validationState['is_blocking'])
                                             <a class="button secondary" href="{{ route('invoices.edit', $invoice) }}">Popraw fakturę</a>
                                             <form method="POST" action="{{ route('invoices.regenerate', $invoice) }}">
                                                 @csrf
@@ -139,7 +159,7 @@
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="7">Brak faktur. Najpierw wystaw fakturę z zamówienia.</td>
+                            <td colspan="8">Brak faktur. Najpierw wystaw fakturę z zamówienia.</td>
                         </tr>
                     @endforelse
                 </tbody>

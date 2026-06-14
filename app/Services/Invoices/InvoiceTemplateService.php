@@ -7,6 +7,7 @@ namespace App\Services\Invoices;
 use App\Models\Invoice;
 use App\Models\InvoiceLine;
 use App\Models\InvoiceTemplate;
+use App\Services\Ksef\KsefQrCodeService;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\Facades\File;
@@ -16,7 +17,12 @@ use Throwable;
 final class InvoiceTemplateService
 {
     private const DEFAULT_TEMPLATE_SOURCE = 'resources/views/invoices/print.blade.php';
-    private const DEFAULT_TEMPLATE_VERSION = '2026-06-14-managed-business-invoice-v8';
+
+    private const DEFAULT_TEMPLATE_VERSION = '2026-06-14-managed-business-invoice-v9-ksef-qr';
+
+    public function __construct(
+        private readonly KsefQrCodeService $qrCodes,
+    ) {}
 
     public function defaultTemplate(): InvoiceTemplate
     {
@@ -43,7 +49,7 @@ final class InvoiceTemplateService
     }
 
     /**
-     * @param array{name?: string, template_body?: string} $payload
+     * @param  array{name?: string, template_body?: string}  $payload
      */
     public function updateDefault(array $payload): InvoiceTemplate
     {
@@ -162,10 +168,11 @@ final class InvoiceTemplateService
                 'invoice' => $invoice,
                 'template' => $template,
                 'assets' => $this->templateAssets(),
+                'ksefQr' => $this->qrCodes->invoiceQr($invoice),
             ]);
         } catch (Throwable $exception) {
             throw new RuntimeException(
-                'Szablon faktury nie może zostać wyrenderowany: ' . $this->safeErrorMessage($exception),
+                'Szablon faktury nie może zostać wyrenderowany: '.$this->safeErrorMessage($exception),
                 previous: $exception,
             );
         }
@@ -192,7 +199,7 @@ final class InvoiceTemplateService
             return null;
         }
 
-        return 'data:' . $mimeType . ';base64,' . base64_encode(File::get($path));
+        return 'data:'.$mimeType.';base64,'.base64_encode(File::get($path));
     }
 
     private function sampleInvoice(): Invoice
