@@ -135,6 +135,36 @@ class KsefSubmissionWorkflowTest extends TestCase
         $this->assertSame('Inny błąd KSeF', $other->last_error);
     }
 
+    public function test_ksef_diagnostics_url_reports_native_client_and_legacy_errors(): void
+    {
+        config([
+            'queue.default' => 'database',
+            'services.ksef.access_token' => '',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.environment' => 'test',
+        ]);
+
+        $invoice = $this->createInvoice();
+        $invoice->ksefSubmissions()->create([
+            'environment' => 'test',
+            'api_version' => '2.6.0',
+            'status' => 'requires_configuration',
+            'last_error' => KsefSubmissionService::LEGACY_GATEWAY_ERROR,
+            'request_metadata' => [
+                'delivery_mode' => 'native',
+            ],
+        ]);
+
+        $this->get(route('ksef.index', ['diagnostics' => 1]))
+            ->assertOk()
+            ->assertJsonPath('code_marker', 'native-ksef-2.0-online-session')
+            ->assertJsonPath('native_client_active', true)
+            ->assertJsonPath('queue_connection', 'database')
+            ->assertJsonPath('legacy_gateway_error_count', 1)
+            ->assertJsonPath('latest_submissions.0.last_error_is_legacy_gateway_error', true)
+            ->assertJsonPath('latest_submissions.0.request_delivery_mode', 'native');
+    }
+
     public function test_configured_ksef_gateway_accepts_submission_and_updates_invoice_number(): void
     {
         config([

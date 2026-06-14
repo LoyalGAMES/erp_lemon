@@ -13,6 +13,7 @@ use App\Services\Ksef\KsefClient;
 use App\Services\Ksef\KsefEligibilityService;
 use App\Services\Ksef\KsefSubmissionService;
 use App\Services\Ksef\KsefXmlBuilder;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
@@ -28,13 +29,47 @@ class KsefController extends Controller
         InvoiceValidationService $validation,
         KsefXmlBuilder $xmlBuilder,
         KsefEligibilityService $eligibility,
-    ): View|RedirectResponse {
+    ): View|RedirectResponse|JsonResponse {
         if ($request->boolean('cleanup_legacy_errors')) {
             $updated = $submissions->cleanupLegacyGatewayConfigurationErrors();
 
             return redirect()
                 ->route('ksef.index')
                 ->with('status', "Wyczyszczono stare komunikaty KSeF: {$updated}.");
+        }
+
+        if ($request->boolean('diagnostics')) {
+            return response()->json([
+                'code_marker' => 'native-ksef-2.0-online-session',
+                'native_client_active' => method_exists($client, 'sendNative'),
+                'queue_connection' => (string) config('queue.default'),
+                'server_time' => now()->toISOString(),
+                'configuration' => $client->configurationStatus(),
+                'legacy_gateway_error_count' => KsefSubmission::query()
+                    ->where('last_error', KsefSubmissionService::LEGACY_GATEWAY_ERROR)
+                    ->count(),
+                'latest_submissions' => KsefSubmission::query()
+                    ->latest()
+                    ->limit(10)
+                    ->get()
+                    ->map(fn (KsefSubmission $submission): array => [
+                        'id' => $submission->id,
+                        'invoice_id' => $submission->invoice_id,
+                        'status' => $submission->status,
+                        'reference_number' => $submission->reference_number,
+                        'ksef_number' => $submission->ksef_number,
+                        'last_error' => $submission->last_error,
+                        'last_error_is_legacy_gateway_error' => $submission->last_error === KsefSubmissionService::LEGACY_GATEWAY_ERROR,
+                        'request_delivery_mode' => data_get($submission->request_metadata, 'delivery_mode'),
+                        'response_mode' => data_get($submission->response_metadata, 'mode'),
+                        'updated_at' => $submission->updated_at?->toISOString(),
+                    ]),
+                'next_steps' => [
+                    'Jeśli native_client_active=false albo code_marker nie istnieje, serwer nie działa na nowym kodzie.',
+                    'Jeśli queue_connection nie jest sync, po deployu uruchom php artisan queue:restart.',
+                    'Jeśli legacy_gateway_error_count > 0, odpal /ksef?cleanup_legacy_errors=1.',
+                ],
+            ]);
         }
 
         $invoices = Invoice::query()
