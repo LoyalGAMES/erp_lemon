@@ -70,9 +70,32 @@
             <label><input type="checkbox" name="order_import_enabled" value="1" checked> Import zamówień</label>
             <label><input type="checkbox" name="stock_export_enabled" value="1" checked> Eksport stanów</label>
             <label><input type="checkbox" name="invoice_upload_enabled" value="1" checked> Upload faktur do zamówień</label>
+            <label>Tryb faktur w WooCommerce
+                <select name="invoice_delivery_mode">
+                    <option value="lemon_plugin" @selected(old('invoice_delivery_mode', 'lemon_plugin') === 'lemon_plugin')>Wtyczka Lemon ERP bez Media Library</option>
+                    <option value="media_library" @selected(old('invoice_delivery_mode') === 'media_library')>WordPress Media Library</option>
+                </select>
+            </label>
             <button class="button" type="submit">Zapisz integrację</button>
         </form>
     </aside>
+
+    <article class="card" id="woocommerce-plugin" style="margin-bottom: 18px;">
+        <div class="panel-header">
+            <span>Wtyczka Lemon ERP for WooCommerce</span>
+            <span>v{{ $woocommercePluginVersion }}</span>
+        </div>
+        <div class="form-grid">
+            <p class="muted">
+                Po dodaniu integracji pobierz paczkę ZIP, wgraj ją w WordPress przez Wtyczki -> Dodaj nową -> Wyślij wtyczkę,
+                a następnie aktywuj plugin. Wtyczka dodaje pola NIP/typ klienta i endpoint faktur bez używania Media Library.
+            </p>
+            <div class="inline-actions">
+                <a class="button" href="{{ route('integrations.woocommerce-plugin.download') }}">Pobierz plugin ZIP</a>
+                <span class="muted">Plik jest generowany z aktualnej wersji w lokalnym repo ERP.</span>
+            </div>
+        </div>
+    </article>
 
     <article class="card" id="ksef" style="margin-bottom: 18px;">
         <div class="panel-header">
@@ -194,6 +217,7 @@
                         <th>URL</th>
                         <th>Klucz</th>
                         <th>WP REST</th>
+                        <th>Faktury</th>
                         <th>Etykiety</th>
                         <th>Ostatni sync</th>
                         <th>Akcje</th>
@@ -204,12 +228,14 @@
                         @php
                             $labelSettings = $integration->shippingLabelSettings();
                             $orderStatusSettings = $integration->orderStatusSettings();
+                            $invoiceDelivery = $integration->invoiceDeliverySettings();
                         @endphp
                         <tr>
                             <td>{{ $integration->salesChannel->code }}</td>
                             <td>{{ $integration->base_url }}</td>
                             <td>{{ $integration->maskedConsumerKey() }}</td>
                             <td>{{ $integration->hasWordpressMediaCredentials() ? 'Gotowe' : 'Brak danych' }}</td>
+                            <td>{{ $invoiceDelivery['mode'] === 'lemon_plugin' ? 'Wtyczka Lemon ERP' : 'Media Library' }}</td>
                             <td>{{ $integration->shippingLabelsEnabled() ? 'Gotowe' : 'Brak konfiguracji' }}</td>
                             <td>{{ $integration->last_successful_sync_at?->format('Y-m-d H:i') ?? '-' }}</td>
                             <td>
@@ -240,6 +266,12 @@
                                             <label class="check-row"><input type="checkbox" name="order_import_enabled" value="1" @checked($integration->order_import_enabled)> Import zamówień</label>
                                             <label class="check-row"><input type="checkbox" name="stock_export_enabled" value="1" @checked($integration->stock_export_enabled)> Eksport stanów</label>
                                             <label class="check-row"><input type="checkbox" name="invoice_upload_enabled" value="1" @checked($integration->invoice_upload_enabled)> Upload faktur</label>
+                                            <label>Tryb faktur
+                                                <select name="invoice_delivery_mode">
+                                                    <option value="lemon_plugin" @selected($invoiceDelivery['mode'] === 'lemon_plugin')>Wtyczka Lemon ERP bez Media Library</option>
+                                                    <option value="media_library" @selected($invoiceDelivery['mode'] === 'media_library')>WordPress Media Library</option>
+                                                </select>
+                                            </label>
                                             <button class="button secondary" type="submit">Zapisz integrację</button>
                                         </form>
                                     </details>
@@ -316,7 +348,7 @@
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="7">Brak integracji. Dodaj aktualny sklep WooCommerce, aby zacząć test API, import produktów i import zamówień.</td>
+                            <td colspan="8">Brak integracji. Dodaj aktualny sklep WooCommerce, aby zacząć test API, import produktów i import zamówień.</td>
                         </tr>
                     @endforelse
                 </tbody>

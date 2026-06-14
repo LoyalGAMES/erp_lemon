@@ -26,8 +26,7 @@ final class OrderInvoiceService
         private readonly InvoiceSettingsService $settings,
         private readonly InvoiceKsefAutomationService $ksefAutomation,
         private readonly InvoiceCurrencyConversionService $currencyConversion,
-    ) {
-    }
+    ) {}
 
     public function createForOrder(ExternalOrder $order): Invoice
     {
@@ -48,7 +47,7 @@ final class OrderInvoiceService
             $sellerStatus = $this->settings->sellerConfigurationStatus();
 
             if (! $sellerStatus['is_ready']) {
-                throw new RuntimeException('Uzupełnij dane sprzedawcy przed wystawieniem faktury. ' . implode(' ', $sellerStatus['errors']));
+                throw new RuntimeException('Uzupełnij dane sprzedawcy przed wystawieniem faktury. '.implode(' ', $sellerStatus['errors']));
             }
 
             $wz = $this->postedWz($order);
@@ -167,7 +166,7 @@ final class OrderInvoiceService
     }
 
     /**
-     * @param array<string, mixed> $raw
+     * @param  array<string, mixed>  $raw
      */
     private function numberFromRaw(array $raw, string $key, float $fallback): float
     {
@@ -186,7 +185,7 @@ final class OrderInvoiceService
         return [
             'name' => trim((string) ($billing['company'] ?? '')) !== ''
                 ? (string) $billing['company']
-                : trim((string) (($billing['first_name'] ?? '') . ' ' . ($billing['last_name'] ?? ''))),
+                : trim((string) (($billing['first_name'] ?? '').' '.($billing['last_name'] ?? ''))),
             'tax_id' => $this->buyerTaxId($order),
             'email' => (string) ($billing['email'] ?? ''),
             'phone' => (string) ($billing['phone'] ?? ''),
@@ -202,7 +201,7 @@ final class OrderInvoiceService
     {
         $billing = $order->billing_data ?? [];
 
-        foreach (['nip', 'vat_number', 'billing_nip', 'billing_vat_number'] as $key) {
+        foreach (['nip', 'vat_number', 'billing_nip', 'billing_vat_number', '_billing_nip', '_lemon_erp_billing_nip'] as $key) {
             if (! empty($billing[$key])) {
                 return (string) $billing[$key];
             }
@@ -210,7 +209,7 @@ final class OrderInvoiceService
 
         foreach (($order->raw_payload['meta_data'] ?? []) as $meta) {
             $key = (string) ($meta['key'] ?? '');
-            if (in_array($key, ['nip', '_billing_nip', 'billing_nip', 'vat_number', '_billing_vat_number'], true)) {
+            if (in_array($key, ['nip', '_billing_nip', 'billing_nip', 'vat_number', '_billing_vat_number', '_lemon_erp_billing_nip'], true)) {
                 return (string) ($meta['value'] ?? '');
             }
         }
@@ -228,8 +227,8 @@ final class OrderInvoiceService
         $directory = storage_path('app/invoices');
         File::ensureDirectoryExists($directory);
 
-        $relativePath = 'invoices/' . str_replace(['/', '\\'], '-', $invoice->number) . '.html';
-        $absolutePath = storage_path('app/' . $relativePath);
+        $relativePath = 'invoices/'.str_replace(['/', '\\'], '-', $invoice->number).'.html';
+        $absolutePath = storage_path('app/'.$relativePath);
         $html = $this->templates->renderHtml($invoice);
 
         File::put($absolutePath, $html);
@@ -260,7 +259,7 @@ final class OrderInvoiceService
 
         foreach ($invoice->files->whereIn('type', ['html', 'pdf']) as $file) {
             if ($file->disk === 'local') {
-                File::delete(storage_path('app/' . $file->path));
+                File::delete(storage_path('app/'.$file->path));
             }
 
             $file->delete();
@@ -294,8 +293,8 @@ final class OrderInvoiceService
 
     private function storePdfFile(Invoice $invoice): void
     {
-        $relativePath = 'invoices/' . str_replace(['/', '\\'], '-', $invoice->number) . '.pdf';
-        $absolutePath = storage_path('app/' . $relativePath);
+        $relativePath = 'invoices/'.str_replace(['/', '\\'], '-', $invoice->number).'.pdf';
+        $absolutePath = storage_path('app/'.$relativePath);
         [$pdf, $rendererMetadata] = $this->renderPdf($invoice);
         $this->assertUsablePdf($pdf, (string) ($rendererMetadata['renderer'] ?? 'unknown'));
 
@@ -338,7 +337,7 @@ final class OrderInvoiceService
             ];
         } catch (Throwable $exception) {
             throw new RuntimeException(
-                'Nie można wygenerować faktury PDF zgodnej z szablonem HTML: ' . mb_substr($exception->getMessage(), 0, 240),
+                'Nie można wygenerować faktury PDF zgodnej z szablonem HTML: '.mb_substr($exception->getMessage(), 0, 240),
                 previous: $exception,
             );
         }
@@ -349,7 +348,7 @@ final class OrderInvoiceService
         $tempDir = storage_path('app/dompdf');
         File::ensureDirectoryExists($tempDir);
 
-        $options = new Options();
+        $options = new Options;
         $options->set('defaultFont', 'DejaVu Sans');
         $options->set('isRemoteEnabled', false);
         $options->set('isHtml5ParserEnabled', true);
@@ -388,14 +387,14 @@ final class OrderInvoiceService
     }
 
     /**
-     * @param array<int, string> $rows
+     * @param  array<int, string>  $rows
      */
     private function renderBasicPdf(array $rows): string
     {
         $content = ['BT', '/F1 10 Tf', '50 790 Td', '14 TL'];
 
         foreach ($rows as $row) {
-            $content[] = '(' . $this->pdfEscape($this->pdfSafeText($row)) . ') Tj';
+            $content[] = '('.$this->pdfEscape($this->pdfSafeText($row)).') Tj';
             $content[] = 'T*';
         }
 
@@ -407,7 +406,7 @@ final class OrderInvoiceService
             2 => '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
             3 => '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
             4 => '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-            5 => "<< /Length " . strlen($stream) . " >>\nstream\n{$stream}\nendstream",
+            5 => '<< /Length '.strlen($stream)." >>\nstream\n{$stream}\nendstream",
         ];
 
         $pdf = "%PDF-1.4\n";
@@ -419,21 +418,21 @@ final class OrderInvoiceService
         }
 
         $xrefOffset = strlen($pdf);
-        $pdf .= "xref\n0 " . (count($objects) + 1) . "\n";
+        $pdf .= "xref\n0 ".(count($objects) + 1)."\n";
         $pdf .= "0000000000 65535 f \n";
 
         for ($i = 1; $i <= count($objects); $i++) {
-            $pdf .= str_pad((string) $offsets[$i], 10, '0', STR_PAD_LEFT) . " 00000 n \n";
+            $pdf .= str_pad((string) $offsets[$i], 10, '0', STR_PAD_LEFT)." 00000 n \n";
         }
 
-        $pdf .= "trailer\n<< /Size " . (count($objects) + 1) . " /Root 1 0 R >>\n";
+        $pdf .= "trailer\n<< /Size ".(count($objects) + 1)." /Root 1 0 R >>\n";
         $pdf .= "startxref\n{$xrefOffset}\n%%EOF\n";
 
         return $pdf;
     }
 
     /**
-     * @param array<int, string> $rows
+     * @param  array<int, string>  $rows
      */
     private function renderRasterPdf(array $rows, string $font): string
     {
@@ -506,7 +505,7 @@ final class OrderInvoiceService
         $line = '';
 
         foreach ($words as $word) {
-            $candidate = trim($line . ' ' . $word);
+            $candidate = trim($line.' '.$word);
 
             if ($candidate === '') {
                 continue;
@@ -514,6 +513,7 @@ final class OrderInvoiceService
 
             if ($this->textWidth($candidate, $font, $fontSize) <= $maxWidth) {
                 $line = $candidate;
+
                 continue;
             }
 
@@ -523,6 +523,7 @@ final class OrderInvoiceService
 
             if ($this->textWidth($word, $font, $fontSize) <= $maxWidth) {
                 $line = $word;
+
                 continue;
             }
 
@@ -559,11 +560,12 @@ final class OrderInvoiceService
         $length = mb_strlen($word);
 
         for ($i = 0; $i < $length; $i++) {
-            $candidate = $chunk . mb_substr($word, $i, 1);
+            $candidate = $chunk.mb_substr($word, $i, 1);
 
             if ($chunk !== '' && $this->textWidth($candidate, $font, $fontSize) > $maxWidth) {
                 $chunks[] = $chunk;
                 $chunk = mb_substr($word, $i, 1);
+
                 continue;
             }
 
@@ -584,7 +586,7 @@ final class OrderInvoiceService
         for ($y = 0; $y < $height; $y++) {
             for ($x = 0; $x < $width; $x++) {
                 $rgb = imagecolorat($image, $x, $y);
-                $raw .= chr(($rgb >> 16) & 0xFF) . chr(($rgb >> 8) & 0xFF) . chr($rgb & 0xFF);
+                $raw .= chr(($rgb >> 16) & 0xFF).chr(($rgb >> 8) & 0xFF).chr($rgb & 0xFF);
             }
         }
 
@@ -595,13 +597,13 @@ final class OrderInvoiceService
             1 => '<< /Type /Catalog /Pages 2 0 R >>',
             2 => '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
             3 => '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /XObject << /Im1 4 0 R >> >> /Contents 5 0 R >>',
-            4 => "<< /Type /XObject /Subtype /Image /Width {$width} /Height {$height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length " . strlen($imageStream) . " >>\nstream\n{$imageStream}\nendstream",
-            5 => "<< /Length " . strlen($contentStream) . " >>\nstream\n{$contentStream}\nendstream",
+            4 => "<< /Type /XObject /Subtype /Image /Width {$width} /Height {$height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /FlateDecode /Length ".strlen($imageStream)." >>\nstream\n{$imageStream}\nendstream",
+            5 => '<< /Length '.strlen($contentStream)." >>\nstream\n{$contentStream}\nendstream",
         ]);
     }
 
     /**
-     * @param array<int, string> $objects
+     * @param  array<int, string>  $objects
      */
     private function buildPdf(array $objects): string
     {
@@ -614,14 +616,14 @@ final class OrderInvoiceService
         }
 
         $xrefOffset = strlen($pdf);
-        $pdf .= "xref\n0 " . (count($objects) + 1) . "\n";
+        $pdf .= "xref\n0 ".(count($objects) + 1)."\n";
         $pdf .= "0000000000 65535 f \n";
 
         for ($i = 1; $i <= count($objects); $i++) {
-            $pdf .= str_pad((string) $offsets[$i], 10, '0', STR_PAD_LEFT) . " 00000 n \n";
+            $pdf .= str_pad((string) $offsets[$i], 10, '0', STR_PAD_LEFT)." 00000 n \n";
         }
 
-        $pdf .= "trailer\n<< /Size " . (count($objects) + 1) . " /Root 1 0 R >>\n";
+        $pdf .= "trailer\n<< /Size ".(count($objects) + 1)." /Root 1 0 R >>\n";
         $pdf .= "startxref\n{$xrefOffset}\n%%EOF\n";
 
         return $pdf;

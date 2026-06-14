@@ -28,12 +28,13 @@ class OrderInvoiceWorkflowTest extends TestCase
     public function test_posted_wz_order_can_issue_invoice_and_upload_it_to_woocommerce(): void
     {
         Http::fake([
-            'https://shop.test/wp-json/wp/v2/media' => Http::response([
-                'id' => 6001,
-                'source_url' => 'https://shop.test/wp-content/uploads/2026/05/fv-501.pdf',
+            'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice' => Http::response([
+                'order_id' => 501,
+                'invoice_number' => 'FV/ERP/'.now()->format('Y').'/00001',
+                'file_url' => 'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice/download?token=test-token',
+                'stored_file' => true,
+                'note_id' => 7001,
             ]),
-            'https://shop.test/wp-json/wc/v3/orders/501' => Http::response(['id' => 501]),
-            'https://shop.test/wp-json/wc/v3/orders/501/notes' => Http::response(['id' => 7001]),
         ]);
 
         [$order] = $this->createFulfilledOrder();
@@ -76,7 +77,7 @@ class OrderInvoiceWorkflowTest extends TestCase
 
         $this->assertSame($order->id, $invoice->external_order_id);
         $this->assertSame('issued', $invoice->status);
-        $this->assertSame('FV/ERP/' . now()->format('Y') . '/00001', $invoice->number);
+        $this->assertSame('FV/ERP/'.now()->format('Y').'/00001', $invoice->number);
         $this->assertSame(now()->addDays(7)->toDateString(), $invoice->payment_due_date->toDateString());
         $this->assertSame('Sempre Love sp. z o.o.', $invoice->seller_data['name']);
         $this->assertSame('5261040828', $invoice->seller_data['tax_id']);
@@ -84,8 +85,9 @@ class OrderInvoiceWorkflowTest extends TestCase
         $this->assertSame('23.00', (string) $invoice->vat_total);
         $this->assertSame('123.00', (string) $invoice->gross_total);
         $this->assertSame('success', $invoice->metadata['woocommerce_upload']['status']);
-        $this->assertSame(6001, $invoice->metadata['woocommerce_upload']['media_id']);
-        $this->assertSame('https://shop.test/wp-content/uploads/2026/05/fv-501.pdf', $invoice->metadata['woocommerce_upload']['file_url']);
+        $this->assertNull($invoice->metadata['woocommerce_upload']['media_id']);
+        $this->assertSame('lemon_plugin', $invoice->metadata['woocommerce_upload']['delivery_mode']);
+        $this->assertSame('https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice/download?token=test-token', $invoice->metadata['woocommerce_upload']['file_url']);
         $this->assertCount(1, $invoice->lines);
 
         $this->assertSame(2, InvoiceFile::query()->count());
@@ -93,29 +95,21 @@ class OrderInvoiceWorkflowTest extends TestCase
         $this->assertSame($invoice->id, $file->invoice_id);
         $this->assertSame('pdf', $file->type);
         $this->assertNotEmpty($file->sha256);
-        $this->assertSame(6001, $file->metadata['wordpress_media_id']);
-        $this->assertSame('https://shop.test/wp-content/uploads/2026/05/fv-501.pdf', $file->metadata['wordpress_source_url']);
+        $this->assertSame('lemon_plugin', $file->metadata['wordpress_invoice_delivery']);
+        $this->assertSame('https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice/download?token=test-token', $file->metadata['wordpress_source_url']);
 
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
-            && $request->url() === 'https://shop.test/wp-json/wp/v2/media'
-            && str_starts_with($request->body(), '%PDF-'));
+            && $request->url() === 'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice'
+            && $request['invoice_number'] === $invoice->number
+            && $request['invoice_type'] === 'vat'
+            && $request['file_sha256'] === $file->sha256
+            && str_starts_with((string) base64_decode((string) $request['file_base64'], true), '%PDF-'));
 
-        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/orders/501'
-            && collect($request['meta_data'])->contains(fn (array $meta): bool => $meta['key'] === '_sempre_erp_invoice_number'
-                && $meta['value'] === $invoice->number)
-            && collect($request['meta_data'])->contains(fn (array $meta): bool => $meta['key'] === '_sempre_erp_invoice_file_url'
-                && $meta['value'] === 'https://shop.test/wp-content/uploads/2026/05/fv-501.pdf'));
-
-        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/orders/501/notes'
-            && str_contains((string) $request['note'], $invoice->number)
-            && str_contains((string) $request['note'], 'https://shop.test/wp-content/uploads/2026/05/fv-501.pdf')
-            && $request['customer_note'] === false);
+        Http::assertNotSent(fn ($request): bool => $request->url() === 'https://shop.test/wp-json/wp/v2/media');
 
         $this->get(route('modules.show', 'orders'))
             ->assertOk()
-            ->assertSee('Faktura ' . $invoice->number)
+            ->assertSee('Faktura '.$invoice->number)
             ->assertDontSee('Wystaw fakturę')
             ->assertDontSee('Utwórz WZ');
 
@@ -155,12 +149,12 @@ class OrderInvoiceWorkflowTest extends TestCase
         ]);
 
         Http::fake([
-            'https://shop.test/wp-json/wp/v2/media' => Http::response([
-                'id' => 6101,
-                'source_url' => 'https://shop.test/wp-content/uploads/2026/05/fv-ksef.pdf',
+            'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice' => Http::response([
+                'order_id' => 501,
+                'file_url' => 'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice/download?token=ksef-token',
+                'stored_file' => true,
+                'note_id' => 7101,
             ]),
-            'https://shop.test/wp-json/wc/v3/orders/501' => Http::response(['id' => 501]),
-            'https://shop.test/wp-json/wc/v3/orders/501/notes' => Http::response(['id' => 7101]),
         ]);
 
         app(DocumentAutomationSettingsService::class)->updateRules([
@@ -198,7 +192,7 @@ class OrderInvoiceWorkflowTest extends TestCase
 
         $this->assertSame($invoice->id, $submission->invoice_id);
         $this->assertSame('missing_configuration', $submission->status);
-        $this->assertStringContainsString('<P_2>' . $invoice->number . '</P_2>', (string) $submission->xml_payload);
+        $this->assertStringContainsString('<P_2>'.$invoice->number.'</P_2>', (string) $submission->xml_payload);
         $this->assertStringContainsString('Brak tokena dostępu KSeF', (string) $submission->last_error);
 
         $this->post(route('orders.invoice.create', $order))
@@ -219,12 +213,12 @@ class OrderInvoiceWorkflowTest extends TestCase
         ]);
 
         Http::fake([
-            'https://shop.test/wp-json/wp/v2/media' => Http::response([
-                'id' => 6102,
-                'source_url' => 'https://shop.test/wp-content/uploads/2026/05/fv-b2c.pdf',
+            'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice' => Http::response([
+                'order_id' => 501,
+                'file_url' => 'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice/download?token=b2c-token',
+                'stored_file' => true,
+                'note_id' => 7102,
             ]),
-            'https://shop.test/wp-json/wc/v3/orders/501' => Http::response(['id' => 501]),
-            'https://shop.test/wp-json/wc/v3/orders/501/notes' => Http::response(['id' => 7102]),
         ]);
 
         app(DocumentAutomationSettingsService::class)->updateRules([
@@ -396,7 +390,7 @@ class OrderInvoiceWorkflowTest extends TestCase
         ]);
 
         $document = WarehouseDocument::query()->create([
-            'number' => 'WZ/' . now()->format('Y') . '/000001',
+            'number' => 'WZ/'.now()->format('Y').'/000001',
             'type' => 'WZ',
             'status' => 'posted',
             'source_warehouse_id' => $warehouse->id,

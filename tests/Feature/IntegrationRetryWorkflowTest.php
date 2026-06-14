@@ -9,11 +9,13 @@ use App\Jobs\ImportWooCommerceProductsJob;
 use App\Models\IntegrationSyncLog;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
+use App\Services\Wordpress\LemonErpWooCommercePluginPackageService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
+use ZipArchive;
 
 class IntegrationRetryWorkflowTest extends TestCase
 {
@@ -65,6 +67,25 @@ class IntegrationRetryWorkflowTest extends TestCase
             'auditable_type' => IntegrationSyncLog::class,
             'auditable_id' => $retryLog->id,
         ]);
+    }
+
+    public function test_operator_can_download_lemon_woocommerce_plugin_zip(): void
+    {
+        $response = $this->get(route('integrations.woocommerce-plugin.download'));
+
+        $response->assertOk();
+        $this->assertStringContainsString(
+            'lemon-erp-woocommerce-',
+            (string) $response->headers->get('content-disposition'),
+        );
+
+        $package = app(LemonErpWooCommercePluginPackageService::class)->build();
+        $zip = new ZipArchive;
+
+        $this->assertTrue($zip->open($package['path']) === true);
+        $this->assertNotFalse($zip->locateName('lemon-erp-woocommerce/lemon-erp-woocommerce.php'));
+        $this->assertNotFalse($zip->locateName('lemon-erp-woocommerce/README.md'));
+        $zip->close();
     }
 
     public function test_failed_order_import_can_be_retried_and_non_failed_log_is_rejected(): void

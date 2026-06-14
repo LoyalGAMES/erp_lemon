@@ -1,9 +1,9 @@
 <?php
 
-use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\AuditLogController;
-use App\Http\Controllers\ExternalOrderFulfillmentController;
+use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExternalOrderController;
+use App\Http\Controllers\ExternalOrderFulfillmentController;
 use App\Http\Controllers\ExternalOrderInvoiceController;
 use App\Http\Controllers\IntegrationController;
 use App\Http\Controllers\InvoiceController;
@@ -18,15 +18,15 @@ use App\Http\Controllers\SettingsController;
 use App\Http\Controllers\StockSyncController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\WarehouseController;
-use App\Http\Controllers\WarehouseDocumentCreateController;
 use App\Http\Controllers\WarehouseDocumentController;
+use App\Http\Controllers\WarehouseDocumentCreateController;
 use App\Http\Middleware\EnsureErpRole;
 use App\Http\Middleware\RequireErpBasicAuth;
 use Illuminate\Support\Facades\Route;
 
 Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
     Route::get('/', DashboardController::class)->name('dashboard');
-    Route::middleware(EnsureErpRole::class . ':settings')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':settings')->group(function (): void {
         Route::get('/settings', SettingsController::class)->name('settings.index');
         Route::get('/settings/documents', [SettingsController::class, 'documents'])->name('settings.documents');
         Route::get('/settings/returns', [SettingsController::class, 'returns'])->name('settings.returns');
@@ -35,7 +35,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::put('/settings/document-automation', [SettingsController::class, 'updateDocumentAutomation'])->name('settings.document_automation.update');
         Route::put('/settings/returns', [SettingsController::class, 'updateReturns'])->name('settings.returns.update');
     });
-    Route::middleware(EnsureErpRole::class . ':users')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':users')->group(function (): void {
         Route::get('/settings/users', [UserController::class, 'index'])->name('settings.users');
         Route::post('/settings/users', [UserController::class, 'store'])->name('settings.users.store');
         Route::put('/settings/users/{user}', [UserController::class, 'update'])->name('settings.users.update');
@@ -48,11 +48,11 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
     Route::redirect('/modul/ledger', '/ledger');
 
     Route::get('/modul/{module}', ModuleController::class)
-        ->middleware(EnsureErpRole::class . ':module')
+        ->middleware(EnsureErpRole::class.':module')
         ->whereIn('module', ['orders', 'returns', 'invoices', 'ksef', 'sync', 'ledger'])
         ->name('modules.show');
 
-    Route::middleware(EnsureErpRole::class . ':products')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':products')->group(function (): void {
         Route::get('/products', [ProductController::class, 'index'])->name('products.index');
         Route::get('/products/image-thumbnail', ProductImageThumbnailController::class)->name('products.image-thumbnail');
         Route::post('/products', [ProductController::class, 'store'])->name('products.store');
@@ -68,7 +68,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::delete('/products/{product}', [ProductController::class, 'destroy'])->name('products.destroy');
     });
 
-    Route::middleware(EnsureErpRole::class . ':warehouses')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':warehouses')->group(function (): void {
         Route::get('/warehouses', [WarehouseController::class, 'index'])->name('warehouses.index');
         Route::post('/warehouses', [WarehouseController::class, 'store'])->name('warehouses.store');
         Route::get('/warehouses/{warehouse}/edit', [WarehouseController::class, 'edit'])->name('warehouses.edit');
@@ -77,7 +77,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::delete('/warehouses/{warehouse}', [WarehouseController::class, 'destroy'])->name('warehouses.destroy');
     });
 
-    Route::middleware(EnsureErpRole::class . ':returns')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':returns')->group(function (): void {
         Route::get('/returns', [ReturnController::class, 'index'])->name('returns.index');
         Route::get('/returns/orders/lookup', [ReturnController::class, 'lookupOrder'])->name('returns.orders.lookup');
         Route::post('/returns', [ReturnController::class, 'store'])->name('returns.store');
@@ -88,7 +88,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::delete('/returns/{returnCase}', [ReturnController::class, 'destroy'])->name('returns.destroy');
     });
 
-    Route::middleware(EnsureErpRole::class . ':packing')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':packing')->group(function (): void {
         Route::get('/packing', [PackingController::class, 'index'])->name('packing.index');
         Route::post('/packing/mode', [PackingController::class, 'mode'])->name('packing.mode');
         Route::post('/packing/scan', [PackingController::class, 'scan'])->name('packing.scan');
@@ -105,15 +105,15 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
     });
 
     Route::get('/audit', AuditLogController::class)
-        ->middleware(EnsureErpRole::class . ':audit')
+        ->middleware(EnsureErpRole::class.':audit')
         ->name('audit.index');
 
-    Route::middleware(EnsureErpRole::class . ':ledger')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':ledger')->group(function (): void {
         Route::get('/ledger', [LedgerController::class, 'index'])->name('ledger.index');
         Route::get('/ledger/export', [LedgerController::class, 'export'])->name('ledger.export');
     });
 
-    Route::middleware(EnsureErpRole::class . ':invoices')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':invoices')->group(function (): void {
         Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
         Route::put('/invoices/template', [InvoiceController::class, 'updateTemplate'])->name('invoices.template.update');
         Route::put('/invoices/seller', [InvoiceController::class, 'updateSeller'])->name('invoices.seller.update');
@@ -129,7 +129,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::post('/invoices/{invoice}/upload-woocommerce', [InvoiceController::class, 'uploadToWooCommerce'])->name('invoices.woocommerce.upload');
     });
 
-    Route::middleware(EnsureErpRole::class . ':documents')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':documents')->group(function (): void {
         Route::get('/documents', [WarehouseDocumentCreateController::class, 'index'])->name('documents.index');
         Route::get('/documents/export', [WarehouseDocumentCreateController::class, 'export'])->name('documents.export');
         Route::get('/documents/create', [WarehouseDocumentCreateController::class, 'create'])->name('documents.create');
@@ -140,8 +140,9 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::get('/documents/{document}/print', [WarehouseDocumentController::class, 'printView'])->name('documents.print');
     });
 
-    Route::middleware(EnsureErpRole::class . ':integrations')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':integrations')->group(function (): void {
         Route::get('/integrations', [IntegrationController::class, 'index'])->name('integrations.index');
+        Route::get('/integrations/woocommerce-plugin/download', [IntegrationController::class, 'downloadWooCommercePlugin'])->name('integrations.woocommerce-plugin.download');
         Route::post('/integrations', [IntegrationController::class, 'store'])->name('integrations.store');
         Route::put('/integrations/{integration}', [IntegrationController::class, 'update'])->name('integrations.update');
         Route::post('/integrations/gs1/test', [IntegrationController::class, 'testGs1Connection'])->name('integrations.gs1.test');
@@ -157,7 +158,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::delete('/integrations/{integration}', [IntegrationController::class, 'destroy'])->name('integrations.destroy');
     });
 
-    Route::middleware(EnsureErpRole::class . ':orders')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':orders')->group(function (): void {
         Route::get('/orders/{order}', [ExternalOrderController::class, 'show'])->name('orders.show');
         Route::post('/orders/{order}/split', [ExternalOrderController::class, 'split'])->name('orders.split');
         Route::post('/orders/{order}/wz', [ExternalOrderFulfillmentController::class, 'createWz'])
@@ -167,7 +168,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
             ->name('orders.invoice.create');
     });
 
-    Route::middleware(EnsureErpRole::class . ':ksef')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':ksef')->group(function (): void {
         Route::get('/ksef', [KsefController::class, 'index'])->name('ksef.index');
         Route::put('/ksef/invoices/{invoice}/policy', [KsefController::class, 'updatePolicy'])->name('ksef.invoices.policy.update');
         Route::post('/ksef/invoices/{invoice}/submit', [KsefController::class, 'submit'])->name('ksef.invoices.submit');
@@ -176,17 +177,17 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::get('/ksef/submissions/{submission}/xml', [KsefController::class, 'xml'])->name('ksef.submissions.xml');
     });
     Route::put('/ksef/configuration', [IntegrationController::class, 'updateKsefConfiguration'])
-        ->middleware(EnsureErpRole::class . ':integrations')
+        ->middleware(EnsureErpRole::class.':integrations')
         ->name('ksef.configuration.update');
 
-    Route::middleware(EnsureErpRole::class . ':sync')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':sync')->group(function (): void {
         Route::post('/sync/{item}/retry', [StockSyncController::class, 'retry'])
             ->name('sync.retry');
         Route::post('/sync/rebuild', [StockSyncController::class, 'rebuild'])
             ->name('sync.rebuild');
     });
 
-    Route::middleware(EnsureErpRole::class . ':documents')->group(function (): void {
+    Route::middleware(EnsureErpRole::class.':documents')->group(function (): void {
         Route::post('/documents/{document}/post', [WarehouseDocumentController::class, 'post'])
             ->name('documents.post');
         Route::post('/documents/{document}/cancel', [WarehouseDocumentController::class, 'cancel'])

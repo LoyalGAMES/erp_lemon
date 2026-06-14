@@ -47,7 +47,7 @@ class WordpressIntegration extends Model
     {
         $key = Crypt::decryptString($this->consumer_key_encrypted);
 
-        return substr($key, 0, 6) . str_repeat('*', max(4, strlen($key) - 10)) . substr($key, -4);
+        return substr($key, 0, 6).str_repeat('*', max(4, strlen($key) - 10)).substr($key, -4);
     }
 
     public function hasWordpressMediaCredentials(): bool
@@ -58,6 +58,18 @@ class WordpressIntegration extends Model
     public function wordpressApiPassword(): string
     {
         return Crypt::decryptString((string) $this->wp_api_password_encrypted);
+    }
+
+    /**
+     * @return array{mode:string}
+     */
+    public function invoiceDeliverySettings(): array
+    {
+        $mode = (string) data_get($this->settings, 'invoice_delivery.mode', 'lemon_plugin');
+
+        return [
+            'mode' => in_array($mode, ['lemon_plugin', 'media_library'], true) ? $mode : 'lemon_plugin',
+        ];
     }
 
     /**

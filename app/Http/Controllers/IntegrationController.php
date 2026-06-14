@@ -14,18 +14,25 @@ use App\Services\Integrations\WooCommerceImportQueueService;
 use App\Services\Ksef\KsefClient;
 use App\Services\Ksef\KsefSettingsService;
 use App\Services\WooCommerce\WooCommerceClient;
+use App\Services\Wordpress\LemonErpWooCommercePluginPackageService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
+use RuntimeException;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Throwable;
 
 class IntegrationController extends Controller
 {
-    public function index(KsefClient $ksefClient, KsefSettingsService $ksefSettings, Gs1SettingsService $gs1Settings): View
-    {
+    public function index(
+        KsefClient $ksefClient,
+        KsefSettingsService $ksefSettings,
+        Gs1SettingsService $gs1Settings,
+        LemonErpWooCommercePluginPackageService $woocommercePlugin,
+    ): View {
         return view('integrations.index', [
             'integrations' => WordpressIntegration::query()
                 ->with('salesChannel')
@@ -39,6 +46,7 @@ class IntegrationController extends Controller
             'ksefConfiguration' => $ksefClient->configurationStatus(),
             'ksefSettings' => $ksefSettings->publicConfiguration(),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
+            'woocommercePluginVersion' => $woocommercePlugin->version(),
             'module' => 'integrations',
         ]);
     }
@@ -61,6 +69,7 @@ class IntegrationController extends Controller
             'order_import_enabled' => ['nullable', 'boolean'],
             'stock_export_enabled' => ['nullable', 'boolean'],
             'invoice_upload_enabled' => ['nullable', 'boolean'],
+            'invoice_delivery_mode' => ['nullable', Rule::in(['lemon_plugin', 'media_library'])],
         ]);
 
         $channel = SalesChannel::query()->firstOrCreate(
@@ -87,6 +96,9 @@ class IntegrationController extends Controller
             'invoice_upload_enabled' => $request->boolean('invoice_upload_enabled'),
             'settings' => [
                 'created_from' => 'erp_panel',
+                'invoice_delivery' => [
+                    'mode' => $validated['invoice_delivery_mode'] ?? 'lemon_plugin',
+                ],
                 'order_statuses' => [
                     'ready_to_ship' => 'ready-to-ship',
                     'shipped' => 'completed',
@@ -105,7 +117,22 @@ class IntegrationController extends Controller
             'invoice_upload_enabled' => $integration->invoice_upload_enabled,
         ]);
 
-        return back()->with('status', 'Integracja WooCommerce została dodana. Użyj testu połączenia przed importem.');
+        return redirect()
+            ->to(route('integrations.index').'#woocommerce-plugin')
+            ->with('status', 'Integracja WooCommerce została dodana. Pobierz wtyczkę Lemon ERP i wgraj ją w panelu WordPress, a potem użyj testu połączenia.');
+    }
+
+    public function downloadWooCommercePlugin(LemonErpWooCommercePluginPackageService $packages): BinaryFileResponse
+    {
+        try {
+            $package = $packages->build();
+        } catch (RuntimeException $exception) {
+            abort(500, $exception->getMessage());
+        }
+
+        return response()->download($package['path'], $package['filename'], [
+            'Content-Type' => 'application/zip',
+        ]);
     }
 
     public function update(
@@ -133,6 +160,7 @@ class IntegrationController extends Controller
             'order_import_enabled' => ['nullable', 'boolean'],
             'stock_export_enabled' => ['nullable', 'boolean'],
             'invoice_upload_enabled' => ['nullable', 'boolean'],
+            'invoice_delivery_mode' => ['nullable', Rule::in(['lemon_plugin', 'media_library'])],
         ]);
 
         $channelCode = $validated['channel_code'];
@@ -144,6 +172,7 @@ class IntegrationController extends Controller
             'order_import_enabled' => $integration->order_import_enabled,
             'stock_export_enabled' => $integration->stock_export_enabled,
             'invoice_upload_enabled' => $integration->invoice_upload_enabled,
+            'invoice_delivery' => $integration->invoiceDeliverySettings(),
             'consumer_key' => $integration->maskedConsumerKey(),
         ];
 
@@ -159,6 +188,11 @@ class IntegrationController extends Controller
             'stock_export_enabled' => $request->boolean('stock_export_enabled'),
             'invoice_upload_enabled' => $request->boolean('invoice_upload_enabled'),
         ];
+        $settings = $integration->settings ?? [];
+        $settings['invoice_delivery'] = [
+            'mode' => $validated['invoice_delivery_mode'] ?? $integration->invoiceDeliverySettings()['mode'],
+        ];
+        $updates['settings'] = $settings;
 
         if (filled($validated['consumer_key'] ?? null)) {
             $updates['consumer_key_encrypted'] = Crypt::encryptString($validated['consumer_key']);
@@ -183,6 +217,7 @@ class IntegrationController extends Controller
                 'order_import_enabled' => $integration->order_import_enabled,
                 'stock_export_enabled' => $integration->stock_export_enabled,
                 'invoice_upload_enabled' => $integration->invoice_upload_enabled,
+                'invoice_delivery' => $integration->invoiceDeliverySettings(),
                 'consumer_key' => filled($validated['consumer_key'] ?? null)
                     ? $integration->maskedConsumerKey()
                     : 'unchanged',
@@ -205,15 +240,14 @@ class IntegrationController extends Controller
         } catch (Throwable $exception) {
             $this->log($integration, 'in', 'test_connection', 'failed', error: $exception->getMessage());
 
-            return back()->with('error', 'Test połączenia nie powiódł się: ' . $exception->getMessage());
+            return back()->with('error', 'Test połączenia nie powiódł się: '.$exception->getMessage());
         }
     }
 
     public function importProducts(
         WordpressIntegration $integration,
         WooCommerceImportQueueService $imports,
-    ): RedirectResponse
-    {
+    ): RedirectResponse {
         $log = $imports->queueImport($integration, 'import_products');
 
         if (! $log->wasRecentlyCreated) {
@@ -226,8 +260,7 @@ class IntegrationController extends Controller
     public function importOrders(
         WordpressIntegration $integration,
         WooCommerceImportQueueService $imports,
-    ): RedirectResponse
-    {
+    ): RedirectResponse {
         $log = $imports->queueImport($integration, 'import_orders');
 
         if (! $log->wasRecentlyCreated) {

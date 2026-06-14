@@ -18,8 +18,7 @@ final class InvoiceWooCommerceUploadService
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly InvoiceValidationService $validation,
-    ) {
-    }
+    ) {}
 
     /**
      * @return array<string, mixed>
@@ -49,82 +48,105 @@ final class InvoiceWooCommerceUploadService
 
         $file = $this->invoiceFile($invoice);
         $ksefData = $this->ksefData($invoice);
-        $existingMedia = $this->existingUploadedMedia($file);
-        $mediaId = $existingMedia['media_id'];
-        $fileUrl = $existingMedia['file_url'];
-        $mediaReused = $mediaId !== null && $fileUrl !== '';
+        $delivery = $integration->invoiceDeliverySettings();
+        $mediaId = null;
+        $fileUrl = '';
+        $mediaReused = false;
 
         $invoiceData = [
             'invoice_number' => $invoice->number,
             'invoice_id' => $invoice->id,
             'invoice_type' => $invoice->type,
+            'invoice_status' => $invoice->status,
             'order_id' => $order->external_id,
             'gross_total' => (string) $invoice->gross_total,
             'currency' => $invoice->currency,
+            'issued_at' => $invoice->issued_at?->toISOString(),
+            'file_type' => $file->type,
+            'file_sha256' => $file->sha256,
+            'ksef_number' => $ksefData['number'],
+            'ksef_reference_number' => $ksefData['reference_number'],
+            'ksef_accepted_at' => $ksefData['accepted_at'],
         ];
 
         try {
-            if ($mediaReused) {
-                $mediaResponse = [
-                    'id' => $mediaId,
-                    'source_url' => $fileUrl,
-                    'reused' => true,
-                ];
-            } else {
-                $mediaResponse = $this->client->uploadMedia(
+            $absolutePath = storage_path('app/'.$file->path);
+
+            if ($delivery['mode'] === 'lemon_plugin') {
+                $mediaResponse = $this->client->upsertOrderInvoiceViaLemonPlugin(
                     $integration,
-                    storage_path('app/' . $file->path),
-                    basename($file->path),
-                    $file->mime_type ?? 'application/pdf',
+                    (string) $order->external_id,
+                    $invoiceData,
+                    $absolutePath,
                 );
-
-                $fileUrl = (string) ($mediaResponse['source_url'] ?? '');
-                $mediaId = $mediaResponse['id'] ?? null;
-
+                $fileUrl = (string) ($mediaResponse['file_url'] ?? '');
+                $noteResponse = ['id' => $mediaResponse['note_id'] ?? null];
+                $metaResponse = $mediaResponse;
                 $file->update([
                     'metadata' => array_merge($file->metadata ?? [], [
-                        'wordpress_media_id' => $mediaId,
+                        'wordpress_invoice_delivery' => 'lemon_plugin',
                         'wordpress_source_url' => $fileUrl,
                         'wordpress_file_sha256' => $file->sha256,
                         'wordpress_uploaded_at' => now()->toISOString(),
                     ]),
                 ]);
+            } else {
+                $existingMedia = $this->existingUploadedMedia($file);
+                $mediaId = $existingMedia['media_id'];
+                $fileUrl = $existingMedia['file_url'];
+                $mediaReused = $mediaId !== null && $fileUrl !== '';
+
+                if ($mediaReused) {
+                    $mediaResponse = [
+                        'id' => $mediaId,
+                        'source_url' => $fileUrl,
+                        'reused' => true,
+                    ];
+                } else {
+                    $mediaResponse = $this->client->uploadMedia(
+                        $integration,
+                        $absolutePath,
+                        basename($file->path),
+                        $file->mime_type ?? 'application/pdf',
+                    );
+
+                    $fileUrl = (string) ($mediaResponse['source_url'] ?? '');
+                    $mediaId = $mediaResponse['id'] ?? null;
+
+                    $file->update([
+                        'metadata' => array_merge($file->metadata ?? [], [
+                            'wordpress_invoice_delivery' => 'media_library',
+                            'wordpress_media_id' => $mediaId,
+                            'wordpress_source_url' => $fileUrl,
+                            'wordpress_file_sha256' => $file->sha256,
+                            'wordpress_uploaded_at' => now()->toISOString(),
+                        ]),
+                    ]);
+                }
+
+                $metaResponse = $this->client->updateOrderInvoiceMeta($integration, (string) $order->external_id, array_merge($invoiceData, [
+                    'file_url' => $fileUrl,
+                    'media_id' => $mediaId,
+                ]));
+
+                $ksefNotePart = $ksefData['number'] !== ''
+                    ? ' Nr KSeF: '.$ksefData['number'].'.'
+                    : '';
+
+                $noteResponse = $this->client->createOrderNote(
+                    $integration,
+                    (string) $order->external_id,
+                    sprintf(
+                        'Sempre ERP: %s %s na kwotę %s %s.%s Plik faktury: %s',
+                        $invoice->type === 'correction' ? 'wystawiono fakturę korygującą' : 'wystawiono fakturę',
+                        $invoice->number,
+                        number_format((float) $invoice->gross_total, 2, ',', ' '),
+                        $invoice->currency,
+                        $ksefNotePart,
+                        $fileUrl !== '' ? $fileUrl : 'zapisany w ERP',
+                    ),
+                );
             }
-
-            $metaResponse = $this->client->updateOrderInvoiceMeta($integration, (string) $order->external_id, [
-                'invoice_number' => $invoice->number,
-                'invoice_id' => $invoice->id,
-                'invoice_status' => $invoice->status,
-                'invoice_type' => $invoice->type,
-                'gross_total' => (string) $invoice->gross_total,
-                'currency' => $invoice->currency,
-                'issued_at' => $invoice->issued_at?->toISOString(),
-                'file_type' => $file->type,
-                'file_sha256' => $file->sha256,
-                'file_url' => $fileUrl,
-                'media_id' => $mediaId,
-                'ksef_number' => $ksefData['number'],
-                'ksef_reference_number' => $ksefData['reference_number'],
-                'ksef_accepted_at' => $ksefData['accepted_at'],
-            ]);
-
-            $ksefNotePart = $ksefData['number'] !== ''
-                ? ' Nr KSeF: ' . $ksefData['number'] . '.'
-                : '';
-
-            $noteResponse = $this->client->createOrderNote(
-                $integration,
-                (string) $order->external_id,
-                sprintf(
-                    'Sempre ERP: %s %s na kwotę %s %s.%s Plik faktury: %s',
-                    $invoice->type === 'correction' ? 'wystawiono fakturę korygującą' : 'wystawiono fakturę',
-                    $invoice->number,
-                    number_format((float) $invoice->gross_total, 2, ',', ' '),
-                    $invoice->currency,
-                    $ksefNotePart,
-                    $fileUrl !== '' ? $fileUrl : 'zapisany w ERP',
-                ),
-            );
         } catch (Throwable $exception) {
             $failureMessage = $this->failureMessage($exception);
 
@@ -149,6 +171,7 @@ final class InvoiceWooCommerceUploadService
                 'integration_id' => $integration->id,
                 'order_id' => $order->external_id,
                 'invoice_type' => $invoice->type,
+                'delivery_mode' => $delivery['mode'],
                 'note_id' => $noteResponse['id'] ?? null,
                 'media_id' => $mediaId,
                 'file_url' => $fileUrl,
@@ -177,6 +200,7 @@ final class InvoiceWooCommerceUploadService
                 'file_url' => $fileUrl,
                 'file_sha256' => $file->sha256,
                 'media_reused' => $mediaReused,
+                'delivery_mode' => $delivery['mode'],
                 'ksef_number' => $ksefData['number'],
                 'ksef_reference_number' => $ksefData['reference_number'],
             ],
@@ -248,7 +272,7 @@ final class InvoiceWooCommerceUploadService
     }
 
     /**
-     * @param array<string, mixed> $context
+     * @param  array<string, mixed>  $context
      */
     private function recordFailure(
         Invoice $invoice,
@@ -303,7 +327,7 @@ final class InvoiceWooCommerceUploadService
     private function failureMessage(Throwable $exception): string
     {
         if ($exception instanceof RequestException && $exception->response !== null) {
-            return trim('HTTP ' . $exception->response->status() . ': ' . $exception->response->body());
+            return trim('HTTP '.$exception->response->status().': '.$exception->response->body());
         }
 
         return $exception->getMessage();
