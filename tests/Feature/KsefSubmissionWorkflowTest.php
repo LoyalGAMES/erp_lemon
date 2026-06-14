@@ -205,7 +205,20 @@ class KsefSubmissionWorkflowTest extends TestCase
         $this->assertSame('20260601-SEMPRE-KSEF-0001', $invoice->ksef_number);
         $this->assertStringStartsWith('https://qr-test.ksef.mf.gov.pl/invoice/5261040828/01-06-2026/', data_get($invoice->metadata, 'ksef.qr_url'));
         $this->assertNotEmpty(data_get($invoice->metadata, 'ksef.invoice_hash_sha256_base64url'));
-        $this->assertStringContainsString('Sprawdź fakturę w KSeF', app(InvoiceTemplateService::class)->renderHtml($invoice));
+        $html = app(InvoiceTemplateService::class)->renderHtml($invoice);
+        $this->assertStringContainsString('Sprawdź fakturę w KSeF', $html);
+        $ksefNumberPosition = strpos($html, 'Nr KSeF: 20260601-SEMPRE-KSEF-0001');
+        $paymentPosition = strpos($html, 'Forma płatności');
+        $qrPosition = strpos($html, 'Sprawdź fakturę w KSeF');
+        $footerPosition = strpos($html, 'Dokument wystawiony elektronicznie w Sempre ERP.');
+
+        $this->assertIsInt($ksefNumberPosition);
+        $this->assertIsInt($paymentPosition);
+        $this->assertIsInt($qrPosition);
+        $this->assertIsInt($footerPosition);
+        $this->assertLessThan($paymentPosition, $ksefNumberPosition);
+        $this->assertLessThan($qrPosition, $paymentPosition);
+        $this->assertLessThan($footerPosition, $qrPosition);
 
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://ksef-gateway.test/submit'

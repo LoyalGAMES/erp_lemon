@@ -125,8 +125,8 @@
         .document-number { color: #3f454b; font-size: 11.2px; font-weight: 700; }
         .document-note { margin-top: 5px; color: #5f666d; font-size: 8.2px; }
         .ksef-qr {
-            width: 96px;
-            margin-top: 8px;
+            width: 116px;
+            margin: 10px 0 0 auto;
             color: #30363d;
             font-size: 6.8px;
             line-height: 1.2;
@@ -337,13 +337,6 @@
                     <div class="document-number">{{ $invoice->number }}</div>
                     @if ($invoice->ksef_number)
                         <div class="document-note">Nr KSeF: {{ $invoice->ksef_number }}</div>
-                    @endif
-                    @if (is_array($ksefQr))
-                        <div class="ksef-qr">
-                            <span class="ksef-qr-label">Sprawdź fakturę w KSeF</span>
-                            <img src="{{ $ksefQr['image_data_uri'] }}" alt="Kod QR KSeF">
-                            <span class="ksef-qr-number">{{ $ksefQr['label'] }}</span>
-                        </div>
                     @endif
                 </td>
                 <td>
@@ -619,6 +612,14 @@
                 </td>
             </tr>
         </table>
+
+        @if (is_array($ksefQr))
+            <div class="ksef-qr">
+                <span class="ksef-qr-label">Sprawdź fakturę w KSeF</span>
+                <img src="{{ $ksefQr['image_data_uri'] }}" alt="Kod QR KSeF">
+                <span class="ksef-qr-number">{{ $ksefQr['label'] }}</span>
+            </div>
+        @endif
 
         <div class="footer">
             <table class="footer-table">
