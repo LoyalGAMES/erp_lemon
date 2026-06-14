@@ -139,6 +139,47 @@ class OrderInvoiceWorkflowTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_invoice_remains_created_when_lemon_plugin_is_missing_in_woocommerce(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice' => Http::response([
+                'code' => 'rest_no_route',
+            ], 404),
+        ]);
+
+        [$order] = $this->createFulfilledOrder();
+        $order->update([
+            'billing_data' => array_merge($order->billing_data ?? [], [
+                'company' => 'Firma testowa sp. z o.o.',
+                'nip' => '5261040828',
+            ]),
+        ]);
+
+        app(InvoiceSettingsService::class)->updateSellerData([
+            'name' => 'Sempre Love sp. z o.o.',
+            'tax_id' => '5261040828',
+            'address_1' => 'Testowa 1',
+            'postcode' => '00-001',
+            'city' => 'Warszawa',
+            'country' => 'PL',
+            'email' => 'biuro@example.test',
+            'phone' => '+48123123123',
+            'bank_account' => 'PL00111122223333444455556666',
+        ]);
+
+        $this->post(route('orders.invoice.create', $order))
+            ->assertRedirect()
+            ->assertSessionHas('error', fn (string $message): bool => str_contains($message, 'Wystawiono fakturę')
+                && str_contains($message, 'nie jest zainstalowana albo aktywna'));
+
+        $invoice = Invoice::query()->firstOrFail();
+
+        $this->assertSame('issued', $invoice->status);
+        $this->assertSame('failed', data_get($invoice->metadata, 'woocommerce_upload.status'));
+        $this->assertTrue(data_get($invoice->metadata, 'woocommerce_upload.requires_resend'));
+        $this->assertStringContainsString('nie jest zainstalowana albo aktywna', (string) data_get($invoice->metadata, 'woocommerce_upload.error'));
+    }
+
     public function test_invoice_issue_can_automatically_queue_ksef_submission(): void
     {
         config([

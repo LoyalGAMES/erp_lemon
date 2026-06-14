@@ -394,18 +394,35 @@ final class WooCommerceClient
             'add_note' => true,
         ]);
 
-        $response = $this->wordpressRequest($integration)
-            ->acceptJson()
-            ->asJson()
-            ->post($this->wordpressRestEndpoint($integration, "/lemon-erp/v1/orders/{$orderId}/invoice"), $payload);
+        try {
+            $response = $this->wordpressRequest($integration)
+                ->acceptJson()
+                ->asJson()
+                ->post($this->wordpressRestEndpoint($integration, "/lemon-erp/v1/orders/{$orderId}/invoice"), $payload);
+        } catch (RequestException $exception) {
+            $this->throwLemonPluginHttpException($exception->response?->status() ?? 0);
+        }
 
         if (! $response->successful()) {
-            throw new RuntimeException("Wtyczka Lemon ERP w WooCommerce zwróciła HTTP {$response->status()}.");
+            $this->throwLemonPluginHttpException($response->status());
         }
 
         $json = $response->json();
 
         return is_array($json) ? $json : [];
+    }
+
+    private function throwLemonPluginHttpException(int $status): never
+    {
+        if ($status === 404) {
+            throw new RuntimeException('Wtyczka Lemon ERP for WooCommerce nie jest zainstalowana albo aktywna w WordPressie. Pobierz ZIP z ekranu Integracje w ERP, wgraj go w WordPress i ponów wysyłkę faktury.');
+        }
+
+        if (in_array($status, [401, 403], true)) {
+            throw new RuntimeException('WordPress odrzucił zapis faktury przez wtyczkę Lemon ERP. Sprawdź użytkownika WordPress REST i jego uprawnienia do edycji zamówień WooCommerce.');
+        }
+
+        throw new RuntimeException("Wtyczka Lemon ERP w WooCommerce zwróciła HTTP {$status}.");
     }
 
     /**

@@ -19,9 +19,17 @@ class ExternalOrderInvoiceController extends Controller
     ): RedirectResponse {
         try {
             $invoice = $invoices->createForOrder($order);
-            $uploader->upload($invoice);
         } catch (RuntimeException $exception) {
             return back()->with('error', $exception->getMessage());
+        }
+
+        try {
+            $uploader->upload($invoice);
+        } catch (RuntimeException $exception) {
+            return back()->with(
+                'error',
+                "Wystawiono fakturę {$invoice->number}, ale nie dodano jej do zamówienia WooCommerce: {$exception->getMessage()} Po poprawieniu integracji kliknij Wyślij do WooCommerce przy tej fakturze.",
+            );
         }
 
         return back()->with('status', "Wystawiono fakturę {$invoice->number} i dodano ją do zamówienia WooCommerce.");
