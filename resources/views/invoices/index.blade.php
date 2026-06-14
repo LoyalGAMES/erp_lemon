@@ -6,7 +6,7 @@
         'running' => 'Przetwarzanie',
         'missing_configuration' => 'Brak konfiguracji',
         'requires_configuration' => 'Wymaga konfiguracji',
-        'submitted' => 'Wysłana',
+        'submitted' => 'W weryfikacji KSeF',
         'accepted' => 'Przyjęta',
         'rejected' => 'Odrzucona',
         'failed' => 'Błąd',

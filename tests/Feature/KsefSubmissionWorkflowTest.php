@@ -45,6 +45,9 @@ class KsefSubmissionWorkflowTest extends TestCase
         $this->assertStringContainsString('<KodFormularza kodSystemowy="FA (3)" wersjaSchemy="1-0E">FA</KodFormularza>', (string) $submission->xml_payload);
         $this->assertStringContainsString('<P_2>FV/2026/000001</P_2>', (string) $submission->xml_payload);
         $this->assertStringContainsString('<P_7>Produkt KSeF</P_7>', (string) $submission->xml_payload);
+        $this->assertStringContainsString('<Podmiot2>', (string) $submission->xml_payload);
+        $this->assertStringContainsString('<JST>2</JST>', (string) $submission->xml_payload);
+        $this->assertStringContainsString('<GV>2</GV>', (string) $submission->xml_payload);
         $this->assertSame(KsefSettingsService::TEST_PUBLIC_KEY_ID, $submission->request_metadata['public_key_id']);
         $this->assertSame(KsefSettingsService::TEST_PUBLIC_KEY_SHA256, $submission->request_metadata['public_key_sha256']);
 
@@ -186,7 +189,7 @@ class KsefSubmissionWorkflowTest extends TestCase
 
         $this->post(route('ksef.invoices.submit', $invoice))
             ->assertRedirect()
-            ->assertSessionHas('status');
+            ->assertSessionHas('status', 'Faktura FV/2026/000001 została przyjęta przez KSeF.');
 
         $submission = KsefSubmission::query()->firstOrFail();
 
@@ -267,7 +270,7 @@ class KsefSubmissionWorkflowTest extends TestCase
 
         $this->post(route('ksef.invoices.submit', $invoice))
             ->assertRedirect()
-            ->assertSessionHas('status');
+            ->assertSessionHas('status', 'Faktura FV/2026/000001 została wysłana do weryfikacji KSeF. Odśwież status po zakończeniu przetwarzania.');
 
         $submission = KsefSubmission::query()->firstOrFail();
 

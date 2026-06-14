@@ -240,7 +240,7 @@ class KsefController extends Controller
     {
         return match ($submission->status) {
             'accepted' => "Faktura {$invoiceNumber} została przyjęta przez KSeF.",
-            'submitted' => "Faktura {$invoiceNumber} została wysłana do KSeF. Odśwież status po zakończeniu przetwarzania.",
+            'submitted' => "Faktura {$invoiceNumber} została wysłana do weryfikacji KSeF. Odśwież status po zakończeniu przetwarzania.",
             default => "Próba wysyłki faktury {$invoiceNumber} do KSeF zakończyła się statusem: {$submission->status}. Sprawdź historię KSeF.",
         };
     }

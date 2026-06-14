@@ -13,7 +13,9 @@ use RuntimeException;
 final class KsefXmlBuilder
 {
     public const FA3_NAMESPACE = 'http://crd.gov.pl/wzor/2025/06/25/13775/';
+
     public const FORM_SYSTEM_CODE = 'FA (3)';
+
     public const SCHEMA_VERSION = '1-0E';
 
     public function build(Invoice $invoice): string
@@ -47,7 +49,7 @@ final class KsefXmlBuilder
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     private function addSubject(DOMDocument $dom, DOMElement $root, string $nodeName, array $data, string $fallbackName): void
     {
@@ -66,6 +68,11 @@ final class KsefXmlBuilder
         $address = $this->element($dom, $subject, 'Adres');
         $this->text($dom, $address, 'KodKraju', strtoupper((string) ($data['country'] ?? 'PL')) ?: 'PL');
         $this->text($dom, $address, 'AdresL1', $this->addressLine($data));
+
+        if ($nodeName === 'Podmiot2') {
+            $this->text($dom, $subject, 'JST', '2');
+            $this->text($dom, $subject, 'GV', '2');
+        }
     }
 
     private function addInvoice(DOMDocument $dom, DOMElement $root, Invoice $invoice): void
@@ -240,6 +247,7 @@ final class KsefXmlBuilder
 
         return array_values(array_unique($unsupported));
     }
+
     private function element(DOMDocument $dom, DOMElement $parent, string $name): DOMElement
     {
         $element = $dom->createElementNS(self::FA3_NAMESPACE, $name);
@@ -257,14 +265,14 @@ final class KsefXmlBuilder
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     private function addressLine(array $data): string
     {
         $parts = array_filter([
             $data['address_1'] ?? null,
             $data['address_2'] ?? null,
-            trim((string) ($data['postcode'] ?? '') . ' ' . (string) ($data['city'] ?? '')),
+            trim((string) ($data['postcode'] ?? '').' '.(string) ($data['city'] ?? '')),
         ]);
 
         return $this->value(implode(', ', $parts), 'Brak adresu');

@@ -271,9 +271,16 @@ final class KsefClient
 
     private function ksefToken(): string
     {
-        $token = $this->setting('access_token', 'KSEF_TOKEN', '');
+        $token = $this->normalizeKsefToken($this->setting('access_token', 'KSEF_TOKEN', ''));
 
-        return $token !== '' ? $token : $this->setting('access_token', 'KSEF_ACCESS_TOKEN', '');
+        return $token !== '' ? $token : $this->normalizeKsefToken($this->setting('access_token', 'KSEF_ACCESS_TOKEN', ''));
+    }
+
+    private function normalizeKsefToken(string $token): string
+    {
+        $token = preg_replace('/^Bearer\s+/i', '', trim($token)) ?? '';
+
+        return preg_replace('/\s+/', '', $token) ?? '';
     }
 
     private function gatewayUrl(): string

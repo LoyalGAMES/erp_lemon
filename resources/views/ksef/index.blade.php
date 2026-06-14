@@ -6,7 +6,7 @@
         'running' => 'Przetwarzanie',
         'missing_configuration' => 'Brak konfiguracji',
         'requires_configuration' => 'Wymaga konfiguracji',
-        'submitted' => 'Wysłana',
+        'submitted' => 'W weryfikacji KSeF',
         'accepted' => 'Przyjęta',
         'rejected' => 'Odrzucona',
         'failed' => 'Błąd',
@@ -138,7 +138,12 @@
                             </td>
                             <td>
                                 <div class="inline-actions">
-                                    @if ($status !== 'accepted')
+                                    @if (in_array($status, $refreshableKsefStatuses, true) && $latest?->reference_number)
+                                        <form method="POST" action="{{ route('ksef.submissions.refresh', $latest) }}">
+                                            @csrf
+                                            <button class="button secondary" type="submit">Sprawdź status</button>
+                                        </form>
+                                    @elseif ($status !== 'accepted')
                                         @if (! $eligibilityState['should_send'])
                                             <a class="button secondary" href="{{ route('invoices.edit', $invoice) }}">Zmień KSeF</a>
                                         @elseif ($validationState['is_blocking'])

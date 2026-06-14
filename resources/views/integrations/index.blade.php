@@ -133,7 +133,7 @@
                 </label>
             </div>
             <label>Token KSeF
-                <input name="access_token" type="password" autocomplete="new-password" placeholder="{{ $ksefSettings['has_access_token'] ? 'Token jest zapisany; wpisz nowy tylko jeśli chcesz go zmienić' : 'Wpisz token KSeF' }}">
+                <input name="access_token" type="password" autocomplete="new-password" placeholder="{{ $ksefSettings['has_access_token'] ? 'Token jest zapisany; wpisz nowy tylko jeśli chcesz go zmienić' : 'Wklej pełny token KSeF, nie ID/SHA certyfikatu' }}">
             </label>
             @if ($ksefSettings['has_access_token'])
                 <label style="display: flex; grid-template-columns: auto 1fr; align-items: center; gap: 8px;">
@@ -146,7 +146,7 @@
                 Tryb: {{ $ksefConfiguration['delivery_mode'] === 'gateway' ? 'bramka zewnętrzna' : 'natywna sesja online MF' }}.
                 Status: {{ $ksefConfiguration['status_url'] ?: 'natywnie z API MF' }}.
                 Preferowany klucz: {{ $ksefConfiguration['public_key_id'] ?: 'automatyczny wybór z MF' }} / SHA256: {{ $ksefConfiguration['public_key_sha256'] ?: 'brak pinu' }}.
-                Dla środowiska testowego domyślnie używane są ID 5855a4 i SHA256 d38f31638bb72c435d03b34115f977ccb1e1c406b7abfb2852bd55f185217187.
+                Pola publicKeyId/SHA zostaw puste, chyba że świadomie pinujesz klucz szyfrujący MF. ID/SHA certyfikatu nie wystarczają do logowania tokenem.
                 Token jest przechowywany zaszyfrowany. Bez bramki ERP sam pobiera certyfikaty MF, inicjuje sesję online, szyfruje XML i sprawdza statusy.
             </div>
             <div class="inline-actions">
