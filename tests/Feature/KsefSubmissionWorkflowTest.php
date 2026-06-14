@@ -11,6 +11,7 @@ use App\Models\KsefSubmission;
 use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Ksef\KsefSettingsService;
 use App\Services\Ksef\KsefSubmissionService;
+use App\Services\Ksef\KsefXmlBuilder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -57,6 +58,49 @@ class KsefSubmissionWorkflowTest extends TestCase
             ->assertSee('<Faktura xmlns="http://crd.gov.pl/wzor/2025/06/25/13775/">', false);
     }
 
+    public function test_ksef_index_shows_full_native_api_error(): void
+    {
+        $baseUrl = 'https://api-test.ksef.local/v2';
+        $longError = 'Nieprawidłowe wyzwanie autoryzacyjne. Pełna treść błędu powinna być widoczna w panelu KSeF bez ucinania końcówki komunikatu.';
+
+        config([
+            'queue.default' => 'sync',
+            'services.ksef.access_token' => 'test-token',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.base_url' => $baseUrl,
+            'services.ksef.environment' => 'test',
+            'services.ksef.auth_status_delay_ms' => 0,
+        ]);
+
+        $invoice = $this->createInvoice();
+
+        Http::fake([
+            $baseUrl.'/security/public-key-certificates' => Http::response($this->publicKeyCertificates()),
+            $baseUrl.'/auth/challenge' => Http::response([
+                'challenge' => 'CHALLENGE-1',
+                'timestampMs' => 1752236636015,
+            ]),
+            $baseUrl.'/auth/ksef-token' => Http::response([
+                'title' => 'Bad Request',
+                'detail' => $longError,
+            ], 400),
+        ]);
+
+        $this->post(route('ksef.invoices.submit', $invoice))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $submission = KsefSubmission::query()->firstOrFail();
+
+        $this->assertSame('failed', $submission->status);
+        $this->assertStringContainsString($longError, (string) $submission->last_error);
+
+        $this->get(route('ksef.index'))
+            ->assertOk()
+            ->assertSee($longError)
+            ->assertDontSee('ucinania końcówki...');
+    }
+
     public function test_configured_ksef_gateway_accepts_submission_and_updates_invoice_number(): void
     {
         config([
@@ -97,6 +141,197 @@ class KsefSubmissionWorkflowTest extends TestCase
             && $request['public_key_id'] === KsefSettingsService::TEST_PUBLIC_KEY_ID
             && $request['public_key_sha256'] === KsefSettingsService::TEST_PUBLIC_KEY_SHA256
             && $request['invoice_size'] > 0);
+    }
+
+    public function test_native_ksef_api_flow_encrypts_xml_and_sends_online_session_invoice(): void
+    {
+        $baseUrl = 'https://api-test.ksef.local/v2';
+        $tokenPublicKeyId = $this->publicKeyId('token');
+        $sessionPublicKeyId = $this->publicKeyId('session');
+
+        config([
+            'queue.default' => 'sync',
+            'services.ksef.access_token' => 'native-ksef-token',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.status_url' => '',
+            'services.ksef.base_url' => $baseUrl,
+            'services.ksef.environment' => 'test',
+            'services.ksef.auth_status_delay_ms' => 0,
+        ]);
+
+        Http::fake([
+            $baseUrl.'/security/public-key-certificates' => Http::response($this->publicKeyCertificates($tokenPublicKeyId, $sessionPublicKeyId)),
+            $baseUrl.'/auth/challenge' => Http::response([
+                'challenge' => 'AUTH-CHALLENGE',
+                'timestampMs' => 1752236636015,
+            ]),
+            $baseUrl.'/auth/ksef-token' => Http::response([
+                'referenceNumber' => 'AUTH-REF',
+                'authenticationToken' => [
+                    'token' => 'AUTH-TOKEN',
+                    'validUntil' => '2026-06-14T12:00:00+00:00',
+                ],
+            ], 202),
+            $baseUrl.'/auth/AUTH-REF' => Http::response([
+                'status' => [
+                    'code' => 200,
+                    'description' => 'Uwierzytelnianie zakończone sukcesem',
+                ],
+            ]),
+            $baseUrl.'/auth/token/redeem' => Http::response([
+                'accessToken' => [
+                    'token' => 'ACCESS-TOKEN',
+                    'validUntil' => '2026-06-14T12:15:00+00:00',
+                ],
+                'refreshToken' => [
+                    'token' => 'REFRESH-TOKEN',
+                    'validUntil' => '2026-06-21T12:15:00+00:00',
+                ],
+            ]),
+            $baseUrl.'/sessions/online' => Http::response([
+                'referenceNumber' => 'SESSION-REF',
+                'validUntil' => '2026-06-14T23:59:00+00:00',
+            ], 202),
+            $baseUrl.'/sessions/online/SESSION-REF/invoices' => Http::response([
+                'referenceNumber' => 'INVOICE-REF',
+            ], 202),
+            $baseUrl.'/sessions/online/SESSION-REF/close' => Http::response(null, 204),
+        ]);
+
+        $invoice = $this->createInvoice();
+
+        $this->post(route('ksef.invoices.submit', $invoice))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $submission = KsefSubmission::query()->firstOrFail();
+
+        $this->assertSame('submitted', $submission->status);
+        $this->assertSame('INVOICE-REF', $submission->reference_number);
+        $this->assertSame('native', $submission->response_metadata['mode']);
+        $this->assertSame('SESSION-REF', $submission->response_metadata['sessionReferenceNumber']);
+        $this->assertSame($sessionPublicKeyId, $submission->response_metadata['symmetricKeyPublicKeyId']);
+
+        Http::assertSent(fn ($request): bool => $request->url() === $baseUrl.'/auth/ksef-token'
+            && $request['challenge'] === 'AUTH-CHALLENGE'
+            && $request['contextIdentifier']['type'] === 'Nip'
+            && $request['contextIdentifier']['value'] === '5261040828'
+            && $request['publicKeyId'] === $tokenPublicKeyId
+            && is_string($request['encryptedToken'])
+            && ! str_contains($request['encryptedToken'], 'native-ksef-token'));
+
+        Http::assertSent(fn ($request): bool => $request->url() === $baseUrl.'/sessions/online'
+            && $request->hasHeader('Authorization', 'Bearer ACCESS-TOKEN')
+            && $request['formCode']['systemCode'] === KsefXmlBuilder::FORM_SYSTEM_CODE
+            && $request['formCode']['schemaVersion'] === KsefXmlBuilder::SCHEMA_VERSION
+            && $request['formCode']['value'] === 'FA'
+            && $request['encryption']['publicKeyId'] === $sessionPublicKeyId
+            && is_string($request['encryption']['encryptedSymmetricKey'])
+            && is_string($request['encryption']['initializationVector']));
+
+        Http::assertSent(fn ($request): bool => $request->url() === $baseUrl.'/sessions/online/SESSION-REF/invoices'
+            && $request->hasHeader('Authorization', 'Bearer ACCESS-TOKEN')
+            && $request['invoiceHash'] === $submission->request_metadata['xml_sha256_base64']
+            && $request['invoiceSize'] === $submission->request_metadata['xml_size']
+            && $request['encryptedInvoiceHash'] !== $request['invoiceHash']
+            && $request['encryptedInvoiceSize'] > 0
+            && $request['offlineMode'] === false
+            && is_string($request['encryptedInvoiceContent'])
+            && ! str_contains($request['encryptedInvoiceContent'], '<P_2>FV/2026/000001</P_2>'));
+
+        Http::assertSent(fn ($request): bool => $request->url() === $baseUrl.'/sessions/online/SESSION-REF/close'
+            && $request->hasHeader('Authorization', 'Bearer ACCESS-TOKEN'));
+    }
+
+    public function test_native_ksef_status_refresh_accepts_invoice_and_updates_invoice_number(): void
+    {
+        $baseUrl = 'https://api-test.ksef.local/v2';
+        $tokenPublicKeyId = $this->publicKeyId('token');
+        $sessionPublicKeyId = $this->publicKeyId('session');
+
+        config([
+            'services.ksef.access_token' => 'native-ksef-token',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.status_url' => '',
+            'services.ksef.base_url' => $baseUrl,
+            'services.ksef.environment' => 'test',
+            'services.ksef.auth_status_delay_ms' => 0,
+        ]);
+
+        Http::fake([
+            $baseUrl.'/security/public-key-certificates' => Http::response($this->publicKeyCertificates($tokenPublicKeyId, $sessionPublicKeyId)),
+            $baseUrl.'/auth/challenge' => Http::response([
+                'challenge' => 'AUTH-CHALLENGE',
+                'timestampMs' => 1752236636015,
+            ]),
+            $baseUrl.'/auth/ksef-token' => Http::response([
+                'referenceNumber' => 'AUTH-REF',
+                'authenticationToken' => [
+                    'token' => 'AUTH-TOKEN',
+                    'validUntil' => '2026-06-14T12:00:00+00:00',
+                ],
+            ], 202),
+            $baseUrl.'/auth/AUTH-REF' => Http::response([
+                'status' => [
+                    'code' => 200,
+                    'description' => 'Uwierzytelnianie zakończone sukcesem',
+                ],
+            ]),
+            $baseUrl.'/auth/token/redeem' => Http::response([
+                'accessToken' => [
+                    'token' => 'ACCESS-TOKEN',
+                    'validUntil' => '2026-06-14T12:15:00+00:00',
+                ],
+                'refreshToken' => [
+                    'token' => 'REFRESH-TOKEN',
+                    'validUntil' => '2026-06-21T12:15:00+00:00',
+                ],
+            ]),
+            $baseUrl.'/sessions/SESSION-REF/invoices/INVOICE-REF' => Http::response([
+                'ordinalNumber' => 1,
+                'referenceNumber' => 'INVOICE-REF',
+                'ksefNumber' => '5261040828-20260614-000000000001-11',
+                'invoiceHash' => 'HASH=',
+                'invoicingDate' => '2026-06-14T12:20:00+00:00',
+                'status' => [
+                    'code' => 200,
+                    'description' => 'Sukces',
+                ],
+            ]),
+        ]);
+
+        $invoice = $this->createInvoice();
+        $xml = app(KsefXmlBuilder::class)->build($invoice);
+        $submission = $invoice->ksefSubmissions()->create([
+            'environment' => 'test',
+            'api_version' => '2.6.0',
+            'status' => 'submitted',
+            'reference_number' => 'INVOICE-REF',
+            'xml_payload' => $xml,
+            'request_metadata' => [
+                'xml_sha256_base64' => base64_encode(hash('sha256', $xml, true)),
+                'xml_size' => strlen($xml),
+            ],
+            'response_metadata' => [
+                'mode' => 'native',
+                'sessionReferenceNumber' => 'SESSION-REF',
+            ],
+            'submitted_at' => now(),
+        ]);
+
+        $this->post(route('ksef.submissions.refresh', $submission))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Status zgłoszenia KSeF został odświeżony.');
+
+        $submission->refresh();
+
+        $this->assertSame('accepted', $submission->status);
+        $this->assertSame('5261040828-20260614-000000000001-11', $submission->ksef_number);
+        $this->assertSame('5261040828-20260614-000000000001-11', $invoice->refresh()->ksef_number);
+        $this->assertSame('SESSION-REF', data_get($submission->response_metadata, 'last_status_check.sessionReferenceNumber'));
+
+        Http::assertSent(fn ($request): bool => $request->url() === $baseUrl.'/sessions/SESSION-REF/invoices/INVOICE-REF'
+            && $request->hasHeader('Authorization', 'Bearer ACCESS-TOKEN'));
     }
 
     public function test_prepare_reuses_active_ksef_submission_for_invoice(): void
@@ -531,6 +766,53 @@ class KsefSubmissionWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee('Do poprawy')
             ->assertSee('brak mapowania dla stawek VAT');
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function publicKeyCertificates(?string $tokenPublicKeyId = null, ?string $sessionPublicKeyId = null): array
+    {
+        $certificate = $this->certificateBase64();
+
+        return [
+            [
+                'certificate' => $certificate,
+                'certificateId' => $this->publicKeyId('token-certificate'),
+                'publicKeyId' => $tokenPublicKeyId ?? $this->publicKeyId('token'),
+                'validFrom' => '2026-01-01T00:00:00+00:00',
+                'validTo' => '2028-01-01T00:00:00+00:00',
+                'usage' => ['KsefTokenEncryption'],
+            ],
+            [
+                'certificate' => $certificate,
+                'certificateId' => $this->publicKeyId('session-certificate'),
+                'publicKeyId' => $sessionPublicKeyId ?? $this->publicKeyId('session'),
+                'validFrom' => '2026-01-01T00:00:00+00:00',
+                'validTo' => '2028-01-01T00:00:00+00:00',
+                'usage' => ['SymmetricKeyEncryption'],
+            ],
+        ];
+    }
+
+    private function publicKeyId(string $seed): string
+    {
+        return base64_encode(hash('sha256', $seed, true));
+    }
+
+    private function certificateBase64(): string
+    {
+        $privateKey = openssl_pkey_new([
+            'private_key_bits' => 2048,
+            'private_key_type' => OPENSSL_KEYTYPE_RSA,
+        ]);
+
+        $csr = openssl_csr_new(['commonName' => 'Ministerstwo Finansow'], $privateKey);
+        $certificate = openssl_csr_sign($csr, null, $privateKey, 365);
+
+        openssl_x509_export($certificate, $pem);
+
+        return preg_replace('/-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s+/', '', $pem) ?? '';
     }
 
     private function createInvoice(): Invoice

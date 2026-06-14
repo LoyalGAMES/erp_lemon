@@ -82,6 +82,8 @@ final class KsefSubmissionService
                     'has_access_token' => $configuration['has_access_token'],
                     'has_gateway_url' => $configuration['has_gateway_url'],
                     'has_public_key' => $configuration['has_public_key'] ?? false,
+                    'delivery_mode' => $configuration['delivery_mode'] ?? 'native',
+                    'native_online_send_ready' => $configuration['native_online_send_ready'] ?? false,
                     'direct_online_send_ready' => $configuration['direct_online_send_ready'],
                     'xml_sha256_base64' => base64_encode(hash('sha256', $xml, true)),
                     'xml_size' => strlen($xml),
@@ -190,7 +192,7 @@ final class KsefSubmissionService
             $metadata['last_status_checked_at'] = now()->toISOString();
 
             $lastError = $resolved === 'rejected'
-                ? (string) data_get($response, 'errorMessage', data_get($response, 'error_message', data_get($response, 'message', 'Zgłoszenie odrzucone przez KSeF.')))
+                ? $this->remoteErrorMessage($response)
                 : null;
 
             $submission->update([
@@ -344,7 +346,24 @@ final class KsefSubmissionService
             return 'accepted';
         }
 
-        $status = strtolower((string) data_get($response, 'status', data_get($response, 'state', data_get($response, 'processingStatus', 'submitted'))));
+        $statusCode = (int) data_get($response, 'status.code', 0);
+
+        if ($statusCode === 200) {
+            return 'accepted';
+        }
+
+        if (in_array($statusCode, [100, 150, 170], true)) {
+            return 'submitted';
+        }
+
+        if ($statusCode >= 400) {
+            return 'rejected';
+        }
+
+        $statusValue = data_get($response, 'status', data_get($response, 'state', data_get($response, 'processingStatus', 'submitted')));
+        $status = strtolower(is_array($statusValue)
+            ? (string) data_get($statusValue, 'description', '')
+            : (string) $statusValue);
 
         if (str_contains($status, 'accept') || str_contains($status, 'accepted') || str_contains($status, 'success')) {
             return 'accepted';
@@ -355,5 +374,40 @@ final class KsefSubmissionService
         }
 
         return 'submitted';
+    }
+
+    /**
+     * @param  array<string, mixed>  $response
+     */
+    private function remoteErrorMessage(array $response): string
+    {
+        $parts = array_filter([
+            data_get($response, 'errorMessage'),
+            data_get($response, 'error_message'),
+            data_get($response, 'message'),
+            data_get($response, 'status.description'),
+            $this->flattenDetails(data_get($response, 'status.details')),
+        ], fn ($part): bool => is_scalar($part) && trim((string) $part) !== '');
+
+        return $parts !== []
+            ? implode(' ', array_map(fn ($part): string => (string) $part, $parts))
+            : 'Zgłoszenie odrzucone przez KSeF.';
+    }
+
+    private function flattenDetails(mixed $details): string
+    {
+        if (is_string($details)) {
+            return $details;
+        }
+
+        if (! is_array($details)) {
+            return '';
+        }
+
+        return collect($details)
+            ->flatten()
+            ->filter(fn ($value): bool => is_scalar($value) && trim((string) $value) !== '')
+            ->map(fn ($value): string => (string) $value)
+            ->implode(' ');
     }
 }

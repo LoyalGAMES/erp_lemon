@@ -387,7 +387,7 @@ class IntegrationController extends Controller
             'base_url' => ['nullable', 'url', 'max:500'],
             'gateway_url' => ['nullable', 'url', 'max:500'],
             'status_url' => ['nullable', 'url', 'max:500'],
-            'public_key_id' => ['nullable', 'string', 'max:64', 'regex:/^[A-Za-z0-9_-]+$/'],
+            'public_key_id' => ['nullable', 'string', 'max:128', 'regex:/^[A-Za-z0-9+\/=_-]+$/'],
             'public_key_sha256' => ['nullable', 'string', 'size:64', 'regex:/^[a-fA-F0-9]{64}$/'],
             'access_token' => ['nullable', 'string', 'max:2000'],
             'clear_access_token' => ['nullable', 'boolean'],

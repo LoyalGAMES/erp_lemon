@@ -34,13 +34,17 @@
         .ksef-validation-list li + li { margin-top: 4px; }
         .ksef-validation-list .error { color: var(--red); }
         .ksef-validation-list .warning { color: var(--orange); }
+        .ksef-error-cell,
+        .ksef-status-cell { min-width: 340px; max-width: 560px; white-space: normal; }
+        .ksef-error-message { margin-top: 6px; color: var(--red); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; white-space: pre-wrap; }
+        .ksef-error-message.compact { color: var(--muted); }
     </style>
 @endpush
 
 @section('content')
     <section class="page-toolbar">
         <div class="toolbar-note">
-            KSeF API {{ $configuration['api_version'] }} | środowisko: {{ $configuration['environment'] }} | {{ $configuration['base_url'] }}
+            KSeF API {{ $configuration['api_version'] }} | środowisko: {{ $configuration['environment'] }} | {{ $configuration['base_url'] }} | tryb: {{ $configuration['delivery_mode'] === 'gateway' ? 'bramka' : 'natywny' }}
         </div>
         <a class="button secondary" href="{{ route('integrations.index') }}#ksef">Konfiguracja w Integracjach</a>
     </section>
@@ -48,10 +52,6 @@
     @if (! $configuration['has_access_token'])
         <div class="alert">
             Brakuje tokena KSeF. Skonfiguruj KSeF w zakładce Integracje. System przygotuje XML FA(3), ale realna wysyłka zostanie zatrzymana ze statusem „Brak konfiguracji”.
-        </div>
-    @elseif (! $configuration['has_gateway_url'])
-        <div class="alert">
-            Token jest skonfigurowany, ale nie ma bramki/szyfrowanej sesji KSeF. Uzupełnij konfigurację w zakładce Integracje.
         </div>
     @endif
 
@@ -126,9 +126,12 @@
                             </td>
                             <td>{{ number_format((float) $invoice->gross_total, 2, ',', ' ') }} {{ $invoice->currency }}</td>
                             <td>{{ data_get($invoice->metadata, 'woocommerce_upload.status') === 'success' ? 'Wysłana' : '-' }}</td>
-                            <td>
+                            <td class="ksef-status-cell">
                                 @if ($status)
                                     <span @class(['status', $statusTone[$status] ?? 'blue'])>{{ $statusLabel[$status] ?? $status }}</span>
+                                    @if ($latest?->last_error)
+                                        <div class="ksef-error-message compact">{{ $latest->last_error }}</div>
+                                    @endif
                                 @else
                                     <span class="muted">Nieprzygotowana</span>
                                 @endif
@@ -197,7 +200,13 @@
                             <td>{{ $submission->reference_number ?? '-' }}</td>
                             <td>{{ $submission->ksef_number ?? '-' }}</td>
                             <td>{{ (int) data_get($submission->request_metadata, 'retry_count', 0) }}</td>
-                            <td>{{ $submission->last_error ? str($submission->last_error)->limit(120) : '-' }}</td>
+                            <td class="ksef-error-cell">
+                                @if ($submission->last_error)
+                                    <div class="ksef-error-message">{{ $submission->last_error }}</div>
+                                @else
+                                    -
+                                @endif
+                            </td>
                             <td>
                                 <div class="inline-actions">
                                     @if ($submission->xml_payload)

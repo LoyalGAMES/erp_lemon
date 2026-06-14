@@ -119,20 +119,20 @@
                 <label>Adres bazowy API
                     <input name="base_url" value="{{ old('base_url', $ksefSettings['base_url']) }}" placeholder="Puste = domyślne URL MF dla środowiska">
                 </label>
-                <label>Adres bramki KSeF
-                    <input name="gateway_url" value="{{ old('gateway_url', $ksefSettings['gateway_url']) }}" placeholder="np. https://.../submit">
+                <label>Adres bramki KSeF (opcjonalnie)
+                    <input name="gateway_url" value="{{ old('gateway_url', $ksefSettings['gateway_url']) }}" placeholder="Puste = natywna sesja online KSeF 2.0">
                 </label>
-                <label>Adres statusu KSeF
-                    <input name="status_url" value="{{ old('status_url', $ksefSettings['status_url']) }}" placeholder="np. https://.../status">
+                <label>Adres statusu KSeF (opcjonalnie)
+                    <input name="status_url" value="{{ old('status_url', $ksefSettings['status_url']) }}" placeholder="Puste = natywny status z API MF">
                 </label>
-                <label>Identyfikator klucza KSeF
-                    <input name="public_key_id" value="{{ old('public_key_id', $ksefSettings['public_key_id']) }}" placeholder="Dla test: 5855a4">
+                <label>Preferowany publicKeyId KSeF (opcjonalnie)
+                    <input name="public_key_id" value="{{ old('public_key_id', $ksefSettings['public_key_id']) }}" placeholder="Puste = wybierz aktualny klucz MF automatycznie">
                 </label>
-                <label>SHA256 klucza KSeF
+                <label>SHA256 klucza KSeF (opcjonalnie)
                     <input name="public_key_sha256" value="{{ old('public_key_sha256', $ksefSettings['public_key_sha256']) }}" maxlength="64" placeholder="64 znaki hex">
                 </label>
             </div>
-            <label>Token dostępu
+            <label>Token KSeF
                 <input name="access_token" type="password" autocomplete="new-password" placeholder="{{ $ksefSettings['has_access_token'] ? 'Token jest zapisany; wpisz nowy tylko jeśli chcesz go zmienić' : 'Wpisz token KSeF' }}">
             </label>
             @if ($ksefSettings['has_access_token'])
@@ -143,10 +143,11 @@
             @endif
             <div class="toolbar-note">
                 Aktualnie: KSeF API {{ $ksefConfiguration['api_version'] }} | środowisko: {{ $ksefConfiguration['environment'] }} | {{ $ksefConfiguration['base_url'] }}.
-                Status: {{ $ksefConfiguration['status_url'] ?: 'automatycznie z adresu bramki' }}.
-                Klucz: {{ $ksefConfiguration['public_key_id'] ?: 'brak' }} / SHA256: {{ $ksefConfiguration['public_key_sha256'] ?: 'brak' }}.
+                Tryb: {{ $ksefConfiguration['delivery_mode'] === 'gateway' ? 'bramka zewnętrzna' : 'natywna sesja online MF' }}.
+                Status: {{ $ksefConfiguration['status_url'] ?: 'natywnie z API MF' }}.
+                Preferowany klucz: {{ $ksefConfiguration['public_key_id'] ?: 'automatyczny wybór z MF' }} / SHA256: {{ $ksefConfiguration['public_key_sha256'] ?: 'brak pinu' }}.
                 Dla środowiska testowego domyślnie używane są ID 5855a4 i SHA256 d38f31638bb72c435d03b34115f977ccb1e1c406b7abfb2852bd55f185217187.
-                Token jest przechowywany zaszyfrowany. Realna wysyłka wymaga skonfigurowanej bramki/sesji szyfrującej.
+                Token jest przechowywany zaszyfrowany. Bez bramki ERP sam pobiera certyfikaty MF, inicjuje sesję online, szyfruje XML i sprawdza statusy.
             </div>
             <div class="inline-actions">
                 <button class="button" type="submit">Zapisz konfigurację KSeF</button>

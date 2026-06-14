@@ -35,4 +35,19 @@ return [
         ],
     ],
 
+    'ksef' => [
+        'environment' => env('KSEF_ENVIRONMENT'),
+        'api_version' => env('KSEF_API_VERSION'),
+        'base_url' => env('KSEF_BASE_URL'),
+        'gateway_url' => env('KSEF_GATEWAY_URL'),
+        'status_url' => env('KSEF_STATUS_URL'),
+        'public_key_id' => env('KSEF_PUBLIC_KEY_ID'),
+        'public_key_sha256' => env('KSEF_PUBLIC_KEY_SHA256'),
+        'access_token' => env('KSEF_TOKEN', env('KSEF_ACCESS_TOKEN')),
+        'context_identifier_type' => env('KSEF_CONTEXT_IDENTIFIER_TYPE'),
+        'context_identifier_value' => env('KSEF_CONTEXT_IDENTIFIER_VALUE'),
+        'auth_status_attempts' => env('KSEF_AUTH_STATUS_ATTEMPTS', 6),
+        'auth_status_delay_ms' => env('KSEF_AUTH_STATUS_DELAY_MS', 500),
+    ],
+
 ];
