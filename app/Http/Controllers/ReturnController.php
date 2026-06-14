@@ -17,9 +17,11 @@ use App\Services\Invoices\ReturnCorrectionInvoiceService;
 use App\Services\Returns\ReturnNumberService;
 use App\Services\Returns\ReturnReceivingService;
 use App\Services\Returns\ReturnSettingsService;
+use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\View\View;
@@ -258,7 +260,7 @@ class ReturnController extends Controller
                     }
                 }
             } catch (Throwable $exception) {
-                $warnings[] = 'Automatyzacja RX: ' . $exception->getMessage();
+                $warnings[] = 'Automatyzacja RX: '.$exception->getMessage();
             }
         }
 
@@ -404,15 +406,27 @@ class ReturnController extends Controller
         return back()->with('status', $message);
     }
 
-    public function createCorrection(ReturnCase $returnCase, ReturnCorrectionInvoiceService $corrections): RedirectResponse
-    {
+    public function createCorrection(
+        ReturnCase $returnCase,
+        ReturnCorrectionInvoiceService $corrections,
+        InvoiceWooCommerceUploadService $uploader,
+    ): RedirectResponse {
         try {
             $invoice = $corrections->createForReturn($returnCase);
         } catch (RuntimeException $exception) {
             return back()->with('error', $exception->getMessage());
         }
 
-        return back()->with('status', "Wystawiono fakturę korygującą {$invoice->number} dla zwrotu {$returnCase->number}.");
+        try {
+            $uploader->upload($invoice);
+        } catch (RuntimeException $exception) {
+            return back()->with(
+                'error',
+                "Wystawiono fakturę korygującą {$invoice->number}, ale nie dodano jej do zamówienia WooCommerce: {$exception->getMessage()} Po poprawieniu integracji kliknij Wyślij do WooCommerce przy tej korekcie.",
+            );
+        }
+
+        return back()->with('status', "Wystawiono fakturę korygującą {$invoice->number} dla zwrotu {$returnCase->number} i dodano ją do zamówienia WooCommerce.");
     }
 
     public function destroy(ReturnCase $returnCase): RedirectResponse
@@ -491,7 +505,7 @@ class ReturnController extends Controller
     }
 
     /**
-     * @param array<string, mixed> $input
+     * @param  array<string, mixed>  $input
      */
     private function resolveOrderFromInput(array $input): ?ExternalOrder
     {
@@ -554,7 +568,7 @@ class ReturnController extends Controller
                 ->filter(fn (ExternalOrderLine $line): bool => $line->product_id !== null && (float) $line->quantity > 0)
                 ->map(function (ExternalOrderLine $line) use ($returned): array {
                     $orderedQuantity = (float) $line->quantity;
-                    $returnedQuantity = (float) ($returned['line:' . $line->id] ?? $returned['product:' . $line->product_id] ?? 0);
+                    $returnedQuantity = (float) ($returned['line:'.$line->id] ?? $returned['product:'.$line->product_id] ?? 0);
                     $remainingQuantity = max(0, $orderedQuantity - $returnedQuantity);
 
                     return [
@@ -586,7 +600,7 @@ class ReturnController extends Controller
         return $order->lines
             ->filter(fn (ExternalOrderLine $line): bool => $line->product_id !== null && (float) $line->quantity > 0)
             ->map(function (ExternalOrderLine $line) use ($defaultCondition, $defaultDisposition, $returned, $order): array {
-                $remainingQuantity = max(0, (float) $line->quantity - (float) ($returned['line:' . $line->id] ?? $returned['product:' . $line->product_id] ?? 0));
+                $remainingQuantity = max(0, (float) $line->quantity - (float) ($returned['line:'.$line->id] ?? $returned['product:'.$line->product_id] ?? 0));
 
                 return [
                     'external_order_line_id' => (int) $line->id,
@@ -594,7 +608,7 @@ class ReturnController extends Controller
                     'quantity' => $remainingQuantity,
                     'condition' => $defaultCondition,
                     'disposition' => $defaultDisposition,
-                    'notes' => 'Uzupełniono automatycznie z zamówienia ' . $order->external_number,
+                    'notes' => 'Uzupełniono automatycznie z zamówienia '.$order->external_number,
                 ];
             })
             ->filter(fn (array $line): bool => $line['quantity'] > 0)
@@ -603,7 +617,7 @@ class ReturnController extends Controller
     }
 
     /**
-     * @param array{external_order_line_id:?int,product_id:int} $line
+     * @param  array{external_order_line_id:?int,product_id:int}  $line
      */
     private function resolveOrderLineForReturn(ExternalOrder $order, array $line): ?ExternalOrderLine
     {
@@ -644,12 +658,13 @@ class ReturnController extends Controller
 
         foreach ($rows as $row) {
             if ($row->external_order_line_id !== null) {
-                $quantities['line:' . $row->external_order_line_id] = (float) $row->quantity;
+                $quantities['line:'.$row->external_order_line_id] = (float) $row->quantity;
+
                 continue;
             }
 
             if ($row->product_id !== null) {
-                $key = 'product:' . $row->product_id;
+                $key = 'product:'.$row->product_id;
                 $quantities[$key] = ($quantities[$key] ?? 0) + (float) $row->quantity;
             }
         }
@@ -658,7 +673,7 @@ class ReturnController extends Controller
     }
 
     /**
-     * @param array<string, mixed> $input
+     * @param  array<string, mixed>  $input
      */
     private function validateReturnableQuantities(
         \Illuminate\Contracts\Validation\Validator $validator,
@@ -676,10 +691,11 @@ class ReturnController extends Controller
 
             if (! $orderLine instanceof ExternalOrderLine) {
                 $validator->errors()->add("lines.{$index}.product_id", 'Ten produkt nie występuje w wybranym zamówieniu.');
+
                 continue;
             }
 
-            $returnedQuantity = (float) ($returned['line:' . $orderLine->id] ?? $returned['product:' . $orderLine->product_id] ?? 0);
+            $returnedQuantity = (float) ($returned['line:'.$orderLine->id] ?? $returned['product:'.$orderLine->product_id] ?? 0);
             $remainingQuantity = max(0, (float) $orderLine->quantity - $returnedQuantity);
 
             if ($line['quantity'] > $remainingQuantity) {
@@ -698,9 +714,9 @@ class ReturnController extends Controller
     }
 
     /**
-     * @return \Illuminate\Support\Collection<int, WarehouseDocument>
+     * @return Collection<int, WarehouseDocument>
      */
-    private function returnDocuments(ReturnCase $returnCase): \Illuminate\Support\Collection
+    private function returnDocuments(ReturnCase $returnCase): Collection
     {
         return collect([$returnCase->warehouseDocument])
             ->merge($returnCase->lines->map(fn (ReturnCaseLine $line) => $line->warehouseDocument))

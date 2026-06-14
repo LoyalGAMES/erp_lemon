@@ -13,8 +13,11 @@ use App\Models\StockBalance;
 use App\Models\StockLedgerEntry;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
+use App\Models\WordpressIntegration;
 use App\Services\Automation\DocumentAutomationSettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
 class ReturnWorkflowTest extends TestCase
@@ -51,7 +54,7 @@ class ReturnWorkflowTest extends TestCase
 
         $returnCase = ReturnCase::query()->with('lines')->firstOrFail();
 
-        $this->assertSame('RET/' . now()->format('Y') . '/000001', $returnCase->number);
+        $this->assertSame('RET/'.now()->format('Y').'/000001', $returnCase->number);
         $this->assertSame('opened', $returnCase->status);
         $this->assertSame($warehouse->id, $returnCase->target_warehouse_id);
         $this->assertCount(1, $returnCase->lines);
@@ -455,11 +458,11 @@ class ReturnWorkflowTest extends TestCase
             ->assertSee('RMA - Zwroty po kontroli')
             ->assertSee('Dyspozycje i magazyny docelowe')
             ->assertSee('Przywróć na stan')
-            ->assertSee('Przykład: RMA/' . now()->format('m/Y') . '/0001');
+            ->assertSee('Przykład: RMA/'.now()->format('m/Y').'/0001');
 
         $this->get(route('returns.index'))
             ->assertOk()
-            ->assertSee('value="' . $warehouse->id . '" selected', false)
+            ->assertSee('value="'.$warehouse->id.'" selected', false)
             ->assertSee('Dodaj pozycję z zamówienia')
             ->assertSee('Otwarte opakowanie')
             ->assertSee('Do kontroli');
@@ -472,7 +475,7 @@ class ReturnWorkflowTest extends TestCase
 
         $returnCase = ReturnCase::query()->with('lines')->firstOrFail();
 
-        $this->assertSame('RMA/' . now()->format('m/Y') . '/0001', $returnCase->number);
+        $this->assertSame('RMA/'.now()->format('m/Y').'/0001', $returnCase->number);
         $this->assertSame('opened', $returnCase->lines->first()->condition);
         $this->assertSame('inspection', $returnCase->lines->first()->disposition);
     }
@@ -662,8 +665,8 @@ class ReturnWorkflowTest extends TestCase
         foreach (range(1, 30) as $index) {
             $newOrder = ExternalOrder::query()->create([
                 'sales_channel_id' => $channel->id,
-                'external_id' => 'NEW-' . $index,
-                'external_number' => 'NEW-' . $index,
+                'external_id' => 'NEW-'.$index,
+                'external_number' => 'NEW-'.$index,
                 'status' => 'processing',
                 'currency' => 'PLN',
                 'total_gross' => 100 + $index,
@@ -696,11 +699,31 @@ class ReturnWorkflowTest extends TestCase
 
     public function test_posted_return_can_issue_correction_invoice(): void
     {
+        Http::fake([
+            'https://shop.test/wp-json/lemon-erp/v1/orders/9001/invoice' => Http::response([
+                'file_url' => 'https://shop.test/wp-json/lemon-erp/v1/orders/9001/invoice/download?token=correction-token',
+                'note_id' => 9801,
+            ]),
+        ]);
+
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
             'name' => 'Sklep B2C',
             'type' => 'woocommerce',
             'is_active' => true,
+        ]);
+
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'wp_api_username' => 'erp',
+            'wp_api_password_encrypted' => Crypt::encryptString('app-password'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+            'invoice_upload_enabled' => true,
         ]);
 
         $warehouse = Warehouse::query()->create([
@@ -753,7 +776,7 @@ class ReturnWorkflowTest extends TestCase
         ]);
 
         $originalInvoice = Invoice::query()->create([
-            'number' => 'FV/' . now()->format('Y') . '/000001',
+            'number' => 'FV/'.now()->format('Y').'/000001',
             'type' => 'vat',
             'status' => 'issued',
             'external_order_id' => $order->id,
@@ -761,8 +784,23 @@ class ReturnWorkflowTest extends TestCase
             'sale_date' => now()->toDateString(),
             'payment_due_date' => now()->toDateString(),
             'currency' => 'PLN',
-            'seller_data' => ['name' => 'Sempre', 'tax_id' => '1111111111'],
-            'buyer_data' => ['name' => 'Anna Kowalska', 'tax_id' => '', 'country' => 'PL'],
+            'seller_data' => [
+                'name' => 'Sempre',
+                'tax_id' => '5261040828',
+                'address_1' => 'Testowa 1',
+                'postcode' => '00-001',
+                'city' => 'Warszawa',
+                'country' => 'PL',
+                'email' => 'biuro@example.test',
+                'phone' => '+48123123123',
+                'bank_account' => 'PL00111122223333444455556666',
+            ],
+            'buyer_data' => [
+                'name' => 'Anna Kowalska',
+                'tax_id' => '',
+                'address_1' => 'Kliencka 1',
+                'country' => 'PL',
+            ],
             'net_total' => 200,
             'vat_total' => 46,
             'gross_total' => 246,
@@ -785,7 +823,7 @@ class ReturnWorkflowTest extends TestCase
         ]);
 
         $returnCase = ReturnCase::query()->create([
-            'number' => 'RET/' . now()->format('Y') . '/000001',
+            'number' => 'RET/'.now()->format('Y').'/000001',
             'external_order_id' => $order->id,
             'target_warehouse_id' => $warehouse->id,
             'status' => 'opened',
@@ -823,7 +861,7 @@ class ReturnWorkflowTest extends TestCase
             ->with(['lines', 'files'])
             ->firstOrFail();
 
-        $this->assertSame('FK/' . now()->format('Y') . '/000001', $correction->number);
+        $this->assertSame('FK/'.now()->format('Y').'/000001', $correction->number);
         $this->assertSame('-100.00', (string) $correction->net_total);
         $this->assertSame('-23.00', (string) $correction->vat_total);
         $this->assertSame('-123.00', (string) $correction->gross_total);
@@ -832,6 +870,15 @@ class ReturnWorkflowTest extends TestCase
         $this->assertSame('-1.0000', (string) $correction->lines->first()->quantity);
         $this->assertTrue($correction->files->contains('type', 'html'));
         $this->assertTrue($correction->files->contains('type', 'pdf'));
+        $this->assertSame('success', data_get($correction->metadata, 'woocommerce_upload.status'));
+        $this->assertSame('correction', data_get($correction->metadata, 'woocommerce_upload.invoice_type'));
+        $this->assertSame('lemon_plugin', data_get($correction->metadata, 'woocommerce_upload.delivery_mode'));
+        $this->assertSame('https://shop.test/wp-json/lemon-erp/v1/orders/9001/invoice/download?token=correction-token', data_get($correction->metadata, 'woocommerce_upload.file_url'));
+
+        Http::assertSent(fn ($request): bool => $request->url() === 'https://shop.test/wp-json/lemon-erp/v1/orders/9001/invoice'
+            && data_get($request->data(), 'invoice_type') === 'correction'
+            && data_get($request->data(), 'invoice_number') === $correction->number
+            && data_get($request->data(), 'order_id') === '9001');
 
         $returnCase->refresh();
 
@@ -840,12 +887,12 @@ class ReturnWorkflowTest extends TestCase
 
         $this->get(route('returns.index'))
             ->assertOk()
-            ->assertSee('Korekta ' . $correction->number);
+            ->assertSee('Korekta '.$correction->number);
 
         $preview = $this->get(route('invoices.preview', $correction))
             ->assertOk()
             ->assertHeader('Content-Type', 'application/pdf')
-            ->assertHeader('Content-Disposition', 'inline; filename="' . str_replace(['/', '\\'], '-', $correction->number) . '.pdf"');
+            ->assertHeader('Content-Disposition', 'inline; filename="'.str_replace(['/', '\\'], '-', $correction->number).'.pdf"');
 
         $this->assertStringStartsWith('%PDF-', $preview->getContent());
     }

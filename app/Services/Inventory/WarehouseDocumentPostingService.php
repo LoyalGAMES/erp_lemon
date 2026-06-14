@@ -9,9 +9,10 @@ use App\Models\ReturnCase;
 use App\Models\StockBalance;
 use App\Models\StockLedgerEntry;
 use App\Models\WarehouseDocument;
-use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Audit\AuditLogService;
+use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Invoices\ReturnCorrectionInvoiceService;
+use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Throwable;
@@ -24,8 +25,8 @@ final class WarehouseDocumentPostingService
         private readonly AuditLogService $audit,
         private readonly DocumentAutomationSettingsService $automationSettings,
         private readonly ReturnCorrectionInvoiceService $returnCorrections,
-    ) {
-    }
+        private readonly InvoiceWooCommerceUploadService $invoiceUpload,
+    ) {}
 
     public function post(WarehouseDocument $document): void
     {
@@ -81,7 +82,7 @@ final class WarehouseDocumentPostingService
 
                     $newOnHand = (float) $balance->quantity_on_hand + $quantityChange;
 
-                    if ($newOnHand < 0 && !$this->warehouseAllowsNegative($document, $warehouseId)) {
+                    if ($newOnHand < 0 && ! $this->warehouseAllowsNegative($document, $warehouseId)) {
                         throw new RuntimeException("Brak stanu dla SKU {$line->product->sku} w magazynie #{$warehouseId}.");
                     }
 
@@ -217,7 +218,7 @@ final class WarehouseDocumentPostingService
                         $previousOnHand = (float) $balance->quantity_on_hand;
                         $newOnHand = $previousOnHand + $quantityChange;
 
-                        if ($newOnHand < 0 && !$this->warehouseAllowsNegative($document, $warehouseId)) {
+                        if ($newOnHand < 0 && ! $this->warehouseAllowsNegative($document, $warehouseId)) {
                             throw new RuntimeException("Anulowanie dokumentu {$document->number} spowodowałoby ujemny stan SKU {$line->product->sku} w magazynie #{$warehouseId}.");
                         }
 
@@ -327,14 +328,14 @@ final class WarehouseDocumentPostingService
     }
 
     /**
-     * @param list<array{warehouse_id:int,product_id:int}> $triggers
+     * @param  list<array{warehouse_id:int,product_id:int}>  $triggers
      */
     private function allocateWaitingReservations(array $triggers): int
     {
         $allocated = 0;
 
         collect($triggers)
-            ->unique(fn (array $trigger): string => $trigger['warehouse_id'] . ':' . $trigger['product_id'])
+            ->unique(fn (array $trigger): string => $trigger['warehouse_id'].':'.$trigger['product_id'])
             ->each(function (array $trigger) use (&$allocated): void {
                 $allocated += $this->reservations->allocateWaitingReservations(
                     (int) $trigger['warehouse_id'],
@@ -355,7 +356,7 @@ final class WarehouseDocumentPostingService
     }
 
     /**
-     * @param list<array{warehouse_id:int,product_id:int}> $triggers
+     * @param  list<array{warehouse_id:int,product_id:int}>  $triggers
      */
     private function queueStockSync(array $triggers, string $reason): void
     {
@@ -392,7 +393,7 @@ final class WarehouseDocumentPostingService
     }
 
     /**
-     * @param list<int> $returnCaseIds
+     * @param  list<int>  $returnCaseIds
      */
     private function issueReturnCorrectionsAfterPosting(array $returnCaseIds): void
     {
@@ -405,7 +406,8 @@ final class WarehouseDocumentPostingService
 
         foreach (array_unique($returnCaseIds) as $returnCaseId) {
             try {
-                $this->returnCorrections->createForReturn(ReturnCase::query()->findOrFail($returnCaseId));
+                $invoice = $this->returnCorrections->createForReturn(ReturnCase::query()->findOrFail($returnCaseId));
+                $this->invoiceUpload->upload($invoice);
             } catch (Throwable $exception) {
                 $returnCase = ReturnCase::query()->find($returnCaseId);
 

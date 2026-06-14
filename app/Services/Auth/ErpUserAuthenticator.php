@@ -27,7 +27,7 @@ final class ErpUserAuthenticator
         if ($this->matchesEnvironmentFallback($login, $password)) {
             return new User([
                 'name' => $login,
-                'email' => $login . '@sempre-erp.local',
+                'email' => $this->fallbackEmail($login),
                 'role' => User::ROLE_ADMINISTRATOR,
                 'is_active' => true,
             ]);
@@ -71,5 +71,12 @@ final class ErpUserAuthenticator
             && $fallbackPassword !== ''
             && hash_equals($fallbackLogin, $login)
             && hash_equals($fallbackPassword, $password);
+    }
+
+    private function fallbackEmail(string $login): string
+    {
+        $configured = trim((string) env('ERP_FALLBACK_EMAIL', ''));
+
+        return $configured !== '' ? $configured : $login;
     }
 }
