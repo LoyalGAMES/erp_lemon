@@ -403,12 +403,12 @@
                 <thead>
                     <tr>
                         <th style="width: 24px;">Lp.</th>
-                        <th style="width: 245px;">Nazwa towaru/usługi</th>
-                        <th class="right nowrap" style="width: 58px;">Ilość / jm</th>
-                        <th class="right nowrap" style="width: 64px;">Cena j. netto</th>
-                        <th class="right nowrap" style="width: 64px;">Wartość netto</th>
+                        <th style="width: 222px;">Nazwa towaru/usługi</th>
+                        <th class="right nowrap" style="width: 54px;">Ilość / jm</th>
+                        <th class="right nowrap" style="width: 62px;">Cena j. netto</th>
+                        <th class="right nowrap" style="width: 56px;">Wartość netto</th>
                         <th class="right nowrap" style="width: 40px;">VAT</th>
-                        <th class="right nowrap" style="width: 64px;">Kwota VAT</th>
+                        <th class="right nowrap" style="width: 62px;">Kwota VAT</th>
                         <th class="right nowrap" style="width: 64px;">Brutto</th>
                     </tr>
                 </thead>
@@ -437,12 +437,12 @@
                 <thead>
                     <tr>
                         <th style="width: 24px;">Lp.</th>
-                        <th style="width: 245px;">Nazwa towaru/usługi</th>
-                        <th class="right nowrap" style="width: 58px;">Ilość / jm</th>
-                        <th class="right nowrap" style="width: 64px;">Cena j. netto</th>
-                        <th class="right nowrap" style="width: 64px;">Wartość netto</th>
+                        <th style="width: 222px;">Nazwa towaru/usługi</th>
+                        <th class="right nowrap" style="width: 54px;">Ilość / jm</th>
+                        <th class="right nowrap" style="width: 62px;">Cena j. netto</th>
+                        <th class="right nowrap" style="width: 56px;">Wartość netto</th>
                         <th class="right nowrap" style="width: 40px;">VAT</th>
-                        <th class="right nowrap" style="width: 64px;">Kwota VAT</th>
+                        <th class="right nowrap" style="width: 62px;">Kwota VAT</th>
                         <th class="right nowrap" style="width: 64px;">Brutto</th>
                     </tr>
                 </thead>
