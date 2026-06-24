@@ -149,8 +149,9 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('data-product-quick-edit-open="sprzedaz"', false)
             ->assertSee('data-product-quick-edit-open="informacje"', false)
             ->assertSee('data-product-quick-edit-open="media"', false)
+            ->assertSee('data-product-quick-edit-tab="warianty"', false)
             ->assertSee('Szybka edycja produktu')
-            ->assertDontSee('/products/' . $product->id . '/edit', false)
+            ->assertSee('/products/' . $product->id . '/edit', false)
             ->assertSee('Produkt')
             ->assertSee('Sprzedaż i magazyn')
             ->assertSee('Informacje')
@@ -260,6 +261,55 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee('Sukienka PARIS Różowa')
             ->assertDontSee('Buty zimowe');
+    }
+
+    public function test_operator_can_manage_product_categories_and_parameter_dictionary(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $this->get(route('products.categories.index'))
+            ->assertOk()
+            ->assertSee('Kategorie')
+            ->assertSee('Parametry');
+
+        $this->post(route('products.categories.store'), [
+            'sales_channel_id' => $channel->id,
+            'external_id' => '88',
+            'name' => 'Akcesoria',
+            'path' => 'Moda > Akcesoria',
+            'slug' => 'akcesoria',
+        ])->assertRedirect();
+
+        $this->post(route('products.parameters.store'), [
+            'name' => 'Rozmiar',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values_text' => "S\nM\nL",
+            'is_variant' => '1',
+            'sort_order' => '10',
+        ])->assertRedirect();
+
+        $this->assertDatabaseHas('product_categories', [
+            'sales_channel_id' => $channel->id,
+            'external_id' => '88',
+            'name' => 'Akcesoria',
+        ]);
+        $this->assertDatabaseHas('product_parameter_definitions', [
+            'name' => 'Rozmiar',
+            'slug' => 'rozmiar',
+            'is_variant' => true,
+        ]);
+
+        $this->get(route('products.index'))
+            ->assertOk()
+            ->assertSee('Moda &gt; Akcesoria', false)
+            ->assertSee('product-parameter-name-options', false)
+            ->assertSee('Rozmiar');
     }
 
     public function test_operator_can_create_product_with_stepper_and_server_media(): void
@@ -398,6 +448,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('Po zapisie ERP przejmuje produkt jako źródło prawdy')
             ->assertSee('data-product-tab="produkt"', false)
             ->assertSee('data-product-tab="sprzedaz"', false)
+            ->assertSee('data-product-tab="warianty"', false)
             ->assertSee('Status WooCommerce')
             ->assertSee('Wyszukaj kategorię z WooCommerce')
             ->assertSee('Dodaj zdjęcia z komputera');

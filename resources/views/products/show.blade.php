@@ -119,12 +119,15 @@
         'product' => $product,
         'categoryOptions' => $categoryOptions,
         'catalogOptions' => $catalogOptions,
+        'parameterOptions' => $parameterOptions,
+        'productLookupOptions' => $productLookupOptions,
     ])
 
     <div class="page-toolbar">
         <div class="inline-actions">
             <a class="button secondary" href="{{ route('products.index') }}">Wróć do produktów</a>
-            <button class="button" type="button" data-product-quick-edit-open="produkt">Edytuj dane ERP</button>
+            <button class="button" type="button" data-product-quick-edit-open="produkt">Szybka edycja</button>
+            <a class="button secondary" href="{{ route('products.edit', $product) }}">Pełna edycja</a>
             @if (! $product->ean)
                 <button class="button secondary" type="button" data-gs1-open-modal>Wygeneruj EAN GS1</button>
             @endif
@@ -358,7 +361,7 @@
             <span>Warianty</span>
             <span class="product-panel-actions">
                 <span>{{ $relatedVariants->count() }} rekordów</span>
-                @include('products._quick_edit_button', ['section' => 'produkt'])
+                @include('products._quick_edit_button', ['section' => 'warianty'])
             </span>
         </div>
         <div class="table-scroll">
@@ -426,7 +429,8 @@
                 @csrf
                 <input type="hidden" name="relation_type" value="variant">
                 <label>SKU wariantu
-                    <input name="child_sku" placeholder="np. BLS..." required>
+                    <input list="product-lookup-options" data-product-sku-lookup placeholder="Wpisz SKU, nazwę lub kategorię" required autocomplete="off">
+                    <input type="hidden" name="child_sku" data-product-sku-hidden>
                 </label>
                 <label>Atrybut wariantu
                     <input name="variant_attribute" value="{{ data_get($master, 'variant_attribute', 'Rozmiar') }}" placeholder="np. Rozmiar">

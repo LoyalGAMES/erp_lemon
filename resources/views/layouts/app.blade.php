@@ -38,6 +38,9 @@
         .nav { display: grid; gap: 4px; }
         .nav a { display: flex; align-items: center; gap: 13px; color: var(--text); text-decoration: none; border-radius: 8px; padding: 12px 16px; font-size: 15px; font-weight: 520; }
         .nav a.active { color: var(--green-dark); background: var(--green-soft); font-weight: 750; }
+        .nav-submenu { display: grid; gap: 2px; margin: -1px 0 6px 18px; padding-left: 12px; border-left: 1px solid var(--border); }
+        .nav-submenu a { min-height: 34px; padding: 8px 12px; font-size: 13px; border-radius: 7px; color: var(--muted); }
+        .nav-submenu a.active { color: var(--green-dark); background: rgba(134, 115, 100, .10); }
         .icon { width: 21px; height: 21px; display: inline-grid; place-items: center; color: currentColor; }
         .user-menu { margin-top: auto; position: relative; }
         .user-menu summary { list-style: none; cursor: pointer; }
@@ -188,6 +191,12 @@
         };
         $nav = array_values(array_filter($nav, fn (array $item): bool => $canAccessArea($item[0])));
         $settingsNav = array_values(array_filter($settingsNav, fn (array $item): bool => $canAccessArea($item[0])));
+        $productSubnav = $canAccessArea('products') ? [
+            ['products', route('products.index'), 'Lista produktów'],
+            ['product-categories', route('products.categories.index'), 'Kategorie'],
+            ['product-parameters', route('products.parameters.index'), 'Parametry'],
+        ] : [];
+        $productActiveKeys = array_column($productSubnav, 0);
     @endphp
     <div class="sidebar-backdrop" data-sidebar-close></div>
     <div class="app">
@@ -200,7 +209,15 @@
             </div>
             <nav class="nav" aria-label="Główne">
                 @foreach ($nav as [$key, $url, $label])
-                    <a href="{{ $url }}" @class(['active' => $active === $key])>{{ $label }}</a>
+                    @php $isProductGroup = $key === 'products' && in_array($active, $productActiveKeys, true); @endphp
+                    <a href="{{ $url }}" @class(['active' => $active === $key || $isProductGroup])>{{ $label }}</a>
+                    @if ($key === 'products' && $productSubnav !== [] && $isProductGroup)
+                        <div class="nav-submenu" aria-label="Produkty">
+                            @foreach ($productSubnav as [$subKey, $subUrl, $subLabel])
+                                <a href="{{ $subUrl }}" @class(['active' => $active === $subKey])>{{ $subLabel }}</a>
+                            @endforeach
+                        </div>
+                    @endif
                 @endforeach
             </nav>
             <details class="user-menu" @if(in_array($active, array_column($settingsNav, 0), true)) open @endif>

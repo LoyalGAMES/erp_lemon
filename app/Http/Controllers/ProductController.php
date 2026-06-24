@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Product;
 use App\Models\ProductCategory;
+use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\StockLedgerEntry;
 use App\Models\StockBalance;
@@ -44,6 +45,8 @@ class ProductController extends Controller
             'warehouseOptions' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'categoryOptions' => $this->categoryOptions(),
             'catalogOptions' => $this->catalogOptions(),
+            'parameterOptions' => $this->parameterOptions(),
+            'productLookupOptions' => $this->productLookupOptions(),
             'module' => 'products',
         ]);
     }
@@ -104,6 +107,8 @@ class ProductController extends Controller
                 ->get(),
             'categoryOptions' => $this->categoryOptions(),
             'catalogOptions' => $this->catalogOptions(),
+            'parameterOptions' => $this->parameterOptions(),
+            'productLookupOptions' => $this->productLookupOptions($product),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
             'module' => 'products',
             'title' => $product->name,
@@ -113,12 +118,19 @@ class ProductController extends Controller
 
     public function edit(Product $product, Gs1SettingsService $gs1Settings): View
     {
-        $product->load(['stockBalances.warehouse', 'channelMappings.salesChannel']);
+        $product->load([
+            'stockBalances.warehouse',
+            'channelMappings.salesChannel',
+            'childRelations.childProduct',
+            'variantChildren.stockBalances.warehouse',
+        ]);
 
         return view('products.edit', [
             'product' => $product,
             'categoryOptions' => $this->categoryOptions(),
             'catalogOptions' => $this->catalogOptions(),
+            'parameterOptions' => $this->parameterOptions(),
+            'productLookupOptions' => $this->productLookupOptions($product),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
             'module' => 'products',
             'title' => 'Edycja produktu',
@@ -158,6 +170,7 @@ class ProductController extends Controller
             $this->storeUploadedMedia($product, $request),
         );
         $product->forceFill(['attributes' => $attributes])->save();
+        $this->syncVariantRelations($product, (array) $request->input('variant_skus', []), [], $validated['variant_attribute'] ?? null);
 
         return redirect()
             ->route('products.show', $product)
@@ -196,6 +209,12 @@ class ProductController extends Controller
             'attributes' => $attributes,
         ]);
         $product->save();
+        $this->syncVariantRelations(
+            $product,
+            (array) $request->input('variant_skus', []),
+            (array) $request->input('variant_remove', []),
+            $validated['variant_attribute'] ?? null,
+        );
 
         $audit->record('product.master_data_updated', $product, $before, [
             'product' => $product->only(['sku', 'name', 'ean', 'unit', 'vat_rate', 'weight_kg', 'is_active']),
@@ -472,6 +491,10 @@ class ProductController extends Controller
             'parameters.value.*' => ['nullable', 'string', 'max:2000'],
             'parameters.variation' => ['nullable', 'array'],
             'parameters.variation.*' => ['nullable', 'boolean'],
+            'variant_skus' => ['nullable', 'array'],
+            'variant_skus.*' => ['nullable', 'string', 'exists:products,sku'],
+            'variant_remove' => ['nullable', 'array'],
+            'variant_remove.*' => ['nullable', 'boolean'],
             'existing_media' => ['nullable', 'array'],
             'existing_media.*.src' => ['nullable', 'string', 'max:2000'],
             'existing_media.*.alt' => ['nullable', 'string', 'max:255'],
@@ -599,6 +622,86 @@ class ProductController extends Controller
         $master['product_type'] = 'variation';
         data_set($attributes, 'master', $master);
         $product->forceFill(['attributes' => $attributes])->save();
+    }
+
+    /**
+     * @param array<int|string, mixed> $submittedSkus
+     * @param array<int|string, mixed> $removeFlags
+     */
+    private function syncVariantRelations(Product $product, array $submittedSkus, array $removeFlags, mixed $variantAttribute): void
+    {
+        if ($submittedSkus === [] && $removeFlags === []) {
+            return;
+        }
+
+        $variantAttribute = $this->nullableString($variantAttribute)
+            ?? $this->nullableString(data_get($product->masterData(), 'variant_attribute'))
+            ?? 'Rozmiar';
+        $currentRelations = ProductRelation::query()
+            ->with('childProduct')
+            ->where('parent_product_id', $product->id)
+            ->where('relation_type', 'variant')
+            ->get();
+        $currentRelationBySku = $currentRelations
+            ->filter(fn (ProductRelation $relation): bool => $relation->childProduct !== null)
+            ->keyBy(fn (ProductRelation $relation): string => mb_strtolower((string) $relation->childProduct->sku));
+        $skusToAttach = [];
+
+        foreach ($submittedSkus as $index => $sku) {
+            $sku = $this->nullableString($sku);
+
+            if ($sku === null || mb_strtolower($sku) === mb_strtolower($product->sku)) {
+                continue;
+            }
+
+            if (filter_var($removeFlags[$index] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+                $currentRelationBySku->get(mb_strtolower($sku))?->delete();
+                continue;
+            }
+
+            $skusToAttach[] = $sku;
+        }
+
+        $children = Product::query()
+            ->whereIn('sku', collect($skusToAttach)->unique()->values()->all())
+            ->get()
+            ->keyBy('sku');
+        $nextSortOrder = (int) (ProductRelation::query()
+            ->where('parent_product_id', $product->id)
+            ->where('relation_type', 'variant')
+            ->max('sort_order') ?? 0);
+
+        foreach (collect($skusToAttach)->unique() as $sku) {
+            $child = $children->get($sku);
+
+            if (! $child instanceof Product || (int) $child->id === (int) $product->id) {
+                continue;
+            }
+
+            $existing = $currentRelationBySku->get(mb_strtolower($sku));
+            $nextSortOrder += $existing instanceof ProductRelation ? 0 : 10;
+
+            ProductRelation::query()->updateOrCreate(
+                [
+                    'parent_product_id' => $product->id,
+                    'child_product_id' => $child->id,
+                    'relation_type' => 'variant',
+                ],
+                [
+                    'sort_order' => $existing?->sort_order ?? $nextSortOrder,
+                    'metadata' => [
+                        'created_from' => 'product_editor',
+                        'variant_attribute' => $variantAttribute,
+                    ],
+                ],
+            );
+
+            $this->markAsVariantChild($child);
+        }
+
+        if ($skusToAttach !== [] || ProductRelation::query()->where('parent_product_id', $product->id)->where('relation_type', 'variant')->exists()) {
+            $this->markAsVariableParent($product, $variantAttribute);
+        }
     }
 
     /**
@@ -1042,6 +1145,84 @@ class ProductController extends Controller
             ->push('Domyślny')
             ->unique(fn (string $catalog): string => mb_strtolower($catalog))
             ->sort()
+            ->values();
+    }
+
+    /**
+     * @return Collection<int, array{name:string,values:list<string>,is_variant:bool,is_required:bool,input_type:string}>
+     */
+    private function parameterOptions(): Collection
+    {
+        $defined = ProductParameterDefinition::query()
+            ->orderBy('sort_order')
+            ->orderBy('name')
+            ->get()
+            ->map(fn (ProductParameterDefinition $definition): array => [
+                'name' => $definition->name,
+                'values' => (array) $definition->values,
+                'is_variant' => (bool) $definition->is_variant,
+                'is_required' => (bool) $definition->is_required,
+                'input_type' => $definition->input_type,
+            ]);
+
+        $discovered = Product::query()
+            ->whereNotNull('attributes')
+            ->get(['attributes'])
+            ->flatMap(function (Product $product): array {
+                return collect((array) data_get((array) $product->attributes, 'master.parameters', []))
+                    ->filter(fn ($row): bool => is_array($row))
+                    ->map(fn (array $row): array => [
+                        'name' => $this->nullableString($row['name'] ?? null),
+                        'value' => $this->nullableString($row['value'] ?? null),
+                        'variation' => (bool) ($row['variation'] ?? false),
+                    ])
+                    ->filter(fn (array $row): bool => $row['name'] !== null)
+                    ->values()
+                    ->all();
+            })
+            ->groupBy(fn (array $row): string => mb_strtolower((string) $row['name']))
+            ->map(fn (Collection $rows): array => [
+                'name' => (string) $rows->first()['name'],
+                'values' => $rows->pluck('value')->filter()->unique()->sort()->values()->all(),
+                'is_variant' => $rows->contains(fn (array $row): bool => (bool) $row['variation']),
+                'is_required' => false,
+                'input_type' => 'text',
+            ])
+            ->values();
+
+        return $defined
+            ->concat($discovered)
+            ->unique(fn (array $row): string => mb_strtolower($row['name']))
+            ->sortBy('name')
+            ->values();
+    }
+
+    /**
+     * @return Collection<int, array{sku:string,name:string,ean:?string,category:?string,label:string}>
+     */
+    private function productLookupOptions(?Product $excludedProduct = null): Collection
+    {
+        return Product::query()
+            ->when($excludedProduct !== null, fn ($query) => $query->whereKeyNot($excludedProduct->id))
+            ->orderBy('name')
+            ->orderBy('sku')
+            ->get(['id', 'sku', 'name', 'ean', 'attributes'])
+            ->map(function (Product $product): array {
+                $category = $this->nullableString(data_get((array) $product->attributes, 'master.category'));
+                $label = $product->sku . ' | ' . $product->name;
+
+                if ($category !== null) {
+                    $label .= ' | ' . $category;
+                }
+
+                return [
+                    'sku' => $product->sku,
+                    'name' => $product->name,
+                    'ean' => $this->nullableString($product->ean),
+                    'category' => $category,
+                    'label' => $label,
+                ];
+            })
             ->values();
     }
 

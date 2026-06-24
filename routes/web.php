@@ -12,6 +12,7 @@ use App\Http\Controllers\LedgerController;
 use App\Http\Controllers\ModuleController;
 use App\Http\Controllers\PackingController;
 use App\Http\Controllers\ProductController;
+use App\Http\Controllers\ProductConfigurationController;
 use App\Http\Controllers\ProductImageThumbnailController;
 use App\Http\Controllers\ReturnController;
 use App\Http\Controllers\SettingsController;
@@ -54,6 +55,14 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
 
     Route::middleware(EnsureErpRole::class.':products')->group(function (): void {
         Route::get('/products', [ProductController::class, 'index'])->name('products.index');
+        Route::get('/products/configuration/categories', [ProductConfigurationController::class, 'categories'])->name('products.categories.index');
+        Route::post('/products/configuration/categories', [ProductConfigurationController::class, 'storeCategory'])->name('products.categories.store');
+        Route::put('/products/configuration/categories/{category}', [ProductConfigurationController::class, 'updateCategory'])->name('products.categories.update');
+        Route::delete('/products/configuration/categories/{category}', [ProductConfigurationController::class, 'destroyCategory'])->name('products.categories.destroy');
+        Route::get('/products/configuration/parameters', [ProductConfigurationController::class, 'parameters'])->name('products.parameters.index');
+        Route::post('/products/configuration/parameters', [ProductConfigurationController::class, 'storeParameter'])->name('products.parameters.store');
+        Route::put('/products/configuration/parameters/{parameter}', [ProductConfigurationController::class, 'updateParameter'])->name('products.parameters.update');
+        Route::delete('/products/configuration/parameters/{parameter}', [ProductConfigurationController::class, 'destroyParameter'])->name('products.parameters.destroy');
         Route::get('/products/image-thumbnail', ProductImageThumbnailController::class)->name('products.image-thumbnail');
         Route::post('/products', [ProductController::class, 'store'])->name('products.store');
         Route::get('/products/{product}/edit', [ProductController::class, 'edit'])->name('products.edit');

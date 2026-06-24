@@ -115,6 +115,7 @@
         <button class="active" type="button" data-product-tab="produkt" aria-selected="true">Produkt</button>
         <button type="button" data-product-tab="sprzedaz" aria-selected="false">Sprzedaż i magazyn</button>
         <button type="button" data-product-tab="informacje" aria-selected="false">Informacje</button>
+        <button type="button" data-product-tab="warianty" aria-selected="false">Warianty i relacje</button>
         <button type="button" data-product-tab="media" aria-selected="false">Media</button>
     </nav>
 
@@ -258,16 +259,16 @@
                     </label>
                 </div>
                 <label>Opis PL HTML
-                    <textarea class="product-html" name="description_pl">{{ $masterField('description_pl', 'content.pl.description') }}</textarea>
+                    <textarea class="product-html" name="description_pl" data-rich-product-editor>{{ $masterField('description_pl', 'content.pl.description') }}</textarea>
                 </label>
                 <label>Opis EN HTML
-                    <textarea class="product-html" name="description_en">{{ $masterField('description_en', 'content.en.description') }}</textarea>
+                    <textarea class="product-html" name="description_en" data-rich-product-editor>{{ $masterField('description_en', 'content.en.description') }}</textarea>
                 </label>
                 <label>Krótki opis PL HTML
-                    <textarea class="product-html" name="short_description_pl">{{ $masterField('short_description_pl', 'content.pl.additional_description') }}</textarea>
+                    <textarea class="product-html" name="short_description_pl" data-rich-product-editor>{{ $masterField('short_description_pl', 'content.pl.additional_description') }}</textarea>
                 </label>
                 <label>Krótki opis EN HTML
-                    <textarea class="product-html" name="short_description_en">{{ $masterField('short_description_en', 'content.en.additional_description') }}</textarea>
+                    <textarea class="product-html" name="short_description_en" data-rich-product-editor>{{ $masterField('short_description_en', 'content.en.additional_description') }}</textarea>
                 </label>
                 <div class="product-form-grid two">
                     <label>Produkty sprzedaży dodatkowej (SKU)
@@ -277,6 +278,7 @@
                         <textarea name="related_cross_sell_skus" placeholder="Jedno SKU w wierszu">{{ $relatedCrossSells }}</textarea>
                     </label>
                 </div>
+                @include('products._relation_sku_pickers')
 
                 <div class="table-scroll">
                     <table class="dense-table repeat-table">
@@ -290,8 +292,8 @@
                         <tbody>
                             @foreach ($parameterRows as $index => $row)
                                 <tr>
-                                    <td><input name="parameters[name][]" value="{{ $row['name'] }}" placeholder="np. Rozmiar"></td>
-                                    <td><input name="parameters[value][]" value="{{ $row['value'] }}" placeholder="np. One size"></td>
+                                    <td><input name="parameters[name][]" value="{{ $row['name'] }}" list="product-parameter-name-options" placeholder="np. Rozmiar"></td>
+                                    <td><input name="parameters[value][]" value="{{ $row['value'] }}" list="product-parameter-value-options" placeholder="np. One size"></td>
                                     <td>
                                         <input type="hidden" name="parameters[variation][{{ $index }}]" value="0">
                                         <label class="toggle-row"><input name="parameters[variation][{{ $index }}]" type="checkbox" value="1" @checked($row['variation'])> Tak</label>
@@ -301,6 +303,16 @@
                         </tbody>
                     </table>
                 </div>
+            </div>
+        </section>
+
+        <section class="card product-edit-card product-edit-step" data-product-step="warianty" hidden>
+            <div class="panel-header">Warianty i relacje</div>
+            <div class="product-edit-body">
+                @include('products._variant_relation_editor', [
+                    'product' => $product,
+                    'productLookupOptions' => $productLookupOptions,
+                ])
             </div>
         </section>
 
@@ -356,6 +368,9 @@
             <option value="{{ $category['path'] }}">{{ $category['sales_channel'] ? $category['sales_channel'] . ' · ' : '' }}{{ $category['name'] }}</option>
         @endforeach
     </datalist>
+    @include('products._parameter_datalists', ['parameterOptions' => $parameterOptions])
+    @include('products._product_lookup_datalist', ['productLookupOptions' => $productLookupOptions])
+    @include('products._rich_editor_assets')
 @endsection
 
 @push('scripts')

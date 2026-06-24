@@ -375,16 +375,16 @@
                     </label>
                 </div>
                 <label>Opis PL HTML
-                    <textarea class="product-html" name="description_pl">{{ old('description_pl') }}</textarea>
+                    <textarea class="product-html" name="description_pl" data-rich-product-editor>{{ old('description_pl') }}</textarea>
                 </label>
                 <label>Opis EN HTML
-                    <textarea class="product-html" name="description_en">{{ old('description_en') }}</textarea>
+                    <textarea class="product-html" name="description_en" data-rich-product-editor>{{ old('description_en') }}</textarea>
                 </label>
                 <label>Krótki opis PL HTML
-                    <textarea class="product-html" name="short_description_pl">{{ old('short_description_pl', old('additional_description_pl')) }}</textarea>
+                    <textarea class="product-html" name="short_description_pl" data-rich-product-editor>{{ old('short_description_pl', old('additional_description_pl')) }}</textarea>
                 </label>
                 <label>Krótki opis EN HTML
-                    <textarea class="product-html" name="short_description_en">{{ old('short_description_en') }}</textarea>
+                    <textarea class="product-html" name="short_description_en" data-rich-product-editor>{{ old('short_description_en') }}</textarea>
                 </label>
                 <div class="drawer-form-grid">
                     <label>Produkty sprzedaży dodatkowej (SKU)
@@ -394,6 +394,7 @@
                         <textarea name="related_cross_sell_skus" placeholder="Jedno SKU w wierszu">{{ old('related_cross_sell_skus', '') }}</textarea>
                     </label>
                 </div>
+                @include('products._relation_sku_pickers')
 
                 <div class="table-scroll drawer-table">
                     <table class="dense-table">
@@ -407,8 +408,8 @@
                         <tbody>
                             @foreach ($createParameterRows as $index => $row)
                                 <tr>
-                                    <td><input name="parameters[name][]" value="{{ $row['name'] }}" placeholder="np. Rozmiar"></td>
-                                    <td><input name="parameters[value][]" value="{{ $row['value'] }}" placeholder="np. One size"></td>
+                                    <td><input name="parameters[name][]" value="{{ $row['name'] }}" list="product-parameter-name-options" placeholder="np. Rozmiar"></td>
+                                    <td><input name="parameters[value][]" value="{{ $row['value'] }}" list="product-parameter-value-options" placeholder="np. One size"></td>
                                     <td>
                                         <input type="hidden" name="parameters[variation][{{ $index }}]" value="0">
                                         <label class="toggle-row"><input name="parameters[variation][{{ $index }}]" type="checkbox" value="1" @checked($row['variation'])> Tak</label>
@@ -738,6 +739,9 @@
             <option value="{{ $category['path'] }}">{{ $category['sales_channel'] ? $category['sales_channel'] . ' · ' : '' }}{{ $category['name'] }}</option>
         @endforeach
     </datalist>
+    @include('products._parameter_datalists', ['parameterOptions' => $parameterOptions])
+    @include('products._product_lookup_datalist', ['productLookupOptions' => $productLookupOptions])
+    @include('products._rich_editor_assets')
 @endsection
 
 @push('scripts')
