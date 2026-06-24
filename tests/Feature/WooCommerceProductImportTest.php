@@ -383,7 +383,7 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('<p>Krótki PL</p>', data_get($product->attributes, 'master.content.pl.additional_description'));
         $this->assertSame('Koszule', data_get($product->attributes, 'master.category'));
         $this->assertSame('A-01-02', data_get($product->attributes, 'master.stock.location'));
-        $this->assertEquals(5.0, data_get($product->attributes, 'master.stock.quantity'));
+        $this->assertNull(data_get($product->attributes, 'master.stock.quantity'));
         $this->assertEquals(299.0, data_get($product->attributes, 'master.prices.sale_price_pln'));
         $this->assertSame('Rozmiar', data_get($product->attributes, 'master.parameters.0.name'));
         $this->assertTrue(data_get($product->attributes, 'master.parameters.0.variation'));

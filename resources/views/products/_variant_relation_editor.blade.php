@@ -6,6 +6,7 @@
             'label' => $variant->sku . ' | ' . $variant->name,
             'name' => $variant->name,
             'ean' => $variant->ean,
+            'existing' => true,
         ])->values()->all()
         : [];
 
@@ -20,6 +21,7 @@
                     'label' => $lookup['label'] ?? $sku,
                     'name' => $lookup['name'] ?? '',
                     'ean' => $lookup['ean'] ?? null,
+                    'existing' => $sku !== '',
                 ];
             })
             ->filter(fn (array $row): bool => $row['sku'] !== '')
@@ -30,7 +32,7 @@
     $emptyVariantRows = max(3, 6 - count($variantRows));
 
     for ($index = 0; $index < $emptyVariantRows; $index++) {
-        $variantRows[] = ['sku' => '', 'label' => '', 'name' => '', 'ean' => null];
+        $variantRows[] = ['sku' => '', 'label' => '', 'name' => '', 'ean' => null, 'existing' => false];
     }
 @endphp
 
@@ -39,9 +41,20 @@
         <style>
             .variant-editor { display: grid; gap: 12px; }
             .variant-editor-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-            .variant-editor-table input { min-width: 180px; }
-            .variant-editor-table .variant-lookup-cell { min-width: 300px; }
+            .variant-editor-list { display: grid; gap: 10px; }
+            .variant-editor-row { display: grid; grid-template-columns: minmax(260px, 1fr) minmax(170px, .45fr); gap: 12px; align-items: center; padding: 12px; border: 1px solid var(--border); border-radius: 8px; background: #fffdfb; }
+            .variant-editor-row.is-empty { background: #fff; }
+            .variant-editor-main { display: grid; gap: 7px; min-width: 0; }
+            .variant-editor-main input { width: 100%; min-width: 0; }
+            .variant-editor-meta { display: flex; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
+            .variant-editor-actions { display: grid; gap: 6px; justify-items: end; }
+            .variant-editor-actions .toggle-row { justify-content: flex-end; }
             .related-picker-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+            @media (max-width: 820px) {
+                .variant-editor-row { grid-template-columns: 1fr; }
+                .variant-editor-actions { justify-items: start; }
+                .variant-editor-actions .toggle-row { justify-content: flex-start; }
+            }
             @media (max-width: 720px) {
                 .related-picker-grid { grid-template-columns: 1fr; }
             }
@@ -53,41 +66,44 @@
     <div class="variant-editor-head">
         <div>
             <strong>Warianty produktu</strong>
-            <div class="toolbar-note">Warianty są osobnymi SKU w ERP i zostaną utworzone jako warianty produktu w WooCommerce.</div>
+            <div class="toolbar-note">Wyszukaj istniejące SKU i zapisz produkt. Odłączenie wariantu usuwa tylko powiązanie wariantowe, nie usuwa produktu z ERP.</div>
         </div>
     </div>
-    <div class="table-scroll variant-editor-table">
-        <table class="dense-table">
-            <thead>
-                <tr>
-                    <th>Produkt wariantowy</th>
-                    <th>SKU</th>
-                    <th>EAN</th>
-                    <th>Usuń relację</th>
-                </tr>
-            </thead>
-            <tbody>
-                @foreach ($variantRows as $index => $row)
-                    <tr>
-                        <td class="variant-lookup-cell">
-                            <input
-                                value="{{ $row['label'] }}"
-                                list="product-lookup-options"
-                                placeholder="Wpisz SKU, nazwę lub kategorię"
-                                data-product-sku-lookup
-                                autocomplete="off"
-                            >
-                            <input type="hidden" name="variant_skus[{{ $index }}]" value="{{ $row['sku'] }}" data-product-sku-hidden>
-                        </td>
-                        <td>{{ $row['sku'] ?: '-' }}</td>
-                        <td>{{ $row['ean'] ?: '-' }}</td>
-                        <td>
-                            <input type="hidden" name="variant_remove[{{ $index }}]" value="0">
-                            <label class="toggle-row"><input name="variant_remove[{{ $index }}]" type="checkbox" value="1" @disabled($row['sku'] === '')> Tak</label>
-                        </td>
-                    </tr>
-                @endforeach
-            </tbody>
-        </table>
+
+    <div class="variant-editor-list">
+        @foreach ($variantRows as $index => $row)
+            <div class="variant-editor-row @if ($row['sku'] === '') is-empty @endif">
+                <div class="variant-editor-main">
+                    <label>Wariant
+                        <input
+                            value="{{ $row['label'] }}"
+                            list="product-lookup-options"
+                            placeholder="Wpisz SKU, nazwę lub kategorię"
+                            data-product-sku-lookup
+                            autocomplete="off"
+                        >
+                    </label>
+                    <input type="hidden" name="variant_skus[{{ $index }}]" value="{{ $row['sku'] }}" data-product-sku-hidden>
+                    <div class="variant-editor-meta">
+                        <span>SKU: <strong>{{ $row['sku'] ?: 'wybierz produkt' }}</strong></span>
+                        <span>EAN: <strong>{{ $row['ean'] ?: '-' }}</strong></span>
+                        @if ($row['name'] !== '')
+                            <span>{{ $row['name'] }}</span>
+                        @endif
+                    </div>
+                </div>
+                <div class="variant-editor-actions">
+                    <input type="hidden" name="variant_remove[{{ $index }}]" value="0">
+                    @if ($row['sku'] !== '')
+                        <label class="toggle-row">
+                            <input name="variant_remove[{{ $index }}]" type="checkbox" value="1">
+                            Odłącz wariant od produktu
+                        </label>
+                    @else
+                        <span class="toolbar-note">Wybierz produkt z listy, aby dodać wariant.</span>
+                    @endif
+                </div>
+            </div>
+        @endforeach
     </div>
 </div>

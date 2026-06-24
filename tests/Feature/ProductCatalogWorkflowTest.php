@@ -310,7 +310,7 @@ class ProductCatalogWorkflowTest extends TestCase
 
         $this->get(route('products.index'))
             ->assertOk()
-            ->assertSee('Moda &gt; Akcesoria', false)
+            ->assertSee('Akcesoria')
             ->assertSee('product-parameter-name-options', false)
             ->assertSee('Rozmiar');
     }
@@ -335,8 +335,6 @@ class ProductCatalogWorkflowTest extends TestCase
             'length_cm' => '40',
             'developed' => '1',
             'retail_price_pln' => '299.00',
-            'stock_quantity' => '8',
-            'stock_threshold' => '2',
             'warehouse_location' => 'A-02-01',
             'description_pl' => '<p>Opis z ERP</p>',
             'short_description_en' => '<p>Short ERP</p>',
@@ -368,7 +366,8 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame('Koszule', data_get($product->attributes, 'master.category'));
         $this->assertSame('M', data_get($product->attributes, 'master.parameters.0.value'));
         $this->assertTrue(data_get($product->attributes, 'master.parameters.0.variation'));
-        $this->assertEquals(8.0, data_get($product->attributes, 'master.stock.quantity'));
+        $this->assertNull(data_get($product->attributes, 'master.stock.quantity'));
+        $this->assertSame('A-02-01', data_get($product->attributes, 'master.stock.location'));
         $this->assertSame('catalog', data_get($product->attributes, 'master.catalog_visibility'));
         $this->assertSame('variable', data_get($product->attributes, 'master.product_type'));
         $this->assertSame('Rozmiar', data_get($product->attributes, 'master.variant_attribute'));
@@ -485,9 +484,6 @@ class ProductCatalogWorkflowTest extends TestCase
             'price_usd' => '88.56',
             'purchase_price_pln' => '100.00',
             'extra_cost_pln' => '5.00',
-            'stock_quantity' => '5',
-            'stock_threshold' => '3',
-            'ordered_quantity' => '2',
             'warehouse_location' => 'A-01-03',
             'name_en' => 'AURA shirt black ecru',
             'description_pl' => '<p>Stylowa koszula</p>',
@@ -519,7 +515,8 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame(['koszula', 'aura'], data_get($product->attributes, 'master.tags'));
         $this->assertEquals(369.0, data_get($product->attributes, 'master.prices.retail_price_pln'));
         $this->assertEquals(round(369 / 4.55, 2), data_get($product->attributes, 'master.prices.price_eur'));
-        $this->assertEquals(5.0, data_get($product->attributes, 'master.stock.quantity'));
+        $this->assertNull(data_get($product->attributes, 'master.stock.quantity'));
+        $this->assertSame('A-01-03', data_get($product->attributes, 'master.stock.location'));
         $this->assertSame('variable', data_get($product->attributes, 'master.product_type'));
         $this->assertSame('Rozmiar', data_get($product->attributes, 'master.variant_attribute'));
         $this->assertSame('SKU-UPSELL', data_get($product->attributes, 'master.related_products.upsell_skus.0'));

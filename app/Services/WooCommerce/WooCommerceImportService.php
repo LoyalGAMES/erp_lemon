@@ -473,7 +473,6 @@ final class WooCommerceImportService
     {
         $categories = $this->nameList($item['categories'] ?? []);
         $images = $this->imageList($item['images'] ?? []);
-        $stockQuantity = $this->nullableFloat($item['stock_quantity'] ?? null);
 
         if ($images === []) {
             $images = $this->imageList($item['parent_images'] ?? []);
@@ -502,9 +501,6 @@ final class WooCommerceImportService
                 'sale_price_pln' => $this->nullableFloat($item['sale_price'] ?? null),
             ],
             'stock' => [
-                'quantity' => $stockQuantity,
-                'ordered_quantity' => 0,
-                'threshold' => 0,
                 'location' => $this->nullableString($this->metaValue($item, ['_warehouse_location', 'warehouse_location', 'location'])),
             ],
             'related_products' => [

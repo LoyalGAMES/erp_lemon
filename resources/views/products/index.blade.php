@@ -353,21 +353,13 @@
                             @endforeach
                         </select>
                     </label>
-                    <label>Ilość stanu magazynowego
-                        <input name="stock_quantity" type="number" step="1" min="0" value="{{ old('stock_quantity') }}">
-                    </label>
-                    <label>Stan zamówiony
-                        <input name="ordered_quantity" type="number" step="1" min="0" value="{{ old('ordered_quantity') }}">
-                    </label>
-                    <label>Próg stanu
-                        <input name="stock_threshold" type="number" step="1" min="0" value="{{ old('stock_threshold') }}">
-                    </label>
                     <label>Lokalizacja
                         <input name="warehouse_location" value="{{ old('warehouse_location') }}" placeholder="np. A-01-03">
                     </label>
                     <label>Cena zakupu (średnia)
                         <input name="purchase_price_pln" type="number" step="0.01" min="0" value="{{ old('purchase_price_pln') }}">
                     </label>
+                    <div class="toolbar-note">Stany magazynowe produktu powstaną z dokumentów magazynowych po zapisaniu produktu.</div>
                 </div>
             </section>
 

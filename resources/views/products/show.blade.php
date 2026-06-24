@@ -107,7 +107,6 @@
         $onHand = $product->stockBalances->sum(fn ($balance) => (float) $balance->quantity_on_hand);
         $reserved = $product->stockBalances->sum(fn ($balance) => (float) $balance->quantity_reserved);
         $available = $product->stockBalances->sum(fn ($balance) => (float) $balance->quantity_available);
-        $ordered = (float) data_get($master, 'stock.ordered_quantity', 0);
         $parameters = collect(data_get($master, 'parameters', []))->filter(fn ($row) => is_array($row));
         $tags = implode(', ', (array) data_get($master, 'tags', []));
         $sourceLabel = $product->isErpMaster() ? 'ERP' : 'Import WooCommerce';
@@ -243,16 +242,13 @@
                 <div class="detail-item"><span>Cena hurt</span><strong>{{ $money(data_get($master, 'prices.wholesale_price_pln')) }}</strong></div>
                 <div class="detail-item"><span>Cena detal</span><strong>{{ $money(data_get($master, 'prices.retail_price_pln')) }}</strong></div>
                 <div class="detail-item"><span>VAT</span><strong>{{ $percent($product->vat_rate) }}</strong></div>
-                <div class="detail-item"><span>Ilość stanu z karty</span><strong>{{ data_get($master, 'stock.quantity') !== null ? $qty(data_get($master, 'stock.quantity')) : '-' }}</strong></div>
                 <div class="detail-item"><span>Lokalizacja</span><strong>{{ data_get($master, 'stock.location') ?: '-' }}</strong></div>
-                <div class="detail-item"><span>Próg stanu</span><strong>{{ data_get($master, 'stock.threshold') !== null ? $qty(data_get($master, 'stock.threshold')) : '-' }}</strong></div>
                 <div class="detail-item"><span>Cena zakupu</span><strong>{{ $money(data_get($master, 'prices.purchase_price_pln')) }}</strong></div>
             </div>
 
             <div class="stock-pills">
                 <span class="stock-pill">Stan ogólny <strong>{{ $qty($onHand) }}</strong></span>
                 <span class="stock-pill">Rezerwacje <strong>{{ $qty($reserved) }}</strong></span>
-                <span class="stock-pill">Stan zamówiony <strong>{{ $qty($ordered) }}</strong></span>
                 <span class="stock-pill available">Dostępne do sprzedaży <strong>{{ $qty($available) }}</strong></span>
             </div>
 

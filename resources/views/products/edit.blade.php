@@ -227,21 +227,12 @@
                 </div>
 
                 <div class="product-form-grid">
-                    <label>Ilość stanu magazynowego
-                        <input name="stock_quantity" type="number" step="1" min="0" value="{{ $masterField('stock_quantity', 'stock.quantity') }}">
-                    </label>
                     <label>VAT %
                         <select name="vat_rate" required>
                             @foreach ([23, 8, 5, 0] as $rate)
                                 <option value="{{ $rate }}" @selected((float) old('vat_rate', $product->vat_rate) === (float) $rate)>{{ $rate }}%</option>
                             @endforeach
                         </select>
-                    </label>
-                    <label>Stan zamówiony
-                        <input name="ordered_quantity" type="number" step="1" min="0" value="{{ $masterField('ordered_quantity', 'stock.ordered_quantity') }}">
-                    </label>
-                    <label>Próg stanu
-                        <input name="stock_threshold" type="number" step="1" min="0" value="{{ $masterField('stock_threshold', 'stock.threshold') }}">
                     </label>
                     <label>Lokalizacja
                         <input name="warehouse_location" value="{{ $masterField('warehouse_location', 'stock.location') }}" placeholder="np. A-01-03">
@@ -250,6 +241,7 @@
                         <input name="purchase_price_pln" type="number" step="0.01" min="0" value="{{ $masterField('purchase_price_pln', 'prices.purchase_price_pln') }}">
                     </label>
                 </div>
+                @include('products._stock_readonly_panel', ['stockProduct' => $product])
             </div>
         </section>
 

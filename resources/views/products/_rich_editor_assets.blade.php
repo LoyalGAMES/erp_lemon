@@ -34,6 +34,7 @@
 
                     const shell = document.createElement('div');
                     shell.className = 'product-rich-shell';
+                    shell.addEventListener('click', (event) => event.stopPropagation());
 
                     const toolbar = document.createElement('div');
                     toolbar.className = 'product-rich-toolbar';
@@ -122,6 +123,8 @@
                     editor.contentEditable = 'true';
                     editor.dataset.placeholder = 'Wpisz opis produktu...';
                     editor.innerHTML = textarea.value || '';
+                    editor.addEventListener('mousedown', (event) => event.stopPropagation());
+                    editor.addEventListener('click', (event) => event.stopPropagation());
                     editor.addEventListener('input', () => {
                         saveSelection();
                         syncVisualToHtml();

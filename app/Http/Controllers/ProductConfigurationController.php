@@ -41,7 +41,8 @@ class ProductConfigurationController extends Controller
     {
         $validated = $this->categoryData($request);
 
-        ProductCategory::query()->create($validated);
+        $category = ProductCategory::query()->create($validated);
+        $this->refreshChildCategoryPaths($category);
 
         return back()->with('status', 'Kategoria produktu została dodana.');
     }
@@ -49,12 +50,14 @@ class ProductConfigurationController extends Controller
     public function updateCategory(Request $request, ProductCategory $category): RedirectResponse
     {
         $category->update($this->categoryData($request, $category));
+        $this->refreshChildCategoryPaths($category->fresh() ?? $category);
 
         return back()->with('status', 'Kategoria produktu została zapisana.');
     }
 
     public function destroyCategory(ProductCategory $category): RedirectResponse
     {
+        $this->detachChildCategories($category);
         $category->delete();
 
         return back()->with('status', 'Kategoria produktu została usunięta.');
@@ -121,21 +124,29 @@ class ProductConfigurationController extends Controller
         ]);
 
         $name = trim((string) $validated['name']);
-        $path = trim((string) ($validated['path'] ?? '')) ?: $name;
-        $slug = trim((string) ($validated['slug'] ?? '')) ?: Str::slug($path);
+        $parentExternalId = $this->nullableString($validated['parent_external_id'] ?? null);
+        $slug = trim((string) ($validated['slug'] ?? '')) ?: Str::slug($name);
         $externalId = trim((string) ($validated['external_id'] ?? ''));
 
         if ($externalId === '') {
             $externalId = $this->uniqueErpCategoryExternalId($salesChannelId, $slug ?: Str::slug($name), $category);
         }
 
+        if ($category !== null && $parentExternalId === (string) $category->external_id) {
+            $parentExternalId = null;
+        }
+
+        if ($category !== null && $parentExternalId !== null && $this->wouldCreateCategoryCycle($category, $parentExternalId, $salesChannelId)) {
+            $parentExternalId = null;
+        }
+
         return [
             'sales_channel_id' => $salesChannelId,
             'external_id' => $externalId,
-            'parent_external_id' => $this->nullableString($validated['parent_external_id'] ?? null),
+            'parent_external_id' => $parentExternalId,
             'name' => $name,
             'slug' => $slug ?: null,
-            'path' => $path,
+            'path' => $this->categoryPath($salesChannelId, $name, $parentExternalId, $category),
             'description' => $this->nullableString($validated['description'] ?? null),
             'metadata' => [
                 'source' => ctype_digit($externalId) ? 'woocommerce' : 'erp',
@@ -239,6 +250,100 @@ class ProductConfigurationController extends Controller
             ->unique(fn (string $item): string => mb_strtolower($item))
             ->values()
             ->all();
+    }
+
+    private function categoryPath(mixed $salesChannelId, string $name, ?string $parentExternalId, ?ProductCategory $category = null): string
+    {
+        $parent = $parentExternalId !== null
+            ? $this->categoryScope(ProductCategory::query(), $salesChannelId)
+                ->where('external_id', $parentExternalId)
+                ->when($category !== null, fn ($query) => $query->whereKeyNot($category->id))
+                ->first()
+            : null;
+
+        if (! $parent instanceof ProductCategory) {
+            return $name;
+        }
+
+        return trim(($parent->path ?: $parent->name) . ' > ' . $name);
+    }
+
+    private function refreshChildCategoryPaths(ProductCategory $category, array &$visited = []): void
+    {
+        $key = ((string) ($category->sales_channel_id ?? 'global')) . ':' . (string) $category->external_id;
+
+        if (isset($visited[$key])) {
+            return;
+        }
+
+        $visited[$key] = true;
+
+        $children = $this->categoryScope(ProductCategory::query(), $category->sales_channel_id)
+            ->where('parent_external_id', $category->external_id)
+            ->orderBy('name')
+            ->get();
+
+        foreach ($children as $child) {
+            $childPath = trim(($category->path ?: $category->name) . ' > ' . $child->name);
+
+            if ($child->path !== $childPath) {
+                $child->forceFill(['path' => $childPath])->save();
+            }
+
+            $this->refreshChildCategoryPaths($child, $visited);
+        }
+    }
+
+    private function detachChildCategories(ProductCategory $category): void
+    {
+        $children = $this->categoryScope(ProductCategory::query(), $category->sales_channel_id)
+            ->where('parent_external_id', $category->external_id)
+            ->get();
+
+        foreach ($children as $child) {
+            $child->forceFill([
+                'parent_external_id' => null,
+                'path' => $child->name,
+            ])->save();
+
+            $this->refreshChildCategoryPaths($child);
+        }
+    }
+
+    private function wouldCreateCategoryCycle(ProductCategory $category, string $parentExternalId, mixed $salesChannelId): bool
+    {
+        $visited = [];
+        $currentParentExternalId = $parentExternalId;
+
+        while ($currentParentExternalId !== '') {
+            if ($currentParentExternalId === (string) $category->external_id) {
+                return true;
+            }
+
+            if (isset($visited[$currentParentExternalId])) {
+                return true;
+            }
+
+            $visited[$currentParentExternalId] = true;
+            $parent = $this->categoryScope(ProductCategory::query(), $salesChannelId)
+                ->where('external_id', $currentParentExternalId)
+                ->first();
+
+            if (! $parent instanceof ProductCategory) {
+                return false;
+            }
+
+            $currentParentExternalId = (string) ($this->nullableString($parent->parent_external_id) ?? '');
+        }
+
+        return false;
+    }
+
+    private function categoryScope($query, mixed $salesChannelId)
+    {
+        return $salesChannelId === null
+            ? $query->whereNull('sales_channel_id')
+            : $query->where('sales_channel_id', $salesChannelId);
     }
 
     private function nullableString(mixed $value): ?string

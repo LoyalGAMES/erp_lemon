@@ -472,9 +472,6 @@ class ProductController extends Controller
             'price_usd' => ['nullable', 'numeric', 'min:0'],
             'purchase_price_pln' => ['nullable', 'numeric', 'min:0'],
             'extra_cost_pln' => ['nullable', 'numeric', 'min:0'],
-            'stock_quantity' => ['nullable', 'numeric', 'min:0'],
-            'stock_threshold' => ['nullable', 'numeric', 'min:0'],
-            'ordered_quantity' => ['nullable', 'numeric', 'min:0'],
             'warehouse_location' => ['nullable', 'string', 'max:255'],
             'name_en' => ['nullable', 'string', 'max:255'],
             'description_pl' => ['nullable', 'string'],
@@ -538,9 +535,6 @@ class ProductController extends Controller
             ],
             'prices' => $this->priceData($validated),
             'stock' => [
-                'quantity' => $this->nullableFloat($validated['stock_quantity'] ?? null),
-                'threshold' => $this->nullableFloat($validated['stock_threshold'] ?? null),
-                'ordered_quantity' => $this->nullableFloat($validated['ordered_quantity'] ?? null),
                 'location' => $this->nullableString($validated['warehouse_location'] ?? null),
             ],
             'content' => [
