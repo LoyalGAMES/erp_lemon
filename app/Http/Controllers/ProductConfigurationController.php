@@ -117,6 +117,7 @@ class ProductConfigurationController extends Controller
             'name' => ['required', 'string', 'max:255'],
             'slug' => ['nullable', 'string', 'max:255'],
             'path' => ['nullable', 'string', 'max:255'],
+            'description' => ['nullable', 'string', 'max:8000'],
         ]);
 
         $name = trim((string) $validated['name']);
@@ -135,6 +136,7 @@ class ProductConfigurationController extends Controller
             'name' => $name,
             'slug' => $slug ?: null,
             'path' => $path,
+            'description' => $this->nullableString($validated['description'] ?? null),
             'metadata' => [
                 'source' => ctype_digit($externalId) ? 'woocommerce' : 'erp',
                 'managed_in_erp' => true,

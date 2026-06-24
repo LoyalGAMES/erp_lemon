@@ -304,16 +304,16 @@
                         <input type="hidden" name="is_active" value="0">
                         <span class="toggle-row"><input name="is_active" type="checkbox" value="1" @checked(old('is_active', '1'))> Aktywny</span>
                     </label>
-                    <label>Status WooCommerce
+                    <label>Status publikacji w sklepie
                         <select name="publication_status">
                             @foreach (['publish' => 'Opublikowany', 'draft' => 'Szkic', 'pending' => 'Oczekujący', 'private' => 'Prywatny'] as $status => $label)
                                 <option value="{{ $status }}" @selected(old('publication_status', 'publish') === $status)>{{ $label }}</option>
                             @endforeach
                         </select>
                     </label>
-                    <label>Widoczność
+                    <label>Widoczność w WooCommerce
                         <select name="catalog_visibility">
-                            @foreach (['visible' => 'Sklep i wyszukiwarka', 'catalog' => 'Tylko sklep', 'search' => 'Tylko wyszukiwarka', 'hidden' => 'Ukryty'] as $visibility => $label)
+                            @foreach (['visible' => 'Widoczny w katalogu i wyszukiwarce', 'catalog' => 'Widoczny tylko w katalogu', 'search' => 'Widoczny tylko w wyszukiwarce', 'hidden' => 'Ukryty w sklepie'] as $visibility => $label)
                                 <option value="{{ $visibility }}" @selected(old('catalog_visibility', 'visible') === $visibility)>{{ $label }}</option>
                             @endforeach
                         </select>
@@ -326,11 +326,14 @@
                         </select>
                     </label>
                     <label>Atrybut wariantu
-                        <input name="variant_attribute" value="{{ old('variant_attribute') }}" placeholder="np. Rozmiar">
+                        @include('products._variant_attribute_select', [
+                            'parameterOptions' => $parameterOptions,
+                            'value' => old('variant_attribute'),
+                        ])
                     </label>
-                    <label>Opracowane
+                    <label>Gotowe do publikacji
                         <input type="hidden" name="developed" value="0">
-                        <span class="toggle-row"><input name="developed" type="checkbox" value="1" @checked(old('developed'))> Tak</span>
+                        <span class="toggle-row"><input name="developed" type="checkbox" value="1" @checked(old('developed'))> Dane PIM kompletne</span>
                     </label>
                 </div>
             </section>

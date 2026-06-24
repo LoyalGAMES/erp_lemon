@@ -19,6 +19,7 @@ class ProductCategory extends Model
         'name',
         'slug',
         'path',
+        'description',
         'count',
         'metadata',
     ];

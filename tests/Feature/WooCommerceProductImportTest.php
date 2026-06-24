@@ -25,6 +25,25 @@ class WooCommerceProductImportTest extends TestCase
         Http::fake(function ($request) {
             $url = $request->url();
 
+            if (str_contains($url, '/products/categories')) {
+                parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+                if ((int) ($query['page'] ?? 1) > 1) {
+                    return Http::response([]);
+                }
+
+                return Http::response([
+                    [
+                        'id' => 15,
+                        'name' => 'Koszule',
+                        'slug' => 'koszule',
+                        'path' => 'Odzież > Koszule',
+                        'description' => 'Opis kategorii z WooCommerce',
+                        'count' => 3,
+                    ],
+                ]);
+            }
+
             if (str_contains($url, '/products/777/variations')) {
                 parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
 
@@ -107,6 +126,12 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('https://shop.test/wp-content/uploads/koszula-vivien.jpg', $product->attributes['woocommerce_parent_image']['src']);
         $this->assertSame(1, $stats['stock_updated']);
         $this->assertSame(1, ProductChannelMapping::query()->where('external_variation_id', '888')->count());
+        $this->assertDatabaseHas('product_categories', [
+            'sales_channel_id' => $channel->id,
+            'external_id' => '15',
+            'name' => 'Koszule',
+            'description' => 'Opis kategorii z WooCommerce',
+        ]);
 
         $warehouse = Warehouse::query()->where('code', 'WC_B2C')->firstOrFail();
         $balance = StockBalance::query()

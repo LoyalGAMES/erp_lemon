@@ -113,6 +113,18 @@
         $sourceLabel = $product->isErpMaster() ? 'ERP' : 'Import WooCommerce';
         $displaySku = $product->displaySku();
         $externalId = $product->externalDisplayId();
+        $publicationStatusLabels = [
+            'publish' => 'Opublikowany',
+            'draft' => 'Szkic',
+            'pending' => 'Oczekuje na publikację',
+            'private' => 'Prywatny',
+        ];
+        $catalogVisibilityLabels = [
+            'visible' => 'Widoczny w katalogu i wyszukiwarce',
+            'catalog' => 'Widoczny tylko w katalogu',
+            'search' => 'Widoczny tylko w wyszukiwarce',
+            'hidden' => 'Ukryty w sklepie',
+        ];
     @endphp
 
     @include('products._quick_edit_drawer', [
@@ -211,11 +223,11 @@
                     <div class="detail-item"><span>Waga</span><strong>{{ $product->weight_kg ? $product->weight_kg . ' kg' : '-' }}</strong></div>
                     <div class="detail-item"><span>Wymiary</span><strong>{{ data_get($master, 'dimensions.height_cm') ?: '0' }} x {{ data_get($master, 'dimensions.width_cm') ?: '0' }} x {{ data_get($master, 'dimensions.length_cm') ?: '0' }} cm</strong></div>
                     <div class="detail-item"><span>Jednostka</span><strong>{{ $product->unit }}</strong></div>
-                    <div class="detail-item"><span>Status WooCommerce</span><strong>{{ data_get($master, 'publication_status', $product->is_active ? 'publish' : 'draft') }}</strong></div>
-                    <div class="detail-item"><span>Widoczność</span><strong>{{ data_get($master, 'catalog_visibility', 'visible') }}</strong></div>
+                    <div class="detail-item"><span>Status publikacji w sklepie</span><strong>{{ $publicationStatusLabels[data_get($master, 'publication_status', $product->is_active ? 'publish' : 'draft')] ?? data_get($master, 'publication_status', '-') }}</strong></div>
+                    <div class="detail-item"><span>Widoczność w WooCommerce</span><strong>{{ $catalogVisibilityLabels[data_get($master, 'catalog_visibility', 'visible')] ?? data_get($master, 'catalog_visibility', '-') }}</strong></div>
                     <div class="detail-item"><span>Typ produktu</span><strong>{{ data_get($master, 'product_type', 'simple') }}</strong></div>
                     <div class="detail-item"><span>Atrybut wariantu</span><strong>{{ data_get($master, 'variant_attribute') ?: '-' }}</strong></div>
-                    <div class="detail-item"><span>Opracowane</span><strong>{{ data_get($master, 'developed') ? 'Tak' : 'Nie' }}</strong></div>
+                    <div class="detail-item"><span>Gotowe do publikacji</span><strong>{{ data_get($master, 'developed') ? 'Dane PIM kompletne' : 'Wymaga uzupełnienia' }}</strong></div>
                 </div>
             </div>
         </div>
@@ -433,7 +445,10 @@
                     <input type="hidden" name="child_sku" data-product-sku-hidden>
                 </label>
                 <label>Atrybut wariantu
-                    <input name="variant_attribute" value="{{ data_get($master, 'variant_attribute', 'Rozmiar') }}" placeholder="np. Rozmiar">
+                    @include('products._variant_attribute_select', [
+                        'parameterOptions' => $parameterOptions,
+                        'value' => data_get($master, 'variant_attribute', 'Rozmiar'),
+                    ])
                 </label>
                 <button class="button secondary" type="submit">Dodaj wariant</button>
             </form>

@@ -275,7 +275,8 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->get(route('products.categories.index'))
             ->assertOk()
             ->assertSee('Kategorie')
-            ->assertSee('Parametry');
+            ->assertSee('Parametry')
+            ->assertSee('Opis kategorii');
 
         $this->post(route('products.categories.store'), [
             'sales_channel_id' => $channel->id,
@@ -283,6 +284,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'name' => 'Akcesoria',
             'path' => 'Moda > Akcesoria',
             'slug' => 'akcesoria',
+            'description' => 'Akcesoria do stylizacji i kompletów.',
         ])->assertRedirect();
 
         $this->post(route('products.parameters.store'), [
@@ -298,6 +300,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'sales_channel_id' => $channel->id,
             'external_id' => '88',
             'name' => 'Akcesoria',
+            'description' => 'Akcesoria do stylizacji i kompletów.',
         ]);
         $this->assertDatabaseHas('product_parameter_definitions', [
             'name' => 'Rozmiar',
@@ -449,7 +452,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('data-product-tab="produkt"', false)
             ->assertSee('data-product-tab="sprzedaz"', false)
             ->assertSee('data-product-tab="warianty"', false)
-            ->assertSee('Status WooCommerce')
+            ->assertSee('Status publikacji w sklepie')
             ->assertSee('Wyszukaj kategorię z WooCommerce')
             ->assertSee('Dodaj zdjęcia z komputera');
 

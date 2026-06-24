@@ -223,6 +223,7 @@ final class WooCommerceImportService
                 'name' => $name,
                 'slug' => $this->nullableString($category['slug'] ?? null),
                 'path' => $this->nullableString($category['path'] ?? null) ?? $name,
+                'description' => $this->nullableString($category['description'] ?? null),
                 'count' => (int) ($category['count'] ?? 0),
                 'metadata' => [
                     'source' => 'woocommerce',
