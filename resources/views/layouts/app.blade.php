@@ -74,6 +74,7 @@
         h1 { margin: 0; font-size: 26px; line-height: 1.1; letter-spacing: 0; }
         .subtitle { margin: 7px 0 0; color: var(--muted); max-width: 820px; }
         .top-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .top-actions:empty { display: none; }
         .status-chip { min-height: 42px; display: inline-flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 13px; background: var(--surface); font-weight: 650; white-space: nowrap; box-shadow: 0 5px 18px rgba(134, 115, 100, .08); }
         .top-shortcut { color: var(--text); text-decoration: none; }
         .top-shortcut.active { color: var(--green-dark); background: var(--green-soft); }
@@ -81,6 +82,7 @@
         .dot.green { background: var(--green); }
         .dot.orange { background: var(--orange); }
         .dot.red { background: var(--red); }
+        .dot.hidden { display: none; }
         .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; margin-bottom: 20px; }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); }
         .metric { min-height: 118px; padding: 22px; }
@@ -232,6 +234,47 @@
         $returnsTopCount = (int) data_get($topStatus, 'return_cases', 0);
         $woocommerceTopStatus = data_get($topStatus, 'woocommerce', ['tone' => 'red', 'label' => 'Brak statusu']);
         $ksefTopStatus = data_get($topStatus, 'ksef', ['tone' => 'red', 'label' => 'Brak statusu']);
+        $topActions = [];
+
+        if (! ($hideTopActions ?? false) && $canAccessArea('packing')) {
+            $topActions[] = [
+                'key' => 'packing',
+                'url' => route('packing.index'),
+                'label' => 'Pakowanie'.($packingTopCount > 0 ? " ({$packingTopCount})" : ''),
+                'tone' => 'hidden',
+                'status' => '',
+            ];
+        }
+
+        if (! ($hideTopActions ?? false) && $canAccessArea('returns')) {
+            $topActions[] = [
+                'key' => 'returns',
+                'url' => route('returns.index'),
+                'label' => 'Moduł zwrotów'.($returnsTopCount > 0 ? " ({$returnsTopCount})" : ''),
+                'tone' => 'hidden',
+                'status' => '',
+            ];
+        }
+
+        if (! ($hideTopActions ?? false) && $canAccessArea('integrations')) {
+            $topActions[] = [
+                'key' => 'integrations',
+                'url' => route('integrations.index'),
+                'label' => 'WooCommerce',
+                'tone' => $woocommerceTopStatus['tone'] ?? 'red',
+                'status' => $woocommerceTopStatus['label'] ?? 'Brak statusu',
+            ];
+        }
+
+        if (! ($hideTopActions ?? false) && $canAccessArea('ksef')) {
+            $topActions[] = [
+                'key' => 'ksef',
+                'url' => $canAccessArea('integrations') ? route('integrations.index').'#ksef' : route('ksef.index'),
+                'label' => 'KSeF',
+                'tone' => $ksefTopStatus['tone'] ?? 'red',
+                'status' => $ksefTopStatus['label'] ?? 'Brak statusu',
+            ];
+        }
     @endphp
     <div class="sidebar-backdrop" data-sidebar-close></div>
     <div class="app">
@@ -255,7 +298,7 @@
                     @endif
                 @endforeach
             </nav>
-            <details class="user-menu" @if(in_array($active, array_column($settingsNav, 0), true)) open @endif>
+            <details class="user-menu" {{ in_array($active, array_column($settingsNav, 0), true) ? 'open' : '' }}>
                 <summary class="user-card">
                     <div class="avatar">{{ $operatorInitials }}</div>
                     <div><strong>{{ $operatorName }}</strong><br><span style="color: var(--muted); font-size: 12px;">{{ $operatorRole }}</span></div>
@@ -281,34 +324,15 @@
                         @endisset
                     </div>
                 </div>
-                @unless($hideTopActions ?? false)
-                    <div class="top-actions">
-                        @if ($canAccessArea('packing'))
-                            <a href="{{ route('packing.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'packing'])>
-                                <strong>Pakowanie@if($packingTopCount > 0) ({{ $packingTopCount }}) @endif</strong>
-                            </a>
-                        @endif
-                        @if ($canAccessArea('returns'))
-                            <a href="{{ route('returns.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'returns'])>
-                                <strong>Moduł zwrotów@if($returnsTopCount > 0) ({{ $returnsTopCount }}) @endif</strong>
-                            </a>
-                        @endif
-                        @if ($canAccessArea('integrations'))
-                            <a href="{{ route('integrations.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'integrations'])>
-                                <strong>WooCommerce</strong>
-                                <span @class(['dot', $woocommerceTopStatus['tone'] ?? 'red']) title="{{ $woocommerceTopStatus['label'] ?? 'Brak statusu' }}"></span>
-                                {{ $woocommerceTopStatus['label'] ?? 'Brak statusu' }}
-                            </a>
-                        @endif
-                        @if ($canAccessArea('ksef'))
-                            <a href="{{ $canAccessArea('integrations') ? route('integrations.index') . '#ksef' : route('ksef.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'ksef'])>
-                                <strong>KSeF</strong>
-                                <span @class(['dot', $ksefTopStatus['tone'] ?? 'red']) title="{{ $ksefTopStatus['label'] ?? 'Brak statusu' }}"></span>
-                                {{ $ksefTopStatus['label'] ?? 'Brak statusu' }}
-                            </a>
-                        @endif
-                    </div>
-                @endunless
+                <div class="top-actions">
+                    @foreach ($topActions as $topAction)
+                        <a href="{{ $topAction['url'] }}" @class(['status-chip', 'top-shortcut', 'active' => $active === $topAction['key']])>
+                            <strong>{{ $topAction['label'] }}</strong>
+                            <span class="dot {{ $topAction['tone'] }}" title="{{ $topAction['status'] }}"></span>
+                            {{ $topAction['status'] }}
+                        </a>
+                    @endforeach
+                </div>
             </header>
 
             @if (session('status'))
