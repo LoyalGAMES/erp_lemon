@@ -84,6 +84,9 @@ class WooCommerceProductDataExportTest extends TestCase
                     ],
                     'prices' => [
                         'retail_price_pln' => 369.00,
+                        'sale_price_pln' => 299.00,
+                        'sale_price_starts_at' => '2026-06-01',
+                        'sale_price_ends_at' => '2026-06-30',
                     ],
                     'stock' => [
                         'location' => 'A-01-03',
@@ -171,6 +174,9 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame('Koszula AURA Czarno-ecru', $request['name']);
         $this->assertSame('SKU-AURA', $request['sku']);
         $this->assertSame('369.00', $request['regular_price']);
+        $this->assertSame('299.00', $request['sale_price']);
+        $this->assertSame('2026-06-01', $request['date_on_sale_from']);
+        $this->assertSame('2026-06-30', $request['date_on_sale_to']);
         $this->assertSame('<p>Stylowa koszula</p>', $request['description']);
         $this->assertSame('<p>Tabela rozmiarów</p>', $request['short_description']);
         $this->assertSame('catalog', $request['catalog_visibility']);
@@ -427,6 +433,117 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame('702', ProductChannelMapping::query()->where('product_id', $variantM->id)->firstOrFail()->external_variation_id);
         $this->assertSame(1, IntegrationSyncLog::query()->where('operation', 'create_product')->count());
         $this->assertSame(2, IntegrationSyncLog::query()->where('operation', 'create_product_variation')->count());
+    }
+
+    public function test_export_converts_existing_mapped_product_to_variable_and_creates_missing_variants(): void
+    {
+        Http::fake(function ($request) {
+            if ($request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/321') {
+                return Http::response([
+                    'id' => 321,
+                    'sku' => 'SET-LUNA',
+                    'name' => 'Komplet LUNA',
+                    'type' => 'variable',
+                ]);
+            }
+
+            if ($request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/321/variations') {
+                return Http::response([
+                    'id' => 322,
+                    'sku' => $request['sku'],
+                    'regular_price' => $request['regular_price'],
+                ], 201);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'stock_export_enabled' => true,
+        ]);
+
+        $parent = Product::query()->create([
+            'sku' => 'SET-LUNA',
+            'name' => 'Komplet LUNA',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variable',
+                    'variant_attribute' => 'Rozmiar',
+                    'prices' => [
+                        'retail_price_pln' => 799.00,
+                        'sale_price_pln' => 699.00,
+                        'sale_price_starts_at' => '2026-08-01',
+                        'sale_price_ends_at' => '2026-08-10',
+                    ],
+                    'content' => [
+                        'pl' => [
+                            'name' => 'Komplet LUNA',
+                            'description' => '<p>Opis</p>',
+                        ],
+                    ],
+                    'parameters' => [
+                        ['name' => 'Kolor', 'value' => 'Czarny'],
+                    ],
+                ],
+            ],
+        ]);
+        $variant = $this->createVariantProduct('SET-LUNA-S', 'S', 799.00);
+
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '321',
+            'external_sku' => 'SET-LUNA',
+            'stock_sync_enabled' => true,
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+
+        $this->post(route('products.woocommerce.export', $parent))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $requests = Http::recorded()->map(fn (array $record) => $record[0])->values();
+        $parentRequest = $requests->first(fn ($request) => $request->url() === 'https://shop.test/wp-json/wc/v3/products/321');
+        $variationRequest = $requests->first(fn ($request) => $request->url() === 'https://shop.test/wp-json/wc/v3/products/321/variations');
+
+        $this->assertSame('variable', $parentRequest['type']);
+        $this->assertSame('Rozmiar', $parentRequest['attributes'][1]['name']);
+        $this->assertSame(['S'], $parentRequest['attributes'][1]['options']);
+        $this->assertTrue($parentRequest['attributes'][1]['variation']);
+        $this->assertSame('SET-LUNA-S', $variationRequest['sku']);
+        $this->assertSame('S', $variationRequest['attributes'][0]['option']);
+        $this->assertSame('799.00', $variationRequest['regular_price']);
+        $this->assertSame('699.00', $variationRequest['sale_price']);
+        $this->assertSame('2026-08-01', $variationRequest['date_on_sale_from']);
+        $this->assertSame('2026-08-10', $variationRequest['date_on_sale_to']);
+
+        $variantMapping = ProductChannelMapping::query()->where('product_id', $variant->id)->firstOrFail();
+        $this->assertSame('321', $variantMapping->external_product_id);
+        $this->assertSame('322', $variantMapping->external_variation_id);
+        $this->assertSame(1, IntegrationSyncLog::query()->where('operation', 'export_product_data')->count());
+        $this->assertSame(1, IntegrationSyncLog::query()->where('operation', 'create_product_variation')->count());
     }
 
     public function test_product_create_is_blocked_when_channel_mapping_already_exists(): void

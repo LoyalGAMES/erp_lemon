@@ -48,6 +48,16 @@ final class KsefEligibilityService
             ];
         }
 
+        if (! $hasBuyerTaxId && $this->correctsKsefInvoice($invoice)) {
+            return [
+                'policy' => $policy,
+                'should_send' => true,
+                'label' => 'Korekta KSeF',
+                'reason' => 'Korekta dotyczy faktury zarejestrowanej lub zgloszonej do KSeF, wiec powinna zostac wyslana mimo braku NIP nabywcy.',
+                'tone' => '',
+            ];
+        }
+
         if (! $hasBuyerTaxId) {
             return [
                 'policy' => $policy,
@@ -100,6 +110,28 @@ final class KsefEligibilityService
         $policy = data_get($invoice->metadata, 'ksef.send_policy');
 
         return is_string($policy) && trim($policy) !== '';
+    }
+
+    private function correctsKsefInvoice(Invoice $invoice): bool
+    {
+        if ($invoice->type !== 'correction') {
+            return false;
+        }
+
+        foreach ([
+            'corrected_invoice_ksef_number',
+            'corrected_invoice_ksef_reference_number',
+            'corrected_invoice_ksef_submission_id',
+            'ksef.correction_of_ksef_number',
+            'ksef.correction_of_reference_number',
+            'ksef.correction_of_submission_id',
+        ] as $key) {
+            if (filled(data_get($invoice->metadata, $key))) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function sendReason(bool $hasBuyerTaxId, bool $hasInvoicePolicy): string

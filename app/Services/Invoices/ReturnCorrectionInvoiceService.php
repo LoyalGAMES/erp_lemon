@@ -6,10 +6,12 @@ namespace App\Services\Invoices;
 
 use App\Models\Invoice;
 use App\Models\InvoiceLine;
+use App\Models\KsefSubmission;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
 use App\Services\Automation\InvoiceKsefAutomationService;
 use App\Services\Audit\AuditLogService;
+use App\Services\Ksef\KsefEligibilityService;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -34,6 +36,7 @@ final class ReturnCorrectionInvoiceService
                 ->with([
                     'lines.externalOrderLine',
                     'lines.warehouseDocument',
+                    'externalOrder.invoices.ksefSubmissions',
                     'externalOrder.invoices.lines',
                     'warehouseDocument',
                     'correctionInvoice.lines',
@@ -84,6 +87,7 @@ final class ReturnCorrectionInvoiceService
             $netTotal = round(collect($correctionLines)->sum('net_total'), 2);
             $vatTotal = round(collect($correctionLines)->sum('vat_total'), 2);
             $grossTotal = round(collect($correctionLines)->sum('gross_total'), 2);
+            $metadata = $this->metadataForCorrection($returnCase, $originalInvoice, $returnDocuments);
 
             $invoice = Invoice::query()->create([
                 'number' => $this->numbers->next('FK'),
@@ -102,20 +106,7 @@ final class ReturnCorrectionInvoiceService
                 'gross_total' => $grossTotal,
                 'payment_method' => $originalInvoice->payment_method,
                 'issued_at' => now(),
-                'metadata' => [
-                    'source' => 'return_case',
-                    'return_case_id' => $returnCase->id,
-                    'return_case_number' => $returnCase->number,
-                    'correction_reason' => $returnCase->reason ?: 'Zwrot towaru',
-                    'corrected_invoice_id' => $originalInvoice->id,
-                    'corrected_invoice_number' => $originalInvoice->number,
-                    'corrected_invoice_issue_date' => $originalInvoice->issue_date?->toDateString(),
-                    'warehouse_document_id' => $returnCase->warehouse_document_id,
-                    'warehouse_document_number' => $returnCase->warehouseDocument?->number,
-                    'warehouse_document_ids' => $returnDocuments->pluck('id')->values()->all(),
-                    'warehouse_document_numbers' => $returnDocuments->pluck('number')->values()->all(),
-                    'legal_review_required' => true,
-                ],
+                'metadata' => $metadata,
             ]);
 
             foreach ($correctionLines as $line) {
@@ -162,6 +153,141 @@ final class ReturnCorrectionInvoiceService
             ->filter()
             ->unique('id')
             ->values();
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function metadataForCorrection(ReturnCase $returnCase, Invoice $originalInvoice, \Illuminate\Support\Collection $returnDocuments): array
+    {
+        $metadata = [
+            'source' => 'return_case',
+            'return_case_id' => $returnCase->id,
+            'return_case_number' => $returnCase->number,
+            'correction_reason' => $returnCase->reason ?: 'Zwrot towaru',
+            'corrected_invoice_id' => $originalInvoice->id,
+            'corrected_invoice_number' => $originalInvoice->number,
+            'corrected_invoice_issue_date' => $originalInvoice->issue_date?->toDateString(),
+            'warehouse_document_id' => $returnCase->warehouse_document_id,
+            'warehouse_document_number' => $returnCase->warehouseDocument?->number,
+            'warehouse_document_ids' => $returnDocuments->pluck('id')->values()->all(),
+            'warehouse_document_numbers' => $returnDocuments->pluck('number')->values()->all(),
+            'legal_review_required' => true,
+        ];
+
+        return $this->withKsefCorrectionContext($metadata, $originalInvoice);
+    }
+
+    /**
+     * @param array<string, mixed> $metadata
+     * @return array<string, mixed>
+     */
+    private function withKsefCorrectionContext(array $metadata, Invoice $originalInvoice): array
+    {
+        $context = $this->originalKsefContext($originalInvoice);
+
+        if (! $context['should_send_correction']) {
+            return $metadata;
+        }
+
+        if (filled($context['number'])) {
+            $metadata['corrected_invoice_ksef_number'] = $context['number'];
+        }
+
+        if (filled($context['reference_number'])) {
+            $metadata['corrected_invoice_ksef_reference_number'] = $context['reference_number'];
+        }
+
+        if (filled($context['accepted_at'])) {
+            $metadata['corrected_invoice_ksef_accepted_at'] = $context['accepted_at'];
+        }
+
+        if ($context['submission_id'] !== null) {
+            $metadata['corrected_invoice_ksef_submission_id'] = $context['submission_id'];
+        }
+
+        $metadata['ksef'] = $this->withoutBlankValues([
+            'send_policy' => KsefEligibilityService::POLICY_SEND,
+            'policy_reason' => 'correction_of_ksef_invoice',
+            'correction_policy_set_at' => now()->toISOString(),
+            'correction_of_invoice_id' => $originalInvoice->id,
+            'correction_of_invoice_number' => $originalInvoice->number,
+            'correction_of_ksef_number' => $context['number'],
+            'correction_of_reference_number' => $context['reference_number'],
+            'correction_of_submission_id' => $context['submission_id'],
+        ]);
+
+        return $metadata;
+    }
+
+    /**
+     * @return array{should_send_correction: bool, number: string|null, reference_number: string|null, accepted_at: string|null, submission_id: int|null}
+     */
+    private function originalKsefContext(Invoice $originalInvoice): array
+    {
+        $originalInvoice->loadMissing('ksefSubmissions');
+
+        $submission = $originalInvoice->ksefSubmissions
+            ->sortByDesc('id')
+            ->first(fn (KsefSubmission $submission): bool => in_array($submission->status, [
+                'accepted',
+                'submitted',
+                'running',
+                'queued',
+                'missing_configuration',
+            ], true));
+
+        $number = $this->firstFilled(
+            $originalInvoice->ksef_number,
+            data_get($originalInvoice->metadata, 'ksef.number'),
+            $submission?->ksef_number,
+        );
+        $referenceNumber = $this->firstFilled(
+            data_get($originalInvoice->metadata, 'ksef.reference_number'),
+            $submission?->reference_number,
+        );
+        $acceptedAt = $this->firstFilled(
+            data_get($originalInvoice->metadata, 'ksef.accepted_at'),
+            $submission?->accepted_at?->toISOString(),
+        );
+        $policy = KsefEligibilityService::POLICY_AUTO;
+        $metadataPolicy = data_get($originalInvoice->metadata, 'ksef.send_policy');
+
+        if (is_string($metadataPolicy) && trim($metadataPolicy) !== '') {
+            $policy = strtolower(trim($metadataPolicy));
+        }
+
+        return [
+            'should_send_correction' => filled($number)
+                || $submission instanceof KsefSubmission
+                || $policy === KsefEligibilityService::POLICY_SEND,
+            'number' => $number,
+            'reference_number' => $referenceNumber,
+            'accepted_at' => $acceptedAt,
+            'submission_id' => $submission instanceof KsefSubmission ? (int) $submission->id : null,
+        ];
+    }
+
+    private function firstFilled(mixed ...$values): ?string
+    {
+        foreach ($values as $value) {
+            if (filled($value)) {
+                return (string) $value;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string, mixed> $values
+     * @return array<string, mixed>
+     */
+    private function withoutBlankValues(array $values): array
+    {
+        return collect($values)
+            ->reject(fn (mixed $value): bool => $value === null || $value === '')
+            ->all();
     }
 
     /**

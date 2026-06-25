@@ -157,6 +157,10 @@ class ReturnController extends Controller
                 $validator->errors()->add('lines', 'Zwrot musi mieć co najmniej jedną pozycję produktu.');
             }
 
+            if ($lines === [] && $hasOrderLookup) {
+                $validator->errors()->add('lines', 'Wybierz co najmniej jeden towar z listy pozycji zamówienia.');
+            }
+
             if (filled($data['external_order_number'] ?? null) && $this->resolveOrderFromInput($data) === null) {
                 $validator->errors()->add('external_order_number', 'Nie znaleziono zamówienia o podanym numerze.');
             }
@@ -186,6 +190,7 @@ class ReturnController extends Controller
             $order = $this->resolveOrderFromInput($data);
 
             if ($order instanceof ExternalOrder) {
+                $this->validateOrderLineSelection($validator, $order, $data);
                 $this->validateReturnableQuantities($validator, $order, $data, $returnSettings);
             }
         });
@@ -194,15 +199,11 @@ class ReturnController extends Controller
         $order = $this->resolveOrderFromInput($validated);
         $returnLines = $this->returnLinesFromInput($validated, $returnSettings);
 
-        if ($returnLines === [] && $order instanceof ExternalOrder) {
-            $returnLines = $this->returnLinesFromOrder($order, $returnSettings);
-        }
-
         if ($returnLines === []) {
             return back()->withInput()->with('error', 'Zamówienie nie ma pozycji możliwych do przyjęcia jako zwrot.');
         }
 
-        $returnCase = DB::transaction(function () use ($validated, $returnLines, $numbers, $order, $settings, $returnSettings): ReturnCase {
+        $returnCase = DB::transaction(function () use ($validated, $returnLines, $numbers, $order): ReturnCase {
             $returnCase = ReturnCase::query()->create([
                 'number' => $numbers->next(),
                 'external_order_id' => $order?->id,
@@ -230,11 +231,7 @@ class ReturnController extends Controller
                     'quantity_accepted' => $line['quantity'],
                     'condition' => $line['condition'],
                     'disposition' => $line['disposition'],
-                    'target_warehouse_id' => $settings->warehouseIdForDisposition(
-                        $line['disposition'],
-                        (int) $validated['target_warehouse_id'],
-                        $returnSettings,
-                    ),
+                    'target_warehouse_id' => (int) $validated['target_warehouse_id'],
                     'notes' => $line['notes'] ?? null,
                     'metadata' => [
                         'created_from' => 'return_form',
@@ -349,7 +346,7 @@ class ReturnController extends Controller
         $order = $returnCase->externalOrder;
         $returnLines = $this->returnLinesFromInput($validated, $returnSettings);
 
-        DB::transaction(function () use ($returnCase, $validated, $returnLines, $order, $settings, $returnSettings): void {
+        DB::transaction(function () use ($returnCase, $validated, $returnLines, $order): void {
             $returnCase->update([
                 'target_warehouse_id' => $validated['target_warehouse_id'],
                 'reason' => $validated['reason'] ?? null,
@@ -371,11 +368,7 @@ class ReturnController extends Controller
                     'quantity_accepted' => $line['quantity'],
                     'condition' => $line['condition'],
                     'disposition' => $line['disposition'],
-                    'target_warehouse_id' => $settings->warehouseIdForDisposition(
-                        $line['disposition'],
-                        (int) $validated['target_warehouse_id'],
-                        $returnSettings,
-                    ),
+                    'target_warehouse_id' => (int) $validated['target_warehouse_id'],
                     'notes' => $line['notes'] ?? null,
                     'metadata' => [
                         'updated_from' => 'return_edit_form',
@@ -588,35 +581,6 @@ class ReturnController extends Controller
     }
 
     /**
-     * @return list<array{external_order_line_id:?int,product_id:int,quantity:float,condition:string,disposition:string,notes:?string}>
-     */
-    private function returnLinesFromOrder(ExternalOrder $order, ?array $settings = null): array
-    {
-        $order->loadMissing('lines');
-        $defaultCondition = $settings['default_condition'] ?? 'unchecked';
-        $defaultDisposition = $settings['default_disposition'] ?? 'restock';
-        $returned = $this->returnedQuantitiesForOrder($order);
-
-        return $order->lines
-            ->filter(fn (ExternalOrderLine $line): bool => $line->product_id !== null && (float) $line->quantity > 0)
-            ->map(function (ExternalOrderLine $line) use ($defaultCondition, $defaultDisposition, $returned, $order): array {
-                $remainingQuantity = max(0, (float) $line->quantity - (float) ($returned['line:'.$line->id] ?? $returned['product:'.$line->product_id] ?? 0));
-
-                return [
-                    'external_order_line_id' => (int) $line->id,
-                    'product_id' => (int) $line->product_id,
-                    'quantity' => $remainingQuantity,
-                    'condition' => $defaultCondition,
-                    'disposition' => $defaultDisposition,
-                    'notes' => 'Uzupełniono automatycznie z zamówienia '.$order->external_number,
-                ];
-            })
-            ->filter(fn (array $line): bool => $line['quantity'] > 0)
-            ->values()
-            ->all();
-    }
-
-    /**
      * @param  array{external_order_line_id:?int,product_id:int}  $line
      */
     private function resolveOrderLineForReturn(ExternalOrder $order, array $line): ?ExternalOrderLine
@@ -670,6 +634,51 @@ class ReturnController extends Controller
         }
 
         return $quantities;
+    }
+
+    /**
+     * @param  array<string, mixed>  $input
+     */
+    private function validateOrderLineSelection(
+        \Illuminate\Contracts\Validation\Validator $validator,
+        ExternalOrder $order,
+        array $input,
+    ): void {
+        $order->loadMissing('lines');
+        $submittedRows = collect((array) ($input['lines'] ?? []))
+            ->filter(fn (mixed $line): bool => is_array($line))
+            ->filter(fn (array $line): bool => filled($line['external_order_line_id'] ?? null)
+                || filled($line['product_id'] ?? null)
+                || filled($line['quantity'] ?? null)
+                || filled($line['notes'] ?? null));
+
+        if ($submittedRows->isEmpty()) {
+            if (filled($input['product_id'] ?? null) || filled($input['quantity'] ?? null)) {
+                $validator->errors()->add('lines', 'Wybierz towar z listy pozycji zamówienia.');
+            }
+
+            return;
+        }
+
+        foreach ($submittedRows as $index => $line) {
+            if (! filled($line['external_order_line_id'] ?? null)) {
+                $validator->errors()->add("lines.{$index}.external_order_line_id", 'Wybierz towar z listy pozycji zamówienia.');
+
+                continue;
+            }
+
+            $orderLine = $order->lines->firstWhere('id', (int) $line['external_order_line_id']);
+
+            if (! $orderLine instanceof ExternalOrderLine) {
+                $validator->errors()->add("lines.{$index}.external_order_line_id", 'Wybrana pozycja nie należy do tego zamówienia.');
+
+                continue;
+            }
+
+            if (filled($line['product_id'] ?? null) && (int) $line['product_id'] !== (int) $orderLine->product_id) {
+                $validator->errors()->add("lines.{$index}.product_id", 'Produkt nie zgadza się z wybraną pozycją zamówienia.');
+            }
+        }
     }
 
     /**

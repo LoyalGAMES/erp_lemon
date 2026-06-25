@@ -467,6 +467,9 @@ class ProductController extends Controller
             'length_cm' => ['nullable', 'numeric', 'min:0'],
             'wholesale_price_pln' => ['nullable', 'numeric', 'min:0'],
             'retail_price_pln' => ['nullable', 'numeric', 'min:0'],
+            'sale_price_pln' => ['nullable', 'numeric', 'min:0'],
+            'sale_price_starts_at' => ['nullable', 'date'],
+            'sale_price_ends_at' => ['nullable', 'date'],
             'price_eur' => ['nullable', 'numeric', 'min:0'],
             'price_gbp' => ['nullable', 'numeric', 'min:0'],
             'price_usd' => ['nullable', 'numeric', 'min:0'],
@@ -572,6 +575,9 @@ class ProductController extends Controller
         return [
             'wholesale_price_pln' => $this->nullableFloat($validated['wholesale_price_pln'] ?? null),
             'retail_price_pln' => $retailPrice,
+            'sale_price_pln' => $this->nullableFloat($validated['sale_price_pln'] ?? null),
+            'sale_price_starts_at' => $this->nullableDateString($validated['sale_price_starts_at'] ?? null),
+            'sale_price_ends_at' => $this->nullableDateString($validated['sale_price_ends_at'] ?? null),
             'price_eur' => $this->convertedPrice($retailPrice, 'EUR'),
             'price_gbp' => $this->convertedPrice($retailPrice, 'GBP'),
             'price_usd' => $this->convertedPrice($retailPrice, 'USD'),
@@ -1022,6 +1028,13 @@ class ProductController extends Controller
         $value = str_replace(',', '.', trim((string) $value));
 
         return $value === '' ? null : (float) $value;
+    }
+
+    private function nullableDateString(mixed $value): ?string
+    {
+        $value = $this->nullableString($value);
+
+        return $value === null ? null : mb_substr($value, 0, 10);
     }
 
     /**

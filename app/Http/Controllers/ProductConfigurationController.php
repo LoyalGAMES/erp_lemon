@@ -8,6 +8,7 @@ use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductParameterDefinition;
 use App\Models\SalesChannel;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
@@ -23,6 +24,8 @@ class ProductConfigurationController extends Controller
             'categories' => ProductCategory::query()
                 ->with('salesChannel')
                 ->orderBy('sales_channel_id')
+                ->orderBy('parent_external_id')
+                ->orderBy('sort_order')
                 ->orderBy('path')
                 ->orderBy('name')
                 ->get(),
@@ -53,6 +56,60 @@ class ProductConfigurationController extends Controller
         $this->refreshChildCategoryPaths($category->fresh() ?? $category);
 
         return back()->with('status', 'Kategoria produktu została zapisana.');
+    }
+
+    public function sortCategories(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'items' => ['required', 'array', 'min:1'],
+            'items.*.id' => ['required', 'integer', 'exists:product_categories,id'],
+            'items.*.parent_external_id' => ['nullable', 'string', 'max:255'],
+            'items.*.sort_order' => ['required', 'integer', 'min:0', 'max:65000'],
+        ]);
+
+        $items = collect($validated['items']);
+        $categories = ProductCategory::query()
+            ->whereKey($items->pluck('id')->all())
+            ->get()
+            ->keyBy('id');
+        $updated = collect();
+
+        foreach ($items as $item) {
+            $category = $categories->get((int) $item['id']);
+
+            if (! $category instanceof ProductCategory) {
+                continue;
+            }
+
+            $parentExternalId = $this->nullableString($item['parent_external_id'] ?? null);
+
+            if ($parentExternalId !== null && ! $this->categoryScope(ProductCategory::query(), $category->sales_channel_id)
+                ->where('external_id', $parentExternalId)
+                ->exists()
+            ) {
+                $parentExternalId = null;
+            }
+
+            if ($parentExternalId === (string) $category->external_id
+                || ($parentExternalId !== null && $this->wouldCreateCategoryCycle($category, $parentExternalId, $category->sales_channel_id))
+            ) {
+                $parentExternalId = null;
+            }
+
+            $category->forceFill([
+                'parent_external_id' => $parentExternalId,
+                'sort_order' => (int) $item['sort_order'],
+                'path' => $this->categoryPath($category->sales_channel_id, $category->name, $parentExternalId, $category),
+            ])->save();
+
+            $updated->push($category->fresh() ?? $category);
+        }
+
+        $updated->each(function (ProductCategory $category): void {
+            $this->refreshChildCategoryPaths($category);
+        });
+
+        return response()->json(['status' => 'ok']);
     }
 
     public function destroyCategory(ProductCategory $category): RedirectResponse
@@ -121,6 +178,7 @@ class ProductConfigurationController extends Controller
             'slug' => ['nullable', 'string', 'max:255'],
             'path' => ['nullable', 'string', 'max:255'],
             'description' => ['nullable', 'string', 'max:8000'],
+            'sort_order' => ['nullable', 'integer', 'min:0', 'max:65000'],
         ]);
 
         $name = trim((string) $validated['name']);
@@ -130,6 +188,14 @@ class ProductConfigurationController extends Controller
 
         if ($externalId === '') {
             $externalId = $this->uniqueErpCategoryExternalId($salesChannelId, $slug ?: Str::slug($name), $category);
+        }
+
+        if ($parentExternalId !== null && ! $this->categoryScope(ProductCategory::query(), $salesChannelId)
+            ->where('external_id', $parentExternalId)
+            ->when($category !== null, fn ($query) => $query->whereKeyNot($category->id))
+            ->exists()
+        ) {
+            $parentExternalId = null;
         }
 
         if ($category !== null && $parentExternalId === (string) $category->external_id) {
@@ -148,6 +214,7 @@ class ProductConfigurationController extends Controller
             'slug' => $slug ?: null,
             'path' => $this->categoryPath($salesChannelId, $name, $parentExternalId, $category),
             'description' => $this->nullableString($validated['description'] ?? null),
+            'sort_order' => (int) ($validated['sort_order'] ?? $category?->sort_order ?? 100),
             'metadata' => [
                 'source' => ctype_digit($externalId) ? 'woocommerce' : 'erp',
                 'managed_in_erp' => true,
@@ -280,6 +347,7 @@ class ProductConfigurationController extends Controller
 
         $children = $this->categoryScope(ProductCategory::query(), $category->sales_channel_id)
             ->where('parent_external_id', $category->external_id)
+            ->orderBy('sort_order')
             ->orderBy('name')
             ->get();
 

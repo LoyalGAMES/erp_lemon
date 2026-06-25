@@ -8,6 +8,7 @@ use App\Models\ExternalOrder;
 use App\Models\Invoice;
 use App\Models\Product;
 use App\Models\ReturnCase;
+use App\Models\ReturnCaseLine;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
 use App\Models\StockLedgerEntry;
@@ -347,7 +348,7 @@ class ReturnWorkflowTest extends TestCase
             'billing_data' => ['email' => 'client@example.test'],
         ]);
 
-        $order->lines()->create([
+        $orderLine = $order->lines()->create([
             'product_id' => $product->id,
             'external_line_id' => 'line-1',
             'sku' => $product->sku,
@@ -368,6 +369,15 @@ class ReturnWorkflowTest extends TestCase
             'external_order_number' => '4870',
             'target_warehouse_id' => $warehouse->id,
             'reason' => 'Zwrot z panelu',
+            'lines' => [
+                [
+                    'external_order_line_id' => $orderLine->id,
+                    'product_id' => $product->id,
+                    'quantity' => 2,
+                    'condition' => 'opened',
+                    'disposition' => 'restock',
+                ],
+            ],
         ])->assertRedirect()->assertSessionHas('status');
 
         $returnCase = ReturnCase::query()->with('lines')->firstOrFail();
@@ -377,6 +387,68 @@ class ReturnWorkflowTest extends TestCase
         $this->assertCount(1, $returnCase->lines);
         $this->assertSame('2.0000', (string) $returnCase->lines->first()->quantity_accepted);
         $this->assertSame($product->id, $returnCase->lines->first()->product_id);
+    }
+
+    public function test_order_return_requires_selected_product_line(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $warehouse = Warehouse::query()->create([
+            'code' => 'RET',
+            'name' => 'Magazyn zwrotow',
+            'type' => 'returns',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-RET-REQUIRED',
+            'name' => 'Produkt wymagany w zwrocie',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => 'RET-NO-LINE',
+            'external_number' => 'RET-NO-LINE',
+            'status' => 'completed',
+            'currency' => 'PLN',
+            'total_gross' => 99,
+            'billing_data' => ['email' => 'client@example.test'],
+        ]);
+
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'return-required-line',
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'quantity' => 1,
+            'unit_gross_price' => 99,
+        ]);
+
+        $this->post(route('returns.store'), [
+            'external_order_number' => 'RET-NO-LINE',
+            'target_warehouse_id' => $warehouse->id,
+            'reason' => 'Brak wyboru produktu',
+        ])->assertRedirect()->assertSessionHasErrors('lines');
+
+        $this->post(route('returns.store'), [
+            'external_order_number' => 'RET-NO-LINE',
+            'target_warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity' => 1,
+            'reason' => 'Produkt bez linii zamowienia',
+        ])->assertRedirect()->assertSessionHasErrors('lines');
+
+        $this->assertSame(0, ReturnCase::query()->count());
+        $this->assertSame(0, ReturnCaseLine::query()->count());
     }
 
     public function test_return_settings_are_separated_and_drive_return_defaults(): void
@@ -414,7 +486,7 @@ class ReturnWorkflowTest extends TestCase
             'billing_data' => ['email' => 'settings@example.test'],
         ]);
 
-        $order->lines()->create([
+        $orderLine = $order->lines()->create([
             'product_id' => $product->id,
             'external_line_id' => 'settings-line-1',
             'sku' => $product->sku,
@@ -456,7 +528,7 @@ class ReturnWorkflowTest extends TestCase
             ->assertSee('{PREFIX}/{MM}/{YYYY}/{SEQ}')
             ->assertSee('RMA')
             ->assertSee('RMA - Zwroty po kontroli')
-            ->assertSee('Dyspozycje i magazyny docelowe')
+            ->assertSee('Dyspozycje i magazyny domyślne')
             ->assertSee('Przywróć na stan')
             ->assertSee('Przykład: RMA/'.now()->format('m/Y').'/0001');
 
@@ -471,6 +543,15 @@ class ReturnWorkflowTest extends TestCase
             'external_order_number' => 'SET-4870',
             'target_warehouse_id' => $warehouse->id,
             'reason' => 'Zwrot automatyczny z ustawień',
+            'lines' => [
+                [
+                    'external_order_line_id' => $orderLine->id,
+                    'product_id' => $product->id,
+                    'quantity' => 1,
+                    'condition' => 'opened',
+                    'disposition' => 'inspection',
+                ],
+            ],
         ])->assertRedirect()->assertSessionHas('status');
 
         $returnCase = ReturnCase::query()->with('lines')->firstOrFail();
@@ -480,7 +561,7 @@ class ReturnWorkflowTest extends TestCase
         $this->assertSame('inspection', $returnCase->lines->first()->disposition);
     }
 
-    public function test_return_disposition_mapping_creates_rx_documents_per_target_warehouse(): void
+    public function test_selected_return_warehouse_overrides_disposition_mapping(): void
     {
         $fallbackWarehouse = Warehouse::query()->create([
             'code' => 'RET',
@@ -562,8 +643,8 @@ class ReturnWorkflowTest extends TestCase
 
         $returnCase = ReturnCase::query()->with('lines')->firstOrFail();
 
-        $this->assertSame($restockWarehouse->id, $returnCase->lines->firstWhere('product_id', $firstProduct->id)->target_warehouse_id);
-        $this->assertSame($inspectionWarehouse->id, $returnCase->lines->firstWhere('product_id', $secondProduct->id)->target_warehouse_id);
+        $this->assertSame($fallbackWarehouse->id, $returnCase->lines->firstWhere('product_id', $firstProduct->id)->target_warehouse_id);
+        $this->assertSame($fallbackWarehouse->id, $returnCase->lines->firstWhere('product_id', $secondProduct->id)->target_warehouse_id);
 
         $this->post(route('returns.document.create', $returnCase))
             ->assertRedirect()
@@ -571,48 +652,38 @@ class ReturnWorkflowTest extends TestCase
 
         $documents = WarehouseDocument::query()->with('lines')->orderBy('id')->get();
 
-        $this->assertCount(2, $documents);
-        $this->assertSame([$restockWarehouse->id, $inspectionWarehouse->id], $documents->pluck('destination_warehouse_id')->all());
+        $this->assertCount(1, $documents);
+        $this->assertSame([$fallbackWarehouse->id], $documents->pluck('destination_warehouse_id')->all());
         $this->assertSame($documents->first()->id, $returnCase->refresh()->warehouse_document_id);
         $this->assertSame($documents->pluck('id')->all(), $returnCase->metadata['warehouse_document_ids']);
 
-        $restockDocument = $documents->firstWhere('destination_warehouse_id', $restockWarehouse->id);
-        $inspectionDocument = $documents->firstWhere('destination_warehouse_id', $inspectionWarehouse->id);
+        $returnDocument = $documents->first();
 
-        $this->assertSame('1.0000', (string) $restockDocument->lines->first()->quantity);
-        $this->assertSame($firstProduct->id, $restockDocument->lines->first()->product_id);
-        $this->assertSame('2.0000', (string) $inspectionDocument->lines->first()->quantity);
-        $this->assertSame($secondProduct->id, $inspectionDocument->lines->first()->product_id);
+        $this->assertSame('1.0000', (string) $returnDocument->lines->firstWhere('product_id', $firstProduct->id)->quantity);
+        $this->assertSame('2.0000', (string) $returnDocument->lines->firstWhere('product_id', $secondProduct->id)->quantity);
 
-        $this->post(route('documents.post', $restockDocument))
-            ->assertRedirect()
-            ->assertSessionHas('status');
-
-        $returnCase->refresh();
-        $this->assertSame('document_created', $returnCase->status);
-
-        $this->post(route('documents.post', $inspectionDocument))
+        $this->post(route('documents.post', $returnDocument))
             ->assertRedirect()
             ->assertSessionHas('status');
 
         $returnCase->refresh();
         $this->assertSame('completed', $returnCase->status);
 
-        $restockBalance = StockBalance::query()
-            ->where('warehouse_id', $restockWarehouse->id)
+        $firstBalance = StockBalance::query()
+            ->where('warehouse_id', $fallbackWarehouse->id)
             ->where('product_id', $firstProduct->id)
             ->firstOrFail();
-        $inspectionBalance = StockBalance::query()
-            ->where('warehouse_id', $inspectionWarehouse->id)
+        $secondBalance = StockBalance::query()
+            ->where('warehouse_id', $fallbackWarehouse->id)
             ->where('product_id', $secondProduct->id)
             ->firstOrFail();
 
-        $this->assertSame('1.0000', (string) $restockBalance->quantity_on_hand);
-        $this->assertSame('2.0000', (string) $inspectionBalance->quantity_on_hand);
+        $this->assertSame('1.0000', (string) $firstBalance->quantity_on_hand);
+        $this->assertSame('2.0000', (string) $secondBalance->quantity_on_hand);
 
         $this->get(route('returns.index'))
             ->assertOk()
-            ->assertSee('M1, QC')
+            ->assertSee('RET')
             ->assertSee('SKU-RESTOCK x 1')
             ->assertSee('SKU-QC x 2');
     }

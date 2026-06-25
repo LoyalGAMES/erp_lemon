@@ -21,11 +21,13 @@ class ProductCategory extends Model
         'path',
         'description',
         'count',
+        'sort_order',
         'metadata',
     ];
 
     protected $casts = [
         'count' => 'integer',
+        'sort_order' => 'integer',
         'metadata' => 'array',
     ];
 

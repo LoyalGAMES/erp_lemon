@@ -224,6 +224,15 @@
                     <label>Cena detal brutto (PLN)
                         <input name="retail_price_pln" type="number" step="0.01" min="0" value="{{ $masterField('retail_price_pln', 'prices.retail_price_pln') }}">
                     </label>
+                    <label>Cena promocyjna brutto (PLN)
+                        <input name="sale_price_pln" type="number" step="0.01" min="0" value="{{ $masterField('sale_price_pln', 'prices.sale_price_pln') }}">
+                    </label>
+                    <label>Promocja od
+                        <input name="sale_price_starts_at" type="date" value="{{ $masterField('sale_price_starts_at', 'prices.sale_price_starts_at') }}">
+                    </label>
+                    <label>Promocja do
+                        <input name="sale_price_ends_at" type="date" value="{{ $masterField('sale_price_ends_at', 'prices.sale_price_ends_at') }}">
+                    </label>
                 </div>
 
                 <div class="product-form-grid">
@@ -253,18 +262,22 @@
                         <input name="name_en" value="{{ $masterField('name_en', 'content.en.name') }}">
                     </label>
                 </div>
-                <label>Opis PL HTML
+                <div class="product-rich-field">
+                    <div class="product-rich-label">Opis PL HTML</div>
                     <textarea class="product-html" name="description_pl" data-rich-product-editor>{{ $masterField('description_pl', 'content.pl.description') }}</textarea>
-                </label>
-                <label>Opis EN HTML
+                </div>
+                <div class="product-rich-field">
+                    <div class="product-rich-label">Opis EN HTML</div>
                     <textarea class="product-html" name="description_en" data-rich-product-editor>{{ $masterField('description_en', 'content.en.description') }}</textarea>
-                </label>
-                <label>Krótki opis PL HTML
+                </div>
+                <div class="product-rich-field">
+                    <div class="product-rich-label">Krótki opis PL HTML</div>
                     <textarea class="product-html" name="short_description_pl" data-rich-product-editor>{{ $masterField('short_description_pl', 'content.pl.additional_description') }}</textarea>
-                </label>
-                <label>Krótki opis EN HTML
+                </div>
+                <div class="product-rich-field">
+                    <div class="product-rich-label">Krótki opis EN HTML</div>
                     <textarea class="product-html" name="short_description_en" data-rich-product-editor>{{ $masterField('short_description_en', 'content.en.additional_description') }}</textarea>
-                </label>
+                </div>
                 <div class="product-form-grid two">
                     <label>Produkty sprzedaży dodatkowej (SKU)
                         <textarea name="related_upsell_skus" placeholder="Jedno SKU w wierszu">{{ $relatedUpsells }}</textarea>

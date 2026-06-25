@@ -7,7 +7,8 @@
                 }
 
                 function syncSkuLookup(input) {
-                    const hidden = input.parentElement?.querySelector('[data-product-sku-hidden]');
+                    const hidden = input.closest('.variant-editor-main')?.querySelector('[data-product-sku-hidden]')
+                        || input.parentElement?.querySelector('[data-product-sku-hidden]');
 
                     if (hidden) {
                         hidden.value = skuFromLookupValue(input.value);

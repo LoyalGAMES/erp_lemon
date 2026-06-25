@@ -4,24 +4,16 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Models\Invoice;
-use App\Models\KsefSubmission;
-use App\Models\Product;
 use App\Models\StockBalance;
-use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
+use App\Support\OperationalStatus;
 
 class DashboardController extends Controller
 {
-    public function __invoke()
+    public function __invoke(OperationalStatus $status)
     {
-        $metrics = [
-            ['Produkty', Product::query()->count(), 'Aktywne SKU w katalogu'],
-            ['Magazyny', Warehouse::query()->count(), 'Magazyny operacyjne'],
-            ['Synchronizacje', StockSyncQueueItem::query()->where('status', 'pending')->count(), 'W kolejce WooCommerce'],
-            ['Faktury', Invoice::query()->count(), 'Dokumenty sprzedaży'],
-        ];
+        $metrics = $status->dashboardMetrics();
 
         $warehouseBalances = Warehouse::query()
             ->with(['stockBalances.product', 'routes.salesChannel'])
@@ -40,12 +32,7 @@ class DashboardController extends Controller
             ->limit(7)
             ->get();
 
-        $ksef = [
-            ['Do wysłania', KsefSubmission::query()->whereIn('status', ['pending', 'queued'])->count(), ''],
-            ['W trakcie', KsefSubmission::query()->whereIn('status', ['running', 'submitted'])->count(), 'blue'],
-            ['Zaakceptowane', KsefSubmission::query()->where('status', 'accepted')->count(), 'green'],
-            ['Do konfiguracji', KsefSubmission::query()->whereIn('status', ['missing_configuration', 'requires_configuration'])->count(), 'red'],
-        ];
+        $ksef = $status->ksefQueueRows();
 
         return view('dashboard', compact('metrics', 'warehouseBalances', 'documents', 'ksef'));
     }

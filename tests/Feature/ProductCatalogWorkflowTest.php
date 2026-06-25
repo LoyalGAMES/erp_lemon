@@ -302,6 +302,50 @@ class ProductCatalogWorkflowTest extends TestCase
             'name' => 'Akcesoria',
             'description' => 'Akcesoria do stylizacji i kompletów.',
         ]);
+
+        $parent = ProductCategory::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => 'parent',
+            'name' => 'Odzież',
+            'slug' => 'odziez',
+            'path' => 'Odzież',
+            'sort_order' => 10,
+        ]);
+        $child = ProductCategory::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => 'child',
+            'parent_external_id' => 'parent',
+            'name' => 'Koszule',
+            'slug' => 'koszule',
+            'path' => 'Odzież > Koszule',
+            'sort_order' => 20,
+        ]);
+
+        $this->postJson(route('products.categories.sort'), [
+            'items' => [
+                [
+                    'id' => $child->id,
+                    'parent_external_id' => null,
+                    'sort_order' => 10,
+                ],
+                [
+                    'id' => $parent->id,
+                    'parent_external_id' => null,
+                    'sort_order' => 20,
+                ],
+            ],
+        ])->assertOk();
+
+        $this->assertDatabaseHas('product_categories', [
+            'id' => $child->id,
+            'parent_external_id' => null,
+            'path' => 'Koszule',
+            'sort_order' => 10,
+        ]);
+        $this->assertDatabaseHas('product_categories', [
+            'id' => $parent->id,
+            'sort_order' => 20,
+        ]);
         $this->assertDatabaseHas('product_parameter_definitions', [
             'name' => 'Rozmiar',
             'slug' => 'rozmiar',
@@ -335,6 +379,9 @@ class ProductCatalogWorkflowTest extends TestCase
             'length_cm' => '40',
             'developed' => '1',
             'retail_price_pln' => '299.00',
+            'sale_price_pln' => '249.00',
+            'sale_price_starts_at' => '2026-06-01',
+            'sale_price_ends_at' => '2026-06-30',
             'warehouse_location' => 'A-02-01',
             'description_pl' => '<p>Opis z ERP</p>',
             'short_description_en' => '<p>Short ERP</p>',
@@ -374,6 +421,9 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame(['SKU-UP-1', 'SKU-UP-2'], data_get($product->attributes, 'master.related_products.upsell_skus'));
         $this->assertSame('<p>Short ERP</p>', data_get($product->attributes, 'master.content.en.additional_description'));
         $this->assertEquals(round(299 / 4.55, 2), data_get($product->attributes, 'master.prices.price_eur'));
+        $this->assertEquals(249.0, data_get($product->attributes, 'master.prices.sale_price_pln'));
+        $this->assertSame('2026-06-01', data_get($product->attributes, 'master.prices.sale_price_starts_at'));
+        $this->assertSame('2026-06-30', data_get($product->attributes, 'master.prices.sale_price_ends_at'));
         $this->assertSame('Nowa koszula ERP', data_get($product->attributes, 'master.media.0.alt'));
 
         $mediaSrc = (string) data_get($product->attributes, 'master.media.0.src');
@@ -479,6 +529,9 @@ class ProductCatalogWorkflowTest extends TestCase
             'variant_attribute' => 'Rozmiar',
             'wholesale_price_pln' => '149.00',
             'retail_price_pln' => '369.00',
+            'sale_price_pln' => '319.00',
+            'sale_price_starts_at' => '2026-07-01',
+            'sale_price_ends_at' => '2026-07-15',
             'price_eur' => '81.18',
             'price_gbp' => '70.11',
             'price_usd' => '88.56',
@@ -514,6 +567,9 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame('Koszule', data_get($product->attributes, 'master.category'));
         $this->assertSame(['koszula', 'aura'], data_get($product->attributes, 'master.tags'));
         $this->assertEquals(369.0, data_get($product->attributes, 'master.prices.retail_price_pln'));
+        $this->assertEquals(319.0, data_get($product->attributes, 'master.prices.sale_price_pln'));
+        $this->assertSame('2026-07-01', data_get($product->attributes, 'master.prices.sale_price_starts_at'));
+        $this->assertSame('2026-07-15', data_get($product->attributes, 'master.prices.sale_price_ends_at'));
         $this->assertEquals(round(369 / 4.55, 2), data_get($product->attributes, 'master.prices.price_eur'));
         $this->assertNull(data_get($product->attributes, 'master.stock.quantity'));
         $this->assertSame('A-01-03', data_get($product->attributes, 'master.stock.location'));

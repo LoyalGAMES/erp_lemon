@@ -108,15 +108,18 @@ final class ReturnSettingsService
         $settings ??= $this->data();
         $disposition = $this->cleanCode($disposition);
 
+        if ($fallbackWarehouseId !== null) {
+            return $fallbackWarehouseId;
+        }
+
         foreach ((array) ($settings['dispositions'] ?? []) as $setting) {
             if (($setting['code'] ?? null) === $disposition) {
                 return $setting['warehouse_id']
-                    ?? $fallbackWarehouseId
                     ?? ($settings['default_target_warehouse_id'] ?? null);
             }
         }
 
-        return $fallbackWarehouseId ?? ($settings['default_target_warehouse_id'] ?? null);
+        return $settings['default_target_warehouse_id'] ?? null;
     }
 
     /**

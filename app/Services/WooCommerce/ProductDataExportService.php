@@ -44,11 +44,26 @@ final class ProductDataExportService
                 throw new RuntimeException("Brak aktywnej integracji WooCommerce dla kanału {$mapping->salesChannel?->code}.");
             }
 
-            $payload = $this->payload($product, filled($mapping->external_variation_id), (int) $mapping->sales_channel_id);
+            $isVariation = filled($mapping->external_variation_id);
+            $variants = $this->variantChildren($product);
+            $payload = $this->payload($product, $isVariation, (int) $mapping->sales_channel_id);
+
+            if (! $isVariation) {
+                $payload = $this->prepareVariablePayload($product, $variants, $payload);
+            }
+
             $response = $this->client->updateProductData($integration, $mapping, $payload);
 
             $this->updateMappingAfterExport($mapping, $product, $payload, $response);
-            $variantResults = $this->exportMappedVariants($product, $integration, (int) $mapping->sales_channel_id);
+            $variantResults = $isVariation
+                ? []
+                : $this->exportOrCreateVariants(
+                    $product,
+                    $variants,
+                    $integration,
+                    (int) $mapping->sales_channel_id,
+                    (string) ($response['id'] ?? $mapping->external_product_id),
+                );
 
             IntegrationSyncLog::query()->create([
                 'sales_channel_id' => $mapping->sales_channel_id,
@@ -231,27 +246,55 @@ final class ProductDataExportService
     /**
      * @return list<array<string,mixed>>
      */
-    private function exportMappedVariants(Product $product, WordpressIntegration $integration, int $salesChannelId): array
+    private function exportOrCreateVariants(Product $product, Collection $variants, WordpressIntegration $integration, int $salesChannelId, string $externalProductId): array
     {
         $results = [];
 
-        foreach ($this->variantChildren($product) as $variant) {
+        foreach ($variants as $variant) {
             $mapping = $variant->channelMappings
                 ->first(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $salesChannelId);
 
-            if (! $mapping instanceof ProductChannelMapping) {
-                continue;
+            $payload = $this->variationPayload($product, $variant, $salesChannelId);
+            $operation = 'export_product_variation_data';
+
+            if ($mapping instanceof ProductChannelMapping && filled($mapping->external_variation_id)) {
+                $response = $this->client->updateProductData($integration, $mapping, $payload);
+            } else {
+                $response = $this->client->createProductVariation($integration, $externalProductId, $payload);
+                $operation = 'create_product_variation';
+                $variationExternalId = $response['id'] ?? null;
+
+                if ($variationExternalId === null || (string) $variationExternalId === '') {
+                    throw new RuntimeException("WooCommerce nie zwrócił ID wariantu {$variant->sku}.");
+                }
+
+                $mapping = ProductChannelMapping::query()->updateOrCreate(
+                    [
+                        'product_id' => $variant->id,
+                        'sales_channel_id' => $salesChannelId,
+                    ],
+                    [
+                        'external_product_id' => $externalProductId,
+                        'external_variation_id' => (string) $variationExternalId,
+                        'external_sku' => (string) ($response['sku'] ?? $variant->sku),
+                        'stock_sync_enabled' => true,
+                        'metadata' => [
+                            'source' => 'erp',
+                            'created_via' => 'erp_product_export_variation_create',
+                            'parent_product_id' => $product->id,
+                            'created_in_woocommerce_at' => now()->toDateTimeString(),
+                        ],
+                    ],
+                );
             }
 
-            $payload = $this->variationPayload($product, $variant, $salesChannelId);
-            $response = $this->client->updateProductData($integration, $mapping, $payload);
             $this->updateMappingAfterExport($mapping, $variant, $payload, $response);
 
             IntegrationSyncLog::query()->create([
                 'sales_channel_id' => $salesChannelId,
                 'wordpress_integration_id' => $integration->id,
                 'direction' => 'out',
-                'operation' => 'export_product_variation_data',
+                'operation' => $operation,
                 'status' => 'success',
                 'external_resource' => 'product_variation',
                 'external_id' => $mapping->external_variation_id ?? $mapping->external_product_id,
@@ -283,6 +326,9 @@ final class ProductDataExportService
     {
         $master = $product->masterData();
         $retailPrice = data_get($master, 'prices.retail_price_pln');
+        $salePrice = data_get($master, 'prices.sale_price_pln');
+        $salePriceStartsAt = data_get($master, 'prices.sale_price_starts_at');
+        $salePriceEndsAt = data_get($master, 'prices.sale_price_ends_at');
         $description = data_get($master, 'content.pl.description');
         $shortDescription = data_get($master, 'content.pl.additional_description');
         $images = $this->images($product);
@@ -324,6 +370,12 @@ final class ProductDataExportService
             $payload['regular_price'] = $this->decimal($retailPrice, 2);
         }
 
+        $payload['sale_price'] = $salePrice !== null && $salePrice !== ''
+            ? $this->decimal($salePrice, 2)
+            : '';
+        $payload['date_on_sale_from'] = $this->dateString($salePriceStartsAt) ?? '';
+        $payload['date_on_sale_to'] = $this->dateString($salePriceEndsAt) ?? '';
+
         return $this->removeEmptyDimensions($payload);
     }
 
@@ -340,6 +392,12 @@ final class ProductDataExportService
 
         $payload['type'] = 'variable';
         $payload['attributes'] = $this->variableAttributes($product, $variants);
+        unset(
+            $payload['regular_price'],
+            $payload['sale_price'],
+            $payload['date_on_sale_from'],
+            $payload['date_on_sale_to'],
+        );
 
         return $payload;
     }
@@ -350,6 +408,28 @@ final class ProductDataExportService
     private function variationPayload(Product $parent, Product $variant, int $salesChannelId): array
     {
         $payload = $this->payload($variant, true, $salesChannelId);
+        $parentMaster = $parent->masterData();
+        $parentRegularPrice = data_get($parentMaster, 'prices.retail_price_pln');
+        $parentSalePrice = data_get($parentMaster, 'prices.sale_price_pln');
+        $parentSaleStartsAt = data_get($parentMaster, 'prices.sale_price_starts_at');
+        $parentSaleEndsAt = data_get($parentMaster, 'prices.sale_price_ends_at');
+
+        if (($payload['regular_price'] ?? '') === '' && $parentRegularPrice !== null && $parentRegularPrice !== '') {
+            $payload['regular_price'] = $this->decimal($parentRegularPrice, 2);
+        }
+
+        if (($payload['sale_price'] ?? '') === '' && $parentSalePrice !== null && $parentSalePrice !== '') {
+            $payload['sale_price'] = $this->decimal($parentSalePrice, 2);
+        }
+
+        if (($payload['date_on_sale_from'] ?? '') === '' && $parentSaleStartsAt !== null && $parentSaleStartsAt !== '') {
+            $payload['date_on_sale_from'] = $this->dateString($parentSaleStartsAt) ?? '';
+        }
+
+        if (($payload['date_on_sale_to'] ?? '') === '' && $parentSaleEndsAt !== null && $parentSaleEndsAt !== '') {
+            $payload['date_on_sale_to'] = $this->dateString($parentSaleEndsAt) ?? '';
+        }
+
         $payload['attributes'] = $this->variationAttributes($parent, $variant);
 
         return $payload;
@@ -667,6 +747,13 @@ final class ProductDataExportService
         }
 
         return number_format((float) $value, $precision, '.', '');
+    }
+
+    private function dateString(mixed $value): ?string
+    {
+        $value = trim((string) ($value ?? ''));
+
+        return $value === '' ? null : mb_substr($value, 0, 10);
     }
 
     /**

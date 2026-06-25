@@ -9,6 +9,7 @@ use App\Models\ExternalOrderLine;
 use App\Models\StockReservation;
 use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderFulfillmentStatusService;
+use App\Services\Packing\PackingTaskService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -60,7 +61,12 @@ class ExternalOrderController extends Controller
         ]);
     }
 
-    public function split(Request $request, ExternalOrder $order, StockReservationService $reservations): RedirectResponse
+    public function split(
+        Request $request,
+        ExternalOrder $order,
+        StockReservationService $reservations,
+        PackingTaskService $packingTasks,
+    ): RedirectResponse
     {
         $validated = $request->validate([
             'split_lines' => ['required', 'array'],
@@ -108,6 +114,7 @@ class ExternalOrderController extends Controller
                 'external_created_at' => $order->external_created_at,
                 'external_updated_at' => now(),
             ]);
+            $splitAllocations = (array) data_get($order->raw_payload, 'sempre_erp_split_allocations', []);
 
             foreach ($quantities as $lineId => $quantity) {
                 /** @var ExternalOrderLine|null $line */
@@ -136,10 +143,24 @@ class ExternalOrderController extends Controller
                     'raw_payload' => array_replace_recursive((array) $line->raw_payload, [
                         'sempre_erp_split' => [
                             'source_order_line_id' => $line->id,
+                            'source_external_line_id' => $line->external_line_id,
                             'source_quantity' => $currentQuantity,
+                            'split_quantity' => $splitQuantity,
                         ],
                     ]),
                 ]);
+
+                $splitAllocations[] = [
+                    'child_external_id' => $splitOrder->external_id,
+                    'child_external_number' => $splitOrder->external_number,
+                    'source_order_line_id' => $line->id,
+                    'source_external_line_id' => $line->external_line_id,
+                    'sku' => $line->sku,
+                    'product_id' => $line->product_id,
+                    'source_quantity' => $currentQuantity,
+                    'split_quantity' => $splitQuantity,
+                    'created_at' => now()->toISOString(),
+                ];
 
                 $remainingQuantity = $currentQuantity - $splitQuantity;
 
@@ -150,14 +171,16 @@ class ExternalOrderController extends Controller
                 }
             }
 
+            $rawPayload = (array) $order->raw_payload;
+            $rawPayload['sempre_erp_split_child_orders'] = array_values(array_filter([
+                ...((array) data_get($order->raw_payload, 'sempre_erp_split_child_orders', [])),
+                $splitOrder->external_id,
+            ]));
+            $rawPayload['sempre_erp_split_allocations'] = $splitAllocations;
+
             $order->update([
                 'total_gross' => $this->grossTotalFromLines($order->refresh()->lines),
-                'raw_payload' => array_replace_recursive((array) $order->raw_payload, [
-                    'sempre_erp_split_child_orders' => array_values(array_filter([
-                        ...((array) data_get($order->raw_payload, 'sempre_erp_split_child_orders', [])),
-                        $splitOrder->external_id,
-                    ])),
-                ]),
+                'raw_payload' => $rawPayload,
             ]);
             $splitOrder->update(['total_gross' => $this->grossTotalFromLines($splitOrder->lines)]);
 
@@ -166,6 +189,8 @@ class ExternalOrderController extends Controller
 
         $reservations->syncForOrder($order);
         $reservations->syncForOrder($splitOrder);
+        $packingTasks->syncForOrder($order);
+        $packingTasks->syncForOrder($splitOrder);
 
         return redirect()
             ->route('orders.show', $splitOrder)

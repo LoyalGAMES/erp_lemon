@@ -8,6 +8,7 @@ use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\PackingTask;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Collection;
 use RuntimeException;
 
 final class PackingTaskService
@@ -21,69 +22,24 @@ final class PackingTaskService
     {
         $created = 0;
         $updated = 0;
+        $cancelled = 0;
 
-        DB::transaction(function () use (&$created, &$updated): void {
+        DB::transaction(function () use (&$created, &$updated, &$cancelled): void {
             ExternalOrder::query()
                 ->with(['lines.product', 'salesChannel'])
                 ->whereIn('status', self::READY_STATUSES)
                 ->orderBy('external_created_at')
                 ->get()
-                ->each(function (ExternalOrder $order) use (&$created, &$updated): void {
-                    foreach ($order->lines as $line) {
-                        if ((float) $line->quantity <= 0) {
-                            continue;
-                        }
+                ->each(function (ExternalOrder $order) use (&$created, &$updated, &$cancelled): void {
+                    $result = $this->syncLoadedOrder($order);
 
-                        $externalLineId = $line->external_line_id ?: 'line-' . $line->id;
-
-                        $task = PackingTask::query()->firstOrNew([
-                            'external_order_id' => $order->id,
-                            'external_line_id' => $externalLineId,
-                        ]);
-
-                        if (in_array($task->status, ['packed', 'cancelled', 'problem'], true)) {
-                            continue;
-                        }
-
-                        $required = (float) $line->quantity;
-                        $picked = min((float) ($task->quantity_picked ?? 0), $required);
-                        $status = $picked >= $required ? 'picked' : 'open';
-
-                        $metadata = array_merge((array) $task->metadata, [
-                            'sales_channel_code' => $order->salesChannel?->code,
-                            'warehouse_location' => $this->warehouseLocation($line),
-                            'customer_note' => (string) data_get($order->raw_payload, 'customer_note', ''),
-                            'order_notes' => $this->orderNotes($order),
-                            'payment_method' => data_get($order->raw_payload, 'payment_method_title'),
-                            'shipping' => $order->shipping_data,
-                            'billing' => $order->billing_data,
-                        ]);
-
-                        $task->fill([
-                            'sales_channel_id' => $order->sales_channel_id,
-                            'external_order_line_id' => $line->id,
-                            'product_id' => $line->product_id,
-                            'order_number' => $order->external_number,
-                            'customer_name' => $this->customerName($order),
-                            'sku' => $line->sku,
-                            'product_name' => $line->product?->name ?: $line->name,
-                            'quantity_required' => $required,
-                            'quantity_picked' => $picked,
-                            'status' => $status,
-                            'courier' => $this->courier($order),
-                            'size_label' => $this->sizeLabel($line),
-                            'order_date' => $order->external_created_at,
-                            'picked_at' => $status === 'picked' ? ($task->picked_at ?? now()) : null,
-                            'metadata' => $metadata,
-                        ]);
-
-                        $task->exists ? $updated++ : $created++;
-                        $task->save();
-                    }
+                    $created += $result['created'];
+                    $updated += $result['updated'];
+                    $cancelled += $result['cancelled'];
                 });
         });
 
-        $cancelled = PackingTask::query()
+        $cancelled += PackingTask::query()
             ->whereIn('status', ['open', 'picked', 'problem'])
             ->whereHas('order', fn ($query) => $query->whereNotIn('status', self::READY_STATUSES))
             ->update(['status' => 'cancelled']);
@@ -93,6 +49,139 @@ final class PackingTaskService
             'updated' => $updated,
             'cancelled' => $cancelled,
         ];
+    }
+
+    /**
+     * @return array{created:int,updated:int,cancelled:int}
+     */
+    public function syncForOrder(ExternalOrder $order): array
+    {
+        return DB::transaction(function () use ($order): array {
+            $order = ExternalOrder::query()
+                ->with(['lines.product', 'salesChannel'])
+                ->lockForUpdate()
+                ->findOrFail($order->id);
+
+            if (! in_array($order->status, self::READY_STATUSES, true)) {
+                return [
+                    'created' => 0,
+                    'updated' => 0,
+                    'cancelled' => $this->cancelActiveTasksForOrder($order, collect()),
+                ];
+            }
+
+            return $this->syncLoadedOrder($order);
+        });
+    }
+
+    /**
+     * @return array{created:int,updated:int,cancelled:int}
+     */
+    private function syncLoadedOrder(ExternalOrder $order): array
+    {
+        $created = 0;
+        $updated = 0;
+        $activeExternalLineIds = collect();
+
+        foreach ($order->lines as $line) {
+            if ((float) $line->quantity <= 0) {
+                continue;
+            }
+
+            $externalLineId = $line->external_line_id ?: 'line-' . $line->id;
+            $activeExternalLineIds->push($externalLineId);
+
+            $task = PackingTask::query()->firstOrNew([
+                'external_order_id' => $order->id,
+                'external_line_id' => $externalLineId,
+            ]);
+
+            if (in_array($task->status, ['packed', 'cancelled', 'problem'], true)) {
+                continue;
+            }
+
+            $required = (float) $line->quantity;
+            $picked = min((float) ($task->quantity_picked ?? 0), $required);
+            $status = $picked >= $required ? 'picked' : 'open';
+
+            $metadata = array_merge((array) $task->metadata, [
+                'sales_channel_code' => $order->salesChannel?->code,
+                'warehouse_location' => $this->warehouseLocation($line),
+                'customer_note' => (string) data_get($order->raw_payload, 'customer_note', ''),
+                'order_notes' => $this->orderNotes($order),
+                'payment_method' => data_get($order->raw_payload, 'payment_method_title'),
+                'shipping' => $order->shipping_data,
+                'billing' => $order->billing_data,
+            ]);
+
+            $task->fill([
+                'sales_channel_id' => $order->sales_channel_id,
+                'external_order_line_id' => $line->id,
+                'product_id' => $line->product_id,
+                'order_number' => $order->external_number,
+                'customer_name' => $this->customerName($order),
+                'sku' => $line->sku,
+                'product_name' => $line->product?->name ?: $line->name,
+                'quantity_required' => $required,
+                'quantity_picked' => $picked,
+                'status' => $status,
+                'courier' => $this->courier($order),
+                'size_label' => $this->sizeLabel($line),
+                'order_date' => $order->external_created_at,
+                'picked_at' => $status === 'picked' ? ($task->picked_at ?? now()) : null,
+                'metadata' => $metadata,
+            ]);
+
+            $task->exists ? $updated++ : $created++;
+            $task->save();
+        }
+
+        return [
+            'created' => $created,
+            'updated' => $updated,
+            'cancelled' => $this->cancelActiveTasksForOrder($order, $activeExternalLineIds),
+        ];
+    }
+
+    /**
+     * @param Collection<int, string> $activeExternalLineIds
+     */
+    private function cancelActiveTasksForOrder(ExternalOrder $order, Collection $activeExternalLineIds): int
+    {
+        $activeExternalLineIds = $activeExternalLineIds
+            ->map(fn (mixed $externalLineId): string => (string) $externalLineId)
+            ->filter()
+            ->unique()
+            ->values();
+
+        $query = PackingTask::query()
+            ->where('external_order_id', $order->id)
+            ->whereIn('status', ['open', 'picked', 'problem']);
+
+        if ($activeExternalLineIds->isNotEmpty()) {
+            $query->where(function ($query) use ($activeExternalLineIds): void {
+                $query
+                    ->whereNull('external_line_id')
+                    ->orWhereNotIn('external_line_id', $activeExternalLineIds->all());
+            });
+        }
+
+        $tasks = $query->lockForUpdate()->get();
+
+        foreach ($tasks as $task) {
+            $metadata = (array) $task->metadata;
+            $metadata['packing_sync'] = [
+                'cancelled_reason' => 'order_line_removed_or_moved',
+                'cancelled_at' => now()->toISOString(),
+            ];
+
+            $task->update([
+                'status' => 'cancelled',
+                'metadata' => $metadata,
+            ]);
+        }
+
+        return $tasks->count();
     }
 
     public function scan(string $code): PackingTask

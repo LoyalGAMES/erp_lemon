@@ -9,10 +9,10 @@
                 || $erpUser->canAccessArea($area);
         };
         $metricAreas = [
-            'Produkty' => 'products',
-            'Magazyny' => 'warehouses',
-            'Synchronizacje' => 'sync',
-            'Faktury' => 'invoices',
+            'Zamówienia' => 'orders',
+            'Przychód' => 'orders',
+            'Zwroty' => 'returns',
+            'Procent zwrotów' => 'returns',
         ];
         $visibleMetrics = collect($metrics)
             ->filter(fn (array $metric): bool => $canAccessArea($metricAreas[$metric[0]] ?? 'dashboard'));

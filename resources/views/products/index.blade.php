@@ -346,6 +346,15 @@
                     <label>Cena detal brutto (PLN)
                         <input name="retail_price_pln" type="number" step="0.01" min="0" value="{{ old('retail_price_pln') }}">
                     </label>
+                    <label>Cena promocyjna brutto (PLN)
+                        <input name="sale_price_pln" type="number" step="0.01" min="0" value="{{ old('sale_price_pln') }}">
+                    </label>
+                    <label>Promocja od
+                        <input name="sale_price_starts_at" type="date" value="{{ old('sale_price_starts_at') }}">
+                    </label>
+                    <label>Promocja do
+                        <input name="sale_price_ends_at" type="date" value="{{ old('sale_price_ends_at') }}">
+                    </label>
                     <label>VAT %
                         <select name="vat_rate" required>
                             @foreach ([23, 8, 5, 0] as $rate)
@@ -369,18 +378,22 @@
                         <input name="name_en" value="{{ old('name_en') }}">
                     </label>
                 </div>
-                <label>Opis PL HTML
+                <div class="product-rich-field">
+                    <div class="product-rich-label">Opis PL HTML</div>
                     <textarea class="product-html" name="description_pl" data-rich-product-editor>{{ old('description_pl') }}</textarea>
-                </label>
-                <label>Opis EN HTML
+                </div>
+                <div class="product-rich-field">
+                    <div class="product-rich-label">Opis EN HTML</div>
                     <textarea class="product-html" name="description_en" data-rich-product-editor>{{ old('description_en') }}</textarea>
-                </label>
-                <label>Krótki opis PL HTML
+                </div>
+                <div class="product-rich-field">
+                    <div class="product-rich-label">Krótki opis PL HTML</div>
                     <textarea class="product-html" name="short_description_pl" data-rich-product-editor>{{ old('short_description_pl', old('additional_description_pl')) }}</textarea>
-                </label>
-                <label>Krótki opis EN HTML
+                </div>
+                <div class="product-rich-field">
+                    <div class="product-rich-label">Krótki opis EN HTML</div>
                     <textarea class="product-html" name="short_description_en" data-rich-product-editor>{{ old('short_description_en') }}</textarea>
-                </label>
+                </div>
                 <div class="drawer-form-grid">
                     <label>Produkty sprzedaży dodatkowej (SKU)
                         <textarea name="related_upsell_skus" placeholder="Jedno SKU w wierszu">{{ old('related_upsell_skus', '') }}</textarea>

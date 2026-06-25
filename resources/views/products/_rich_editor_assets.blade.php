@@ -2,6 +2,8 @@
     @push('styles')
         <style>
             .product-rich-shell { border: 1px solid var(--border); border-radius: 8px; background: #fff; overflow: hidden; }
+            .product-rich-field { display: grid; gap: 6px; color: var(--muted); font-weight: 650; }
+            .product-rich-label { color: var(--muted); font-weight: 650; }
             .product-rich-toolbar { min-height: 42px; display: flex; align-items: center; gap: 6px; padding: 8px; border-bottom: 1px solid var(--border); background: #fffdfb; flex-wrap: wrap; }
             .product-rich-toolbar button { min-width: 34px; min-height: 32px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); font: inherit; font-weight: 760; padding: 5px 9px; cursor: pointer; }
             .product-rich-toolbar button:hover, .product-rich-toolbar button.active { color: var(--green-dark); background: var(--green-soft); }
@@ -34,6 +36,7 @@
 
                     const shell = document.createElement('div');
                     shell.className = 'product-rich-shell';
+                    shell.addEventListener('mousedown', (event) => event.stopPropagation());
                     shell.addEventListener('click', (event) => event.stopPropagation());
 
                     const toolbar = document.createElement('div');
@@ -129,6 +132,8 @@
                         saveSelection();
                         syncVisualToHtml();
                     });
+                    editor.addEventListener('blur', syncVisualToHtml);
+                    editor.addEventListener('keydown', saveSelection);
                     editor.addEventListener('keyup', saveSelection);
                     editor.addEventListener('mouseup', saveSelection);
                     editor.addEventListener('focus', saveSelection);

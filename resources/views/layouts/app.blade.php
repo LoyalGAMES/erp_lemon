@@ -4,6 +4,16 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{ $title ?? 'Sempre ERP' }}</title>
+    <script>
+        (() => {
+            try {
+                if (window.matchMedia('(min-width: 900px)').matches
+                    && localStorage.getItem('sempre-erp-sidebar-open') === '1') {
+                    document.documentElement.classList.add('sidebar-open-initial');
+                }
+            } catch (error) {}
+        })();
+    </script>
     <style>
         :root {
             --bg: #f5f2f0;
@@ -24,25 +34,27 @@
             --shadow: 0 12px 30px rgba(134, 115, 100, .09);
             --sidebar-width: 306px;
         }
+        html { overflow-y: auto; scrollbar-gutter: stable; }
         * { box-sizing: border-box; }
         body { margin: 0; background: var(--bg); color: var(--text); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 14px; line-height: 1.5; }
         .app { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1fr); }
-        .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 70; width: min(var(--sidebar-width), 88vw); height: 100vh; border-right: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; padding: 18px 10px 14px; box-shadow: 24px 0 48px rgba(134, 115, 100, .16); transform: translateX(-100%); transition: transform .18s ease; }
-        body.sidebar-open .sidebar { transform: translateX(0); }
+        .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 70; width: min(var(--sidebar-width), 88vw); height: 100vh; max-height: 100dvh; overflow: hidden; border-right: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; padding: 18px 10px 14px; box-shadow: 24px 0 48px rgba(134, 115, 100, .16); transform: translateX(-100%); transition: transform .18s ease; }
+        body.sidebar-open .sidebar,
+        html.sidebar-open-initial .sidebar { transform: translateX(0); }
         .sidebar-backdrop { display: none; position: fixed; inset: 0; z-index: 60; background: rgba(37, 31, 26, .38); }
         body.sidebar-open .sidebar-backdrop { display: block; }
-        .sidebar-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 12px 28px 20px; }
+        .sidebar-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex: 0 0 auto; padding: 0 12px 28px 20px; }
         .brand { display: flex; align-items: center; width: 130px; min-height: 42px; padding: 0; color: var(--text); text-decoration: none; }
         .sidebar-head .brand { padding-bottom: 0; }
         .brand-logo { display: block; width: 130px; height: auto; }
-        .nav { display: grid; gap: 4px; }
-        .nav a { display: flex; align-items: center; gap: 13px; color: var(--text); text-decoration: none; border-radius: 8px; padding: 12px 16px; font-size: 15px; font-weight: 520; }
+        .nav { display: grid; gap: 4px; flex: 1 1 auto; min-height: 0; align-content: start; overflow-x: hidden; overflow-y: auto; padding-right: 4px; scrollbar-gutter: stable; }
+        .nav a { display: flex; align-items: center; gap: 13px; flex: 0 0 auto; color: var(--text); text-decoration: none; border-radius: 8px; padding: 12px 16px; font-size: 15px; font-weight: 520; }
         .nav a.active { color: var(--green-dark); background: var(--green-soft); font-weight: 750; }
         .nav-submenu { display: grid; gap: 2px; margin: -1px 0 6px 18px; padding-left: 12px; border-left: 1px solid var(--border); }
         .nav-submenu a { min-height: 34px; padding: 8px 12px; font-size: 13px; border-radius: 7px; color: var(--muted); }
         .nav-submenu a.active { color: var(--green-dark); background: rgba(134, 115, 100, .10); }
         .icon { width: 21px; height: 21px; display: inline-grid; place-items: center; color: currentColor; }
-        .user-menu { margin-top: auto; position: relative; }
+        .user-menu { margin-top: 10px; position: relative; flex: 0 0 auto; }
         .user-menu summary { list-style: none; cursor: pointer; }
         .user-menu summary::-webkit-details-marker { display: none; }
         .user-card { border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: flex; align-items: center; gap: 12px; background: var(--surface); }
@@ -59,18 +71,21 @@
         .sidebar-close span { transform: rotate(45deg); box-shadow: none; }
         .sidebar-close span::after { content: ""; display: block; width: 18px; height: 2px; border-radius: 2px; background: currentColor; transform: rotate(90deg); }
         .back-button { width: 42px; height: 42px; flex: 0 0 auto; display: inline-grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); text-decoration: none; font-size: 25px; line-height: 1; box-shadow: 0 5px 18px rgba(134, 115, 100, .08); }
-        h1 { margin: 0; font-size: 26px; line-height: 1.1; letter-spacing: -.02em; }
+        h1 { margin: 0; font-size: 26px; line-height: 1.1; letter-spacing: 0; }
         .subtitle { margin: 7px 0 0; color: var(--muted); max-width: 820px; }
         .top-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-        .status-chip { min-height: 42px; display: inline-flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 13px; background: var(--surface); font-weight: 650; box-shadow: 0 5px 18px rgba(134, 115, 100, .08); }
+        .status-chip { min-height: 42px; display: inline-flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 13px; background: var(--surface); font-weight: 650; white-space: nowrap; box-shadow: 0 5px 18px rgba(134, 115, 100, .08); }
         .top-shortcut { color: var(--text); text-decoration: none; }
         .top-shortcut.active { color: var(--green-dark); background: var(--green-soft); }
-        .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+        .dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
+        .dot.green { background: var(--green); }
+        .dot.orange { background: var(--orange); }
+        .dot.red { background: var(--red); }
         .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; margin-bottom: 20px; }
         .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow); }
         .metric { min-height: 118px; padding: 22px; }
         .metric-label { color: var(--muted); font-weight: 650; margin-bottom: 4px; }
-        .metric-value { font-size: 31px; line-height: 1; letter-spacing: -.03em; font-weight: 820; margin-bottom: 12px; }
+        .metric-value { font-size: 31px; line-height: 1; letter-spacing: 0; font-weight: 820; margin-bottom: 12px; overflow-wrap: anywhere; }
         .metric-value-blue { color: var(--blue); }
         .metric-value-red { color: var(--red); }
         .metric-caption { color: var(--muted); }
@@ -134,7 +149,8 @@
         footer { color: var(--muted); text-align: center; font-size: 12px; padding: 23px 0 0; }
         @media (min-width: 900px) {
             .sidebar { width: var(--sidebar-width); box-shadow: none; }
-            body.sidebar-open .main { margin-left: var(--sidebar-width); }
+            body.sidebar-open .main,
+            html.sidebar-open-initial .main { margin-left: var(--sidebar-width); }
             body.sidebar-open .sidebar-backdrop { display: none; }
         }
         @media (max-width: 1180px) {
@@ -167,12 +183,12 @@
         $operatorInitials = $operatorInitials !== '' ? mb_strtoupper($operatorInitials) : 'AM';
         $nav = [
             ['dashboard', route('dashboard'), 'Dashboard'],
-            ['products', route('products.index'), 'Produkty'],
-            ['warehouses', route('warehouses.index'), 'Magazyny'],
-            ['documents', route('documents.index'), 'Dokumenty'],
             ['orders', route('modules.show', 'orders'), 'Zamówienia'],
-            ['returns', route('returns.index'), 'Zwroty'],
+            ['products', route('products.index'), 'Produkty'],
             ['invoices', route('invoices.index'), 'Faktury'],
+            ['documents', route('documents.index'), 'Dokumenty magazynowe'],
+            ['returns', route('returns.index'), 'Zwroty'],
+            ['warehouses', route('warehouses.index'), 'Magazyny'],
         ];
         $settingsNav = [
             ['settings', route('settings.index'), 'Ustawienia'],
@@ -197,6 +213,13 @@
             ['product-parameters', route('products.parameters.index'), 'Parametry'],
         ] : [];
         $productActiveKeys = array_column($productSubnav, 0);
+        $topStatus = ($hideTopActions ?? false)
+            ? []
+            : app(\App\Support\OperationalStatus::class)->navigation();
+        $packingTopCount = (int) data_get($topStatus, 'packing_orders', 0);
+        $returnsTopCount = (int) data_get($topStatus, 'return_cases', 0);
+        $woocommerceTopStatus = data_get($topStatus, 'woocommerce', ['tone' => 'red', 'label' => 'Brak statusu']);
+        $ksefTopStatus = data_get($topStatus, 'ksef', ['tone' => 'red', 'label' => 'Brak statusu']);
     @endphp
     <div class="sidebar-backdrop" data-sidebar-close></div>
     <div class="app">
@@ -211,7 +234,7 @@
                 @foreach ($nav as [$key, $url, $label])
                     @php $isProductGroup = $key === 'products' && in_array($active, $productActiveKeys, true); @endphp
                     <a href="{{ $url }}" @class(['active' => $active === $key || $isProductGroup])>{{ $label }}</a>
-                    @if ($key === 'products' && $productSubnav !== [] && $isProductGroup)
+                    @if ($key === 'products' && $productSubnav !== [])
                         <div class="nav-submenu" aria-label="Produkty">
                             @foreach ($productSubnav as [$subKey, $subUrl, $subLabel])
                                 <a href="{{ $subUrl }}" @class(['active' => $active === $subKey])>{{ $subLabel }}</a>
@@ -249,16 +272,28 @@
                 @unless($hideTopActions ?? false)
                     <div class="top-actions">
                         @if ($canAccessArea('packing'))
-                            <a href="{{ route('packing.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'packing'])><strong>Pakowanie</strong></a>
+                            <a href="{{ route('packing.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'packing'])>
+                                <strong>Pakowanie@if($packingTopCount > 0) ({{ $packingTopCount }}) @endif</strong>
+                            </a>
                         @endif
                         @if ($canAccessArea('returns'))
-                            <a href="{{ route('returns.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'returns'])><strong>Moduł zwrotów</strong></a>
+                            <a href="{{ route('returns.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'returns'])>
+                                <strong>Moduł zwrotów@if($returnsTopCount > 0) ({{ $returnsTopCount }}) @endif</strong>
+                            </a>
                         @endif
                         @if ($canAccessArea('integrations'))
-                            <a href="{{ route('integrations.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'integrations'])><strong>WooCommerce</strong><span class="dot"></span> Konfiguracja</a>
+                            <a href="{{ route('integrations.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'integrations'])>
+                                <strong>WooCommerce</strong>
+                                <span @class(['dot', $woocommerceTopStatus['tone'] ?? 'red']) title="{{ $woocommerceTopStatus['label'] ?? 'Brak statusu' }}"></span>
+                                {{ $woocommerceTopStatus['label'] ?? 'Brak statusu' }}
+                            </a>
                         @endif
                         @if ($canAccessArea('ksef'))
-                            <a href="{{ $canAccessArea('integrations') ? route('integrations.index') . '#ksef' : route('ksef.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'ksef'])><strong>KSeF</strong><span class="dot"></span> Moduł</a>
+                            <a href="{{ $canAccessArea('integrations') ? route('integrations.index') . '#ksef' : route('ksef.index') }}" @class(['status-chip', 'top-shortcut', 'active' => $active === 'ksef'])>
+                                <strong>KSeF</strong>
+                                <span @class(['dot', $ksefTopStatus['tone'] ?? 'red']) title="{{ $ksefTopStatus['label'] ?? 'Brak statusu' }}"></span>
+                                {{ $ksefTopStatus['label'] ?? 'Brak statusu' }}
+                            </a>
                         @endif
                     </div>
                 @endunless
@@ -281,6 +316,7 @@
         if (desktopSidebar() && localStorage.getItem(sidebarPersistenceKey) === '1') {
             document.body.classList.add('sidebar-open');
         }
+        document.documentElement.classList.remove('sidebar-open-initial');
         document.querySelectorAll('[data-sidebar-open]').forEach((button) => {
             button.addEventListener('click', () => {
                 document.body.classList.add('sidebar-open');

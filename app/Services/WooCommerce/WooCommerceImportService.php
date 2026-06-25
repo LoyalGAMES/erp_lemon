@@ -225,6 +225,7 @@ final class WooCommerceImportService
                 'path' => $this->nullableString($category['path'] ?? null) ?? $name,
                 'description' => $this->nullableString($category['description'] ?? null),
                 'count' => (int) ($category['count'] ?? 0),
+                'sort_order' => (int) ($category['menu_order'] ?? 100),
                 'metadata' => [
                     'source' => 'woocommerce',
                     'raw' => $category,
@@ -255,15 +256,21 @@ final class WooCommerceImportService
                     'external_id' => (string) $item['id'],
                 ]);
                 $isNew = ! $order->exists;
+                $existingRawPayload = (array) $order->raw_payload;
+                $splitAllocations = $order->exists ? $this->splitAllocationsForOrder($order) : [];
+                $importLines = $this->importableOrderLines($item, $splitAllocations);
+                $rawPayload = $this->rawPayloadForImportedOrder($item, $existingRawPayload, $splitAllocations);
 
                 $order->fill([
                     'external_number' => (string) ($item['number'] ?? $item['id']),
                     'status' => (string) ($item['status'] ?? 'unknown'),
                     'currency' => (string) ($item['currency'] ?? 'PLN'),
-                    'total_gross' => (float) ($item['total'] ?? 0),
+                    'total_gross' => $splitAllocations === []
+                        ? (float) ($item['total'] ?? 0)
+                        : $this->grossTotalFromImportLines($importLines),
                     'billing_data' => $item['billing'] ?? null,
                     'shipping_data' => $item['shipping'] ?? null,
-                    'raw_payload' => $item,
+                    'raw_payload' => $rawPayload,
                     'external_created_at' => $item['date_created'] ?? null,
                     'external_updated_at' => $item['date_modified'] ?? null,
                 ]);
@@ -271,10 +278,11 @@ final class WooCommerceImportService
 
                 $order->lines()->delete();
 
-                foreach (($item['line_items'] ?? []) as $line) {
+                foreach ($importLines as $line) {
                     $sku = trim((string) ($line['sku'] ?? ''));
                     $product = $sku !== '' ? Product::query()->where('sku', $sku)->first() : null;
                     $quantity = (float) ($line['quantity'] ?? 0);
+                    $sourceQuantity = (float) ($line['sempre_erp_source_quantity'] ?? $quantity);
 
                     $order->lines()->create([
                         'product_id' => $product?->id,
@@ -282,11 +290,11 @@ final class WooCommerceImportService
                         'sku' => $sku !== '' ? $sku : null,
                         'name' => (string) ($line['name'] ?? 'Pozycja zamówienia'),
                         'quantity' => $quantity,
-                        'unit_net_price' => isset($line['subtotal']) && $quantity > 0
-                            ? (float) $line['subtotal'] / $quantity
+                        'unit_net_price' => isset($line['subtotal']) && $sourceQuantity > 0
+                            ? (float) $line['subtotal'] / $sourceQuantity
                             : null,
-                        'unit_gross_price' => isset($line['total']) && $quantity > 0
-                            ? (float) $line['total'] / $quantity
+                        'unit_gross_price' => isset($line['total']) && $sourceQuantity > 0
+                            ? (float) $line['total'] / $sourceQuantity
                             : null,
                         'vat_rate' => null,
                         'raw_payload' => $line,
@@ -325,6 +333,138 @@ final class WooCommerceImportService
             'released' => $released,
             'reservation_skipped' => $reservationSkipped,
         ];
+    }
+
+    /**
+     * @param array<string, mixed> $item
+     * @param list<array<string, mixed>> $splitAllocations
+     * @return list<array<string, mixed>>
+     */
+    private function importableOrderLines(array $item, array $splitAllocations): array
+    {
+        return collect((array) ($item['line_items'] ?? []))
+            ->map(function (array $line) use ($splitAllocations): ?array {
+                $sourceQuantity = (float) ($line['quantity'] ?? 0);
+                $splitQuantity = $this->splitQuantityForLine($line, $splitAllocations);
+                $remainingQuantity = max(0, $sourceQuantity - $splitQuantity);
+
+                if ($remainingQuantity <= 0) {
+                    return null;
+                }
+
+                $line['quantity'] = $remainingQuantity;
+                $line['sempre_erp_source_quantity'] = $sourceQuantity;
+                $line['sempre_erp_split_quantity'] = $splitQuantity;
+
+                return $line;
+            })
+            ->filter()
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param array<string, mixed> $line
+     * @param list<array<string, mixed>> $splitAllocations
+     */
+    private function splitQuantityForLine(array $line, array $splitAllocations): float
+    {
+        $externalLineId = isset($line['id']) ? (string) $line['id'] : '';
+        $sku = trim((string) ($line['sku'] ?? ''));
+
+        return collect($splitAllocations)
+            ->filter(function (array $allocation) use ($externalLineId, $sku): bool {
+                $sourceExternalLineId = trim((string) ($allocation['source_external_line_id'] ?? ''));
+
+                if ($sourceExternalLineId !== '' && $externalLineId !== '') {
+                    return $sourceExternalLineId === $externalLineId;
+                }
+
+                return $sku !== '' && trim((string) ($allocation['sku'] ?? '')) === $sku;
+            })
+            ->sum(fn (array $allocation): float => (float) ($allocation['split_quantity'] ?? 0));
+    }
+
+    /**
+     * @param array<string, mixed> $item
+     * @param array<string, mixed> $existingRawPayload
+     * @param list<array<string, mixed>> $splitAllocations
+     * @return array<string, mixed>
+     */
+    private function rawPayloadForImportedOrder(array $item, array $existingRawPayload, array $splitAllocations): array
+    {
+        if ($splitAllocations === []) {
+            return $item;
+        }
+
+        $item['sempre_erp_split_child_orders'] = array_values(array_unique(array_filter([
+            ...((array) data_get($existingRawPayload, 'sempre_erp_split_child_orders', [])),
+            ...collect($splitAllocations)->pluck('child_external_id')->filter()->values()->all(),
+        ])));
+        $item['sempre_erp_split_allocations'] = $splitAllocations;
+        $item['sempre_erp_split_import_adjusted_at'] = now()->toISOString();
+
+        return $item;
+    }
+
+    /**
+     * @param list<array<string, mixed>> $importLines
+     */
+    private function grossTotalFromImportLines(array $importLines): float
+    {
+        return round(collect($importLines)->sum(function (array $line): float {
+            $quantity = (float) ($line['quantity'] ?? 0);
+            $sourceQuantity = (float) ($line['sempre_erp_source_quantity'] ?? $quantity);
+
+            if (! isset($line['total']) || $sourceQuantity <= 0) {
+                return 0.0;
+            }
+
+            return ((float) $line['total'] / $sourceQuantity) * $quantity;
+        }), 2);
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function splitAllocationsForOrder(ExternalOrder $order): array
+    {
+        $childOrders = ExternalOrder::query()
+            ->with('lines')
+            ->where('sales_channel_id', $order->sales_channel_id)
+            ->where('external_id', 'like', $order->external_id . '-SPLIT-%')
+            ->get();
+
+        if ($childOrders->isNotEmpty()) {
+            return $childOrders
+                ->flatMap(function (ExternalOrder $childOrder) use ($order) {
+                    return $childOrder->lines->map(function ($line) use ($childOrder, $order): array {
+                        $sourceExternalLineId = trim((string) data_get($line->raw_payload, 'sempre_erp_split.source_external_line_id', ''));
+                        $externalLineId = (string) ($line->external_line_id ?? '');
+
+                        if ($sourceExternalLineId === '' && $externalLineId !== '') {
+                            $sourceExternalLineId = (string) preg_replace('/-S\d+$/', '', $externalLineId);
+                        }
+
+                        return [
+                            'child_external_id' => $childOrder->external_id,
+                            'child_external_number' => $childOrder->external_number,
+                            'parent_external_id' => $order->external_id,
+                            'source_external_line_id' => $sourceExternalLineId,
+                            'sku' => $line->sku,
+                            'product_id' => $line->product_id,
+                            'split_quantity' => (float) $line->quantity,
+                        ];
+                    });
+                })
+                ->values()
+                ->all();
+        }
+
+        return collect((array) data_get($order->raw_payload, 'sempre_erp_split_allocations', []))
+            ->filter(fn (mixed $allocation): bool => is_array($allocation))
+            ->values()
+            ->all();
     }
 
     private function syncImportedStock(WordpressIntegration $integration, Product $product, float $quantity): void
@@ -499,6 +639,8 @@ final class WooCommerceImportService
             'prices' => [
                 'retail_price_pln' => $this->nullableFloat($item['regular_price'] ?? $item['price'] ?? null),
                 'sale_price_pln' => $this->nullableFloat($item['sale_price'] ?? null),
+                'sale_price_starts_at' => $this->nullableDateString($item['date_on_sale_from'] ?? null),
+                'sale_price_ends_at' => $this->nullableDateString($item['date_on_sale_to'] ?? null),
             ],
             'stock' => [
                 'location' => $this->nullableString($this->metaValue($item, ['_warehouse_location', 'warehouse_location', 'location'])),
@@ -758,6 +900,13 @@ final class WooCommerceImportService
         $value = str_replace(',', '.', trim((string) $value));
 
         return $value === '' ? null : (float) $value;
+    }
+
+    private function nullableDateString(mixed $value): ?string
+    {
+        $value = $this->nullableString($value);
+
+        return $value === null ? null : mb_substr($value, 0, 10);
     }
 
     private function stockImportWarehouse(WordpressIntegration $integration): Warehouse

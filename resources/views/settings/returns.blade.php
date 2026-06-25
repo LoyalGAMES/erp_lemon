@@ -102,8 +102,8 @@
             </section>
 
             <section class="settings-section">
-                <h2>Dyspozycje i magazyny docelowe</h2>
-                <p class="muted">Tu przypinasz działanie zwrotu do magazynu. Puste pole magazynu oznacza użycie magazynu domyślnego.</p>
+                <h2>Dyspozycje i magazyny domyślne</h2>
+                <p class="muted">Magazyn wybrany przy konkretnym zwrocie ma pierwszeństwo. Tu ustawiasz domyślne podpowiedzi dla dyspozycji, gdy magazyn nie został wskazany ręcznie.</p>
                 <div class="settings-option-list" data-repeat-list data-repeat-type="disposition" data-next-index="{{ count($settingDispositions) }}">
                     @foreach ($settingDispositions as $index => $disposition)
                         <div class="settings-option-row disposition-row">

@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\ExternalOrder;
+use App\Models\PackingTask;
+use App\Models\ReturnCase;
+use App\Models\SalesChannel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -23,6 +27,62 @@ class ErpDashboardTest extends TestCase
             ->assertDontSee('12 458')
             ->assertDontSee('PZ/26/0001')
             ->assertDontSee('M1 - Glowny');
+    }
+
+    public function test_dashboard_shows_operational_sales_return_and_top_action_counts(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $firstOrder = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '1001',
+            'external_number' => '1001',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 200,
+        ]);
+
+        ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '1002',
+            'external_number' => '1002',
+            'status' => 'completed',
+            'currency' => 'PLN',
+            'total_gross' => 100.50,
+        ]);
+
+        PackingTask::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_order_id' => $firstOrder->id,
+            'order_number' => '1001',
+            'product_name' => 'Produkt testowy',
+            'quantity_required' => 1,
+            'status' => 'open',
+        ]);
+
+        ReturnCase::query()->create([
+            'number' => 'R/1',
+            'external_order_id' => $firstOrder->id,
+            'status' => 'opened',
+        ]);
+
+        $this->get('/')
+            ->assertOk()
+            ->assertSee('Zamówienia')
+            ->assertSee('2')
+            ->assertSee('Przychód')
+            ->assertSee('300,50 PLN')
+            ->assertSee('Zwroty')
+            ->assertSee('1')
+            ->assertSee('Procent zwrotów')
+            ->assertSee('50,0%')
+            ->assertSee('Pakowanie (1)')
+            ->assertSee('Moduł zwrotów (1)');
     }
 
     public function test_integrations_page_starts_empty_and_accepts_real_woocommerce_configuration(): void

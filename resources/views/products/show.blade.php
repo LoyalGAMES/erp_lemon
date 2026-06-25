@@ -241,6 +241,9 @@
             <div class="detail-grid">
                 <div class="detail-item"><span>Cena hurt</span><strong>{{ $money(data_get($master, 'prices.wholesale_price_pln')) }}</strong></div>
                 <div class="detail-item"><span>Cena detal</span><strong>{{ $money(data_get($master, 'prices.retail_price_pln')) }}</strong></div>
+                <div class="detail-item"><span>Cena promocyjna</span><strong>{{ $money(data_get($master, 'prices.sale_price_pln')) }}</strong></div>
+                <div class="detail-item"><span>Promocja od</span><strong>{{ data_get($master, 'prices.sale_price_starts_at') ?: '-' }}</strong></div>
+                <div class="detail-item"><span>Promocja do</span><strong>{{ data_get($master, 'prices.sale_price_ends_at') ?: '-' }}</strong></div>
                 <div class="detail-item"><span>VAT</span><strong>{{ $percent($product->vat_rate) }}</strong></div>
                 <div class="detail-item"><span>Lokalizacja</span><strong>{{ data_get($master, 'stock.location') ?: '-' }}</strong></div>
                 <div class="detail-item"><span>Cena zakupu</span><strong>{{ $money(data_get($master, 'prices.purchase_price_pln')) }}</strong></div>

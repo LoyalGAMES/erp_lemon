@@ -524,6 +524,21 @@
                 }
             });
 
+            form?.addEventListener('submit', (event) => {
+                if (lineList?.querySelector('[data-return-line]')) {
+                    return;
+                }
+
+                event.preventDefault();
+                alert('Wybierz co najmniej jeden towar z listy pozycji zamówienia.');
+
+                if (selectedOrder) {
+                    openProductModal();
+                } else {
+                    orderLookup?.focus();
+                }
+            });
+
             orderLookup?.addEventListener('input', () => {
                 if (orderNumberInput) {
                     orderNumberInput.value = '';
