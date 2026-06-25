@@ -8,12 +8,13 @@ use App\Models\StockBalance;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Support\OperationalStatus;
+use Throwable;
 
 class DashboardController extends Controller
 {
-    public function __invoke(OperationalStatus $status)
+    public function __invoke()
     {
-        $metrics = $status->dashboardMetrics();
+        $metrics = $this->dashboardMetrics();
 
         $warehouseBalances = Warehouse::query()
             ->with(['stockBalances.product', 'routes.salesChannel'])
@@ -32,8 +33,42 @@ class DashboardController extends Controller
             ->limit(7)
             ->get();
 
-        $ksef = $status->ksefQueueRows();
+        $ksef = $this->ksefQueueRows();
 
         return view('dashboard', compact('metrics', 'warehouseBalances', 'documents', 'ksef'));
+    }
+
+    /**
+     * @return list<array{0:string,1:string,2:string}>
+     */
+    private function dashboardMetrics(): array
+    {
+        try {
+            return app(OperationalStatus::class)->dashboardMetrics();
+        } catch (Throwable) {
+            return [
+                ['Zamówienia', '0', 'Metryki chwilowo niedostępne'],
+                ['Przychód', '0,00 PLN', 'Metryki chwilowo niedostępne'],
+                ['Zwroty', '0', 'Metryki chwilowo niedostępne'],
+                ['Procent zwrotów', '0,0%', 'Metryki chwilowo niedostępne'],
+            ];
+        }
+    }
+
+    /**
+     * @return list<array{0:string,1:int,2:string}>
+     */
+    private function ksefQueueRows(): array
+    {
+        try {
+            return app(OperationalStatus::class)->ksefQueueRows();
+        } catch (Throwable) {
+            return [
+                ['Do wysłania', 0, ''],
+                ['W trakcie', 0, 'blue'],
+                ['Zaakceptowane', 0, 'green'],
+                ['Wymaga reakcji', 0, 'red'],
+            ];
+        }
     }
 }

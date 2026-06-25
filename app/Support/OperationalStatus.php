@@ -13,6 +13,7 @@ use App\Models\StockSyncQueueItem;
 use App\Models\WordpressIntegration;
 use App\Services\Ksef\KsefClient;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Throwable;
 
 final class OperationalStatus
@@ -26,13 +27,19 @@ final class OperationalStatus
      */
     public function dashboardMetrics(): array
     {
-        $ordersCount = ExternalOrder::query()->count();
-        $returnsCount = ReturnCase::query()->count();
-        $currencyTotals = ExternalOrder::query()
-            ->select('currency', DB::raw('SUM(total_gross) as total'))
-            ->groupBy('currency')
-            ->pluck('total', 'currency')
-            ->map(fn ($total): float => (float) $total);
+        $ordersCount = $this->tableExists('external_orders')
+            ? ExternalOrder::query()->count()
+            : 0;
+        $returnsCount = $this->tableExists('return_cases')
+            ? ReturnCase::query()->count()
+            : 0;
+        $currencyTotals = $this->tableExists('external_orders')
+            ? ExternalOrder::query()
+                ->select('currency', DB::raw('SUM(total_gross) as total'))
+                ->groupBy('currency')
+                ->pluck('total', 'currency')
+                ->map(fn ($total): float => (float) $total)
+            : collect();
         $revenue = $currencyTotals->sum();
         $currency = $currencyTotals->count() === 1 ? (string) $currencyTotals->keys()->first() : 'PLN';
         $returnRate = $ordersCount > 0 ? ($returnsCount / $ordersCount) * 100 : 0;
@@ -68,6 +75,15 @@ final class OperationalStatus
      */
     public function ksefQueueRows(): array
     {
+        if (! $this->tableExists('ksef_submissions')) {
+            return [
+                ['Do wysłania', 0, ''],
+                ['W trakcie', 0, 'blue'],
+                ['Zaakceptowane', 0, 'green'],
+                ['Wymaga reakcji', 0, 'red'],
+            ];
+        }
+
         return [
             ['Do wysłania', KsefSubmission::query()->whereIn('status', ['pending', 'queued'])->count(), ''],
             ['W trakcie', KsefSubmission::query()->whereIn('status', ['running', 'submitted'])->count(), 'blue'],
@@ -78,6 +94,10 @@ final class OperationalStatus
 
     private function packingOrdersToHandle(): int
     {
+        if (! $this->tableExists('packing_tasks')) {
+            return 0;
+        }
+
         return (int) PackingTask::query()
             ->whereIn('status', ['open', 'picked', 'problem'])
             ->distinct()
@@ -86,6 +106,10 @@ final class OperationalStatus
 
     private function returnCasesToHandle(): int
     {
+        if (! $this->tableExists('return_cases')) {
+            return 0;
+        }
+
         return ReturnCase::query()
             ->whereIn('status', ['opened', 'document_created'])
             ->count();
@@ -97,6 +121,10 @@ final class OperationalStatus
     private function woocommerceStatus(): array
     {
         try {
+            if (! $this->tableExists('wordpress_integrations')) {
+                return ['tone' => 'red', 'label' => 'Brak konfiguracji'];
+            }
+
             $integrations = WordpressIntegration::query()->count();
 
             if ($integrations === 0) {
@@ -112,7 +140,9 @@ final class OperationalStatus
                 })
                 ->count();
             $imports = $this->latestImportStatusCounts();
-            $stockExports = $this->statusCounts(StockSyncQueueItem::query());
+            $stockExports = $this->tableExists('stock_sync_queue_items')
+                ? $this->statusCounts(StockSyncQueueItem::query())
+                : [];
             $failed = ($imports['failed'] ?? 0) + ($stockExports['failed'] ?? 0);
             $active = ($imports['queued'] ?? 0)
                 + ($imports['running'] ?? 0)
@@ -144,13 +174,19 @@ final class OperationalStatus
     {
         try {
             $configuration = $this->ksefClient->configurationStatus();
-            $failed = KsefSubmission::query()->whereIn('status', ['failed', 'rejected'])->count();
-            $configurationIssues = KsefSubmission::query()
-                ->whereIn('status', ['missing_configuration', 'requires_configuration'])
-                ->count();
-            $active = KsefSubmission::query()
-                ->whereIn('status', ['pending', 'queued', 'running', 'submitted'])
-                ->count();
+            $failed = $this->tableExists('ksef_submissions')
+                ? KsefSubmission::query()->whereIn('status', ['failed', 'rejected'])->count()
+                : 0;
+            $configurationIssues = $this->tableExists('ksef_submissions')
+                ? KsefSubmission::query()
+                    ->whereIn('status', ['missing_configuration', 'requires_configuration'])
+                    ->count()
+                : 0;
+            $active = $this->tableExists('ksef_submissions')
+                ? KsefSubmission::query()
+                    ->whereIn('status', ['pending', 'queued', 'running', 'submitted'])
+                    ->count()
+                : 0;
 
             if (! (bool) ($configuration['direct_online_send_ready'] ?? false)) {
                 return ['tone' => 'red', 'label' => 'Brak konfiguracji'];
@@ -177,6 +213,10 @@ final class OperationalStatus
      */
     private function latestImportStatusCounts(): array
     {
+        if (! $this->tableExists('integration_sync_logs')) {
+            return [];
+        }
+
         $latestImportIds = IntegrationSyncLog::query()
             ->whereIn('operation', ['import_products', 'import_orders'])
             ->whereNotNull('wordpress_integration_id')
@@ -209,5 +249,14 @@ final class OperationalStatus
     private function money(float $value, string $currency): string
     {
         return number_format($value, 2, ',', ' ').' '.($currency !== '' ? $currency : 'PLN');
+    }
+
+    private function tableExists(string $table): bool
+    {
+        try {
+            return Schema::hasTable($table);
+        } catch (Throwable) {
+            return false;
+        }
     }
 }

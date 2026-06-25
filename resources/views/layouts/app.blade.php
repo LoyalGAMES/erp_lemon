@@ -213,9 +213,21 @@
             ['product-parameters', route('products.parameters.index'), 'Parametry'],
         ] : [];
         $productActiveKeys = array_column($productSubnav, 0);
-        $topStatus = ($hideTopActions ?? false)
-            ? []
-            : app(\App\Support\OperationalStatus::class)->navigation();
+        $topStatus = [];
+
+        if (! ($hideTopActions ?? false)) {
+            try {
+                $topStatus = app(\App\Support\OperationalStatus::class)->navigation();
+            } catch (\Throwable) {
+                $topStatus = [
+                    'packing_orders' => 0,
+                    'return_cases' => 0,
+                    'woocommerce' => ['tone' => 'red', 'label' => 'Status niedostępny'],
+                    'ksef' => ['tone' => 'red', 'label' => 'Status niedostępny'],
+                ];
+            }
+        }
+
         $packingTopCount = (int) data_get($topStatus, 'packing_orders', 0);
         $returnsTopCount = (int) data_get($topStatus, 'return_cases', 0);
         $woocommerceTopStatus = data_get($topStatus, 'woocommerce', ['tone' => 'red', 'label' => 'Brak statusu']);
