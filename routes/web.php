@@ -57,6 +57,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::get('/products', [ProductController::class, 'index'])->name('products.index');
         Route::get('/products/configuration/categories', [ProductConfigurationController::class, 'categories'])->name('products.categories.index');
         Route::post('/products/configuration/categories', [ProductConfigurationController::class, 'storeCategory'])->name('products.categories.store');
+        Route::post('/products/configuration/categories/sort', [ProductConfigurationController::class, 'sortCategories'])->name('products.categories.sort');
         Route::put('/products/configuration/categories/{category}', [ProductConfigurationController::class, 'updateCategory'])->name('products.categories.update');
         Route::delete('/products/configuration/categories/{category}', [ProductConfigurationController::class, 'destroyCategory'])->name('products.categories.destroy');
         Route::get('/products/configuration/parameters', [ProductConfigurationController::class, 'parameters'])->name('products.parameters.index');
