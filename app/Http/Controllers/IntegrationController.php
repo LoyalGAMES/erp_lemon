@@ -122,12 +122,14 @@ class IntegrationController extends Controller
             ->with('status', 'Integracja WooCommerce została dodana. Pobierz wtyczkę Lemon ERP i wgraj ją w panelu WordPress, a potem użyj testu połączenia.');
     }
 
-    public function downloadWooCommercePlugin(LemonErpWooCommercePluginPackageService $packages): BinaryFileResponse
+    public function downloadWooCommercePlugin(LemonErpWooCommercePluginPackageService $packages): BinaryFileResponse|RedirectResponse
     {
         try {
             $package = $packages->build();
         } catch (RuntimeException $exception) {
-            abort(500, $exception->getMessage());
+            return redirect()
+                ->to(route('integrations.index').'#woocommerce-plugin')
+                ->with('error', 'Nie można przygotować paczki wtyczki WooCommerce: '.$exception->getMessage());
         }
 
         return response()->download($package['path'], $package['filename'], [

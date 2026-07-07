@@ -8,6 +8,7 @@ use App\Models\IntegrationSyncLog;
 use App\Models\Invoice;
 use App\Models\InvoiceFile;
 use App\Models\WordpressIntegration;
+use App\Services\Invoices\OrderInvoiceService;
 use App\Services\Invoices\InvoiceValidationService;
 use Illuminate\Http\Client\RequestException;
 use RuntimeException;
@@ -18,6 +19,7 @@ final class InvoiceWooCommerceUploadService
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly InvoiceValidationService $validation,
+        private readonly OrderInvoiceService $invoiceFiles,
     ) {}
 
     /**
@@ -36,6 +38,7 @@ final class InvoiceWooCommerceUploadService
         }
 
         $this->validation->assertValidForExternalSend($invoice);
+        $invoice = $this->invoiceFiles->ensureFiles($invoice);
 
         $integration = WordpressIntegration::query()
             ->where('sales_channel_id', $order->sales_channel_id)

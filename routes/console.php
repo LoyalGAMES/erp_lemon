@@ -9,6 +9,9 @@ use App\Services\Inventory\StockSyncQueueService;
 use App\Services\Ksef\KsefSubmissionService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Schedule;
 
 Artisan::command('inspire', function (): void {
@@ -155,6 +158,112 @@ Artisan::command('erp:refresh-invoice-template {--regenerate : Regenerate HTML/P
 
     return 0;
 })->purpose('Refresh the managed Sempre invoice template and optionally regenerate invoice files.');
+
+Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation check}', function (): int {
+    $failures = 0;
+    $runCheck = function (string $label, callable $callback) use (&$failures): void {
+        try {
+            $callback();
+            $this->line("OK  {$label}");
+        } catch (\Throwable $exception) {
+            $failures++;
+            $this->error("ERR {$label}: " . mb_substr($exception->getMessage(), 0, 240));
+        }
+    };
+
+    $runCheck('database connection', function (): void {
+        DB::select('select 1 as ok');
+    });
+
+    $runCheck('storage writable', function (): void {
+        $directory = storage_path('app/preflight');
+        File::ensureDirectoryExists($directory);
+
+        $path = $directory . '/' . uniqid('erp_preflight_', true) . '.tmp';
+
+        if (File::put($path, 'ok') === false || File::get($path) !== 'ok') {
+            throw new \RuntimeException('Nie można zapisać i odczytać pliku testowego w storage/app.');
+        }
+
+        File::delete($path);
+    });
+
+    $runCheck('runtime directories writable', function (): void {
+        $directories = [
+            storage_path('app'),
+            storage_path('framework/cache'),
+            storage_path('framework/sessions'),
+            storage_path('framework/views'),
+            storage_path('logs'),
+        ];
+
+        foreach ($directories as $directory) {
+            File::ensureDirectoryExists($directory);
+
+            if (! is_writable($directory)) {
+                throw new \RuntimeException("Katalog nie jest zapisywalny: {$directory}");
+            }
+        }
+    });
+
+    $runCheck('critical routes registered', function (): void {
+        $routes = [
+            'dashboard',
+            'products.index',
+            'documents.index',
+            'warehouses.index',
+            'returns.index',
+            'invoices.index',
+            'integrations.index',
+            'settings.index',
+        ];
+
+        foreach ($routes as $route) {
+            if (! Route::has($route)) {
+                throw new \RuntimeException("Brak trasy: {$route}");
+            }
+        }
+    });
+
+    $runCheck('brand assets available', function (): void {
+        $assets = [
+            public_path('assets/sempre-logotyp.svg'),
+            public_path('assets/sempre-logotyp.png'),
+        ];
+
+        foreach ($assets as $asset) {
+            if (! is_file($asset)) {
+                throw new \RuntimeException("Brak assetu: {$asset}");
+            }
+        }
+    });
+
+    if (! (bool) $this->option('skip-views')) {
+        $runCheck('Blade views compile', function (): void {
+            try {
+                Artisan::call('view:clear');
+                $exitCode = Artisan::call('view:cache');
+                $output = trim(Artisan::output());
+
+                if ($exitCode !== 0) {
+                    throw new \RuntimeException($output !== '' ? $output : 'view:cache zwrócił kod ' . $exitCode);
+                }
+            } finally {
+                Artisan::call('view:clear');
+            }
+        });
+    }
+
+    if ($failures > 0) {
+        $this->error("ERP preflight failed: {$failures} błędów.");
+
+        return 1;
+    }
+
+    $this->info('ERP preflight OK.');
+
+    return 0;
+})->purpose('Run ERP runtime checks before or after deployment.');
 
 Schedule::command('erp:queue-woocommerce-imports --orders')
     ->cron('*/5 * * * *')

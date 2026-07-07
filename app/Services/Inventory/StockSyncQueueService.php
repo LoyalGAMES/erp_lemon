@@ -33,9 +33,16 @@ final class StockSyncQueueService
             return 0;
         }
 
+        $exportEnabledSalesChannelIds = $this->exportEnabledSalesChannelIds();
+
+        if ($exportEnabledSalesChannelIds->isEmpty()) {
+            return 0;
+        }
+
         $routesByWarehouse = WarehouseChannelRoute::query()
             ->with('warehouse')
             ->whereIn('warehouse_id', $triggers->pluck('warehouse_id')->unique()->values()->all())
+            ->whereIn('sales_channel_id', $exportEnabledSalesChannelIds->all())
             ->where('push_stock', true)
             ->orderBy('priority')
             ->get()
@@ -93,6 +100,14 @@ final class StockSyncQueueService
             return 0;
         }
 
+        $salesChannelIds = $salesChannelIds
+            ->intersect($this->exportEnabledSalesChannelIds())
+            ->values();
+
+        if ($salesChannelIds->isEmpty()) {
+            return 0;
+        }
+
         $productIds = StockBalance::query()
             ->where('warehouse_id', $warehouse->id)
             ->pluck('product_id')
@@ -129,6 +144,17 @@ final class StockSyncQueueService
         }
 
         return $queued;
+    }
+
+    private function exportEnabledSalesChannelIds(): \Illuminate\Support\Collection
+    {
+        return WordpressIntegration::query()
+            ->where('stock_export_enabled', true)
+            ->pluck('sales_channel_id')
+            ->map(fn ($id): int => (int) $id)
+            ->filter()
+            ->unique()
+            ->values();
     }
 
     /**

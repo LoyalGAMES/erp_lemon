@@ -98,7 +98,7 @@ enum WarehouseDocumentType: string
             self::PW => 'PW przyjmuje towar do magazynu. Wybierasz tylko magazyn docelowy.',
             self::RX => 'RX przyjmuje zwrot do magazynu. Wybierasz tylko magazyn docelowy.',
             self::ZW => 'ZW przyjmuje zwrot do magazynu. Wybierasz tylko magazyn docelowy.',
-            self::KOR => 'Korekta przyjęcia zwiększa stan w magazynie docelowym.',
+            self::KOR => 'Korekta stanu zwiększa albo zmniejsza stan w magazynie docelowym. Wpisz ilość dodatnią dla zwiększenia albo ujemną dla zmniejszenia.',
             self::WZ => 'WZ wydaje towar z magazynu. Wybierasz tylko magazyn źródłowy.',
             self::RW => 'RW rozchodzi towar z magazynu. Wybierasz tylko magazyn źródłowy.',
             self::MM => 'MM przesuwa towar między dwoma różnymi magazynami.',

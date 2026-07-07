@@ -272,6 +272,12 @@ final class OrderInvoiceService
     {
         $invoice = $this->currencyConversion->apply($invoice->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']));
 
+        $this->pruneMissingLocalFiles($invoice, ['html', 'pdf']);
+
+        if (! $invoice->relationLoaded('files')) {
+            $invoice->load('files');
+        }
+
         if (! $invoice->files->contains('type', 'html')) {
             $this->storeHtmlFile($invoice);
         }
@@ -281,6 +287,33 @@ final class OrderInvoiceService
         }
 
         return $invoice->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']);
+    }
+
+    /**
+     * @param  list<string>  $types
+     */
+    private function pruneMissingLocalFiles(Invoice $invoice, array $types): void
+    {
+        $deleted = false;
+
+        foreach ($invoice->files->whereIn('type', $types) as $file) {
+            if ($file->disk !== 'local') {
+                continue;
+            }
+
+            $path = storage_path('app/'.$file->path);
+
+            if (File::exists($path) && File::size($path) > 0) {
+                continue;
+            }
+
+            $file->delete();
+            $deleted = true;
+        }
+
+        if ($deleted) {
+            $invoice->unsetRelation('files');
+        }
     }
 
     public function previewPdf(Invoice $invoice): string

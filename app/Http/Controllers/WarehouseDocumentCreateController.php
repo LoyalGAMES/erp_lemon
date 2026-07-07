@@ -138,10 +138,10 @@ class WarehouseDocumentCreateController extends Controller
             'source_warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
             'destination_warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
             'product_id' => ['nullable', 'integer', 'exists:products,id'],
-            'quantity' => ['nullable', 'numeric', 'min:0.0001'],
+            'quantity' => ['nullable', 'numeric'],
             'lines' => ['nullable', 'array', 'max:100'],
             'lines.*.product_id' => ['nullable', 'required_with:lines.*.quantity', 'integer', 'exists:products,id'],
-            'lines.*.quantity' => ['nullable', 'required_with:lines.*.product_id', 'numeric', 'min:0.0001'],
+            'lines.*.quantity' => ['nullable', 'required_with:lines.*.product_id', 'numeric'],
             'lines.*.unit_gross_price' => ['nullable', 'numeric', 'min:0'],
             'lines.*.location' => ['nullable', 'string', 'max:120'],
             'notes' => ['nullable', 'string', 'max:2000'],
@@ -150,10 +150,10 @@ class WarehouseDocumentCreateController extends Controller
         $documentType = WarehouseDocumentType::from($validated['type']);
         $type = $documentType->value;
         $documentDate = CarbonImmutable::parse((string) ($validated['document_date'] ?? now()->toDateString()))->startOfDay();
-        $lines = $this->documentLines($validated);
+        $lines = $this->documentLines($validated, $documentType);
 
         if ($lines === []) {
-            return back()->withInput()->with('error', 'Dokument musi mieć co najmniej jedną pozycję z produktem i ilością.');
+            return back()->withInput()->with('error', 'Dokument musi mieć co najmniej jedną pozycję z produktem i poprawną ilością. Dla KOR ilość może być dodatnia albo ujemna, ale nie może wynosić zero.');
         }
 
         $warehouseError = $documentType->warehouseTopologyError(
@@ -223,7 +223,7 @@ class WarehouseDocumentCreateController extends Controller
      * @param array<string, mixed> $validated
      * @return list<array{product_id:int,quantity:float,unit_gross_price:?float,notes:?string,metadata:?array<string,string>}>
      */
-    private function documentLines(array $validated): array
+    private function documentLines(array $validated, WarehouseDocumentType $documentType): array
     {
         $lines = collect($validated['lines'] ?? [])
             ->filter(fn (array $line): bool => ! empty($line['product_id']) || ! empty($line['quantity']))
@@ -240,7 +240,7 @@ class WarehouseDocumentCreateController extends Controller
                     'metadata' => $location !== '' ? ['location' => $location] : null,
                 ];
             })
-            ->filter(fn (array $line): bool => $line['product_id'] > 0 && $line['quantity'] > 0)
+            ->filter(fn (array $line): bool => $line['product_id'] > 0 && $this->quantityAllowedForType((float) $line['quantity'], $documentType))
             ->values()
             ->all();
 
@@ -248,7 +248,7 @@ class WarehouseDocumentCreateController extends Controller
             return $lines;
         }
 
-        if (! empty($validated['product_id']) && ! empty($validated['quantity'])) {
+        if (! empty($validated['product_id']) && isset($validated['quantity']) && $this->quantityAllowedForType((float) $validated['quantity'], $documentType)) {
             return [[
                 'product_id' => (int) $validated['product_id'],
                 'quantity' => (float) $validated['quantity'],
@@ -259,6 +259,15 @@ class WarehouseDocumentCreateController extends Controller
         }
 
         return [];
+    }
+
+    private function quantityAllowedForType(float $quantity, WarehouseDocumentType $documentType): bool
+    {
+        if ($documentType === WarehouseDocumentType::KOR) {
+            return abs($quantity) > 0.0000001;
+        }
+
+        return $quantity > 0;
     }
 
     /**

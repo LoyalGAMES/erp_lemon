@@ -458,11 +458,25 @@ class InvoiceController extends Controller
         return back()->with('status', 'Wysłano zaległe faktury do WooCommerce. Wysłane: '.$uploaded.', pominięte: '.$skipped.'.');
     }
 
-    public function downloadFile(Invoice $invoice, InvoiceFile $file): BinaryFileResponse
+    public function downloadFile(Invoice $invoice, InvoiceFile $file, OrderInvoiceService $invoices): BinaryFileResponse
     {
         $absolutePath = storage_path('app/'.$file->path);
 
-        if ($file->invoice_id !== $invoice->id || $file->disk !== 'local' || ! File::exists($absolutePath)) {
+        if ($file->invoice_id !== $invoice->id || $file->disk !== 'local') {
+            abort(404);
+        }
+
+        if (! File::exists($absolutePath) || File::size($absolutePath) === 0) {
+            try {
+                $invoice = $invoices->ensureFiles($invoice);
+                $file = $invoice->files->firstWhere('type', $file->type);
+                $absolutePath = $file instanceof InvoiceFile ? storage_path('app/'.$file->path) : '';
+            } catch (RuntimeException) {
+                abort(404);
+            }
+        }
+
+        if (! $file instanceof InvoiceFile || $file->disk !== 'local' || ! File::exists($absolutePath)) {
             abort(404);
         }
 

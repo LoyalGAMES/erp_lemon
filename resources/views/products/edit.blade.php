@@ -101,7 +101,7 @@
             <a class="button secondary" href="{{ route('products.show', $product) }}">Wróć do szczegółów</a>
             <a class="button secondary" href="{{ route('products.index') }}">Lista produktów</a>
             @if (! $product->ean)
-                <button class="button secondary" type="button" data-gs1-open-modal>Wygeneruj EAN GS1</button>
+                <button class="button secondary" type="button" data-gs1-open-modal data-gs1-target="gs1-gpc-modal-{{ $product->id }}">Wygeneruj EAN GS1</button>
             @endif
         </div>
         <div class="toolbar-note">Po zapisie ERP przejmuje produkt jako źródło prawdy i import WooCommerce nie nadpisuje tych pól.</div>

@@ -297,8 +297,21 @@
                 }
 
                 refreshAllLineStocks();
+                refreshQuantityRules(type);
 
                 if (typeHelp) typeHelp.textContent = typeHelpTexts[type] || '';
+            }
+
+            function refreshQuantityRules(type) {
+                const allowsNegativeCorrection = type === 'KOR';
+
+                documentLines?.querySelectorAll('[data-document-quantity]').forEach((input) => {
+                    input.min = allowsNegativeCorrection ? '' : '1';
+                    input.placeholder = allowsNegativeCorrection ? 'np. 5 lub -2' : '';
+                    input.title = allowsNegativeCorrection
+                        ? 'Dla KOR wpisz wartość dodatnią, aby zwiększyć stan, albo ujemną, aby zmniejszyć stan.'
+                        : 'Ilość musi być większa od zera.';
+                });
             }
 
             function refreshDocumentLineButtons() {
@@ -403,6 +416,7 @@
                 const line = wrapper.firstElementChild;
                 documentLines.appendChild(line);
                 refreshDocumentLineButtons();
+                refreshQuantityRules(typeControl?.value || 'PZ');
 
                 return line;
             }

@@ -18,7 +18,7 @@ final class InvoiceTemplateService
 {
     private const DEFAULT_TEMPLATE_SOURCE = 'resources/views/invoices/print.blade.php';
 
-    private const DEFAULT_TEMPLATE_VERSION = '2026-06-14-managed-business-invoice-v9-ksef-qr';
+    private const DEFAULT_TEMPLATE_VERSION = '2026-07-07-managed-business-invoice-v10-compact-brand-pdf';
 
     public function __construct(
         private readonly KsefQrCodeService $qrCodes,

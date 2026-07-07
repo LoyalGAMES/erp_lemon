@@ -6,6 +6,8 @@
     if ($selectedGpcLabel === '' && $selectedGpcCode !== '') {
         $selectedGpcLabel = (string) data_get($gpcOptions->firstWhere('code', $selectedGpcCode), 'label', '');
     }
+    $gs1ModalId = 'gs1-gpc-modal-' . $product->id;
+    $gs1FormId = 'product-gs1-ean-form-' . $product->id;
 @endphp
 
 @once
@@ -42,24 +44,6 @@
     @push('scripts')
         <script>
             (() => {
-                const modal = document.querySelector('[data-gs1-modal]');
-                const openButtons = Array.from(document.querySelectorAll('[data-gs1-open-modal]'));
-                const closeButtons = Array.from(document.querySelectorAll('[data-gs1-close-modal]'));
-                const searchInput = document.querySelector('[data-gs1-search]');
-                const manualInput = document.querySelector('[data-gs1-manual-code]');
-                const form = document.querySelector('[data-gs1-form]');
-                const selectedCodeInput = document.querySelector('[data-gs1-selected-code]');
-                const selectedLabelInput = document.querySelector('[data-gs1-selected-label]');
-                const selectedText = document.querySelector('[data-gs1-selected-text]');
-                const options = Array.from(document.querySelectorAll('[data-gs1-gpc-option]'));
-                const emptyFilterResult = document.querySelector('[data-gs1-filter-empty]');
-                const filterCounter = document.querySelector('[data-gs1-filter-count]');
-                const registerProducts = modal?.dataset.registerProducts === '1';
-
-                if (!modal || !form || !selectedCodeInput || !selectedLabelInput || !selectedText) {
-                    return;
-                }
-
                 function normalizeSearch(value) {
                     return String(value || '')
                         .toLocaleLowerCase('pl-PL')
@@ -83,112 +67,152 @@
                     return [token, token.slice(0, -1)];
                 }
 
-                const searchableOptions = options.map((option) => ({
-                    option,
-                    haystack: normalizeSearch(`${option.dataset.code || ''} ${option.dataset.label || ''} ${option.dataset.description || ''}`),
-                    compactHaystack: compactSearch(`${option.dataset.code || ''} ${option.dataset.label || ''} ${option.dataset.description || ''}`),
-                }));
+                function initializeModal(modal) {
+                    if (!modal || modal.dataset.gs1Initialized === '1') {
+                        return;
+                    }
 
-                function setSelected(code, label) {
-                    selectedCodeInput.value = code || '';
-                    selectedLabelInput.value = label || '';
-                    selectedText.textContent = code ? `${code} - ${label || 'kod wpisany ręcznie'}` : 'Nie wybrano kodu GPC';
-                    options.forEach((option) => option.classList.toggle('selected', option.dataset.code === code));
-                }
+                    const formId = modal.dataset.gs1Form;
+                    const form = formId ? document.getElementById(formId) : null;
+                    const openButtons = Array.from(document.querySelectorAll(`[data-gs1-open-modal][data-gs1-target="${modal.id}"]`));
+                    const closeButtons = Array.from(modal.querySelectorAll('[data-gs1-close-modal]'));
+                    const searchInput = modal.querySelector('[data-gs1-search]');
+                    const manualInput = modal.querySelector('[data-gs1-manual-code]');
+                    const selectedCodeInput = form?.querySelector('[data-gs1-selected-code]');
+                    const selectedLabelInput = form?.querySelector('[data-gs1-selected-label]');
+                    const selectedText = modal.querySelector('[data-gs1-selected-text]');
+                    const options = Array.from(modal.querySelectorAll('[data-gs1-gpc-option]'));
+                    const emptyFilterResult = modal.querySelector('[data-gs1-filter-empty]');
+                    const filterCounter = modal.querySelector('[data-gs1-filter-count]');
+                    const registerProducts = modal.dataset.registerProducts === '1';
 
-                function openModal() {
-                    modal.classList.add('open');
-                    modal.setAttribute('aria-hidden', 'false');
-                    window.setTimeout(() => searchInput?.focus(), 30);
-                }
+                    if (!form || !selectedCodeInput || !selectedLabelInput || !selectedText) {
+                        return;
+                    }
 
-                function closeModal() {
-                    modal.classList.remove('open');
-                    modal.setAttribute('aria-hidden', 'true');
-                }
+                    modal.dataset.gs1Initialized = '1';
 
-                function filterOptions() {
-                    const query = normalizeSearch(searchInput?.value || '');
-                    const compactQuery = compactSearch(searchInput?.value || '');
-                    const tokens = query.split(' ').filter(Boolean);
-                    let visibleCount = 0;
+                    const searchableOptions = options.map((option) => ({
+                        option,
+                        haystack: normalizeSearch(`${option.dataset.code || ''} ${option.dataset.label || ''} ${option.dataset.description || ''}`),
+                        compactHaystack: compactSearch(`${option.dataset.code || ''} ${option.dataset.label || ''} ${option.dataset.description || ''}`),
+                    }));
 
-                    searchableOptions.forEach(({ option, haystack, compactHaystack }) => {
-                        const visible = query === ''
-                            || haystack.includes(query)
-                            || (compactQuery !== '' && compactHaystack.includes(compactQuery))
-                            || tokens.every((token) => tokenVariants(token).some((variant) => (
-                                haystack.includes(variant) || compactHaystack.includes(variant)
-                            )));
-                        option.hidden = !visible;
+                    function setSelected(code, label) {
+                        selectedCodeInput.value = code || '';
+                        selectedLabelInput.value = label || '';
+                        selectedText.textContent = code ? `${code} - ${label || 'kod wpisany ręcznie'}` : 'Nie wybrano kodu GPC';
+                        options.forEach((option) => option.classList.toggle('selected', option.dataset.code === code));
+                    }
 
-                        if (visible) {
-                            visibleCount += 1;
+                    function openModal() {
+                        modal.classList.add('open');
+                        modal.setAttribute('aria-hidden', 'false');
+                        window.setTimeout(() => searchInput?.focus(), 30);
+                    }
+
+                    function closeModal() {
+                        modal.classList.remove('open');
+                        modal.setAttribute('aria-hidden', 'true');
+                    }
+
+                    function filterOptions() {
+                        const rawQuery = searchInput?.value || '';
+                        const query = normalizeSearch(rawQuery);
+                        const compactQuery = compactSearch(rawQuery);
+                        const tokens = query.split(' ').filter(Boolean);
+                        let visibleCount = 0;
+
+                        searchableOptions.forEach(({ option, haystack, compactHaystack }) => {
+                            const visible = query === ''
+                                || haystack.includes(query)
+                                || (compactQuery !== '' && compactHaystack.includes(compactQuery))
+                                || tokens.every((token) => tokenVariants(token).some((variant) => (
+                                    haystack.includes(variant) || compactHaystack.includes(variant)
+                                )));
+                            option.hidden = !visible;
+
+                            if (visible) {
+                                visibleCount += 1;
+                            }
+                        });
+
+                        if (filterCounter) {
+                            filterCounter.textContent = query === ''
+                                ? `Wszystkie kody: ${options.length}`
+                                : `Znaleziono: ${visibleCount} z ${options.length}`;
+                        }
+
+                        if (emptyFilterResult) {
+                            emptyFilterResult.hidden = query === '' || visibleCount > 0;
+                        }
+                    }
+
+                    openButtons.forEach((button) => button.addEventListener('click', openModal));
+                    closeButtons.forEach((button) => button.addEventListener('click', closeModal));
+                    ['input', 'search', 'change', 'keyup'].forEach((eventName) => searchInput?.addEventListener(eventName, filterOptions));
+
+                    options.forEach((option) => {
+                        option.addEventListener('click', () => {
+                            setSelected(option.dataset.code || '', option.dataset.label || '');
+                            if (manualInput) {
+                                manualInput.value = '';
+                            }
+                        });
+                    });
+
+                    manualInput?.addEventListener('input', () => {
+                        const code = manualInput.value.replace(/\D+/g, '').slice(0, 8);
+                        manualInput.value = code;
+
+                        if (code.length === 8) {
+                            setSelected(code, 'kod wpisany ręcznie');
                         }
                     });
 
-                    if (filterCounter) {
-                        filterCounter.textContent = query === ''
-                            ? `Wszystkie kody: ${options.length}`
-                            : `Znaleziono: ${visibleCount} z ${options.length}`;
-                    }
-
-                    if (emptyFilterResult) {
-                        emptyFilterResult.hidden = query === '' || visibleCount > 0;
-                    }
-                }
-
-                openButtons.forEach((button) => button.addEventListener('click', openModal));
-                closeButtons.forEach((button) => button.addEventListener('click', closeModal));
-                ['input', 'search', 'change', 'keyup'].forEach((eventName) => searchInput?.addEventListener(eventName, filterOptions));
-
-                options.forEach((option) => {
-                    option.addEventListener('click', () => {
-                        setSelected(option.dataset.code || '', option.dataset.label || '');
-                        if (manualInput) {
-                            manualInput.value = '';
+                    modal.addEventListener('click', (event) => {
+                        if (event.target === modal) {
+                            closeModal();
                         }
                     });
-                });
 
-                manualInput?.addEventListener('input', () => {
-                    const code = manualInput.value.replace(/\D+/g, '').slice(0, 8);
-                    manualInput.value = code;
+                    form.addEventListener('submit', (event) => {
+                        if (registerProducts && !selectedCodeInput.value) {
+                            event.preventDefault();
+                            selectedText.textContent = 'Wybierz kod GPC albo wpisz ręcznie 8 cyfr.';
+                            openModal();
+                        }
+                    });
 
-                    if (code.length === 8) {
-                        setSelected(code, 'kod wpisany ręcznie');
-                    }
-                });
+                    setSelected(selectedCodeInput.value, selectedLabelInput.value);
+                    filterOptions();
+                }
 
-                modal.addEventListener('click', (event) => {
-                    if (event.target === modal) {
-                        closeModal();
-                    }
-                });
+                function initialize() {
+                    document.querySelectorAll('[data-gs1-modal]').forEach(initializeModal);
+                }
+
+                if (document.readyState === 'loading') {
+                    document.addEventListener('DOMContentLoaded', initialize);
+                } else {
+                    initialize();
+                }
 
                 document.addEventListener('keydown', (event) => {
-                    if (event.key === 'Escape' && modal.classList.contains('open')) {
-                        closeModal();
+                    if (event.key === 'Escape') {
+                        document.querySelectorAll('[data-gs1-modal].open').forEach((modal) => {
+                            modal.classList.remove('open');
+                            modal.setAttribute('aria-hidden', 'true');
+                        });
                     }
                 });
-
-                form.addEventListener('submit', (event) => {
-                    if (registerProducts && !selectedCodeInput.value) {
-                        event.preventDefault();
-                        selectedText.textContent = 'Wybierz kod GPC albo wpisz ręcznie 8 cyfr.';
-                        openModal();
-                    }
-                });
-
-                setSelected(selectedCodeInput.value, selectedLabelInput.value);
-                filterOptions();
             })();
         </script>
     @endpush
 @endonce
 
 <form
-    id="product-gs1-ean-form"
+    id="{{ $gs1FormId }}"
     method="POST"
     action="{{ route('products.gs1.ean.generate', $product) }}"
     data-gs1-form
@@ -198,7 +222,7 @@
     <input type="hidden" name="gpc_label" value="{{ $selectedGpcLabel }}" data-gs1-selected-label>
 </form>
 
-<div class="gs1-modal" data-gs1-modal data-register-products="{{ ($gs1Settings['register_products'] ?? true) ? '1' : '0' }}" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Wybór kodu GPC">
+<div id="{{ $gs1ModalId }}" class="gs1-modal" data-gs1-modal data-gs1-form="{{ $gs1FormId }}" data-register-products="{{ ($gs1Settings['register_products'] ?? true) ? '1' : '0' }}" aria-hidden="true" role="dialog" aria-modal="true" aria-label="Wybór kodu GPC">
     <div class="gs1-modal-card">
         <div class="gs1-modal-header">
             <div>
@@ -241,7 +265,7 @@
             <div class="toolbar-note">Kod GPC jest wymagany, gdy produkt ma zostać zarejestrowany w MojeGS1.</div>
             <div class="inline-actions">
                 <button class="button secondary" type="button" data-gs1-close-modal>Anuluj</button>
-                <button class="button" type="submit" form="product-gs1-ean-form">Wygeneruj EAN GS1</button>
+                <button class="button" type="submit" form="{{ $gs1FormId }}">Wygeneruj EAN GS1</button>
             </div>
         </div>
     </div>

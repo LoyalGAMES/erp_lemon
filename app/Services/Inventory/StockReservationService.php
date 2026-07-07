@@ -25,6 +25,7 @@ final class StockReservationService
     public function __construct(
         private readonly SalesChannelWarehouseResolver $warehouseResolver,
         private readonly OrderFulfillmentStatusService $fulfillmentStatus,
+        private readonly StockSyncQueueService $stockSyncQueue,
     ) {}
 
     /**
@@ -109,9 +110,13 @@ final class StockReservationService
                 }
             }
 
-            foreach ($this->uniquePairs([...$releasedPairs, ...$newPairs]) as [$warehouseId, $productId]) {
+            $changedPairs = $this->uniquePairs([...$releasedPairs, ...$newPairs]);
+
+            foreach ($changedPairs as [$warehouseId, $productId]) {
                 $this->recalculateBalance($warehouseId, $productId);
             }
+
+            $this->queueStockSync($changedPairs, 'order_reservation_synced');
 
             return [
                 'reserved' => $reserved,
@@ -411,6 +416,27 @@ final class StockReservationService
             ->sum('quantity');
 
         return max(0, $onHand - $reserved);
+    }
+
+    /**
+     * @param  list<array{0:int,1:int}>  $pairs
+     */
+    private function queueStockSync(array $pairs, string $reason): void
+    {
+        if ($pairs === []) {
+            return;
+        }
+
+        $this->stockSyncQueue->queueForTriggers(
+            array_map(
+                fn (array $pair): array => [
+                    'warehouse_id' => (int) $pair[0],
+                    'product_id' => (int) $pair[1],
+                ],
+                $pairs,
+            ),
+            $reason,
+        );
     }
 
     /**
