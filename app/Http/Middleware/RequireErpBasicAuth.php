@@ -27,7 +27,10 @@ class RequireErpBasicAuth
         $password = (string) $request->getPassword();
         $user = $this->authenticator->authenticate($login, $password);
 
-        if ($user === null && (string) env('ERP_BASIC_USER', '') === '' && (string) env('ERP_BASIC_PASSWORD', '') === '') {
+        $fallbackConfigured = (string) config('erp.basic_user', '') !== ''
+            && (string) config('erp.basic_password', '') !== '';
+
+        if ($user === null && ! $fallbackConfigured && ! $this->authenticator->hasDatabaseUsers()) {
             abort(503, 'ERP basic auth is not configured.');
         }
 
