@@ -62,10 +62,19 @@ final class ErpUserAuthenticator
         return $user->refresh();
     }
 
+    public function hasDatabaseUsers(): bool
+    {
+        if (! Schema::hasTable('users')) {
+            return false;
+        }
+
+        return User::query()->where('is_active', true)->exists();
+    }
+
     private function matchesEnvironmentFallback(string $login, string $password): bool
     {
-        $fallbackLogin = (string) env('ERP_BASIC_USER', '');
-        $fallbackPassword = (string) env('ERP_BASIC_PASSWORD', '');
+        $fallbackLogin = (string) config('erp.basic_user', '');
+        $fallbackPassword = (string) config('erp.basic_password', '');
 
         return $fallbackLogin !== ''
             && $fallbackPassword !== ''
@@ -75,7 +84,7 @@ final class ErpUserAuthenticator
 
     private function fallbackEmail(string $login): string
     {
-        $configured = trim((string) env('ERP_FALLBACK_EMAIL', ''));
+        $configured = trim((string) config('erp.fallback_email', ''));
 
         return $configured !== '' ? $configured : $login;
     }
