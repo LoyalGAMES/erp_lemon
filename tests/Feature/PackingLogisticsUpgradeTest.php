@@ -255,6 +255,7 @@ class PackingLogisticsUpgradeTest extends TestCase
     public function test_courier_accounts_can_be_managed_in_settings(): void
     {
         $this->post(route('settings.shipping.accounts.store'), [
+            'provider' => 'inpost',
             'name' => 'Konto główne',
             'code' => 'glowne',
             'organization_id' => '111',
