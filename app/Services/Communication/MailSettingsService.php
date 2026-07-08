@@ -171,6 +171,87 @@ final class MailSettingsService
         return true;
     }
 
+    /**
+     * @return array{
+     *     from_domain:?string,
+     *     username_domain:?string,
+     *     ehlo_domain:string,
+     *     checks:array<int, array{status:string,title:string,description:string}>
+     * }
+     */
+    public function deliverabilityReport(): array
+    {
+        $settings = $this->data();
+        $fromDomain = $this->emailDomain($settings['from_address']);
+        $usernameDomain = $this->emailDomain($settings['username']);
+        $ehloDomain = $settings['ehlo_domain'] !== ''
+            ? $settings['ehlo_domain']
+            : (string) parse_url((string) config('app.url', 'http://localhost'), PHP_URL_HOST);
+        $checks = [];
+
+        if (! $settings['enabled']) {
+            $checks[] = [
+                'status' => 'warn',
+                'title' => 'SMTP jest wyłączone',
+                'description' => 'Maile transakcyjne nie będą wysyłane przez zapisane konto SMTP.',
+            ];
+        }
+
+        if ($fromDomain === null) {
+            $checks[] = [
+                'status' => 'warn',
+                'title' => 'Brak poprawnej domeny nadawcy',
+                'description' => 'Ustaw adres nadawcy w domenie sklepu, np. powiadomienia@twojadomena.pl.',
+            ];
+        } else {
+            $checks[] = [
+                'status' => 'info',
+                'title' => 'DNS domeny '.$fromDomain,
+                'description' => 'W DNS tej domeny muszą być poprawne rekordy SPF, DKIM i DMARC dla serwera SMTP, z którego wysyłasz.',
+            ];
+        }
+
+        if ($fromDomain !== null && $usernameDomain !== null && $fromDomain !== $usernameDomain) {
+            $checks[] = [
+                'status' => 'warn',
+                'title' => 'Login SMTP jest w innej domenie',
+                'description' => "Login SMTP używa domeny {$usernameDomain}, a nadawca {$fromDomain}. Jeśli dostawca SMTP nie podpisuje domeny nadawcy DKIM/SPF, Gmail może wrzucać wiadomości do spamu.",
+            ];
+        }
+
+        if ($ehloDomain === '' || in_array($ehloDomain, ['localhost', '127.0.0.1'], true)) {
+            $checks[] = [
+                'status' => 'warn',
+                'title' => 'Domena EHLO nie wygląda produkcyjnie',
+                'description' => 'Ustaw EHLO na domenę hosta lub subdomenę powiązaną z ERP, np. erp.twojadomena.pl.',
+            ];
+        } else {
+            $checks[] = [
+                'status' => 'ok',
+                'title' => 'EHLO',
+                'description' => 'Serwer przedstawi się jako '.$ehloDomain.'.',
+            ];
+        }
+
+        $checks[] = [
+            'status' => 'info',
+            'title' => 'DKIM',
+            'description' => 'DKIM musi być włączony u dostawcy SMTP. Aplikacja nie podpisuje DKIM lokalnie.',
+        ];
+        $checks[] = [
+            'status' => 'info',
+            'title' => 'DMARC',
+            'description' => 'Dodaj DMARC dla domeny nadawcy, minimum p=none na start, potem zaostrzaj politykę po testach.',
+        ];
+
+        return [
+            'from_domain' => $fromDomain,
+            'username_domain' => $usernameDomain,
+            'ehlo_domain' => $ehloDomain,
+            'checks' => $checks,
+        ];
+    }
+
     private function password(): ?string
     {
         $stored = AppSetting::query()
@@ -200,6 +281,19 @@ final class MailSettingsService
         $color = trim($color);
 
         return preg_match('/^#[0-9a-fA-F]{6}$/', $color) === 1 ? $color : '#2f6f4f';
+    }
+
+    private function emailDomain(string $email): ?string
+    {
+        $email = trim($email);
+
+        if (! str_contains($email, '@')) {
+            return null;
+        }
+
+        $domain = mb_strtolower(trim((string) substr(strrchr($email, '@') ?: '', 1)));
+
+        return $domain !== '' ? $domain : null;
     }
 
     /**

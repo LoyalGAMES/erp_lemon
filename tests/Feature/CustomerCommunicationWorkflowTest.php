@@ -67,6 +67,31 @@ class CustomerCommunicationWorkflowTest extends TestCase
         });
     }
 
+    public function test_manual_return_message_renders_template_variables_on_backend(): void
+    {
+        Mail::fake();
+        $order = $this->createOrder('return-client@example.test');
+        $returnCase = ReturnCase::query()->create([
+            'number' => 'RET/2026/000123',
+            'external_order_id' => $order->id,
+            'status' => 'pending',
+            'customer_email' => 'return-client@example.test',
+            'metadata' => ['source' => 'test'],
+        ]);
+
+        $this->post(route('returns.message.send', $returnCase), [
+            'subject' => 'Informacja o zwrocie {{return_number}}',
+            'body' => 'Zwrot {{ return_number }} do zamówienia {{order_number}} dla {{customer_email}}.',
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $message = CustomerMessage::query()->firstOrFail();
+
+        $this->assertSame('Informacja o zwrocie RET/2026/000123', $message->subject);
+        $this->assertSame('Zwrot RET/2026/000123 do zamówienia 9001 dla return-client@example.test.', $message->body);
+        $this->assertSame('RET/2026/000123', $message->metadata['return_number']);
+        $this->assertSame('9001', $message->metadata['order_number']);
+    }
+
     public function test_automated_order_status_message_is_deduplicated(): void
     {
         Mail::fake();

@@ -62,13 +62,8 @@ class ReturnController extends Controller
                 'lines.targetWarehouse',
                 'lines.warehouseDocument',
                 'targetWarehouse',
-                'warehouseDocument',
                 'externalOrder',
                 'correctionInvoice',
-                'shippingLabels',
-                'customerMessages',
-                'internalNotes',
-                'customerPayments',
             ])
             ->when($tab === 'pending', fn ($query) => $query->where('status', StoreReturnIntakeService::STATUS_PENDING))
             ->when($search !== '', function ($query) use ($search): void {
@@ -105,19 +100,58 @@ class ReturnController extends Controller
             'products' => Product::query()->where('is_active', true)->orderBy('sku')->get(),
             'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'returnSettings' => $returnSettings,
+            'mbankPayoutCount' => $mbankBasket->eligibleReturns()->count(),
+            'module' => 'returns',
+        ]);
+    }
+
+    public function show(
+        ReturnCase $returnCase,
+        ReturnSettingsService $settings,
+        MbankTransferBasketService $mbankBasket,
+    ): View {
+        $returnCase->load([
+            'lines.product',
+            'lines.externalOrderLine.product',
+            'lines.targetWarehouse',
+            'lines.warehouseDocument.lines.product',
+            'lines.warehouseDocument.destinationWarehouse',
+            'targetWarehouse',
+            'warehouseDocument.lines.product',
+            'warehouseDocument.destinationWarehouse',
+            'externalOrder.lines.product',
+            'externalOrder.invoices.files',
+            'externalOrder.customerMessages',
+            'externalOrder.customerPayments',
+            'externalOrder.internalNotes',
+            'correctionInvoice.files',
+            'shippingLabels.courierAccount',
+            'customerMessages',
+            'internalNotes',
+            'customerPayments',
+        ]);
+
+        return view('returns.show', [
+            'title' => 'Karta zwrotu '.$returnCase->number,
+            'subtitle' => 'Pełna obsługa zwrotu: produkty, historia, dokumenty, wypłaty, notatki, komunikacja i etykiety.',
+            'module' => 'returns',
+            'returnCase' => $returnCase,
+            'returnSettings' => $settings->data(),
             'courierAccounts' => CourierAccount::query()
                 ->where('provider', 'inpost')
                 ->where('is_active', true)
                 ->orderByDesc('is_default')
                 ->orderBy('name')
                 ->get(),
-            'mbankPayoutCount' => $mbankBasket->eligibleReturns()->count(),
             'emailTemplates' => EmailTemplate::query()
                 ->where('is_active', true)
                 ->whereIn('context', ['return', 'both'])
                 ->orderBy('name')
                 ->get(),
-            'module' => 'returns',
+            'mbankPayoutEligible' => $mbankBasket->eligibleReturns()->contains('id', $returnCase->id),
+            'mbankPayoutAmount' => $mbankBasket->amount($returnCase),
+            'mbankPayoutRecipient' => $mbankBasket->recipientName($returnCase),
+            'mbankPayoutAccount' => $mbankBasket->recipientAccount($returnCase),
         ]);
     }
 
@@ -352,7 +386,7 @@ class ReturnController extends Controller
 
         if ($this->hasReturnDocuments($returnCase)) {
             return redirect()
-                ->route('returns.index')
+                ->route('returns.show', $returnCase)
                 ->with('error', 'Zwrotu z utworzonym dokumentem RX nie można edytować. Zmień dokument magazynowy albo utwórz kolejny zwrot.');
         }
 
@@ -373,7 +407,7 @@ class ReturnController extends Controller
 
         if ($this->hasReturnDocuments($returnCase)) {
             return redirect()
-                ->route('returns.index')
+                ->route('returns.show', $returnCase)
                 ->with('error', 'Zwrotu z utworzonym dokumentem RX nie można edytować.');
         }
 
@@ -454,7 +488,7 @@ class ReturnController extends Controller
         });
 
         return redirect()
-            ->route('returns.index')
+            ->route('returns.show', $returnCase)
             ->with('status', "Zwrot {$returnCase->number} został zaktualizowany.");
     }
 

@@ -119,6 +119,26 @@
                 </label>
                 <button class="button secondary" type="submit">Wyślij mail testowy</button>
             </form>
+            <div class="deliverability-box">
+                <strong>Dostarczalność</strong>
+                <div class="deliverability-meta">
+                    <span>Nadawca: {{ $mailDeliverability['from_domain'] ?? '-' }}</span>
+                    <span>Login SMTP: {{ $mailDeliverability['username_domain'] ?? '-' }}</span>
+                    <span>EHLO: {{ $mailDeliverability['ehlo_domain'] ?: '-' }}</span>
+                </div>
+                <div class="deliverability-list">
+                    @foreach ($mailDeliverability['checks'] as $check)
+                        @php $checkLabel = ['ok' => 'OK', 'info' => 'info', 'warn' => 'uwaga'][$check['status']] ?? $check['status']; @endphp
+                        <div class="deliverability-item">
+                            <span @class(['status', 'blue' => $check['status'] === 'info', 'orange' => $check['status'] === 'warn'])>{{ $checkLabel }}</span>
+                            <div>
+                                <strong>{{ $check['title'] }}</strong>
+                                <p>{{ $check['description'] }}</p>
+                            </div>
+                        </div>
+                    @endforeach
+                </div>
+            </div>
         </article>
     </section>
 
@@ -128,6 +148,16 @@
             <span>{{ $emailTemplates->count() }} szablonów</span>
         </div>
         <div class="template-settings-body">
+            <div class="template-variable-help">
+                <strong>Dostępne zmienne</strong>
+                <div class="template-variable-list">
+                    @foreach ($templateVariables as $variable => $description)
+                        @php $placeholder = sprintf('{{%s}}', $variable); @endphp
+                        <span title="{{ $description }}">{{ $placeholder }}</span>
+                    @endforeach
+                </div>
+                <p class="muted">Zmienne są teraz renderowane również po stronie backendu, więc zadziałają w mailu nawet wtedy, gdy ktoś wpisze je ręcznie w temacie lub treści.</p>
+            </div>
             <form method="POST" action="{{ route('settings.mail.templates.store') }}" class="template-form">
                 @csrf
                 <div class="mail-settings-fields">
@@ -218,6 +248,11 @@
         .settings-subsection > div:first-child { display: grid; gap: 4px; }
         .settings-subsection strong { font-size: 15px; }
         .mail-clear-password { align-self: end; min-height: 42px; }
+        .deliverability-box { display: grid; gap: 12px; padding: 16px; border-top: 1px solid var(--border); }
+        .deliverability-meta { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+        .deliverability-list { display: grid; gap: 10px; }
+        .deliverability-item { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; }
+        .deliverability-item p { margin: 2px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; }
         .toggle-row {
             display: grid;
             grid-template-columns: auto minmax(0, 1fr);
@@ -235,6 +270,9 @@
         .inline-flag input { width: 17px; height: 17px; }
         .template-settings-panel { margin-top: 14px; }
         .template-settings-body { display: grid; gap: 18px; }
+        .template-variable-help { display: grid; gap: 9px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: #fffdfb; }
+        .template-variable-list { display: flex; flex-wrap: wrap; gap: 7px; }
+        .template-variable-list span { display: inline-flex; min-height: 27px; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; background: var(--surface); color: var(--brand-dark); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; font-weight: 760; }
         .template-form { display: grid; gap: 10px; }
         .template-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
         .template-card { display: grid; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }

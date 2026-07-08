@@ -74,6 +74,11 @@ class ShipmentGenerationTest extends TestCase
 
         $this->get(route('returns.index'))
             ->assertOk()
+            ->assertSee('Otwórz kartę')
+            ->assertDontSee('Generuj przesyłkę zwrotną');
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
             ->assertSee('Generuj przesyłkę zwrotną');
 
         $this->post(route('returns.shipping-label.create', $returnCase), [
@@ -100,7 +105,7 @@ class ShipmentGenerationTest extends TestCase
             ->assertOk()
             ->assertHeader('Content-Type', 'application/pdf');
 
-        $this->get(route('returns.index'))
+        $this->get(route('returns.show', $returnCase))
             ->assertOk()
             ->assertSee('Etykieta zwrotna');
     }

@@ -19,6 +19,7 @@ final class CustomerCommunicationService
 
     public function __construct(
         private readonly MailSettingsService $mailSettings,
+        private readonly EmailTemplateRenderer $templateRenderer,
     ) {
     }
 
@@ -30,17 +31,17 @@ final class CustomerCommunicationService
             throw new RuntimeException('Zamówienie nie ma adresu e-mail klienta.');
         }
 
+        $templateContext = $this->orderTemplateContext($order, $recipient);
+
         return $this->createAndSend([
             'external_order_id' => $order->id,
             'type' => self::TYPE_MANUAL,
             'trigger' => 'manual_order_message',
             'recipient_email' => $recipient['email'],
             'recipient_name' => $recipient['name'],
-            'subject' => trim($subject),
-            'body' => trim($body),
-            'metadata' => [
-                'order_number' => $this->orderNumber($order),
-            ],
+            'subject' => $this->renderTemplate(trim($subject), $templateContext),
+            'body' => $this->renderTemplate(trim($body), $templateContext),
+            'metadata' => $templateContext,
         ], true);
     }
 
@@ -53,6 +54,8 @@ final class CustomerCommunicationService
             throw new RuntimeException('Zwrot nie ma adresu e-mail klienta.');
         }
 
+        $templateContext = $this->returnTemplateContext($returnCase, $recipient);
+
         return $this->createAndSend([
             'return_case_id' => $returnCase->id,
             'external_order_id' => $returnCase->external_order_id,
@@ -60,14 +63,9 @@ final class CustomerCommunicationService
             'trigger' => 'manual_return_message',
             'recipient_email' => $recipient['email'],
             'recipient_name' => $recipient['name'],
-            'subject' => trim($subject),
-            'body' => trim($body),
-            'metadata' => [
-                'return_number' => $returnCase->number,
-                'order_number' => $returnCase->externalOrder instanceof ExternalOrder
-                    ? $this->orderNumber($returnCase->externalOrder)
-                    : null,
-            ],
+            'subject' => $this->renderTemplate(trim($subject), $templateContext),
+            'body' => $this->renderTemplate(trim($body), $templateContext),
+            'metadata' => $templateContext,
         ], true);
     }
 
@@ -81,7 +79,8 @@ final class CustomerCommunicationService
         }
 
         $recipient = $this->orderRecipient($order);
-        $content = $this->orderStatusContent($order, $trigger, $context);
+        $templateContext = $this->orderTemplateContext($order, $recipient, $context);
+        $content = $this->renderContent($this->orderStatusContent($order, $trigger, $templateContext), $templateContext);
 
         return $this->createAutomated([
             'external_order_id' => $order->id,
@@ -90,9 +89,7 @@ final class CustomerCommunicationService
             'recipient_name' => $recipient['name'],
             'subject' => $content['subject'],
             'body' => $content['body'],
-            'metadata' => array_merge($context, [
-                'order_number' => $this->orderNumber($order),
-            ]),
+            'metadata' => $templateContext,
         ]);
     }
 
@@ -107,7 +104,8 @@ final class CustomerCommunicationService
 
         $returnCase->loadMissing('externalOrder');
         $recipient = $this->returnRecipient($returnCase);
-        $content = $this->returnStatusContent($returnCase, $trigger, $context);
+        $templateContext = $this->returnTemplateContext($returnCase, $recipient, $context);
+        $content = $this->renderContent($this->returnStatusContent($returnCase, $trigger, $templateContext), $templateContext);
 
         return $this->createAutomated([
             'return_case_id' => $returnCase->id,
@@ -117,12 +115,7 @@ final class CustomerCommunicationService
             'recipient_name' => $recipient['name'],
             'subject' => $content['subject'],
             'body' => $content['body'],
-            'metadata' => array_merge($context, [
-                'return_number' => $returnCase->number,
-                'order_number' => $returnCase->externalOrder instanceof ExternalOrder
-                    ? $this->orderNumber($returnCase->externalOrder)
-                    : null,
-            ]),
+            'metadata' => $templateContext,
         ]);
     }
 
@@ -347,5 +340,74 @@ final class CustomerCommunicationService
     private function orderNumber(ExternalOrder $order): string
     {
         return (string) ($order->external_number ?: $order->external_id ?: $order->id);
+    }
+
+    /**
+     * @param array{email:?string,name:?string} $recipient
+     * @param array<string, mixed> $context
+     * @return array<string, mixed>
+     */
+    private function orderTemplateContext(ExternalOrder $order, array $recipient, array $context = []): array
+    {
+        return array_merge($this->baseTemplateContext(), $context, [
+            'order_number' => $this->orderNumber($order),
+            'customer_email' => $recipient['email'],
+            'customer_name' => $recipient['name'],
+            'currency' => $order->currency ?: ($context['currency'] ?? 'PLN'),
+        ]);
+    }
+
+    /**
+     * @param array{email:?string,name:?string} $recipient
+     * @param array<string, mixed> $context
+     * @return array<string, mixed>
+     */
+    private function returnTemplateContext(ReturnCase $returnCase, array $recipient, array $context = []): array
+    {
+        return array_merge($this->baseTemplateContext(), $context, [
+            'return_number' => $returnCase->number,
+            'order_number' => $returnCase->externalOrder instanceof ExternalOrder
+                ? $this->orderNumber($returnCase->externalOrder)
+                : ($context['order_number'] ?? ''),
+            'customer_email' => $recipient['email'],
+            'customer_name' => $recipient['name'],
+            'currency' => $context['currency'] ?? $returnCase->externalOrder?->currency ?? 'PLN',
+        ]);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function baseTemplateContext(): array
+    {
+        $settings = $this->mailSettings->data();
+
+        return [
+            'from_name' => $settings['from_name'],
+            'brand_name' => $settings['brand_name'],
+            'support_email' => $settings['support_email'],
+            'support_phone' => $settings['support_phone'],
+        ];
+    }
+
+    /**
+     * @param array{subject:string,body:string} $content
+     * @param array<string, mixed> $context
+     * @return array{subject:string,body:string}
+     */
+    private function renderContent(array $content, array $context): array
+    {
+        return [
+            'subject' => $this->renderTemplate($content['subject'], $context),
+            'body' => $this->renderTemplate($content['body'], $context),
+        ];
+    }
+
+    /**
+     * @param array<string, mixed> $context
+     */
+    private function renderTemplate(string $template, array $context): string
+    {
+        return $this->templateRenderer->render($template, $context);
     }
 }

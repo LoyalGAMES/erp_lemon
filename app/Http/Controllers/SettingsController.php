@@ -8,6 +8,7 @@ use App\Models\CourierAccount;
 use App\Models\EmailTemplate;
 use App\Models\Warehouse;
 use App\Services\Automation\DocumentAutomationSettingsService;
+use App\Services\Communication\EmailTemplateRenderer;
 use App\Services\Communication\MailSettingsService;
 use App\Services\Inventory\WarehouseDocumentSettingsService;
 use App\Services\Payments\MbankTransferBasketSettingsService;
@@ -62,13 +63,15 @@ class SettingsController extends Controller
         ]);
     }
 
-    public function mail(MailSettingsService $mailSettings): View
+    public function mail(MailSettingsService $mailSettings, EmailTemplateRenderer $templateRenderer): View
     {
         return view('settings.mail', [
             'title' => 'Ustawienia maili',
             'subtitle' => 'Konfiguracja SMTP oraz szablony ręcznej komunikacji z klientami.',
             'module' => 'settings',
             'mailSettings' => $mailSettings->data(),
+            'mailDeliverability' => $mailSettings->deliverabilityReport(),
+            'templateVariables' => $templateRenderer->variables(),
             'emailTemplates' => EmailTemplate::query()
                 ->orderBy('context')
                 ->orderBy('name')

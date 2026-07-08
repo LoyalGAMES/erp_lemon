@@ -166,5 +166,35 @@ class MailSettingsWorkflowTest extends TestCase
         $this->assertStringContainsString('https://pay.example.test/ret/1', $html);
         $this->assertStringContainsString('Sempre WL - wiadomość systemowa.', $html);
         $this->assertStringContainsString('bok@example.test', $html);
+
+        $mailable = new CustomerMessageMail($message);
+        $mailable->build();
+
+        $this->assertSame('emails.customer-message-text', $mailable->textView);
+        $this->assertEquals([['address' => 'sklep@example.test', 'name' => 'Sempre Sklep']], $mailable->from);
+        $this->assertEquals([['address' => 'bok@example.test', 'name' => 'Sempre Premium']], $mailable->replyTo);
+    }
+
+    public function test_mail_settings_page_shows_deliverability_hints_and_template_variables(): void
+    {
+        app(MailSettingsService::class)->update([
+            'enabled' => true,
+            'host' => 'smtp.mail-provider.test',
+            'port' => 587,
+            'encryption' => 'tls',
+            'username' => 'smtp-user@provider.test',
+            'from_address' => 'powiadomienia@semprelove.pl',
+            'from_name' => 'Sempre with Love',
+            'ehlo_domain' => 'erp.semprelove.pl',
+            'timeout' => 15,
+        ]);
+
+        $this->get(route('settings.mail'))
+            ->assertOk()
+            ->assertSee('Dostarczalność')
+            ->assertSee('DNS domeny semprelove.pl')
+            ->assertSee('Login SMTP jest w innej domenie')
+            ->assertSee('{{return_number}}')
+            ->assertSee('{{order_number}}');
     }
 }
