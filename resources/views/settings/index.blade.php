@@ -34,14 +34,14 @@
             <strong>Stanowiska pakowania</strong>
             <span>Tryb pracy, pakowanie i przygotowanie pod drukarki etykiet.</span>
         </a>
+        <a class="settings-card" href="{{ route('settings.shipping') }}">
+            <strong>Wysyłki i konta kurierskie</strong>
+            <span>Konta InPost (ShipX) do generowania etykiet z wyborem konta nadawczego.</span>
+        </a>
         <a class="settings-card" href="{{ route('settings.users') }}">
             <strong>Użytkownicy</strong>
             <span>Konta ERP, role robocze, aktywność i hasła dostępu do aplikacji.</span>
         </a>
-        <article class="settings-card muted-card">
-            <strong>Drukarki</strong>
-            <span>Miejsce na konfigurację drukarek etykiet i dokumentów po wyborze sprzętu.</span>
-        </article>
     </section>
 @endsection
 

@@ -103,7 +103,7 @@ class ErpDashboardTest extends TestCase
             ->assertSee('Zwroty')
             ->assertSee('Integracje')
             ->assertSee('Kolejka sync')
-            ->assertSee('Drukarki')
+            ->assertSee('Wysyłki i konta kurierskie')
             ->assertDontSee('Zapisz numerację')
             ->assertDontSee('Zapisz lokalizacje')
             ->assertDontSee('Zapisz ustawienia zwrotów');

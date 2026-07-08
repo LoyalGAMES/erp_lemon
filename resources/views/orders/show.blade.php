@@ -38,6 +38,8 @@
         .order-grid { display: grid; grid-template-columns: minmax(320px, .9fr) minmax(0, 1.4fr); gap: 16px; margin-bottom: 16px; }
         .order-section { margin-bottom: 16px; }
         .order-section-body { padding: 16px; }
+        .order-label-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+        .order-label-form select { min-height: 44px; min-width: 260px; }
         .address-grid { display: grid; gap: 14px; }
         .address-box { border: 1px solid var(--border); border-radius: 8px; padding: 13px; }
         .address-box strong { display: block; margin-bottom: 6px; }
@@ -196,6 +198,39 @@
         </div>
     </article>
 
+    @if (count($orderSegments) > 1)
+        <article class="card order-section shipping-decision-card">
+            <div class="panel-header">
+                <span>Wysyłka częściowa — obuwie i odzież</span>
+                <span>To zamówienie łączy obuwie z odzieżą</span>
+            </div>
+            <div class="order-section-body">
+                @if (is_array($shippingDecision))
+                    <p class="shipping-decision-current">
+                        Decyzja: <strong>{{ ($shippingDecision['decision'] ?? '') === 'ship_footwear_now' ? 'Wyślij buty od razu' : 'Czekaj na resztę zamówienia' }}</strong>
+                        <span class="muted">
+                            ({{ $shippingDecision['decided_by'] ?? 'ERP' }}, {{ \Illuminate\Support\Carbon::parse($shippingDecision['decided_at'] ?? now())->format('Y-m-d H:i') }})
+                        </span>
+                    </p>
+                @else
+                    <p class="muted" style="margin-top: 0;">Zdecyduj, czy buty mają jechać do klienta osobno, nie czekając na skompletowanie odzieży. Wydzielone buty trafią do osobnego zamówienia z własną kompletacją, pakowaniem i etykietą.</p>
+                @endif
+                <div class="inline-actions">
+                    <form method="POST" action="{{ route('orders.shipping-decision', $order) }}" onsubmit="return confirm('Wydzielić buty do osobnego zamówienia i wysłać od razu?');">
+                        @csrf
+                        <input type="hidden" name="decision" value="ship_footwear_now">
+                        <button class="button" type="submit">Wyślij buty od razu</button>
+                    </form>
+                    <form method="POST" action="{{ route('orders.shipping-decision', $order) }}">
+                        @csrf
+                        <input type="hidden" name="decision" value="wait_for_all">
+                        <button class="button secondary" type="submit">Czekaj na resztę zamówienia</button>
+                    </form>
+                </div>
+            </div>
+        </article>
+    @endif
+
     <article class="card order-section">
         <div class="panel-header">
             <span>Podziel zamówienie</span>
@@ -331,6 +366,19 @@
                 @empty
                     <span class="muted">Brak wygenerowanej etykiety kurierskiej.</span>
                 @endforelse
+
+                @if ($order->shippingLabels->where('status', 'generated')->isEmpty())
+                    <form class="order-label-form" method="POST" action="{{ route('orders.label.generate', $order) }}">
+                        @csrf
+                        <select name="courier_account_id" aria-label="Konto nadawcze">
+                            <option value="">Etykieta ze sklepu (WooCommerce)</option>
+                            @foreach ($courierAccounts as $courierAccount)
+                                <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default)>InPost: {{ $courierAccount->name }}</option>
+                            @endforeach
+                        </select>
+                        <button class="button" type="submit">Generuj przesyłkę</button>
+                    </form>
+                @endif
             </div>
         </article>
 

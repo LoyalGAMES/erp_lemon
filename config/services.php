@@ -50,4 +50,8 @@ return [
         'auth_status_delay_ms' => env('KSEF_AUTH_STATUS_DELAY_MS', 500),
     ],
 
+    'inpost' => [
+        'base_url' => env('INPOST_API_URL', 'https://api-shipx-pl.easypack24.net'),
+    ],
+
 ];

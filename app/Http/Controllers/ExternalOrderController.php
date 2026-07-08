@@ -4,21 +4,27 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\StockReservation;
-use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderFulfillmentStatusService;
-use App\Services\Packing\PackingTaskService;
+use App\Services\Orders\OrderSplitService;
+use App\Services\Packing\ProductSegmentService;
+use App\Services\Shipping\ShippingLabelService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\View\View;
+use RuntimeException;
 
 class ExternalOrderController extends Controller
 {
-    public function show(ExternalOrder $order, OrderFulfillmentStatusService $fulfillmentStatus): View
-    {
+    public function show(
+        ExternalOrder $order,
+        OrderFulfillmentStatusService $fulfillmentStatus,
+        ProductSegmentService $segments,
+    ): View {
         $order->load([
             'salesChannel',
             'lines.product',
@@ -58,14 +64,49 @@ class ExternalOrderController extends Controller
                 ->where('status', 'waiting')
                 ->sum(fn (StockReservation $reservation): float => (float) $reservation->quantity),
             'orderNotes' => collect(data_get($order->raw_payload, 'erp_imported_order_notes', [])),
+            'orderSegments' => $segments->segmentsForOrder($order),
+            'shippingDecision' => data_get($order->raw_payload, 'sempre_erp_shipping_decision'),
+            'courierAccounts' => CourierAccount::query()
+                ->where('provider', 'inpost')
+                ->where('is_active', true)
+                ->orderByDesc('is_default')
+                ->orderBy('name')
+                ->get(),
         ]);
+    }
+
+    public function generateLabel(
+        Request $request,
+        ExternalOrder $order,
+        ShippingLabelService $shippingLabels,
+    ): RedirectResponse {
+        $data = $request->validate([
+            'courier_account_id' => ['nullable', 'integer', 'exists:courier_accounts,id'],
+        ]);
+
+        $account = filled($data['courier_account_id'] ?? null)
+            ? CourierAccount::query()->where('is_active', true)->find((int) $data['courier_account_id'])
+            : null;
+
+        try {
+            $label = $shippingLabels->generateForOrder($order, $account);
+        } catch (RuntimeException $exception) {
+            return back()->with('error', 'Nie udało się wygenerować przesyłki: ' . $exception->getMessage());
+        }
+
+        $message = "Przesyłka dla zamówienia {$order->external_number} została wygenerowana: {$label->filename()}.";
+
+        if ($account instanceof CourierAccount) {
+            $message .= " Konto nadawcze: {$account->name}.";
+        }
+
+        return back()->with('status', $message);
     }
 
     public function split(
         Request $request,
         ExternalOrder $order,
-        StockReservationService $reservations,
-        PackingTaskService $packingTasks,
+        OrderSplitService $splitter,
     ): RedirectResponse
     {
         $validated = $request->validate([
@@ -79,128 +120,68 @@ class ExternalOrderController extends Controller
             ->mapWithKeys(fn (array $line, string|int $lineId): array => [(int) $lineId => (float) $line['quantity']])
             ->all();
 
-        if ($quantities === []) {
-            return back()->with('error', 'Podaj ilość co najmniej jednej pozycji do wydzielenia.');
+        try {
+            $splitOrder = $splitter->split($order, $quantities, $validated['note'] ?? null);
+        } catch (RuntimeException $exception) {
+            return back()->with('error', $exception->getMessage());
         }
-
-        $splitOrder = DB::transaction(function () use ($order, $quantities, $validated): ExternalOrder {
-            $order = ExternalOrder::query()
-                ->with('lines')
-                ->lockForUpdate()
-                ->findOrFail($order->id);
-
-            $splitIndex = ExternalOrder::query()
-                ->where('sales_channel_id', $order->sales_channel_id)
-                ->where('external_id', 'like', $order->external_id . '-SPLIT-%')
-                ->count() + 1;
-
-            $splitOrder = ExternalOrder::query()->create([
-                'sales_channel_id' => $order->sales_channel_id,
-                'external_id' => $order->external_id . '-SPLIT-' . $splitIndex,
-                'external_number' => ($order->external_number ?: $order->external_id) . '/S' . $splitIndex,
-                'status' => in_array($order->status, ['pending', 'processing', 'on-hold'], true) ? $order->status : 'processing',
-                'currency' => $order->currency,
-                'total_gross' => 0,
-                'billing_data' => $order->billing_data,
-                'shipping_data' => $order->shipping_data,
-                'raw_payload' => array_replace_recursive((array) $order->raw_payload, [
-                    'sempre_erp_split' => [
-                        'parent_order_id' => $order->id,
-                        'parent_external_id' => $order->external_id,
-                        'note' => $validated['note'] ?? null,
-                        'created_at' => now()->toISOString(),
-                    ],
-                ]),
-                'external_created_at' => $order->external_created_at,
-                'external_updated_at' => now(),
-            ]);
-            $splitAllocations = (array) data_get($order->raw_payload, 'sempre_erp_split_allocations', []);
-
-            foreach ($quantities as $lineId => $quantity) {
-                /** @var ExternalOrderLine|null $line */
-                $line = $order->lines->firstWhere('id', $lineId);
-
-                if (! $line instanceof ExternalOrderLine) {
-                    continue;
-                }
-
-                $currentQuantity = (float) $line->quantity;
-                $splitQuantity = min($quantity, $currentQuantity);
-
-                if ($splitQuantity <= 0) {
-                    continue;
-                }
-
-                $splitOrder->lines()->create([
-                    'product_id' => $line->product_id,
-                    'external_line_id' => $line->external_line_id ? $line->external_line_id . '-S' . $splitIndex : null,
-                    'sku' => $line->sku,
-                    'name' => $line->name,
-                    'quantity' => $splitQuantity,
-                    'unit_net_price' => $line->unit_net_price,
-                    'unit_gross_price' => $line->unit_gross_price,
-                    'vat_rate' => $line->vat_rate,
-                    'raw_payload' => array_replace_recursive((array) $line->raw_payload, [
-                        'sempre_erp_split' => [
-                            'source_order_line_id' => $line->id,
-                            'source_external_line_id' => $line->external_line_id,
-                            'source_quantity' => $currentQuantity,
-                            'split_quantity' => $splitQuantity,
-                        ],
-                    ]),
-                ]);
-
-                $splitAllocations[] = [
-                    'child_external_id' => $splitOrder->external_id,
-                    'child_external_number' => $splitOrder->external_number,
-                    'source_order_line_id' => $line->id,
-                    'source_external_line_id' => $line->external_line_id,
-                    'sku' => $line->sku,
-                    'product_id' => $line->product_id,
-                    'source_quantity' => $currentQuantity,
-                    'split_quantity' => $splitQuantity,
-                    'created_at' => now()->toISOString(),
-                ];
-
-                $remainingQuantity = $currentQuantity - $splitQuantity;
-
-                if ($remainingQuantity <= 0) {
-                    $line->delete();
-                } else {
-                    $line->update(['quantity' => $remainingQuantity]);
-                }
-            }
-
-            $rawPayload = (array) $order->raw_payload;
-            $rawPayload['sempre_erp_split_child_orders'] = array_values(array_filter([
-                ...((array) data_get($order->raw_payload, 'sempre_erp_split_child_orders', [])),
-                $splitOrder->external_id,
-            ]));
-            $rawPayload['sempre_erp_split_allocations'] = $splitAllocations;
-
-            $order->update([
-                'total_gross' => $this->grossTotalFromLines($order->refresh()->lines),
-                'raw_payload' => $rawPayload,
-            ]);
-            $splitOrder->update(['total_gross' => $this->grossTotalFromLines($splitOrder->lines)]);
-
-            return $splitOrder;
-        });
-
-        $reservations->syncForOrder($order);
-        $reservations->syncForOrder($splitOrder);
-        $packingTasks->syncForOrder($order);
-        $packingTasks->syncForOrder($splitOrder);
 
         return redirect()
             ->route('orders.show', $splitOrder)
             ->with('status', "Wydzielono zamówienie {$splitOrder->external_number}. Rezerwacje zostały przeliczone.");
     }
 
-    private function grossTotalFromLines($lines): float
-    {
-        return (float) collect($lines)->sum(
-            fn (ExternalOrderLine $line): float => (float) ($line->unit_gross_price ?? 0) * (float) $line->quantity,
-        );
+    public function shippingDecision(
+        Request $request,
+        ExternalOrder $order,
+        OrderSplitService $splitter,
+        ProductSegmentService $segments,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'decision' => ['required', 'string', 'in:ship_footwear_now,wait_for_all'],
+        ]);
+
+        $order->load('lines.product');
+
+        $raw = (array) $order->raw_payload;
+        $raw['sempre_erp_shipping_decision'] = [
+            'decision' => $validated['decision'],
+            'decided_by' => Auth::user()?->name,
+            'decided_at' => now()->toISOString(),
+        ];
+        $order->update(['raw_payload' => $raw]);
+
+        if ($validated['decision'] === 'wait_for_all') {
+            return back()->with('status', "Zamówienie {$order->external_number} zostanie wysłane w całości po skompletowaniu wszystkich pozycji.");
+        }
+
+        $footwearQuantities = $order->lines
+            ->filter(fn (ExternalOrderLine $line): bool => (float) $line->quantity > 0
+                && $segments->segmentForLine($line) === ProductSegmentService::SEGMENT_FOOTWEAR)
+            ->mapWithKeys(fn (ExternalOrderLine $line): array => [$line->id => (float) $line->quantity])
+            ->all();
+
+        if ($footwearQuantities === []) {
+            return back()->with('error', 'To zamówienie nie zawiera pozycji obuwia do wydzielenia.');
+        }
+
+        if (count($footwearQuantities) === $order->lines->where('quantity', '>', 0)->count()) {
+            return back()->with('error', 'Całe zamówienie to obuwie — nie ma czego wydzielać, zostanie wysłane standardowo.');
+        }
+
+        try {
+            $splitOrder = $splitter->split(
+                $order,
+                $footwearQuantities,
+                'Wysyłka butów od razu — decyzja z widoku zamówienia.',
+                'ship_footwear_now',
+            );
+        } catch (RuntimeException $exception) {
+            return back()->with('error', $exception->getMessage());
+        }
+
+        return redirect()
+            ->route('orders.show', $splitOrder)
+            ->with('status', "Buty z zamówienia trafiły do osobnego zamówienia {$splitOrder->external_number} i idą od razu do kompletacji. Reszta zamówienia czeka na skompletowanie.");
     }
 }

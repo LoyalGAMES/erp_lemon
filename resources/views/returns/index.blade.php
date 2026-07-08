@@ -269,6 +269,8 @@
         .returns-tab-count { display: inline-flex; align-items: center; justify-content: center; min-width: 21px; min-height: 21px; border-radius: 999px; padding: 0 6px; background: var(--orange); color: #fff; font-size: 12px; }
         .returns-search { display: flex; gap: 8px; flex: 1 1 340px; max-width: 560px; }
         .returns-search input { flex: 1; min-width: 0; }
+        .return-label-form { display: grid; gap: 6px; margin-top: 6px; }
+        .return-label-form select { min-height: 38px; max-width: 220px; }
         @media (max-width: 760px) {
             .returns-filters { align-items: stretch; flex-direction: column; }
             .returns-search { max-width: none; }
