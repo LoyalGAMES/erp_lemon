@@ -21,6 +21,7 @@ final class ShippingLabelService
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly InPostShipmentService $inpost,
+        private readonly BLPaczkaShipmentService $blpaczka,
         private readonly AuditLogService $audit,
     ) {
     }
@@ -35,7 +36,26 @@ final class ShippingLabelService
             ->with('salesChannel')
             ->findOrFail($order->id);
 
-        $integration = $this->integrationForOrder($order);
+        $blpaczkaLabel = $this->fetchBLPaczkaLabelIfAvailable($order);
+
+        if ($blpaczkaLabel instanceof ShippingLabel) {
+            return $blpaczkaLabel;
+        }
+
+        $integration = $this->integrationWithLabelsForOrder($order);
+
+        if (! $integration instanceof WordpressIntegration) {
+            $fallbackAccount = CourierAccount::defaultFor('inpost');
+
+            if ($fallbackAccount instanceof CourierAccount && $this->looksLikeInPostShipping($order)) {
+                return $this->generateViaInPost($order, $fallbackAccount);
+            }
+
+            throw new RuntimeException(
+                'Brak konfiguracji etykiet dla kanału tego zamówienia. Włącz etykiety kurierskie w Integracjach (endpoint wtyczki sklepu), dodaj konto InPost w Ustawienia → Wysyłki (dla wysyłek InPost) albo wygeneruj etykietę ręcznie i wybierz konto przy zamówieniu.',
+            );
+        }
+
         $startedAt = now();
 
         try {
@@ -215,18 +235,103 @@ final class ShippingLabelService
         }
     }
 
-    private function integrationForOrder(ExternalOrder $order): WordpressIntegration
+    /**
+     * Jeśli przesyłka dla zamówienia została utworzona wtyczką BLPaczka
+     * (meta BLPACZKA_blpaczka_order_id), pobiera jej etykietę z API BLPaczki.
+     */
+    private function fetchBLPaczkaLabelIfAvailable(ExternalOrder $order): ?ShippingLabel
     {
-        $integration = WordpressIntegration::query()
+        $blpaczkaOrderId = $this->blpaczka->orderIdFromMeta($order);
+
+        if ($blpaczkaOrderId === null) {
+            return null;
+        }
+
+        $account = CourierAccount::defaultFor('blpaczka');
+
+        if (! $account instanceof CourierAccount) {
+            throw new RuntimeException(
+                'Zamówienie ma przesyłkę BLPaczka (nr '.$blpaczkaOrderId.'), ale w ERP nie ma konta BLPaczka. Dodaj je w Ustawienia → Wysyłki (login + klucz API z panelu BLPaczki).',
+            );
+        }
+
+        try {
+            $labelData = $this->blpaczka->fetchLabelForShipment($blpaczkaOrderId, $account);
+
+            $extension = str_contains(mb_strtolower($labelData['mime_type']), 'pdf') ? 'pdf' : 'bin';
+            $filename = 'blpaczka-'.preg_replace('/[^A-Za-z0-9._-]+/', '-', (string) ($order->external_number ?: $order->external_id))
+                .'-'.now()->format('YmdHis').'.'.$extension;
+            $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
+
+            Storage::disk('local')->put($path, $labelData['contents']);
+
+            $label = ShippingLabel::query()->create([
+                'sales_channel_id' => $order->sales_channel_id,
+                'external_order_id' => $order->id,
+                'courier_account_id' => $account->id,
+                'status' => 'generated',
+                'provider' => 'blpaczka',
+                'label_number' => $labelData['shipment_id'],
+                'tracking_number' => $labelData['tracking_number'],
+                'disk' => 'local',
+                'path' => $path,
+                'mime_type' => $labelData['mime_type'],
+                'size' => strlen($labelData['contents']),
+                'sha256' => hash('sha256', $labelData['contents']),
+                'response_payload' => [
+                    'courier_account' => $account->code,
+                    'reused_existing_shipment' => true,
+                    'blpaczka' => $labelData['response_payload'],
+                ],
+                'generated_at' => now(),
+            ]);
+
+            $this->audit->record('shipping_label.generated', $label, null, [
+                'order_number' => $order->external_number,
+                'label_id' => $label->id,
+                'provider' => 'blpaczka',
+                'blpaczka_order_id' => $blpaczkaOrderId,
+            ], [
+                'sales_channel' => $order->salesChannel?->code,
+            ]);
+
+            return $label;
+        } catch (Throwable $exception) {
+            $this->audit->record('shipping_label.failed', $order, null, null, [
+                'sales_channel' => $order->salesChannel?->code,
+                'provider' => 'blpaczka',
+                'blpaczka_order_id' => $blpaczkaOrderId,
+                'error' => $exception->getMessage(),
+            ]);
+
+            throw new RuntimeException($exception->getMessage(), previous: $exception);
+        }
+    }
+
+    /**
+     * Automatyczny fallback na konto InPost tylko dla zamówień, w których klient
+     * wybrał wysyłkę InPost/Paczkomat — inne kuriery (np. z BLPaczki) nie mogą
+     * dostać etykiety InPost.
+     */
+    private function looksLikeInPostShipping(ExternalOrder $order): bool
+    {
+        $methods = collect((array) data_get($order->raw_payload, 'shipping_lines', []))
+            ->map(fn (array $line): string => mb_strtolower(trim((string) ($line['method_title'] ?? $line['method_id'] ?? ''))))
+            ->filter();
+
+        return $methods->contains(
+            fn (string $method): bool => str_contains($method, 'inpost')
+                || str_contains($method, 'paczkomat')
+                || str_contains($method, 'easypack'),
+        );
+    }
+
+    private function integrationWithLabelsForOrder(ExternalOrder $order): ?WordpressIntegration
+    {
+        return WordpressIntegration::query()
             ->where('sales_channel_id', $order->sales_channel_id)
             ->get()
             ->first(fn (WordpressIntegration $candidate): bool => $candidate->shippingLabelsEnabled());
-
-        if (! $integration instanceof WordpressIntegration) {
-            throw new RuntimeException('Brak aktywnej konfiguracji etykiet kurierskich dla kanału tego zamówienia.');
-        }
-
-        return $integration;
     }
 
     /**

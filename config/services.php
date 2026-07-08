@@ -54,4 +54,8 @@ return [
         'base_url' => env('INPOST_API_URL', 'https://api-shipx-pl.easypack24.net'),
     ],
 
+    'blpaczka' => [
+        'base_url' => env('BLPACZKA_API_URL', 'https://api.blpaczka.com'),
+    ],
+
 ];

@@ -18,6 +18,7 @@ final class CourierPickupTrackingService
 {
     public function __construct(
         private readonly InPostTrackingService $tracking,
+        private readonly BLPaczkaShipmentService $blpaczka,
         private readonly PackingFulfillmentService $fulfillment,
     ) {
     }
@@ -33,11 +34,20 @@ final class CourierPickupTrackingService
             ->pluck('external_order_id');
 
         $labels = ShippingLabel::query()
-            ->with('order')
+            ->with(['order', 'courierAccount'])
             ->whereIn('external_order_id', $orderIds)
             ->where('status', 'generated')
-            ->whereNotNull('tracking_number')
-            ->where('tracking_number', '!=', '')
+            ->where(function ($query): void {
+                $query
+                    ->where(function ($query): void {
+                        $query->whereNotNull('tracking_number')->where('tracking_number', '!=', '');
+                    })
+                    ->orWhere(function ($query): void {
+                        $query->where('provider', 'blpaczka')
+                            ->whereNotNull('label_number')
+                            ->where('label_number', '!=', '');
+                    });
+            })
             ->orderBy('generated_at')
             ->limit($limit)
             ->get()
@@ -57,10 +67,14 @@ final class CourierPickupTrackingService
             }
 
             try {
-                $status = $this->tracking->trackingStatus((string) $label->tracking_number);
+                $status = $this->statusForLabel($label);
             } catch (Throwable $exception) {
                 $warnings[] = $exception->getMessage();
 
+                continue;
+            }
+
+            if ($status === null) {
                 continue;
             }
 
@@ -83,8 +97,8 @@ final class CourierPickupTrackingService
             $label->update(['status' => 'picked_up']);
 
             $result = $this->fulfillment->markOrderPickedUpByCourier($order, [
-                'source' => 'inpost_tracking',
-                'tracking_number' => $label->tracking_number,
+                'source' => $label->provider === 'blpaczka' ? 'blpaczka_tracking' : 'inpost_tracking',
+                'tracking_number' => $label->tracking_number ?: $label->label_number,
                 'tracking_status' => $status['status'],
                 'picked_up_at' => $status['picked_up_at'] ?? now()->toISOString(),
             ]);
@@ -102,5 +116,23 @@ final class CourierPickupTrackingService
             'orders' => $shippedOrders,
             'warnings' => $warnings,
         ];
+    }
+
+    /**
+     * @return array{status:string,picked_up:bool,picked_up_at:?string}|null
+     */
+    private function statusForLabel(ShippingLabel $label): ?array
+    {
+        if ($label->provider === 'blpaczka') {
+            $account = $label->courierAccount ?? \App\Models\CourierAccount::defaultFor('blpaczka');
+
+            if ($account === null || filled($label->label_number) === false) {
+                return null;
+            }
+
+            return $this->blpaczka->trackingStatus((string) $label->label_number, $account);
+        }
+
+        return $this->tracking->trackingStatus((string) $label->tracking_number);
     }
 }
