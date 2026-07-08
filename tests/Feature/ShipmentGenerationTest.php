@@ -119,13 +119,27 @@ class ShipmentGenerationTest extends TestCase
         ]);
 
         $order = $this->createOrder();
+        $order->update(['raw_payload' => ['shipping_lines' => [['method_title' => 'InPost Paczkomaty 24/7']]]]);
         $account = $this->createAccount();
 
-        $label = app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order);
+        $label = app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order->fresh());
 
         $this->assertSame('inpost', $label->provider);
         $this->assertSame($account->id, $label->courier_account_id);
         $this->assertSame($order->id, $label->external_order_id);
+    }
+
+    public function test_automatic_fallback_refuses_inpost_label_for_other_courier_order(): void
+    {
+        $order = $this->createOrder();
+        $order->update(['raw_payload' => ['shipping_lines' => [['method_title' => 'Kurier DPD (BLPaczka)']]]]);
+        $this->createAccount();
+
+        $this->expectExceptionMessage('Brak konfiguracji etykiet');
+
+        app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order->fresh());
+
+        $this->assertSame(0, ShippingLabel::query()->count());
     }
 
     public function test_automatic_label_without_any_configuration_gives_actionable_error(): void

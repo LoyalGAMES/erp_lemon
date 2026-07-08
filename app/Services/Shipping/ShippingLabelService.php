@@ -40,12 +40,12 @@ final class ShippingLabelService
         if (! $integration instanceof WordpressIntegration) {
             $fallbackAccount = CourierAccount::defaultFor('inpost');
 
-            if ($fallbackAccount instanceof CourierAccount) {
+            if ($fallbackAccount instanceof CourierAccount && $this->looksLikeInPostShipping($order)) {
                 return $this->generateViaInPost($order, $fallbackAccount);
             }
 
             throw new RuntimeException(
-                'Brak konfiguracji etykiet dla kanału tego zamówienia. Włącz etykiety kurierskie w Integracjach (endpoint wtyczki sklepu) albo dodaj konto InPost w Ustawienia → Wysyłki.',
+                'Brak konfiguracji etykiet dla kanału tego zamówienia. Włącz etykiety kurierskie w Integracjach (endpoint wtyczki sklepu), dodaj konto InPost w Ustawienia → Wysyłki (dla wysyłek InPost) albo wygeneruj etykietę ręcznie i wybierz konto przy zamówieniu.',
             );
         }
 
@@ -226,6 +226,24 @@ final class ShippingLabelService
 
             throw new RuntimeException($exception->getMessage(), previous: $exception);
         }
+    }
+
+    /**
+     * Automatyczny fallback na konto InPost tylko dla zamówień, w których klient
+     * wybrał wysyłkę InPost/Paczkomat — inne kuriery (np. z BLPaczki) nie mogą
+     * dostać etykiety InPost.
+     */
+    private function looksLikeInPostShipping(ExternalOrder $order): bool
+    {
+        $methods = collect((array) data_get($order->raw_payload, 'shipping_lines', []))
+            ->map(fn (array $line): string => mb_strtolower(trim((string) ($line['method_title'] ?? $line['method_id'] ?? ''))))
+            ->filter();
+
+        return $methods->contains(
+            fn (string $method): bool => str_contains($method, 'inpost')
+                || str_contains($method, 'paczkomat')
+                || str_contains($method, 'easypack'),
+        );
     }
 
     private function integrationWithLabelsForOrder(ExternalOrder $order): ?WordpressIntegration
