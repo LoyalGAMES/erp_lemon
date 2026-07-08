@@ -6,13 +6,14 @@
     $money = fn ($value): string => number_format((float) $value, 2, ',', ' ');
     $qty = fn ($value): string => number_format((float) $value, floor((float) $value) === (float) $value ? 0 : 2, ',', ' ');
     $isCorrection = $invoice->type === 'correction';
-    $documentTitle = $isCorrection ? 'Faktura korygująca' : 'Faktura VAT';
+    $isProforma = $invoice->type === 'proforma';
+    $documentTitle = $isCorrection ? 'Faktura korygująca' : ($isProforma ? 'Faktura proforma' : 'Faktura VAT');
     $netSummaryLabel = $isCorrection ? 'Korekta netto' : 'Razem netto';
     $vatSummaryLabel = $isCorrection ? 'Korekta VAT' : 'Razem VAT';
     $grossSummaryLabel = $isCorrection ? 'Korekta brutto' : 'Do zapłaty';
     $settlementLabel = $isCorrection
         ? ((float) $invoice->gross_total < 0 ? 'Do zwrotu' : ((float) $invoice->gross_total > 0 ? 'Do dopłaty' : 'Saldo korekty'))
-        : 'Kwota do zapłaty';
+        : ($isProforma ? 'Kwota proformy' : 'Kwota do zapłaty');
     $settlementAmount = $isCorrection ? abs((float) $invoice->gross_total) : (float) $invoice->gross_total;
     $vatSummary = $invoice->lines
         ->groupBy(fn ($line): string => number_format((float) $line->vat_rate, 2, '.', ''))

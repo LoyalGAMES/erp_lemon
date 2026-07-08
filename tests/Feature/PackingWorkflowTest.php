@@ -156,6 +156,60 @@ class PackingWorkflowTest extends TestCase
         $this->assertNotNull($task->packed_at);
     }
 
+    public function test_collect_view_falls_back_to_size_from_product_name(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'BLS6A106E8F662FB',
+            'name' => 'Garnitur AMELIA Tenis Butter Cream - S/M',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '9437',
+            'external_number' => '9437',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 399,
+            'raw_payload' => [
+                'shipping_lines' => [
+                    ['method_title' => 'InPost Kurier Standard'],
+                ],
+            ],
+            'external_created_at' => now(),
+        ]);
+
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'name-size-1',
+            'sku' => $product->sku,
+            'name' => 'Garnitur AMELIA Tenis Butter Cream - S/M',
+            'quantity' => 1,
+            'raw_payload' => [
+                'meta_data' => [],
+            ],
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'collect']))
+            ->assertOk()
+            ->assertSee('Garnitur AMELIA Tenis Butter Cream - S/M')
+            ->assertSee('Rozmiar <strong>S/M</strong>', false)
+            ->assertDontSee('Rozmiar <strong>-</strong>', false);
+
+        $task = PackingTask::query()->firstOrFail();
+        $this->assertSame('S/M', $task->size_label);
+    }
+
     public function test_operator_can_pick_without_scanner_and_pack_whole_order(): void
     {
         $channel = SalesChannel::query()->create([

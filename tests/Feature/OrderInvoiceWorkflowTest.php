@@ -292,6 +292,65 @@ class OrderInvoiceWorkflowTest extends TestCase
         $this->assertSame(0, KsefSubmission::query()->count());
     }
 
+    public function test_foreign_b2c_order_uses_oss_numbering_and_destination_country_vat(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice' => Http::response([
+                'order_id' => 501,
+                'invoice_number' => 'FV/OSS/1/'.now()->format('m/Y'),
+                'file_url' => 'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice/download?token=oss-token',
+                'stored_file' => true,
+                'note_id' => 7201,
+            ]),
+        ]);
+
+        [$order] = $this->createFulfilledOrder();
+        $order->update([
+            'currency' => 'EUR',
+            'total_gross' => 119,
+            'billing_data' => array_merge($order->billing_data ?? [], [
+                'country' => 'DE',
+            ]),
+        ]);
+        $order->lines()->firstOrFail()->update([
+            'unit_gross_price' => 119,
+            'vat_rate' => null,
+            'raw_payload' => [
+                'total' => '100.00',
+                'total_tax' => '0.00',
+            ],
+        ]);
+
+        app(InvoiceSettingsService::class)->updateSellerData([
+            'name' => 'Sempre Love sp. z o.o.',
+            'tax_id' => '5261040828',
+            'address_1' => 'Testowa 1',
+            'postcode' => '00-001',
+            'city' => 'Warszawa',
+            'country' => 'PL',
+            'email' => 'biuro@example.test',
+            'phone' => '+48123123123',
+            'bank_account' => 'PL00111122223333444455556666',
+        ]);
+
+        $this->post(route('orders.invoice.create', $order), [
+            'document_type' => 'vat',
+        ])->assertRedirect()
+            ->assertSessionHas('status');
+
+        $invoice = Invoice::query()->with('lines')->firstOrFail();
+
+        $this->assertSame('FV/OSS/1/'.now()->format('m/Y'), $invoice->number);
+        $this->assertSame('DE', $invoice->buyer_data['country']);
+        $this->assertSame('oss_union', data_get($invoice->metadata, 'oss.scheme'));
+        $this->assertSame('DE', data_get($invoice->metadata, 'oss.buyer_country'));
+        $this->assertEquals(19.0, data_get($invoice->metadata, 'oss.standard_vat_rate'));
+        $this->assertSame('100.00', (string) $invoice->net_total);
+        $this->assertSame('19.00', (string) $invoice->vat_total);
+        $this->assertSame('119.00', (string) $invoice->gross_total);
+        $this->assertSame('19.00', (string) $invoice->lines->first()->vat_rate);
+    }
+
     public function test_operator_can_open_order_details_with_lines_reservations_wz_and_woocommerce_notes(): void
     {
         [$order, $document] = $this->createFulfilledOrder();

@@ -4,10 +4,11 @@
     $footerText = trim((string) ($layout['footer_text'] ?? ''));
     $supportEmail = trim((string) ($layout['support_email'] ?? ''));
     $supportPhone = trim((string) ($layout['support_phone'] ?? ''));
+    $subjectText = trim((string) ($messageSubject ?? $customerMessage->renderedSubject()));
     $bodyText = trim((string) $messageBody);
     $paymentUrl = trim((string) data_get($customerMessage->metadata, 'payment_url', ''));
 @endphp
-{{ $customerMessage->subject }}
+{{ $subjectText !== '' ? $subjectText : 'Wiadomość' }}
 
 {{ $bodyText }}
 @if (filter_var($paymentUrl, FILTER_VALIDATE_URL) !== false)

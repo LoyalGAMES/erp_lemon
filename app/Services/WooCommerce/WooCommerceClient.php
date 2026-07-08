@@ -333,6 +333,78 @@ final class WooCommerceClient
     }
 
     /**
+     * @return list<array{language:?string,product_id:string,status:string}>
+     */
+    public function updateProductPublicationDateTranslations(
+        WordpressIntegration $integration,
+        ProductChannelMapping $mapping,
+        string $sku,
+        string $dateCreated,
+    ): array {
+        if (filled($mapping->external_variation_id)) {
+            return [];
+        }
+
+        $mainProductId = (string) $mapping->external_product_id;
+        $updated = [];
+        $updatedIds = [];
+
+        foreach ($integration->productImportLanguages() as $language) {
+            $query = [
+                'sku' => $sku,
+                'per_page' => 20,
+            ];
+
+            if ($language !== null) {
+                $query['lang'] = $language;
+            }
+
+            $response = $this->request($integration)
+                ->get($this->endpoint($integration, '/products'), $query);
+
+            if (! $response->successful()) {
+                throw new RuntimeException("Wyszukanie tłumaczeń Polylang produktu {$sku} zwróciło HTTP {$response->status()}.");
+            }
+
+            $products = $response->json();
+
+            if (! is_array($products)) {
+                continue;
+            }
+
+            foreach ($products as $product) {
+                if (! is_array($product) || ! isset($product['id'])) {
+                    continue;
+                }
+
+                $translationId = (string) $product['id'];
+
+                if ($translationId === '' || $translationId === $mainProductId || in_array($translationId, $updatedIds, true)) {
+                    continue;
+                }
+
+                $updateResponse = $this->request($integration)
+                    ->put($this->endpoint($integration, "/products/{$translationId}"), [
+                        'date_created' => $dateCreated,
+                    ]);
+
+                if (! $updateResponse->successful()) {
+                    throw new RuntimeException("Aktualizacja daty publikacji tłumaczenia WooCommerce #{$translationId} zwróciła HTTP {$updateResponse->status()}.");
+                }
+
+                $updatedIds[] = $translationId;
+                $updated[] = [
+                    'language' => $language,
+                    'product_id' => $translationId,
+                    'status' => 'updated',
+                ];
+            }
+        }
+
+        return $updated;
+    }
+
+    /**
      * @param  array<string, mixed>  $invoiceData
      * @return array<string, mixed>
      */

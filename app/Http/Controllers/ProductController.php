@@ -11,19 +11,25 @@ use App\Models\ProductRelation;
 use App\Models\StockLedgerEntry;
 use App\Models\StockBalance;
 use App\Models\Warehouse;
+use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\Audit\AuditLogService;
 use App\Services\Gs1\Gs1SettingsService;
 use App\Services\Gs1\Gs1GtinService;
+use App\Services\Inventory\WarehouseDocumentNumberService;
+use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\WooCommerce\ProductDataExportService;
+use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
+use RuntimeException;
 
 class ProductController extends Controller
 {
@@ -109,6 +115,7 @@ class ProductController extends Controller
             'catalogOptions' => $this->catalogOptions(),
             'parameterOptions' => $this->parameterOptions(),
             'productLookupOptions' => $this->productLookupOptions($product),
+            'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
             'module' => 'products',
             'title' => $product->name,
@@ -308,6 +315,103 @@ class ProductController extends Controller
         return back()->with('status', 'Wariant został odłączony od produktu.');
     }
 
+    public function adjustStock(
+        Product $product,
+        Request $request,
+        WarehouseDocumentNumberService $numbers,
+        WarehouseDocumentPostingService $posting,
+        AuditLogService $audit,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'warehouse_id' => ['required', 'integer', 'exists:warehouses,id'],
+            'new_quantity' => ['required', 'numeric', 'min:0', 'max:99999999'],
+            'notes' => ['nullable', 'string', 'max:500'],
+        ]);
+
+        $warehouse = Warehouse::query()
+            ->whereKey((int) $validated['warehouse_id'])
+            ->where('is_active', true)
+            ->firstOrFail();
+        $balance = StockBalance::query()
+            ->where('product_id', $product->id)
+            ->where('warehouse_id', $warehouse->id)
+            ->first();
+        $current = round((float) ($balance?->quantity_on_hand ?? 0), 4);
+        $target = round((float) $validated['new_quantity'], 4);
+        $delta = round($target - $current, 4);
+
+        if (abs($delta) < 0.0001) {
+            return back()->with('status', "Stan SKU {$product->sku} w magazynie {$warehouse->code} już wynosi {$this->formatQuantity($target)}.");
+        }
+
+        $document = DB::transaction(function () use ($product, $warehouse, $validated, $numbers, $current, $target, $delta): WarehouseDocument {
+            $document = WarehouseDocument::query()->create([
+                'number' => $numbers->next('KOR'),
+                'type' => 'KOR',
+                'status' => 'draft',
+                'destination_warehouse_id' => $warehouse->id,
+                'document_date' => now(),
+                'external_reference' => $product->sku,
+                'notes' => $this->nullableString($validated['notes'] ?? null)
+                    ?? "Ręczna korekta stanu SKU {$product->sku} z karty produktu.",
+                'metadata' => [
+                    'source' => 'product_stock_adjustment',
+                    'product_id' => $product->id,
+                    'product_sku' => $product->sku,
+                    'warehouse_id' => $warehouse->id,
+                    'warehouse_code' => $warehouse->code,
+                    'previous_quantity_on_hand' => $current,
+                    'target_quantity_on_hand' => $target,
+                    'delta_quantity' => $delta,
+                ],
+            ]);
+
+            $document->lines()->create([
+                'product_id' => $product->id,
+                'quantity' => $delta,
+                'notes' => "Stan {$current} -> {$target}",
+                'metadata' => [
+                    'source' => 'product_stock_adjustment',
+                    'previous_quantity_on_hand' => $current,
+                    'target_quantity_on_hand' => $target,
+                ],
+            ]);
+
+            return $document;
+        });
+
+        try {
+            $posting->post($document);
+        } catch (RuntimeException $exception) {
+            $audit->record('product.stock_adjust_failed', $product, null, null, [
+                'warehouse_id' => $warehouse->id,
+                'warehouse_code' => $warehouse->code,
+                'document_id' => $document->id,
+                'current_quantity' => $current,
+                'target_quantity' => $target,
+                'delta_quantity' => $delta,
+                'error' => $exception->getMessage(),
+            ]);
+
+            return back()->with('error', 'Nie zaksięgowano korekty stanu: '.$exception->getMessage());
+        }
+
+        $audit->record('product.stock_adjusted', $product, [
+            'warehouse_id' => $warehouse->id,
+            'quantity_on_hand' => $current,
+        ], [
+            'warehouse_id' => $warehouse->id,
+            'quantity_on_hand' => $target,
+            'delta_quantity' => $delta,
+            'document_id' => $document->id,
+            'document_number' => $document->number,
+        ]);
+
+        return redirect()
+            ->route('products.show', $product)
+            ->with('status', "Zmieniono stan SKU {$product->sku} w magazynie {$warehouse->code} z {$this->formatQuantity($current)} na {$this->formatQuantity($target)} dokumentem {$document->number}.");
+    }
+
     public function exportToWooCommerce(
         Product $product,
         ProductDataExportService $exportService,
@@ -459,6 +563,7 @@ class ProductController extends Controller
             'tags' => ['nullable', 'string', 'max:1000'],
             'asin' => ['nullable', 'string', 'max:255'],
             'publication_status' => ['nullable', 'string', 'in:publish,draft,pending,private'],
+            'publication_date' => ['nullable', 'date'],
             'catalog_visibility' => ['nullable', 'string', 'in:visible,catalog,search,hidden'],
             'product_type' => ['nullable', 'string', 'in:simple,variable,variation'],
             'variant_attribute' => ['nullable', 'string', 'max:255'],
@@ -527,6 +632,7 @@ class ProductController extends Controller
             'tags' => $this->tagList($validated['tags'] ?? ''),
             'asin' => $this->nullableString($validated['asin'] ?? null),
             'publication_status' => $this->nullableString($validated['publication_status'] ?? null) ?? 'publish',
+            'publication_date' => $this->nullableDateTimeString($validated['publication_date'] ?? null),
             'catalog_visibility' => $this->nullableString($validated['catalog_visibility'] ?? null) ?? 'visible',
             'product_type' => $this->nullableString($validated['product_type'] ?? null) ?? 'simple',
             'variant_attribute' => $this->nullableString($validated['variant_attribute'] ?? null),
@@ -1035,6 +1141,30 @@ class ProductController extends Controller
         $value = $this->nullableString($value);
 
         return $value === null ? null : mb_substr($value, 0, 10);
+    }
+
+    private function nullableDateTimeString(mixed $value): ?string
+    {
+        $value = $this->nullableString($value);
+
+        if ($value === null) {
+            return null;
+        }
+
+        try {
+            return CarbonImmutable::parse($value)->format('Y-m-d\TH:i');
+        } catch (\Throwable) {
+            return mb_substr(str_replace(' ', 'T', $value), 0, 16);
+        }
+    }
+
+    private function formatQuantity(float $value): string
+    {
+        if (abs($value - round($value)) < 0.00001) {
+            return number_format($value, 0, ',', ' ');
+        }
+
+        return rtrim(rtrim(number_format($value, 4, ',', ' '), '0'), ',');
     }
 
     /**

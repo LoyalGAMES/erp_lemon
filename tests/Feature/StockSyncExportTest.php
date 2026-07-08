@@ -390,8 +390,13 @@ class StockSyncExportTest extends TestCase
             ->assertRedirect()
             ->assertSessionHas('status');
 
-        $this->assertSame(3, StockSyncQueueItem::query()->count());
-        $this->assertSame($b2c->id, StockSyncQueueItem::query()->latest()->firstOrFail()->sales_channel_id);
+        $this->assertSame(2, StockSyncQueueItem::query()->count());
+
+        $b2cItem->refresh();
+        $this->assertSame($b2c->id, $b2cItem->sales_channel_id);
+        $this->assertSame('manual_full_stock_rebuild', $b2cItem->metadata['latest_reason']);
+        $this->assertSame(1, $b2cItem->metadata['coalesced_count']);
+        $this->assertSame('9.0000', (string) $b2cItem->quantity_to_push);
     }
 
     public function test_sync_module_shows_operational_queue_summary(): void

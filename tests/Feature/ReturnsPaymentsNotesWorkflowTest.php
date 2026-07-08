@@ -142,8 +142,12 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
             'type' => 'manual',
             'status' => 'sent',
             'recipient_email' => 'jan@example.test',
-            'subject' => 'Instrukcja wymiany',
-            'body' => 'Wyślij paczkę do magazynu.',
+            'subject' => 'Instrukcja wymiany {{return_number}}',
+            'body' => 'Wyślij paczkę do magazynu dla {{order_number}}.',
+            'metadata' => [
+                'return_number' => $returnCase->number,
+                'order_number' => $order->external_number,
+            ],
             'sent_at' => now(),
         ]);
 
@@ -191,7 +195,9 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
             ->assertSee('Wypłaty i rozliczenia')
             ->assertSee('24,99 PLN')
             ->assertSee('Komunikacja z klientem')
-            ->assertSee('Instrukcja wymiany')
+            ->assertSee('Instrukcja wymiany '.$returnCase->number)
+            ->assertSee('Wyślij paczkę do magazynu dla '.$order->external_number)
+            ->assertDontSee('Instrukcja wymiany {{return_number}}')
             ->assertSee('Notatki wewnętrzne')
             ->assertSee('Sprawdzić kompletność')
             ->assertSee('Etykiety wymiany i zwrotu')

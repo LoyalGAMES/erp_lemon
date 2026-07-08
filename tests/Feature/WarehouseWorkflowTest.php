@@ -14,7 +14,9 @@ use App\Models\StockLedgerEntry;
 use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
+use App\Models\WordpressIntegration;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
@@ -353,6 +355,9 @@ class WarehouseWorkflowTest extends TestCase
             'type' => 'woocommerce',
             'is_active' => true,
         ]);
+
+        $this->createStockExportIntegration($b2c);
+        $this->createStockExportIntegration($b2b);
 
         $product = Product::query()->create([
             'sku' => 'SKU-ROUTE-SYNC',
@@ -1154,6 +1159,8 @@ class WarehouseWorkflowTest extends TestCase
             'is_active' => true,
         ]);
 
+        $this->createStockExportIntegration($channel);
+
         $product = Product::query()->create([
             'sku' => 'SKU-AGG',
             'name' => 'Aggregated stock product',
@@ -1263,5 +1270,17 @@ class WarehouseWorkflowTest extends TestCase
             ->assertSee('M1:')
             ->assertSee('M2:')
             ->assertDontSee('M3:');
+    }
+
+    private function createStockExportIntegration(SalesChannel $channel): WordpressIntegration
+    {
+        return WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => $channel->name,
+            'base_url' => 'https://' . strtolower($channel->code) . '.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'stock_export_enabled' => true,
+        ]);
     }
 }

@@ -147,6 +147,9 @@
                             @endforeach
                         </select>
                     </label>
+                    <label>Data publikacji w sklepie
+                        <input name="publication_date" type="datetime-local" value="{{ $quickMasterField('publication_date', 'publication_date') }}">
+                    </label>
                     <label>Widoczność w WooCommerce
                         <select name="catalog_visibility">
                             @foreach (['visible' => 'Widoczny w katalogu i wyszukiwarce', 'catalog' => 'Widoczny tylko w katalogu', 'search' => 'Widoczny tylko w wyszukiwarce', 'hidden' => 'Ukryty w sklepie'] as $visibility => $label)

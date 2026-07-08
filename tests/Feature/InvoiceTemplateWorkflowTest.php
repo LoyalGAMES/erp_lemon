@@ -210,6 +210,11 @@ BLADE,
         $this->put(route('invoices.settings.update'), [
             'sales_prefix' => 'FV/ERP',
             'correction_prefix' => 'FK/ERP',
+            'proforma_prefix' => 'PRO/ERP',
+            'oss_sales_prefix' => 'FV/OSS',
+            'oss_correction_prefix' => 'FVK/OSS',
+            'oss_pattern' => '{PREFIX}/{SEQ}/{MM}/{YYYY}',
+            'oss_padding' => 1,
             'pattern' => '{PREFIX}/{YYYY}/{SEQ}',
             'padding' => 4,
             'payment_due_days' => 14,
@@ -222,7 +227,11 @@ BLADE,
             ->assertOk()
             ->assertSee('FV/ERP')
             ->assertSee('FK/ERP')
+            ->assertSee('PRO/ERP')
+            ->assertSee('FV/OSS')
+            ->assertSee('FVK/OSS')
             ->assertSee('{PREFIX}/{YYYY}/{SEQ}')
+            ->assertSee('{PREFIX}/{SEQ}/{MM}/{YYYY}')
             ->assertSee('14')
             ->assertSee('Domyślnie nie wysyłaj do KSeF');
 
@@ -233,10 +242,17 @@ BLADE,
 
         $this->assertSame('FV/ERP/'.now()->format('Y').'/0010', $numbers->next());
         $this->assertSame('FK/ERP/'.now()->format('Y').'/0001', $numbers->next('FK'));
+        $this->assertSame('FV/OSS/1/'.now()->format('m/Y'), $numbers->next('OSS'));
+        $this->assertSame('FVK/OSS/1/'.now()->format('m/Y'), $numbers->next('CORRECTION_OSS'));
 
         $this->put(route('invoices.settings.update'), [
             'sales_prefix' => 'FV/ERP',
             'correction_prefix' => 'FK/ERP',
+            'proforma_prefix' => 'PRO/ERP',
+            'oss_sales_prefix' => 'FV/OSS',
+            'oss_correction_prefix' => 'FVK/OSS',
+            'oss_pattern' => '{PREFIX}/{SEQ}/{MM}/{YYYY}',
+            'oss_padding' => 1,
             'pattern' => '{PREFIX}/{MM}/{YYYY}/{SEQ}',
             'padding' => 3,
             'payment_due_days' => 14,

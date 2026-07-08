@@ -18,6 +18,7 @@
     ];
     $invoiceTypeLabel = [
         'vat' => 'Faktura VAT',
+        'proforma' => 'Proforma',
         'correction' => 'Korekta',
     ];
 @endphp
@@ -82,11 +83,26 @@
                 <label>Seria korekt
                     <input name="correction_prefix" value="{{ old('correction_prefix', $numbering['correction_prefix']) }}" required>
                 </label>
+                <label>Seria proform
+                    <input name="proforma_prefix" value="{{ old('proforma_prefix', $numbering['proforma_prefix']) }}" required>
+                </label>
+                <label>Seria faktur OSS
+                    <input name="oss_sales_prefix" value="{{ old('oss_sales_prefix', $numbering['oss_sales_prefix']) }}" required>
+                </label>
+                <label>Seria korekt OSS
+                    <input name="oss_correction_prefix" value="{{ old('oss_correction_prefix', $numbering['oss_correction_prefix']) }}" required>
+                </label>
                 <label>Format numeru
                     <input name="pattern" value="{{ old('pattern', $numbering['pattern']) }}" required>
                 </label>
+                <label>Format numeru OSS
+                    <input name="oss_pattern" value="{{ old('oss_pattern', $numbering['oss_pattern']) }}" required>
+                </label>
                 <label>Długość numeru
                     <input name="padding" value="{{ old('padding', $numbering['padding']) }}" type="number" min="3" max="9" required>
+                </label>
+                <label>Długość numeru OSS
+                    <input name="oss_padding" value="{{ old('oss_padding', $numbering['oss_padding']) }}" type="number" min="1" max="9" required>
                 </label>
                 <label>Termin płatności (dni)
                     <input name="payment_due_days" value="{{ old('payment_due_days', $numbering['payment_due_days']) }}" type="number" min="0" max="365" required>
@@ -101,7 +117,7 @@
                         <option value="skip" @selected($selectedDefaultKsefPolicy === 'skip')>Domyślnie nie wysyłaj do KSeF</option>
                     </select>
                 </label>
-                <p class="muted">Tokeny: {PREFIX}, {YYYY}, {YY}, {MM}, {SEQ}. Przykład: {{ strtr($numbering['pattern'], ['{PREFIX}' => trim($numbering['sales_prefix'], '/'), '{YYYY}' => now()->format('Y'), '{YY}' => now()->format('y'), '{MM}' => now()->format('m'), '{SEQ}' => str_pad('1', (int) $numbering['padding'], '0', STR_PAD_LEFT)]) }}</p>
+                <p class="muted">Tokeny: {PREFIX}, {YYYY}, {YY}, {MM}, {SEQ}. Przykład: {{ strtr($numbering['pattern'], ['{PREFIX}' => trim($numbering['sales_prefix'], '/'), '{YYYY}' => now()->format('Y'), '{YY}' => now()->format('y'), '{MM}' => now()->format('m'), '{SEQ}' => str_pad('1', (int) $numbering['padding'], '0', STR_PAD_LEFT)]) }}. OSS: {{ strtr($numbering['oss_pattern'], ['{PREFIX}' => trim($numbering['oss_sales_prefix'], '/'), '{YYYY}' => now()->format('Y'), '{YY}' => now()->format('y'), '{MM}' => now()->format('m'), '{SEQ}' => str_pad('1', (int) $numbering['oss_padding'], '0', STR_PAD_LEFT)]) }}</p>
                 <p class="muted">To ustawienie działa jako domyślne dla nowych i istniejących faktur bez ręcznej decyzji KSeF. Ustawienie na konkretnej fakturze ma pierwszeństwo.</p>
                 <button class="button" type="submit">Zapisz ustawienia</button>
             </form>
@@ -345,7 +361,7 @@
                                             <button class="button secondary" type="submit">Uzupełnij sprzedawcę</button>
                                         </form>
                                     @endif
-                                    @if ($invoice->external_order_id)
+                                    @if ($invoice->external_order_id && $invoice->type !== 'proforma')
                                         @if ($validationState['is_blocking'])
                                             <button class="button secondary" type="button" disabled title="{{ implode(' ', $validationState['errors']) }}">Popraw fakturę</button>
                                         @else

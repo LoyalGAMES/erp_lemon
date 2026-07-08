@@ -658,6 +658,7 @@ final class WooCommerceImportService
             'tags' => $this->nameList($item['tags'] ?? []),
             'parameters' => $this->parameterList($item),
             'publication_status' => $this->nullableString($item['status'] ?? null) ?? 'publish',
+            'publication_date' => $this->nullableDateTimeString($item['date_created'] ?? null),
             'catalog_visibility' => $this->nullableString($item['catalog_visibility'] ?? null) ?? 'visible',
             'product_type' => $this->nullableString($item['type'] ?? null) ?? 'simple',
             'ean' => $this->eanForImport($item),
@@ -937,6 +938,13 @@ final class WooCommerceImportService
         $value = $this->nullableString($value);
 
         return $value === null ? null : mb_substr($value, 0, 10);
+    }
+
+    private function nullableDateTimeString(mixed $value): ?string
+    {
+        $value = $this->nullableString($value);
+
+        return $value === null ? null : mb_substr(str_replace(' ', 'T', $value), 0, 16);
     }
 
     private function stockImportWarehouse(WordpressIntegration $integration): Warehouse

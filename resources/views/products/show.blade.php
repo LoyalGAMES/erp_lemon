@@ -51,6 +51,10 @@
         .stock-pill { border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; background: #fffdfb; color: var(--muted); font-size: 12px; }
         .stock-pill strong { color: var(--text); font-size: 15px; margin-left: 4px; }
         .stock-pill.available strong { color: var(--green-dark); }
+        .stock-block { display: grid; gap: 8px; }
+        .stock-block > strong { font-size: 13px; }
+        .stock-adjust-form { display: grid; grid-template-columns: 120px minmax(170px, 1fr) auto; gap: 8px; align-items: end; min-width: 390px; }
+        .stock-adjust-form input { min-height: 34px; }
         .html-preview { border: 1px solid var(--border); border-radius: 8px; background: #fffdfb; padding: 12px; white-space: pre-wrap; overflow-wrap: anywhere; color: #312b25; }
         .media-gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 12px; }
         .media-button { border: 1px solid var(--border); border-radius: 8px; background: #f4f1ef; padding: 0; overflow: hidden; cursor: pointer; aspect-ratio: 4 / 5; }
@@ -74,6 +78,7 @@
             .variant-relation-form form { grid-template-columns: 1fr; }
             .product-quick-form-grid, .product-quick-form-grid.two { grid-template-columns: 1fr; }
             .product-quick-step-actions { align-items: stretch; flex-direction: column; }
+            .stock-adjust-form { grid-template-columns: 1fr; min-width: 0; }
         }
         @media (max-width: 640px) {
             .detail-grid { grid-template-columns: 1fr; }
@@ -107,6 +112,32 @@
         $onHand = $product->stockBalances->sum(fn ($balance) => (float) $balance->quantity_on_hand);
         $reserved = $product->stockBalances->sum(fn ($balance) => (float) $balance->quantity_reserved);
         $available = $product->stockBalances->sum(fn ($balance) => (float) $balance->quantity_available);
+        $stockBalanceByWarehouse = $product->stockBalances->keyBy(fn ($balance) => (string) $balance->warehouse_id);
+        $stockFamilyProducts = collect([$product])->merge($relatedVariants)->unique('id')->values();
+        $familyBalances = $stockFamilyProducts->flatMap(fn ($item) => $item->stockBalances);
+        $familyOnHand = $familyBalances->sum(fn ($balance) => (float) $balance->quantity_on_hand);
+        $familyReserved = $familyBalances->sum(fn ($balance) => (float) $balance->quantity_reserved);
+        $familyAvailable = $familyBalances->sum(fn ($balance) => (float) $balance->quantity_available);
+        $familyWarehouseRows = $familyBalances
+            ->groupBy(fn ($balance) => (string) ($balance->warehouse_id ?? 'none'))
+            ->map(function ($balances) {
+                $first = $balances->first();
+
+                return [
+                    'code' => $first?->warehouse?->code ?? 'MAG?',
+                    'name' => $first?->warehouse?->name ?? '',
+                    'on_hand' => $balances->sum(fn ($balance) => (float) $balance->quantity_on_hand),
+                    'reserved' => $balances->sum(fn ($balance) => (float) $balance->quantity_reserved),
+                    'available' => $balances->sum(fn ($balance) => (float) $balance->quantity_available),
+                    'recalculated_at' => $balances
+                        ->pluck('recalculated_at')
+                        ->filter()
+                        ->sortDesc()
+                        ->first(),
+                ];
+            })
+            ->sortBy('code')
+            ->values();
         $parameters = collect(data_get($master, 'parameters', []))->filter(fn ($row) => is_array($row));
         $tags = implode(', ', (array) data_get($master, 'tags', []));
         $sourceLabel = $product->isErpMaster() ? 'ERP' : 'Import WooCommerce';
@@ -124,6 +155,7 @@
             'search' => 'Widoczny tylko w wyszukiwarce',
             'hidden' => 'Ukryty w sklepie',
         ];
+        $publicationDate = data_get($master, 'publication_date');
     @endphp
 
     @include('products._quick_edit_drawer', [
@@ -223,6 +255,7 @@
                     <div class="detail-item"><span>Wymiary</span><strong>{{ data_get($master, 'dimensions.height_cm') ?: '0' }} x {{ data_get($master, 'dimensions.width_cm') ?: '0' }} x {{ data_get($master, 'dimensions.length_cm') ?: '0' }} cm</strong></div>
                     <div class="detail-item"><span>Jednostka</span><strong>{{ $product->unit }}</strong></div>
                     <div class="detail-item"><span>Status publikacji w sklepie</span><strong>{{ $publicationStatusLabels[data_get($master, 'publication_status', $product->is_active ? 'publish' : 'draft')] ?? data_get($master, 'publication_status', '-') }}</strong></div>
+                    <div class="detail-item"><span>Data publikacji w sklepie</span><strong>{{ $publicationDate ? str_replace('T', ' ', mb_substr((string) $publicationDate, 0, 16)) : '-' }}</strong></div>
                     <div class="detail-item"><span>Widoczność w WooCommerce</span><strong>{{ $catalogVisibilityLabels[data_get($master, 'catalog_visibility', 'visible')] ?? data_get($master, 'catalog_visibility', '-') }}</strong></div>
                     <div class="detail-item"><span>Typ produktu</span><strong>{{ data_get($master, 'product_type', 'simple') }}</strong></div>
                     <div class="detail-item"><span>Atrybut wariantu</span><strong>{{ data_get($master, 'variant_attribute') ?: '-' }}</strong></div>
@@ -249,10 +282,58 @@
                 <div class="detail-item"><span>Cena zakupu</span><strong>{{ $money(data_get($master, 'prices.purchase_price_pln')) }}</strong></div>
             </div>
 
-            <div class="stock-pills">
-                <span class="stock-pill">Stan ogólny <strong>{{ $qty($onHand) }}</strong></span>
-                <span class="stock-pill">Rezerwacje <strong>{{ $qty($reserved) }}</strong></span>
-                <span class="stock-pill available">Dostępne do sprzedaży <strong>{{ $qty($available) }}</strong></span>
+            <div class="stock-block">
+                <strong>Stan tego SKU</strong>
+                <div class="stock-pills">
+                    <span class="stock-pill">Stan <strong>{{ $qty($onHand) }}</strong></span>
+                    <span class="stock-pill">Rezerwacje <strong>{{ $qty($reserved) }}</strong></span>
+                    <span class="stock-pill available">Dostępne do sprzedaży <strong>{{ $qty($available) }}</strong></span>
+                </div>
+            </div>
+
+            @if ($relatedVariants->isNotEmpty())
+                <div class="stock-block">
+                    <strong>Stan rodziny produktu z wariantami, zgodny z listą produktów</strong>
+                    <div class="stock-pills">
+                        <span class="stock-pill">Ogółem <strong>{{ $qty($familyOnHand) }}</strong></span>
+                        <span class="stock-pill">Rezerwacje <strong>{{ $qty($familyReserved) }}</strong></span>
+                        <span class="stock-pill available">Dostępne <strong>{{ $qty($familyAvailable) }}</strong></span>
+                    </div>
+                </div>
+
+                <div class="table-scroll">
+                    <table class="dense-table">
+                        <thead>
+                            <tr>
+                                <th>Magazyn</th>
+                                <th class="numeric">Stan rodziny</th>
+                                <th class="numeric">Rezerwacja rodziny</th>
+                                <th class="numeric">Dostępne rodziny</th>
+                                <th>Przeliczono</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @forelse ($familyWarehouseRows as $row)
+                                <tr>
+                                    <td><strong>{{ $row['code'] }}</strong> {{ $row['name'] }}</td>
+                                    <td class="numeric">{{ $qty($row['on_hand']) }}</td>
+                                    <td class="numeric">{{ $qty($row['reserved']) }}</td>
+                                    <td class="numeric">{{ $qty($row['available']) }}</td>
+                                    <td>{{ $row['recalculated_at']?->format('Y-m-d H:i') ?? '-' }}</td>
+                                </tr>
+                            @empty
+                                <tr>
+                                    <td colspan="5">Brak stanów magazynowych dla rodziny produktu.</td>
+                                </tr>
+                            @endforelse
+                        </tbody>
+                    </table>
+                </div>
+            @endif
+
+            <div class="stock-block">
+                <strong>Magazyny tego SKU i ręczna korekta stanu</strong>
+                <div class="toolbar-note">Zmiana tworzy dokument KOR i księguje ruch magazynowy dla wybranego magazynu.</div>
             </div>
 
             <div class="table-scroll">
@@ -264,20 +345,38 @@
                             <th class="numeric">Rezerwacja</th>
                             <th class="numeric">Dostępne</th>
                             <th>Przeliczono</th>
+                            <th>Ustaw stan</th>
                         </tr>
                     </thead>
                     <tbody>
-                        @forelse ($product->stockBalances->sortBy(fn ($balance) => $balance->warehouse?->code ?? '') as $balance)
+                        @forelse ($warehouses as $warehouse)
+                            @php
+                                $balance = $stockBalanceByWarehouse->get((string) $warehouse->id);
+                                $currentOnHand = (float) ($balance?->quantity_on_hand ?? 0);
+                            @endphp
                             <tr>
-                                <td><strong>{{ $balance->warehouse?->code ?? 'MAG?' }}</strong> {{ $balance->warehouse?->name ?? '' }}</td>
-                                <td class="numeric">{{ $qty($balance->quantity_on_hand) }}</td>
-                                <td class="numeric">{{ $qty($balance->quantity_reserved) }}</td>
-                                <td class="numeric">{{ $qty($balance->quantity_available) }}</td>
-                                <td>{{ $balance->recalculated_at?->format('Y-m-d H:i') ?? '-' }}</td>
+                                <td><strong>{{ $warehouse->code }}</strong> {{ $warehouse->name }}</td>
+                                <td class="numeric">{{ $qty($currentOnHand) }}</td>
+                                <td class="numeric">{{ $qty($balance?->quantity_reserved ?? 0) }}</td>
+                                <td class="numeric">{{ $qty($balance?->quantity_available ?? 0) }}</td>
+                                <td>{{ $balance?->recalculated_at?->format('Y-m-d H:i') ?? '-' }}</td>
+                                <td>
+                                    <form class="stock-adjust-form" method="POST" action="{{ route('products.stock.adjust', $product) }}" onsubmit="return confirm('Zaksięgować korektę stanu dla SKU {{ $product->sku }} w magazynie {{ $warehouse->code }}?');">
+                                        @csrf
+                                        <input type="hidden" name="warehouse_id" value="{{ $warehouse->id }}">
+                                        <label>Nowy stan
+                                            <input name="new_quantity" type="number" min="0" step="0.0001" value="{{ old('new_quantity', $currentOnHand) }}" required>
+                                        </label>
+                                        <label>Powód
+                                            <input name="notes" value="{{ old('notes') }}" placeholder="np. inwentaryzacja">
+                                        </label>
+                                        <button class="button secondary" type="submit">Ustaw</button>
+                                    </form>
+                                </td>
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="5">Brak stanów magazynowych dla tego produktu.</td>
+                                <td colspan="6">Brak aktywnych magazynów do korekty stanu.</td>
                             </tr>
                         @endforelse
                     </tbody>

@@ -10,8 +10,9 @@
     $footerText = trim((string) ($layout['footer_text'] ?? ''));
     $supportEmail = trim((string) ($layout['support_email'] ?? ''));
     $supportPhone = trim((string) ($layout['support_phone'] ?? ''));
+    $subjectText = trim((string) ($messageSubject ?? $customerMessage->renderedSubject()));
     $bodyText = trim((string) $messageBody);
-    $preheader = \Illuminate\Support\Str::limit(preg_replace('/\s+/', ' ', $bodyText) ?: (string) $customerMessage->subject, 140);
+    $preheader = \Illuminate\Support\Str::limit(preg_replace('/\s+/', ' ', $bodyText) ?: $subjectText, 140);
     $paymentUrl = trim((string) data_get($customerMessage->metadata, 'payment_url', ''));
     $hasPaymentUrl = filter_var($paymentUrl, FILTER_VALIDATE_URL) !== false;
     $referenceNumber = trim((string) (
@@ -25,7 +26,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>{{ $customerMessage->subject ?? 'Wiadomość' }}</title>
+    <title>{{ $subjectText !== '' ? $subjectText : 'Wiadomość' }}</title>
 </head>
 <body style="margin:0; padding:0; background:#f3f5f4; font-family:Arial, Helvetica, sans-serif; color:#1f2933;">
     <div style="display:none; max-height:0; overflow:hidden; opacity:0; color:transparent;">
@@ -61,7 +62,7 @@
                                 {{ $headerText }}
                             </div>
                             <h1 style="margin:8px 0 0; font-size:24px; line-height:1.25; color:#17211b; font-weight:700;">
-                                {{ $customerMessage->subject }}
+                                {{ $subjectText !== '' ? $subjectText : 'Wiadomość' }}
                             </h1>
                             @if ($referenceNumber !== '')
                                 <div style="display:inline-block; margin-top:14px; padding:7px 10px; border-radius:999px; background:#eef5f1; color:#2e5b42; font-size:13px; font-weight:700;">
