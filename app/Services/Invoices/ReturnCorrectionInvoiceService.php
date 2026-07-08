@@ -90,7 +90,7 @@ final class ReturnCorrectionInvoiceService
             $metadata = $this->metadataForCorrection($returnCase, $originalInvoice, $returnDocuments);
 
             $invoice = Invoice::query()->create([
-                'number' => $this->numbers->next('FK'),
+                'number' => $this->numbers->next($this->correctionNumberType($originalInvoice)),
                 'type' => 'correction',
                 'status' => 'issued',
                 'external_order_id' => $returnCase->external_order_id,
@@ -175,7 +175,21 @@ final class ReturnCorrectionInvoiceService
             'legal_review_required' => true,
         ];
 
+        $oss = data_get($originalInvoice->metadata, 'oss');
+
+        if (is_array($oss)) {
+            $metadata['oss'] = array_merge($oss, [
+                'correction_of_oss_invoice' => true,
+                'corrected_invoice_number' => $originalInvoice->number,
+            ]);
+        }
+
         return $this->withKsefCorrectionContext($metadata, $originalInvoice);
+    }
+
+    private function correctionNumberType(Invoice $originalInvoice): string
+    {
+        return is_array(data_get($originalInvoice->metadata, 'oss')) ? 'CORRECTION_OSS' : 'FK';
     }
 
     /**

@@ -26,19 +26,33 @@ final class OrderInvoiceService
         private readonly InvoiceSettingsService $settings,
         private readonly InvoiceKsefAutomationService $ksefAutomation,
         private readonly InvoiceCurrencyConversionService $currencyConversion,
+        private readonly OssVatRateService $ossVatRates,
     ) {}
 
     public function createForOrder(ExternalOrder $order): Invoice
     {
+        return $this->createDocumentForOrder($order, 'vat');
+    }
+
+    public function createProformaForOrder(ExternalOrder $order): Invoice
+    {
+        return $this->createDocumentForOrder($order, 'proforma');
+    }
+
+    private function createDocumentForOrder(ExternalOrder $order, string $type): Invoice
+    {
         $createdInvoiceId = null;
 
-        $invoice = DB::transaction(function () use ($order, &$createdInvoiceId): Invoice {
+        $invoice = DB::transaction(function () use ($order, $type, &$createdInvoiceId): Invoice {
             $order = ExternalOrder::query()
                 ->with(['lines', 'invoices'])
                 ->lockForUpdate()
                 ->findOrFail($order->id);
 
-            $existing = $order->invoices()->latest()->first();
+            $existing = $order->invoices()
+                ->where('type', $type)
+                ->latest()
+                ->first();
 
             if ($existing !== null) {
                 return $this->ensureFiles($existing->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']));
@@ -52,7 +66,7 @@ final class OrderInvoiceService
 
             $wz = $this->postedWz($order);
 
-            if ($wz === null) {
+            if ($type === 'vat' && $wz === null) {
                 throw new RuntimeException('Najpierw zaksięguj WZ dla tego zamówienia.');
             }
 
@@ -61,7 +75,7 @@ final class OrderInvoiceService
             }
 
             $linePayloads = $order->lines
-                ->map(fn (ExternalOrderLine $line): array => $this->linePayload($line))
+                ->map(fn (ExternalOrderLine $line): array => $this->linePayload($line, $order))
                 ->values();
             $template = $this->templates->defaultTemplate();
 
@@ -70,19 +84,39 @@ final class OrderInvoiceService
             $grossTotal = round($linePayloads->sum('gross_total'), 2);
 
             if ($grossTotal <= 0 && (float) $order->total_gross > 0) {
+                $fallbackVatRate = $this->ossVatRates->rateForOrder($order) ?? 23.0;
                 $grossTotal = (float) $order->total_gross;
-                $netTotal = round($grossTotal / 1.23, 2);
+                $netTotal = round($grossTotal / (1 + ($fallbackVatRate / 100)), 2);
                 $vatTotal = round($grossTotal - $netTotal, 2);
             }
 
+            $metadata = [
+                'source' => 'external_order',
+                'external_order_id' => $order->external_id,
+                'external_order_number' => $order->external_number,
+                'invoice_template_code' => $template->code,
+                'legal_review_required' => true,
+            ];
+
+            if ($wz !== null) {
+                $metadata['warehouse_document_id'] = $wz->id;
+                $metadata['warehouse_document_number'] = $wz->number;
+            }
+
+            $ossMetadata = $this->ossVatRates->metadataForOrder($order);
+
+            if ($ossMetadata !== null) {
+                $metadata['oss'] = $ossMetadata;
+            }
+
             $invoice = Invoice::query()->create([
-                'number' => $this->numbers->next(),
-                'type' => 'vat',
+                'number' => $this->numbers->next($this->numberType($type, $ossMetadata !== null)),
+                'type' => $type,
                 'status' => 'issued',
                 'external_order_id' => $order->id,
                 'invoice_template_id' => $template->id,
                 'issue_date' => now()->toDateString(),
-                'sale_date' => ($wz->posted_at ?? $wz->document_date ?? $order->external_created_at ?? now())->toDateString(),
+                'sale_date' => ($wz?->posted_at ?? $wz?->document_date ?? $order->external_created_at ?? now())->toDateString(),
                 'payment_due_date' => $this->settings->paymentDueDate(),
                 'currency' => $order->currency,
                 'seller_data' => $this->settings->sellerData(),
@@ -92,15 +126,7 @@ final class OrderInvoiceService
                 'gross_total' => $grossTotal,
                 'payment_method' => $this->paymentMethod($order),
                 'issued_at' => now(),
-                'metadata' => [
-                    'source' => 'external_order',
-                    'external_order_id' => $order->external_id,
-                    'external_order_number' => $order->external_number,
-                    'invoice_template_code' => $template->code,
-                    'warehouse_document_id' => $wz->id,
-                    'warehouse_document_number' => $wz->number,
-                    'legal_review_required' => true,
-                ],
+                'metadata' => $metadata,
             ]);
 
             foreach ($linePayloads as $payload) {
@@ -113,11 +139,20 @@ final class OrderInvoiceService
             return $this->ensureFiles($invoice->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']));
         });
 
-        if ($createdInvoiceId !== null) {
+        if ($createdInvoiceId !== null && $type !== 'proforma') {
             $this->ksefAutomation->queueAfterInvoiceIssued($invoice);
         }
 
         return $invoice->refresh()->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']);
+    }
+
+    private function numberType(string $type, bool $isOss): string
+    {
+        if ($type === 'proforma') {
+            return 'PROFORMA';
+        }
+
+        return $isOss ? 'OSS' : 'FV';
     }
 
     private function postedWz(ExternalOrder $order): ?WarehouseDocument
@@ -130,23 +165,48 @@ final class OrderInvoiceService
     /**
      * @return array<string, mixed>
      */
-    private function linePayload(ExternalOrderLine $line): array
+    private function linePayload(ExternalOrderLine $line, ExternalOrder $order): array
     {
         $quantity = max(0.0001, (float) $line->quantity);
         $raw = $line->raw_payload ?? [];
+        $ossVatRate = $this->ossVatRates->isOssB2cOrder($order)
+            ? $this->ossVatRates->rateForOrder($order)
+            : null;
+        $fallbackVatRate = (float) ($ossVatRate ?? $line->vat_rate ?? 23.0);
+        $rawHasTax = array_key_exists('total_tax', $raw) && is_numeric($raw['total_tax']);
         $netTotal = $this->numberFromRaw($raw, 'total', $line->unit_net_price !== null ? (float) $line->unit_net_price * $quantity : 0);
         $vatTotal = $this->numberFromRaw($raw, 'total_tax', 0);
         $grossTotal = round($netTotal + $vatTotal, 2);
 
+        if ($ossVatRate !== null && $netTotal > 0 && $this->shouldApplyOssVatRate($netTotal, $vatTotal, $ossVatRate)) {
+            $vatTotal = round($netTotal * ($ossVatRate / 100), 2);
+            $grossTotal = round($netTotal + $vatTotal, 2);
+        } elseif (! $rawHasTax && $netTotal > 0) {
+            if ($line->unit_gross_price !== null) {
+                $grossFromLine = round((float) $line->unit_gross_price * $quantity, 2);
+
+                if ($grossFromLine > $netTotal) {
+                    $grossTotal = $grossFromLine;
+                    $vatTotal = round($grossTotal - $netTotal, 2);
+                } else {
+                    $vatTotal = round($netTotal * ($fallbackVatRate / 100), 2);
+                    $grossTotal = round($netTotal + $vatTotal, 2);
+                }
+            } elseif ($fallbackVatRate > 0) {
+                $vatTotal = round($netTotal * ($fallbackVatRate / 100), 2);
+                $grossTotal = round($netTotal + $vatTotal, 2);
+            }
+        }
+
         if ($grossTotal <= 0 && $line->unit_gross_price !== null) {
             $grossTotal = round((float) $line->unit_gross_price * $quantity, 2);
-            $netTotal = round($grossTotal / 1.23, 2);
+            $netTotal = round($grossTotal / (1 + ($fallbackVatRate / 100)), 2);
             $vatTotal = round($grossTotal - $netTotal, 2);
         }
 
         $vatRate = $netTotal > 0
             ? round(($vatTotal / $netTotal) * 100, 2)
-            : (float) ($line->vat_rate ?? 23);
+            : $fallbackVatRate;
 
         return [
             'product_id' => $line->product_id,
@@ -163,6 +223,17 @@ final class OrderInvoiceService
                 'external_line_id' => $line->external_line_id,
             ],
         ];
+    }
+
+    private function shouldApplyOssVatRate(float $netTotal, float $vatTotal, float $ossVatRate): bool
+    {
+        if ($vatTotal <= 0) {
+            return true;
+        }
+
+        $derivedRate = round(($vatTotal / $netTotal) * 100, 2);
+
+        return abs($derivedRate - $ossVatRate) > 0.05;
     }
 
     /**

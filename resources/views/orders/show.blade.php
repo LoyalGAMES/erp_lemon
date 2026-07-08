@@ -83,6 +83,7 @@
             'order' => $order,
             'wzDocument' => $latestWz,
             'invoice' => $latestInvoice,
+            'proforma' => $latestProforma,
             'activeReservations' => $activeReservations,
             'showDetailsLink' => false,
         ])

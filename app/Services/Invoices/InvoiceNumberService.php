@@ -16,45 +16,74 @@ final class InvoiceNumberService
     public function next(string $type = 'FV'): string
     {
         $numbering = $this->settings->numberingData();
-        $prefix = $this->prefixForType($type, $numbering);
+        $series = $this->seriesForType($type, $numbering);
+        $prefix = $series['prefix'];
         $date = now();
         $placeholder = '__SEQ__';
         $template = $this->renderNumber($prefix, 0, $date, [
-            'pattern' => str_replace('{SEQ}', $placeholder, $numbering['pattern']),
-            'padding' => $numbering['padding'],
+            'pattern' => str_replace('{SEQ}', $placeholder, $series['pattern']),
+            'padding' => $series['padding'],
         ]);
-        $numberPrefix = explode($placeholder, $template)[0] ?? '';
+        [$numberPrefix, $numberSuffix] = array_pad(explode($placeholder, $template, 2), 2, '');
 
-        $last = Invoice::query()
-            ->where('number', 'like', $numberPrefix . '%')
+        $numbers = Invoice::query()
+            ->where('number', 'like', $numberPrefix.'%')
             ->lockForUpdate()
-            ->orderByDesc('id')
-            ->value('number');
-
-        $sequence = 1;
-
-        if (is_string($last) && preg_match('/(\d+)$/', $last, $matches)) {
-            $sequence = (int) $matches[1] + 1;
-        }
+            ->pluck('number');
+        $sequence = ((int) $numbers
+            ->map(fn (string $number): ?int => $this->sequenceFromNumber($number, $numberPrefix, $numberSuffix))
+            ->filter()
+            ->max()) + 1;
 
         do {
-            $number = $this->renderNumber($prefix, $sequence, $date, $numbering);
+            $number = $this->renderNumber($prefix, $sequence, $date, $series);
             $sequence += 1;
         } while (Invoice::query()->where('number', $number)->exists());
 
         return $number;
     }
 
-    /**
-     * @param array{sales_prefix: string, correction_prefix: string, pattern: string, padding: int, payment_due_days: int} $numbering
-     */
-    private function prefixForType(string $type, array $numbering): string
+    private function sequenceFromNumber(string $number, string $prefix, string $suffix): ?int
     {
-        return match (strtoupper($type)) {
+        if (! str_starts_with($number, $prefix)) {
+            return null;
+        }
+
+        if ($suffix !== '' && ! str_ends_with($number, $suffix)) {
+            return null;
+        }
+
+        $sequence = substr($number, strlen($prefix), strlen($number) - strlen($prefix) - strlen($suffix));
+
+        return ctype_digit($sequence) ? (int) $sequence : null;
+    }
+
+    /**
+     * @param array{sales_prefix: string, correction_prefix: string, proforma_prefix: string, oss_sales_prefix: string, oss_correction_prefix: string, oss_pattern: string, oss_padding: int, pattern: string, padding: int, payment_due_days: int} $numbering
+     * @return array{prefix:string,pattern:string,padding:int}
+     */
+    private function seriesForType(string $type, array $numbering): array
+    {
+        $normalized = strtoupper($type);
+
+        $prefix = match ($normalized) {
             'FV', 'VAT', 'SALES' => $numbering['sales_prefix'],
             'FK', 'CORRECTION' => $numbering['correction_prefix'],
+            'PRO', 'PROFORMA' => $numbering['proforma_prefix'],
+            'OSS', 'VAT_OSS', 'SALES_OSS', 'FV_OSS' => $numbering['oss_sales_prefix'],
+            'FVK_OSS', 'FK_OSS', 'CORRECTION_OSS' => $numbering['oss_correction_prefix'],
             default => $type,
         };
+
+        return [
+            'prefix' => $prefix,
+            'pattern' => in_array($normalized, ['OSS', 'VAT_OSS', 'SALES_OSS', 'FV_OSS', 'FVK_OSS', 'FK_OSS', 'CORRECTION_OSS'], true)
+                ? $numbering['oss_pattern']
+                : $numbering['pattern'],
+            'padding' => in_array($normalized, ['OSS', 'VAT_OSS', 'SALES_OSS', 'FV_OSS', 'FVK_OSS', 'FK_OSS', 'CORRECTION_OSS'], true)
+                ? $numbering['oss_padding']
+                : $numbering['padding'],
+        ];
     }
 
     /**

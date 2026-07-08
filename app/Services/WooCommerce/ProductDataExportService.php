@@ -55,6 +55,7 @@ final class ProductDataExportService
             $response = $this->client->updateProductData($integration, $mapping, $payload);
 
             $this->updateMappingAfterExport($mapping, $product, $payload, $response);
+            $translationPublicationResults = $this->syncPublicationDateTranslations($product, $integration, $mapping, $isVariation);
             $variantResults = $isVariation
                 ? []
                 : $this->exportOrCreateVariants(
@@ -79,6 +80,7 @@ final class ProductDataExportService
                     'sku' => $response['sku'] ?? null,
                     'name' => $response['name'] ?? null,
                     'regular_price' => $response['regular_price'] ?? null,
+                    'publication_date_translations' => $translationPublicationResults,
                 ],
                 'attempts' => 1,
                 'started_at' => now(),
@@ -89,6 +91,7 @@ final class ProductDataExportService
                 'channel' => $mapping->salesChannel?->code,
                 'external_id' => $mapping->external_variation_id ?? $mapping->external_product_id,
                 'response' => $response,
+                'publication_date_translations' => $translationPublicationResults,
                 'variants' => $variantResults,
             ];
         }
@@ -329,6 +332,7 @@ final class ProductDataExportService
         $salePrice = data_get($master, 'prices.sale_price_pln');
         $salePriceStartsAt = data_get($master, 'prices.sale_price_starts_at');
         $salePriceEndsAt = data_get($master, 'prices.sale_price_ends_at');
+        $publicationDate = $this->dateTimeString(data_get($master, 'publication_date'));
         $description = data_get($master, 'content.pl.description');
         $shortDescription = data_get($master, 'content.pl.additional_description');
         $images = $this->images($product);
@@ -344,6 +348,10 @@ final class ProductDataExportService
             ],
             'meta_data' => $this->metaData($product, $master),
         ];
+
+        if ($publicationDate !== null) {
+            $payload['date_created'] = $publicationDate;
+        }
 
         if (! $isVariation) {
             $payload['name'] = (string) (data_get($master, 'content.pl.name') ?: $product->name);
@@ -485,6 +493,7 @@ final class ProductDataExportService
             '_sempre_erp_producer' => data_get($master, 'producer'),
             '_sempre_erp_tags' => implode(', ', (array) data_get($master, 'tags', [])),
             '_sempre_erp_asin' => data_get($master, 'asin'),
+            '_sempre_erp_publication_date' => data_get($master, 'publication_date'),
             '_sempre_erp_developed' => data_get($master, 'developed') ? '1' : '0',
             '_sempre_erp_location' => data_get($master, 'stock.location'),
             '_sempre_erp_name_en' => data_get($master, 'content.en.name'),
@@ -754,6 +763,51 @@ final class ProductDataExportService
         $value = trim((string) ($value ?? ''));
 
         return $value === '' ? null : mb_substr($value, 0, 10);
+    }
+
+    private function dateTimeString(mixed $value): ?string
+    {
+        $value = trim((string) ($value ?? ''));
+
+        if ($value === '') {
+            return null;
+        }
+
+        $value = str_replace(' ', 'T', $value);
+        $value = mb_substr($value, 0, 19);
+
+        if (preg_match('/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/', $value) === 1) {
+            return $value.':00';
+        }
+
+        return $value;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function syncPublicationDateTranslations(
+        Product $product,
+        WordpressIntegration $integration,
+        ProductChannelMapping $mapping,
+        bool $isVariation,
+    ): array {
+        if ($isVariation) {
+            return [];
+        }
+
+        $publicationDate = $this->dateTimeString(data_get($product->masterData(), 'publication_date'));
+
+        if ($publicationDate === null || trim($product->sku) === '') {
+            return [];
+        }
+
+        return $this->client->updateProductPublicationDateTranslations(
+            $integration,
+            $mapping,
+            $product->sku,
+            $publicationDate,
+        );
     }
 
     /**

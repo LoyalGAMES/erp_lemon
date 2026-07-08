@@ -126,7 +126,14 @@ class ModuleController extends Controller
                             view('partials.order-actions', [
                                 'order' => $order,
                                 'wzDocument' => $fulfillmentStatus->latestWz($order),
-                                'invoice' => $order->invoices->sortByDesc('id')->first(),
+                                'invoice' => $order->invoices
+                                    ->reject(fn ($invoice): bool => $invoice->type === 'proforma')
+                                    ->sortByDesc('id')
+                                    ->first(),
+                                'proforma' => $order->invoices
+                                    ->where('type', 'proforma')
+                                    ->sortByDesc('id')
+                                    ->first(),
                                 'activeReservations' => $activeReservations,
                             ])->render(),
                         ];

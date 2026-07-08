@@ -26,6 +26,16 @@ final class KsefEligibilityService
         $hasBuyerTaxId = $this->hasBuyerTaxId($invoice);
         $hasInvoicePolicy = $this->hasInvoicePolicy($invoice);
 
+        if ($invoice->type === 'proforma') {
+            return [
+                'policy' => $policy,
+                'should_send' => false,
+                'label' => 'Proforma / pomiń',
+                'reason' => 'Proforma nie jest fakturą sprzedaży do wysyłki do KSeF.',
+                'tone' => 'orange',
+            ];
+        }
+
         if ($policy === self::POLICY_SKIP) {
             return [
                 'policy' => $policy,

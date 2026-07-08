@@ -53,7 +53,14 @@ class ExternalOrderController extends Controller
             ->latest('document_date')
             ->get();
 
-        $latestInvoice = $order->invoices->sortByDesc('id')->first();
+        $latestInvoice = $order->invoices
+            ->reject(fn ($invoice): bool => $invoice->type === 'proforma')
+            ->sortByDesc('id')
+            ->first();
+        $latestProforma = $order->invoices
+            ->where('type', 'proforma')
+            ->sortByDesc('id')
+            ->first();
 
         return view('orders.show', [
             'title' => 'Zamówienie ' . ($order->external_number ?: $order->external_id),
@@ -64,6 +71,7 @@ class ExternalOrderController extends Controller
             'wzDocuments' => $wzDocuments,
             'latestWz' => $fulfillmentStatus->latestWz($order),
             'latestInvoice' => $latestInvoice,
+            'latestProforma' => $latestProforma,
             'activeReservations' => (float) $reservations
                 ->where('status', 'active')
                 ->sum(fn (StockReservation $reservation): float => (float) $reservation->quantity),

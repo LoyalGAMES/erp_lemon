@@ -140,6 +140,11 @@ class InvoiceController extends Controller
         $validated = $request->validate([
             'sales_prefix' => ['required', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
             'correction_prefix' => ['required', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
+            'proforma_prefix' => ['required', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
+            'oss_sales_prefix' => ['required', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
+            'oss_correction_prefix' => ['required', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
+            'oss_pattern' => ['required', 'string', 'max:120', 'regex:/^[A-Za-z0-9_\/{}-]+$/'],
+            'oss_padding' => ['required', 'integer', 'min:1', 'max:9'],
             'pattern' => ['required', 'string', 'max:120', 'regex:/^[A-Za-z0-9_\/{}-]+$/'],
             'padding' => ['required', 'integer', 'min:3', 'max:9'],
             'payment_due_days' => ['required', 'integer', 'min:0', 'max:365'],
@@ -395,6 +400,10 @@ class InvoiceController extends Controller
         Invoice $invoice,
         InvoiceWooCommerceUploadService $uploader,
     ): RedirectResponse {
+        if ($invoice->type === 'proforma') {
+            return back()->with('error', 'Proforma zostaje w ERP i nie jest wysyłana jako faktura do WooCommerce.');
+        }
+
         try {
             $uploader->upload($invoice);
         } catch (RuntimeException $exception) {
@@ -624,6 +633,10 @@ class InvoiceController extends Controller
 
     private function needsWooCommerceUpload(Invoice $invoice): bool
     {
+        if ($invoice->type === 'proforma') {
+            return false;
+        }
+
         if (! filled($invoice->external_order_id)) {
             return false;
         }

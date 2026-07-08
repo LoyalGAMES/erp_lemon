@@ -158,7 +158,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('Media')
             ->assertSee('Warianty')
             ->assertSee('https://cdn.test/koszula.jpg')
-            ->assertSee('Stan ogólny')
+            ->assertSee('Stan tego SKU')
             ->assertSee('Relacje i kanały')
             ->assertSee('Ostatnie ruchy magazynowe')
             ->assertSee('PZ/2026/000123')
@@ -249,7 +249,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->get(route('products.index', ['q' => 'Opis po polsku']))
             ->assertOk()
             ->assertSee('Sukienka PARIS Różowa')
-            ->assertDontSee('Buty zimowe');
+            ->assertDontSee('>Buty zimowe</a>', false);
 
         $this->get(route('products.index', [
             'channel' => 'B2C',
@@ -260,7 +260,7 @@ class ProductCatalogWorkflowTest extends TestCase
         ]))
             ->assertOk()
             ->assertSee('Sukienka PARIS Różowa')
-            ->assertDontSee('Buty zimowe');
+            ->assertDontSee('>Buty zimowe</a>', false);
     }
 
     public function test_operator_can_manage_product_categories_and_parameter_dictionary(): void
@@ -483,6 +483,67 @@ class ProductCatalogWorkflowTest extends TestCase
         File::deleteDirectory(public_path('uploads/testing-product-thumbnails'));
     }
 
+    public function test_operator_can_adjust_product_stock_from_product_card_per_warehouse(): void
+    {
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Magazyn główny',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-ADJUST',
+            'name' => 'Produkt do korekty',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 5,
+            'quantity_reserved' => 2,
+            'quantity_available' => 3,
+        ]);
+
+        $this->get(route('products.show', $product))
+            ->assertOk()
+            ->assertSee('Magazyny tego SKU i ręczna korekta stanu')
+            ->assertSee('Ustaw stan');
+
+        $this->post(route('products.stock.adjust', $product), [
+            'warehouse_id' => $warehouse->id,
+            'new_quantity' => 8,
+            'notes' => 'Inwentaryzacja testowa',
+        ])->assertRedirect(route('products.show', $product))
+            ->assertSessionHas('status');
+
+        $balance = StockBalance::query()
+            ->where('warehouse_id', $warehouse->id)
+            ->where('product_id', $product->id)
+            ->firstOrFail();
+
+        $this->assertSame('8.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('2.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('6.0000', (string) $balance->quantity_available);
+
+        $document = WarehouseDocument::query()->with('lines')->firstOrFail();
+        $this->assertSame('KOR', $document->type);
+        $this->assertSame('posted', $document->status);
+        $this->assertSame($warehouse->id, $document->destination_warehouse_id);
+        $this->assertSame('3.0000', (string) $document->lines->first()->quantity);
+
+        $ledger = StockLedgerEntry::query()->firstOrFail();
+        $this->assertSame($document->id, $ledger->warehouse_document_id);
+        $this->assertSame('3.0000', (string) $ledger->quantity_change);
+        $this->assertSame('in', $ledger->direction);
+
+        $this->assertSame(1, AuditLog::query()->where('action', 'product.stock_adjusted')->count());
+        $this->assertSame(1, AuditLog::query()->where('action', 'warehouse_document.posted')->count());
+    }
+
     public function test_operator_can_edit_product_master_data_in_erp(): void
     {
         $product = Product::query()->create([
@@ -502,6 +563,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('data-product-tab="sprzedaz"', false)
             ->assertSee('data-product-tab="warianty"', false)
             ->assertSee('Status publikacji w sklepie')
+            ->assertSee('Data publikacji w sklepie')
             ->assertSee('Wyszukaj kategorię z WooCommerce')
             ->assertSee('Dodaj zdjęcia z komputera');
 
@@ -524,6 +586,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'length_cm' => '40',
             'developed' => '1',
             'publication_status' => 'publish',
+            'publication_date' => '2026-07-20T08:15',
             'catalog_visibility' => 'visible',
             'product_type' => 'variable',
             'variant_attribute' => 'Rozmiar',
@@ -573,6 +636,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertEquals(round(369 / 4.55, 2), data_get($product->attributes, 'master.prices.price_eur'));
         $this->assertNull(data_get($product->attributes, 'master.stock.quantity'));
         $this->assertSame('A-01-03', data_get($product->attributes, 'master.stock.location'));
+        $this->assertSame('2026-07-20T08:15', data_get($product->attributes, 'master.publication_date'));
         $this->assertSame('variable', data_get($product->attributes, 'master.product_type'));
         $this->assertSame('Rozmiar', data_get($product->attributes, 'master.variant_attribute'));
         $this->assertSame('SKU-UPSELL', data_get($product->attributes, 'master.related_products.upsell_skus.0'));
@@ -593,6 +657,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('Koszula AURA Czarno-ecru')
             ->assertSee('Koszule')
             ->assertSee('Cena detal')
+            ->assertSee('2026-07-20 08:15')
             ->assertSee('369,00 PLN')
             ->assertSee('Dostępne do sprzedaży')
             ->assertSee('Opis PL HTML')

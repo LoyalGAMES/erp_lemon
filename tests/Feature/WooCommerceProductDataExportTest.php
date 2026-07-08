@@ -224,6 +224,111 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame(1, AuditLog::query()->where('action', 'product.woocommerce_export_failed')->count());
     }
 
+    public function test_product_publication_date_exports_to_woocommerce_and_polylang_translations(): void
+    {
+        Http::fake(function ($request) {
+            $url = $request->url();
+
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/123') {
+                return Http::response([
+                    'id' => 123,
+                    'sku' => 'SKU-DATE',
+                    'name' => 'Produkt z datą',
+                ]);
+            }
+
+            if ($request->method() === 'GET' && str_starts_with($url, 'https://shop.test/wp-json/wc/v3/products')) {
+                parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+                return match ($query['lang'] ?? null) {
+                    'pl' => Http::response([
+                        ['id' => 123, 'sku' => 'SKU-DATE'],
+                    ]),
+                    'en' => Http::response([
+                        ['id' => 124, 'sku' => 'SKU-DATE'],
+                    ]),
+                    default => Http::response([]),
+                };
+            }
+
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/124') {
+                return Http::response([
+                    'id' => 124,
+                    'sku' => 'SKU-DATE',
+                    'date_created' => $request['date_created'],
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'stock_export_enabled' => true,
+            'settings' => [
+                'product_import' => [
+                    'languages' => ['pl', 'en'],
+                ],
+            ],
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-DATE',
+            'name' => 'Produkt z datą',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'publication_status' => 'publish',
+                    'publication_date' => '2026-07-15T09:30',
+                    'content' => [
+                        'pl' => [
+                            'name' => 'Produkt z datą',
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'SKU-DATE',
+            'stock_sync_enabled' => true,
+        ]);
+
+        $this->post(route('products.woocommerce.export', $product))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
+            && $request['date_created'] === '2026-07-15T09:30:00');
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'GET'
+            && str_contains($request->url(), 'lang=pl'));
+        Http::assertSent(fn ($request): bool => $request->method() === 'GET'
+            && str_contains($request->url(), 'lang=en'));
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
+            && $request['date_created'] === '2026-07-15T09:30:00');
+    }
+
     public function test_erp_product_can_be_created_in_unmapped_woocommerce_channel(): void
     {
         Http::fake([

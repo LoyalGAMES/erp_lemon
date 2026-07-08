@@ -98,7 +98,7 @@ final class InvoiceSettingsService
     }
 
     /**
-     * @return array{sales_prefix: string, correction_prefix: string, pattern: string, padding: int, payment_due_days: int}
+     * @return array{sales_prefix: string, correction_prefix: string, proforma_prefix: string, oss_sales_prefix: string, oss_correction_prefix: string, oss_pattern: string, oss_padding: int, pattern: string, padding: int, payment_due_days: int}
      */
     public function numberingData(): array
     {
@@ -111,6 +111,11 @@ final class InvoiceSettingsService
         return [
             'sales_prefix' => $this->cleanPrefix((string) $data['sales_prefix'], 'FV'),
             'correction_prefix' => $this->cleanPrefix((string) $data['correction_prefix'], 'FK'),
+            'proforma_prefix' => $this->cleanPrefix((string) ($data['proforma_prefix'] ?? 'PRO'), 'PRO'),
+            'oss_sales_prefix' => $this->cleanPrefix((string) ($data['oss_sales_prefix'] ?? 'FV/OSS'), 'FV/OSS'),
+            'oss_correction_prefix' => $this->cleanPrefix((string) ($data['oss_correction_prefix'] ?? 'FVK/OSS'), 'FVK/OSS'),
+            'oss_pattern' => $this->cleanPattern((string) ($data['oss_pattern'] ?? '{PREFIX}/{SEQ}/{MM}/{YYYY}')),
+            'oss_padding' => max(1, min(9, (int) ($data['oss_padding'] ?? 1))),
             'pattern' => $this->cleanPattern((string) ($data['pattern'] ?? '{PREFIX}/{YYYY}/{SEQ}')),
             'padding' => max(3, min(9, (int) $data['padding'])),
             'payment_due_days' => max(0, min(365, (int) $data['payment_due_days'])),
@@ -119,13 +124,18 @@ final class InvoiceSettingsService
 
     /**
      * @param  array<string, mixed>  $data
-     * @return array{sales_prefix: string, correction_prefix: string, pattern: string, padding: int, payment_due_days: int}
+     * @return array{sales_prefix: string, correction_prefix: string, proforma_prefix: string, oss_sales_prefix: string, oss_correction_prefix: string, oss_pattern: string, oss_padding: int, pattern: string, padding: int, payment_due_days: int}
      */
     public function updateNumberingData(array $data): array
     {
         $payload = [
             'sales_prefix' => $this->cleanPrefix((string) ($data['sales_prefix'] ?? 'FV'), 'FV'),
             'correction_prefix' => $this->cleanPrefix((string) ($data['correction_prefix'] ?? 'FK'), 'FK'),
+            'proforma_prefix' => $this->cleanPrefix((string) ($data['proforma_prefix'] ?? 'PRO'), 'PRO'),
+            'oss_sales_prefix' => $this->cleanPrefix((string) ($data['oss_sales_prefix'] ?? 'FV/OSS'), 'FV/OSS'),
+            'oss_correction_prefix' => $this->cleanPrefix((string) ($data['oss_correction_prefix'] ?? 'FVK/OSS'), 'FVK/OSS'),
+            'oss_pattern' => $this->cleanPattern((string) ($data['oss_pattern'] ?? '{PREFIX}/{SEQ}/{MM}/{YYYY}')),
+            'oss_padding' => max(1, min(9, (int) ($data['oss_padding'] ?? 1))),
             'pattern' => $this->cleanPattern((string) ($data['pattern'] ?? '{PREFIX}/{YYYY}/{SEQ}')),
             'padding' => max(3, min(9, (int) ($data['padding'] ?? 6))),
             'payment_due_days' => max(0, min(365, (int) ($data['payment_due_days'] ?? 0))),
@@ -198,13 +208,18 @@ final class InvoiceSettingsService
     }
 
     /**
-     * @return array{sales_prefix: string, correction_prefix: string, pattern: string, padding: int, payment_due_days: int}
+     * @return array{sales_prefix: string, correction_prefix: string, proforma_prefix: string, oss_sales_prefix: string, oss_correction_prefix: string, oss_pattern: string, oss_padding: int, pattern: string, padding: int, payment_due_days: int}
      */
     private function defaultNumberingData(): array
     {
         return [
             'sales_prefix' => env('INVOICE_SALES_PREFIX', 'FV'),
             'correction_prefix' => env('INVOICE_CORRECTION_PREFIX', 'FK'),
+            'proforma_prefix' => env('INVOICE_PROFORMA_PREFIX', 'PRO'),
+            'oss_sales_prefix' => env('INVOICE_OSS_SALES_PREFIX', 'FV/OSS'),
+            'oss_correction_prefix' => env('INVOICE_OSS_CORRECTION_PREFIX', 'FVK/OSS'),
+            'oss_pattern' => env('INVOICE_OSS_NUMBER_PATTERN', '{PREFIX}/{SEQ}/{MM}/{YYYY}'),
+            'oss_padding' => (int) env('INVOICE_OSS_NUMBER_PADDING', 1),
             'pattern' => env('INVOICE_NUMBER_PATTERN', '{PREFIX}/{YYYY}/{SEQ}'),
             'padding' => (int) env('INVOICE_NUMBER_PADDING', 6),
             'payment_due_days' => (int) env('INVOICE_PAYMENT_DUE_DAYS', 0),
