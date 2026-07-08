@@ -17,6 +17,8 @@ use App\Services\Invoices\ReturnCorrectionInvoiceService;
 use App\Services\Returns\ReturnNumberService;
 use App\Services\Returns\ReturnReceivingService;
 use App\Services\Returns\ReturnSettingsService;
+use App\Services\Returns\ReturnStatusPushService;
+use App\Services\Returns\StoreReturnIntakeService;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -30,23 +32,49 @@ use Throwable;
 
 class ReturnController extends Controller
 {
-    public function index(ReturnSettingsService $settings): View
+    public function index(Request $request, ReturnSettingsService $settings): View
     {
         $returnSettings = $settings->data();
+        $tab = $request->query('tab') === 'pending' ? 'pending' : 'all';
+        $search = trim((string) $request->query('q', ''));
+
+        $returnsQuery = ReturnCase::query()
+            ->with([
+                'lines.product',
+                'lines.targetWarehouse',
+                'lines.warehouseDocument',
+                'targetWarehouse',
+                'warehouseDocument',
+                'externalOrder',
+                'correctionInvoice',
+            ])
+            ->when($tab === 'pending', fn ($query) => $query->where('status', StoreReturnIntakeService::STATUS_PENDING))
+            ->when($search !== '', function ($query) use ($search): void {
+                $needle = mb_strtolower($search);
+                $query->where(function ($query) use ($needle): void {
+                    $query
+                        ->whereRaw("LOWER(COALESCE(number, '')) LIKE ?", ["%{$needle}%"])
+                        ->orWhereRaw("LOWER(COALESCE(customer_email, '')) LIKE ?", ["%{$needle}%"])
+                        ->orWhereRaw("LOWER(COALESCE(reason, '')) LIKE ?", ["%{$needle}%"])
+                        ->orWhereRaw("LOWER(COALESCE(CAST(metadata AS CHAR), '')) LIKE ?", ["%{$needle}%"])
+                        ->orWhereHas('externalOrder', function ($orderQuery) use ($needle): void {
+                            $orderQuery
+                                ->whereRaw("LOWER(COALESCE(external_number, '')) LIKE ?", ["%{$needle}%"])
+                                ->orWhereRaw("LOWER(COALESCE(external_id, '')) LIKE ?", ["%{$needle}%"]);
+                        })
+                        ->orWhereHas('lines', function ($lineQuery) use ($needle): void {
+                            $lineQuery->whereRaw("LOWER(COALESCE(CAST(metadata AS CHAR), '')) LIKE ?", ["%{$needle}%"]);
+                        });
+                });
+            });
 
         return view('returns.index', [
-            'returns' => ReturnCase::query()
-                ->with([
-                    'lines.product',
-                    'lines.targetWarehouse',
-                    'lines.warehouseDocument',
-                    'targetWarehouse',
-                    'warehouseDocument',
-                    'externalOrder',
-                    'correctionInvoice',
-                ])
-                ->latest()
-                ->get(),
+            'returns' => $returnsQuery->latest()->get(),
+            'pendingCount' => ReturnCase::query()
+                ->where('status', StoreReturnIntakeService::STATUS_PENDING)
+                ->count(),
+            'activeTab' => $tab,
+            'searchTerm' => $search,
             'orders' => ExternalOrder::query()
                 ->with(['lines.product'])
                 ->latest()
@@ -420,6 +448,59 @@ class ReturnController extends Controller
         }
 
         return back()->with('status', "Wystawiono fakturę korygującą {$invoice->number} dla zwrotu {$returnCase->number} i dodano ją do zamówienia WooCommerce.");
+    }
+
+    public function approve(
+        ReturnCase $returnCase,
+        ReturnStatusPushService $pusher,
+    ): RedirectResponse {
+        if ($returnCase->status !== StoreReturnIntakeService::STATUS_PENDING) {
+            return back()->with('error', "Zwrot {$returnCase->number} nie oczekuje na zatwierdzenie.");
+        }
+
+        $returnCase->update(['status' => StoreReturnIntakeService::STATUS_COMPLETED]);
+
+        return $this->pushStatusToStore(
+            $returnCase,
+            $pusher,
+            "Zwrot {$returnCase->number} został zatwierdzony.",
+        );
+    }
+
+    public function reject(ReturnCase $returnCase, ReturnStatusPushService $pusher): RedirectResponse
+    {
+        if ($returnCase->status !== StoreReturnIntakeService::STATUS_PENDING) {
+            return back()->with('error', "Zwrot {$returnCase->number} nie oczekuje na obsługę.");
+        }
+
+        $returnCase->update(['status' => StoreReturnIntakeService::STATUS_REJECTED]);
+
+        return $this->pushStatusToStore(
+            $returnCase,
+            $pusher,
+            "Zwrot {$returnCase->number} został odrzucony.",
+        );
+    }
+
+    private function pushStatusToStore(
+        ReturnCase $returnCase,
+        ReturnStatusPushService $pusher,
+        string $successMessage,
+    ): RedirectResponse {
+        if (! $pusher->canPush($returnCase)) {
+            return back()->with(
+                'status',
+                $successMessage.' Sklep pobierze nowy status przy najbliższej synchronizacji.',
+            );
+        }
+
+        try {
+            $pusher->push($returnCase);
+        } catch (RuntimeException $exception) {
+            return back()->with('error', $successMessage." Nie udało się powiadomić sklepu: {$exception->getMessage()} Wtyczka pobierze status automatycznie w ciągu 15 minut.");
+        }
+
+        return back()->with('status', $successMessage.' Sklep został powiadomiony i utworzy zwrot w zamówieniu.');
     }
 
     public function destroy(ReturnCase $returnCase): RedirectResponse

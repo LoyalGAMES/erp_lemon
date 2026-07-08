@@ -10,7 +10,17 @@
         && $returnDocuments->every(fn ($document) => $document->status === 'posted');
 @endphp
 
-@if ($allReturnDocumentsPosted)
+@if ($returnCase->status === 'pending')
+    <form method="POST" action="{{ route('returns.approve', $returnCase) }}" onsubmit="return confirm('Zatwierdzić zwrot {{ $returnCase->number }}? Sklep utworzy zwrot w zamówieniu WooCommerce.');">
+        @csrf
+        <button class="button" type="submit">Zatwierdź</button>
+    </form>
+    <form method="POST" action="{{ route('returns.reject', $returnCase) }}" onsubmit="return confirm('Odrzucić zwrot {{ $returnCase->number }}?');">
+        @csrf
+        <button class="button danger" type="submit">Odrzuć</button>
+    </form>
+    <a class="button secondary" href="{{ route('returns.edit', $returnCase) }}">Edytuj</a>
+@elseif ($allReturnDocumentsPosted)
     <span class="status">Przyjęty</span>
     @if ($returnCase->correctionInvoice)
         <a class="button secondary" href="{{ route('invoices.preview', $returnCase->correctionInvoice) }}" target="_blank" rel="noopener">

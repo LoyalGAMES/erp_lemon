@@ -129,6 +129,25 @@
                 <button class="button secondary" type="button" data-repeat-add="disposition">Dodaj dyspozycję</button>
             </section>
 
+            <section class="settings-section">
+                <h2>Formularz zwrotów w sklepie (wtyczka lemon-woo-returns)</h2>
+                <p class="muted">Token API uwierzytelnia zgłoszenia przychodzące ze sklepu. Sekret webhooka pozwala ERP natychmiast powiadomić sklep o zatwierdzeniu zwrotu — wpisz te same wartości w ustawieniach wtyczki (WooCommerce → Ustawienia zwrotów).</p>
+                <div class="settings-fields">
+                    <label>Token API (Bearer / X-API-Key)
+                        <input name="store_api_token" value="{{ old('store_api_token', $returnSettings['store_api_token']) }}" maxlength="120" autocomplete="off" spellcheck="false">
+                    </label>
+                    <label>Sekret webhooka (X-Lemon-Returns-Token)
+                        <input name="store_webhook_secret" value="{{ old('store_webhook_secret', $returnSettings['store_webhook_secret']) }}" maxlength="120" autocomplete="off" spellcheck="false">
+                    </label>
+                </div>
+                <p class="muted">
+                    Adresy endpointów do wpisania we wtyczce:<br>
+                    wyszukiwanie zamówienia: <code>{{ url('/api/store-returns/lookup-order') }}</code><br>
+                    tworzenie zwrotu: <code>{{ url('/api/store-returns') }}</code><br>
+                    status zwrotu: <code>{{ url('/api/store-returns/status') }}</code>
+                </p>
+            </section>
+
             <button class="button" type="submit">Zapisz ustawienia zwrotów</button>
         </form>
     </article>

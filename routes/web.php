@@ -93,6 +93,8 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::post('/returns', [ReturnController::class, 'store'])->name('returns.store');
         Route::get('/returns/{returnCase}/edit', [ReturnController::class, 'edit'])->name('returns.edit');
         Route::put('/returns/{returnCase}', [ReturnController::class, 'update'])->name('returns.update');
+        Route::post('/returns/{returnCase}/approve', [ReturnController::class, 'approve'])->name('returns.approve');
+        Route::post('/returns/{returnCase}/reject', [ReturnController::class, 'reject'])->name('returns.reject');
         Route::post('/returns/{returnCase}/document', [ReturnController::class, 'createDocument'])->name('returns.document.create');
         Route::post('/returns/{returnCase}/correction', [ReturnController::class, 'createCorrection'])->name('returns.correction.create');
         Route::delete('/returns/{returnCase}', [ReturnController::class, 'destroy'])->name('returns.destroy');

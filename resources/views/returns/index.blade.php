@@ -116,10 +116,42 @@
         </form>
     </aside>
 
+    @php
+        $statusLabels = [
+            'pending' => ['label' => 'Oczekujący', 'class' => 'orange'],
+            'opened' => ['label' => 'Otwarty', 'class' => 'blue'],
+            'document_created' => ['label' => 'Dokument RX', 'class' => 'blue'],
+            'completed' => ['label' => 'Zrealizowany', 'class' => ''],
+            'rejected' => ['label' => 'Odrzucony', 'class' => 'red'],
+            'cancelled' => ['label' => 'Anulowany', 'class' => 'red'],
+        ];
+    @endphp
+
     <article class="card">
         <div class="panel-header">
             <span>Zwroty w systemie</span>
             <span>{{ $returns->count() }} rekordów</span>
+        </div>
+        <div class="returns-filters">
+            <nav class="returns-tabs">
+                <a class="returns-tab {{ $activeTab === 'all' ? 'active' : '' }}" href="{{ route('returns.index', array_filter(['q' => $searchTerm])) }}">Wszystkie</a>
+                <a class="returns-tab {{ $activeTab === 'pending' ? 'active' : '' }}" href="{{ route('returns.index', array_filter(['tab' => 'pending', 'q' => $searchTerm])) }}">
+                    Oczekujące ze sklepu
+                    @if ($pendingCount > 0)
+                        <span class="returns-tab-count">{{ $pendingCount }}</span>
+                    @endif
+                </a>
+            </nav>
+            <form class="returns-search" method="GET" action="{{ route('returns.index') }}">
+                @if ($activeTab === 'pending')
+                    <input type="hidden" name="tab" value="pending">
+                @endif
+                <input name="q" value="{{ $searchTerm }}" placeholder="Szukaj: numer zwrotu, zgłoszenia, zamówienia, e-mail, telefon" aria-label="Szukaj zwrotów">
+                <button class="button secondary" type="submit">Szukaj</button>
+                @if ($searchTerm !== '')
+                    <a class="button secondary" href="{{ route('returns.index', array_filter(['tab' => $activeTab === 'pending' ? 'pending' : null])) }}">Wyczyść</a>
+                @endif
+            </form>
         </div>
         <div class="table-scroll">
             <table class="dense-table">
@@ -143,9 +175,18 @@
                                 ->values();
                         @endphp
                         <tr>
-                            <td><strong>{{ $returnCase->number }}</strong></td>
                             <td>
-                                <span class="status {{ $returnCase->status === 'opened' ? 'blue' : '' }}">{{ $returnCase->status }}</span>
+                                <strong>{{ $returnCase->number }}</strong>
+                                @if (data_get($returnCase->metadata, 'source') === 'store_form')
+                                    <br><span class="muted">{{ data_get($returnCase->metadata, 'return_reference') }}</span>
+                                @endif
+                            </td>
+                            <td>
+                                @php $statusMeta = $statusLabels[$returnCase->status] ?? ['label' => $returnCase->status, 'class' => 'blue']; @endphp
+                                <span class="status {{ $statusMeta['class'] }}">{{ $statusMeta['label'] }}</span>
+                                @if (data_get($returnCase->metadata, 'return_method') === 'wygodne_zwroty')
+                                    <br><span class="muted">Wygodne Zwroty</span>
+                                @endif
                                 @if ($automationWarnings->isNotEmpty())
                                     <details class="return-automation-details">
                                         <summary>Automatyzacja ({{ $automationWarnings->count() }})</summary>
@@ -184,7 +225,15 @@
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="8">Brak zwrotów. Dodaj zwrot, wybierz zamówienie i produkty przyjmowane na magazyn.</td>
+                            <td colspan="8">
+                                @if ($searchTerm !== '')
+                                    Brak zwrotów pasujących do „{{ $searchTerm }}".
+                                @elseif ($activeTab === 'pending')
+                                    Brak oczekujących zgłoszeń ze sklepu. Nowe zgłoszenia z formularza zwrotów pojawią się tutaj automatycznie.
+                                @else
+                                    Brak zwrotów. Dodaj zwrot, wybierz zamówienie i produkty przyjmowane na magazyn.
+                                @endif
+                            </td>
                         </tr>
                     @endforelse
                 </tbody>
@@ -213,6 +262,17 @@
 @push('styles')
     <style>
         .return-drawer-panel { width: min(880px, 96vw); }
+        .returns-filters { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+        .returns-tabs { display: flex; gap: 6px; }
+        .returns-tab { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 8px; padding: 7px 13px; font-weight: 700; color: var(--muted); text-decoration: none; background: var(--surface); }
+        .returns-tab.active { border-color: var(--brand); color: var(--brand-dark); background: var(--brand-soft); }
+        .returns-tab-count { display: inline-flex; align-items: center; justify-content: center; min-width: 21px; min-height: 21px; border-radius: 999px; padding: 0 6px; background: var(--orange); color: #fff; font-size: 12px; }
+        .returns-search { display: flex; gap: 8px; flex: 1 1 340px; max-width: 560px; }
+        .returns-search input { flex: 1; min-width: 0; }
+        @media (max-width: 760px) {
+            .returns-filters { align-items: stretch; flex-direction: column; }
+            .returns-search { max-width: none; }
+        }
         .return-order-field { position: relative; }
         .return-order-results { position: absolute; z-index: 40; inset-inline: 0; top: calc(100% + 6px); display: grid; gap: 8px; max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--surface); box-shadow: var(--shadow); }
         .return-order-results[hidden] { display: none; }
