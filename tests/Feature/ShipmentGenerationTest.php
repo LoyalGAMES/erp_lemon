@@ -103,6 +103,37 @@ class ShipmentGenerationTest extends TestCase
             ->assertSee('Etykieta zwrotna');
     }
 
+    public function test_automatic_label_falls_back_to_default_inpost_account_when_store_endpoint_missing(): void
+    {
+        Http::fake([
+            '*/v1/organizations/111/shipments' => Http::response(['id' => 'SHIP-FB', 'status' => 'created'], 201),
+            '*/v1/shipments/SHIP-FB/label*' => Http::response('%PDF-1.4 fallback-label', 200, ['Content-Type' => 'application/pdf']),
+            '*/v1/shipments/SHIP-FB' => Http::response([
+                'id' => 'SHIP-FB',
+                'status' => 'confirmed',
+                'tracking_number' => '520000555555555555555555',
+            ], 200),
+        ]);
+
+        $order = $this->createOrder();
+        $account = $this->createAccount();
+
+        $label = app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order);
+
+        $this->assertSame('inpost', $label->provider);
+        $this->assertSame($account->id, $label->courier_account_id);
+        $this->assertSame($order->id, $label->external_order_id);
+    }
+
+    public function test_automatic_label_without_any_configuration_gives_actionable_error(): void
+    {
+        $order = $this->createOrder();
+
+        $this->expectExceptionMessage('Włącz etykiety kurierskie w Integracjach');
+
+        app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order);
+    }
+
     public function test_return_label_requires_configured_return_address(): void
     {
         $returnCase = $this->createReturnCase();

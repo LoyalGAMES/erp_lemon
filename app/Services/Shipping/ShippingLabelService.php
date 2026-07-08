@@ -35,7 +35,20 @@ final class ShippingLabelService
             ->with('salesChannel')
             ->findOrFail($order->id);
 
-        $integration = $this->integrationForOrder($order);
+        $integration = $this->integrationWithLabelsForOrder($order);
+
+        if (! $integration instanceof WordpressIntegration) {
+            $fallbackAccount = CourierAccount::defaultFor('inpost');
+
+            if ($fallbackAccount instanceof CourierAccount) {
+                return $this->generateViaInPost($order, $fallbackAccount);
+            }
+
+            throw new RuntimeException(
+                'Brak konfiguracji etykiet dla kanału tego zamówienia. Włącz etykiety kurierskie w Integracjach (endpoint wtyczki sklepu) albo dodaj konto InPost w Ustawienia → Wysyłki.',
+            );
+        }
+
         $startedAt = now();
 
         try {
@@ -215,18 +228,12 @@ final class ShippingLabelService
         }
     }
 
-    private function integrationForOrder(ExternalOrder $order): WordpressIntegration
+    private function integrationWithLabelsForOrder(ExternalOrder $order): ?WordpressIntegration
     {
-        $integration = WordpressIntegration::query()
+        return WordpressIntegration::query()
             ->where('sales_channel_id', $order->sales_channel_id)
             ->get()
             ->first(fn (WordpressIntegration $candidate): bool => $candidate->shippingLabelsEnabled());
-
-        if (! $integration instanceof WordpressIntegration) {
-            throw new RuntimeException('Brak aktywnej konfiguracji etykiet kurierskich dla kanału tego zamówienia.');
-        }
-
-        return $integration;
     }
 
     /**
