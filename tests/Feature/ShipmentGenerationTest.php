@@ -134,6 +134,38 @@ class ShipmentGenerationTest extends TestCase
         app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order);
     }
 
+    public function test_locker_shipment_detects_official_inpost_plugin_meta_keys(): void
+    {
+        Http::fake([
+            '*/v1/organizations/111/shipments' => Http::response(['id' => 'SHIP-LOC', 'status' => 'created'], 201),
+            '*/v1/shipments/SHIP-LOC/label*' => Http::response('%PDF-1.4 locker-label', 200, ['Content-Type' => 'application/pdf']),
+            '*/v1/shipments/SHIP-LOC' => Http::response(['id' => 'SHIP-LOC', 'status' => 'confirmed', 'tracking_number' => '520000777'], 200),
+        ]);
+
+        $order = $this->createOrder();
+        $raw = (array) $order->raw_payload;
+        $raw['shipping_lines'] = [[
+            'method_title' => 'InPost Paczkomaty',
+            'meta_data' => [
+                ['key' => '_inpost_locker_id', 'value' => 'KRA05H'],
+            ],
+        ]];
+        $order->update(['raw_payload' => $raw]);
+
+        $account = $this->createAccount();
+
+        app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order->fresh(), $account);
+
+        Http::assertSent(function ($request): bool {
+            if (! str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/shipments') || $request->method() !== 'POST') {
+                return true;
+            }
+
+            return data_get($request->data(), 'service') === 'inpost_locker_standard'
+                && data_get($request->data(), 'custom_attributes.target_point') === 'KRA05H';
+        });
+    }
+
     public function test_return_label_requires_configured_return_address(): void
     {
         $returnCase = $this->createReturnCase();

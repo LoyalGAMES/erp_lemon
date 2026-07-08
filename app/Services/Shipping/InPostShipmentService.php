@@ -254,6 +254,8 @@ final class InPostShipmentService
 
     /**
      * Wyszukuje identyfikator Paczkomatu w danych zamówienia WooCommerce.
+     * Obsługuje klucze meta różnych wtyczek (oficjalna InPost dla WooCommerce,
+     * WP Desk, easypack) na poziomie zamówienia i pozycji wysyłkowych.
      */
     private function lockerTargetPoint(ExternalOrder $order): ?string
     {
@@ -263,11 +265,23 @@ final class InPostShipmentService
             data_get($order->shipping_data, 'target_point'),
         ];
 
-        foreach ((array) data_get($order->raw_payload, 'meta_data', []) as $meta) {
-            $key = mb_strtolower((string) ($meta['key'] ?? ''));
+        $metaSources = [(array) data_get($order->raw_payload, 'meta_data', [])];
 
-            if (str_contains($key, 'paczkomat') || str_contains($key, 'target_point') || str_contains($key, 'parcel_machine')) {
-                $candidates[] = $meta['value'] ?? null;
+        foreach ((array) data_get($order->raw_payload, 'shipping_lines', []) as $shippingLine) {
+            $metaSources[] = (array) ($shippingLine['meta_data'] ?? []);
+        }
+
+        foreach ($metaSources as $metaData) {
+            foreach ($metaData as $meta) {
+                if (! is_array($meta)) {
+                    continue;
+                }
+
+                $key = mb_strtolower((string) ($meta['key'] ?? ''));
+
+                if ($this->isLockerMetaKey($key)) {
+                    $candidates[] = $meta['value'] ?? null;
+                }
             }
         }
 
@@ -278,6 +292,17 @@ final class InPostShipmentService
         }
 
         return null;
+    }
+
+    private function isLockerMetaKey(string $key): bool
+    {
+        foreach (['paczkomat', 'target_point', 'parcel_machine', 'locker', 'easypack'] as $needle) {
+            if (str_contains($key, $needle)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function request(CourierAccount $account): PendingRequest
