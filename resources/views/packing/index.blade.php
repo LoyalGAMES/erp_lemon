@@ -498,7 +498,7 @@
                                     <select name="courier_account_id" aria-label="Konto nadawcze InPost">
                                         <option value="">Etykieta ze sklepu</option>
                                         @foreach ($courierAccounts as $courierAccount)
-                                            <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default)>InPost: {{ $courierAccount->name }}</option>
+                                            <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default && $courierAccount->provider === 'inpost')>{{ $courierAccount->provider === 'blpaczka' ? 'BLPaczka' : 'InPost' }}: {{ $courierAccount->name }}</option>
                                         @endforeach
                                     </select>
                                     <button class="button secondary" type="submit">Etykieta</button>

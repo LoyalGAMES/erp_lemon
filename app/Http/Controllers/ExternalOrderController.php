@@ -67,8 +67,8 @@ class ExternalOrderController extends Controller
             'orderSegments' => $segments->segmentsForOrder($order),
             'shippingDecision' => data_get($order->raw_payload, 'sempre_erp_shipping_decision'),
             'courierAccounts' => CourierAccount::query()
-                ->where('provider', 'inpost')
                 ->where('is_active', true)
+                ->orderBy('provider')
                 ->orderByDesc('is_default')
                 ->orderBy('name')
                 ->get(),

@@ -107,8 +107,8 @@ class PackingController extends Controller
             'activeStation' => $activeStation,
             'footwearKeywords' => $packingSettings['footwear_keywords'],
             'courierAccounts' => CourierAccount::query()
-                ->where('provider', 'inpost')
                 ->where('is_active', true)
+                ->orderBy('provider')
                 ->orderByDesc('is_default')
                 ->orderBy('name')
                 ->get(),

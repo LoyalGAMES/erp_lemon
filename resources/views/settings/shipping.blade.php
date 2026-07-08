@@ -63,9 +63,62 @@
                             <label class="inline-flag"><input type="checkbox" name="is_active" value="1" @checked($account->is_active)> Konto aktywne</label>
                         </div>
                     </div>
+                    @if ($account->provider === 'blpaczka')
+                        @php
+                            $senderConfig = (array) data_get($account->metadata, 'sender', []);
+                            $parcelConfig = (array) data_get($account->metadata, 'parcel', []);
+                        @endphp
+                        <details class="shipping-return-config" @if (blank($senderConfig['name'] ?? null)) open @endif>
+                            <summary>Nadawca i domyślna paczka (wymagane do tworzenia przesyłek BLPaczka z ERP)</summary>
+                            <div class="shipping-account-grid">
+                                <label>Nazwa nadawcy
+                                    <input name="sender_name" value="{{ $senderConfig['name'] ?? '' }}" maxlength="120" placeholder="np. Sempre Sp. z o.o.">
+                                </label>
+                                <label>Ulica
+                                    <input name="sender_street" value="{{ $senderConfig['street'] ?? '' }}" maxlength="160">
+                                </label>
+                                <label>Nr domu
+                                    <input name="sender_house_no" value="{{ $senderConfig['house_no'] ?? '' }}" maxlength="20">
+                                </label>
+                                <label>Nr lokalu
+                                    <input name="sender_locum_no" value="{{ $senderConfig['locum_no'] ?? '' }}" maxlength="20">
+                                </label>
+                                <label>Kod pocztowy
+                                    <input name="sender_postal" value="{{ $senderConfig['postal'] ?? '' }}" maxlength="12">
+                                </label>
+                                <label>Miasto
+                                    <input name="sender_city" value="{{ $senderConfig['city'] ?? '' }}" maxlength="80">
+                                </label>
+                                <label>Telefon
+                                    <input name="sender_phone" value="{{ $senderConfig['phone'] ?? '' }}" maxlength="32">
+                                </label>
+                                <label>E-mail
+                                    <input name="sender_email" type="email" value="{{ $senderConfig['email'] ?? '' }}" maxlength="255">
+                                </label>
+                                <label>Waga paczki [kg]
+                                    <input name="parcel_weight" type="number" step="0.1" min="0.1" value="{{ $parcelConfig['weight'] ?? '' }}" placeholder="np. 2">
+                                </label>
+                                <label>Długość [cm]
+                                    <input name="parcel_side_x" type="number" min="1" value="{{ $parcelConfig['side_x'] ?? '' }}" placeholder="np. 40">
+                                </label>
+                                <label>Szerokość [cm]
+                                    <input name="parcel_side_y" type="number" min="1" value="{{ $parcelConfig['side_y'] ?? '' }}" placeholder="np. 30">
+                                </label>
+                                <label>Wysokość [cm]
+                                    <input name="parcel_side_z" type="number" min="1" value="{{ $parcelConfig['side_z'] ?? '' }}" placeholder="np. 15">
+                                </label>
+                                <label>Płatność za przesyłki
+                                    <select name="payment">
+                                        <option value="bank" @selected(data_get($account->metadata, 'payment', 'bank') === 'bank')>Skarbonka (saldo BLPaczki)</option>
+                                        <option value="pay_later" @selected(data_get($account->metadata, 'payment') === 'pay_later')>Płatność odroczona</option>
+                                    </select>
+                                </label>
+                            </div>
+                        </details>
+                    @endif
                     @php $returnConfig = (array) data_get($account->metadata, 'return', []); @endphp
                     <details class="shipping-return-config" @if (filled($returnConfig['name'] ?? null)) open @endif>
-                        <summary>Adres zwrotów (etykiety zwrotne klient → magazyn)</summary>
+                        <summary>Adres zwrotów (etykiety zwrotne klient → magazyn{{ $account->provider === 'blpaczka' ? ' — tylko konta InPost' : '' }})</summary>
                         <div class="shipping-account-grid">
                             <label>Nazwa odbiorcy zwrotów
                                 <input name="return_name" value="{{ $returnConfig['name'] ?? '' }}" maxlength="120" placeholder="np. Sempre — Magazyn zwrotów">
