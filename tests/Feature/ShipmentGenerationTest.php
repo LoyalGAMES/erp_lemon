@@ -22,6 +22,7 @@ class ShipmentGenerationTest extends TestCase
     public function test_order_page_shows_generate_shipment_form_and_creates_inpost_label(): void
     {
         Http::fake([
+            '*/v1/organizations/111/shipments?*' => Http::response(['items' => []], 200),
             '*/v1/organizations/111/shipments' => Http::response(['id' => 'SHIP-9', 'status' => 'created'], 201),
             '*/v1/shipments/SHIP-9/label*' => Http::response('%PDF-1.4 order-label', 200, ['Content-Type' => 'application/pdf']),
             '*/v1/shipments/SHIP-9' => Http::response([
@@ -58,6 +59,7 @@ class ShipmentGenerationTest extends TestCase
     public function test_return_label_is_generated_with_reversed_direction_to_warehouse(): void
     {
         Http::fake([
+            '*/v1/organizations/111/shipments?*' => Http::response(['items' => []], 200),
             '*/v1/organizations/111/shipments' => Http::response(['id' => 'SHIP-RET', 'status' => 'created'], 201),
             '*/v1/shipments/SHIP-RET/label*' => Http::response('%PDF-1.4 return-label', 200, ['Content-Type' => 'application/pdf']),
             '*/v1/shipments/SHIP-RET' => Http::response([
@@ -106,6 +108,7 @@ class ShipmentGenerationTest extends TestCase
     public function test_automatic_label_falls_back_to_default_inpost_account_when_store_endpoint_missing(): void
     {
         Http::fake([
+            '*/v1/organizations/111/shipments?*' => Http::response(['items' => []], 200),
             '*/v1/organizations/111/shipments' => Http::response(['id' => 'SHIP-FB', 'status' => 'created'], 201),
             '*/v1/shipments/SHIP-FB/label*' => Http::response('%PDF-1.4 fallback-label', 200, ['Content-Type' => 'application/pdf']),
             '*/v1/shipments/SHIP-FB' => Http::response([
@@ -137,6 +140,7 @@ class ShipmentGenerationTest extends TestCase
     public function test_locker_shipment_detects_official_inpost_plugin_meta_keys(): void
     {
         Http::fake([
+            '*/v1/organizations/111/shipments?*' => Http::response(['items' => []], 200),
             '*/v1/organizations/111/shipments' => Http::response(['id' => 'SHIP-LOC', 'status' => 'created'], 201),
             '*/v1/shipments/SHIP-LOC/label*' => Http::response('%PDF-1.4 locker-label', 200, ['Content-Type' => 'application/pdf']),
             '*/v1/shipments/SHIP-LOC' => Http::response(['id' => 'SHIP-LOC', 'status' => 'confirmed', 'tracking_number' => '520000777'], 200),
@@ -164,6 +168,67 @@ class ShipmentGenerationTest extends TestCase
             return data_get($request->data(), 'service') === 'inpost_locker_standard'
                 && data_get($request->data(), 'custom_attributes.target_point') === 'KRA05H';
         });
+    }
+
+    public function test_existing_plugin_shipment_is_reused_instead_of_creating_duplicate(): void
+    {
+        Http::fake([
+            '*/v1/organizations/111/shipments?*' => Http::response(['items' => [
+                [
+                    'id' => 'SHIP-PLUGIN',
+                    'status' => 'confirmed',
+                    'reference' => '801',
+                    'tracking_number' => '520000444444444444444444',
+                ],
+            ]], 200),
+            '*/v1/shipments/SHIP-PLUGIN/label*' => Http::response('%PDF-1.4 plugin-label', 200, ['Content-Type' => 'application/pdf']),
+            '*/v1/shipments/SHIP-PLUGIN' => Http::response([
+                'id' => 'SHIP-PLUGIN',
+                'status' => 'confirmed',
+                'tracking_number' => '520000444444444444444444',
+            ], 200),
+        ]);
+
+        $order = $this->createOrder();
+        $account = $this->createAccount();
+
+        $label = app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order, $account);
+
+        $this->assertSame('SHIP-PLUGIN', $label->label_number);
+        $this->assertSame('520000444444444444444444', $label->tracking_number);
+        $this->assertTrue((bool) data_get($label->response_payload, 'shipment.reused_existing_shipment'));
+
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/shipments'));
+    }
+
+    public function test_existing_shipment_is_found_by_meta_shipment_id(): void
+    {
+        Http::fake([
+            '*/v1/shipments/987654/label*' => Http::response('%PDF-1.4 meta-label', 200, ['Content-Type' => 'application/pdf']),
+            '*/v1/shipments/987654' => Http::response([
+                'id' => 987654,
+                'status' => 'dispatched_by_sender',
+                'tracking_number' => '520000333333333333333333',
+            ], 200),
+        ]);
+
+        $order = $this->createOrder();
+        $raw = (array) $order->raw_payload;
+        $raw['meta_data'] = [
+            ['key' => '_inpost_shipment_id', 'value' => '987654'],
+        ];
+        $order->update(['raw_payload' => $raw]);
+
+        $account = $this->createAccount();
+
+        $label = app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order->fresh(), $account);
+
+        $this->assertSame('987654', $label->label_number);
+        $this->assertSame('520000333333333333333333', $label->tracking_number);
+
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/shipments'));
     }
 
     public function test_return_label_requires_configured_return_address(): void

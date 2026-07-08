@@ -17,20 +17,34 @@ use RuntimeException;
  */
 final class InPostShipmentService
 {
-    private const LABEL_READY_STATUSES = ['confirmed', 'ready_to_pickup', 'oversized'];
+    /**
+     * Statusy sprzed potwierdzenia przesyłki — etykieta nie jest jeszcze dostępna.
+     * Każdy inny status (poza error) oznacza przesyłkę z gotową etykietą,
+     * także dla przesyłek już nadanych/doręczanych (reużytych z wtyczki sklepu).
+     */
+    private const LABEL_PENDING_STATUSES = ['created', 'offers_prepared', 'offer_selected', 'unconfirmed'];
     private const LABEL_POLL_ATTEMPTS = 10;
     private const LABEL_POLL_DELAY_MS = 800;
 
     /**
-     * Tworzy przesyłkę i pobiera etykietę PDF.
+     * Tworzy przesyłkę i pobiera etykietę PDF. Jeśli przesyłka dla zamówienia
+     * już istnieje w ShipX (np. utworzona wtyczką InPost dla WooCommerce na tym
+     * samym koncie), pobiera etykietę istniejącej przesyłki zamiast tworzyć nową.
      *
      * @return array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>}
      */
     public function createShipmentWithLabel(ExternalOrder $order, CourierAccount $account): array
     {
-        $shipment = $this->createShipment($order, $account);
+        $shipment = $this->findExistingShipment($order, $account);
+        $reused = $shipment !== null;
+
+        if ($shipment === null) {
+            $shipment = $this->createShipment($order, $account);
+        }
+
         $shipmentId = (string) $shipment['id'];
         $shipment = $this->waitForConfirmation($account, $shipmentId);
+        $shipment['reused_existing_shipment'] = $reused;
 
         return [
             'shipment_id' => $shipmentId,
@@ -39,6 +53,107 @@ final class InPostShipmentService
             'mime_type' => 'application/pdf',
             'response_payload' => $shipment,
         ];
+    }
+
+    /**
+     * Szuka istniejącej przesyłki ShipX dla zamówienia: najpierw po ID przesyłki
+     * i numerze śledzenia z meta zamówienia (zapisuje je wtyczka sklepu),
+     * potem po numerze zamówienia w polu reference organizacji.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function findExistingShipment(ExternalOrder $order, CourierAccount $account): ?array
+    {
+        [$shipmentIds, $trackingNumbers] = $this->shipmentCandidatesFromMeta($order);
+
+        foreach ($shipmentIds as $shipmentId) {
+            $response = $this->request($account)->get("/v1/shipments/{$shipmentId}");
+
+            if ($response->successful() && filled($response->json('id'))) {
+                $shipment = (array) $response->json();
+
+                if ((string) ($shipment['status'] ?? '') !== 'error') {
+                    return $shipment;
+                }
+            }
+        }
+
+        $reference = trim((string) ($order->external_number ?: $order->external_id));
+
+        if ($reference === '') {
+            return null;
+        }
+
+        $response = $this->request($account)->get(
+            "/v1/organizations/{$account->organization_id}/shipments",
+            ['reference' => $reference, 'per_page' => 25],
+        );
+
+        if (! $response->successful()) {
+            return null;
+        }
+
+        foreach ((array) $response->json('items', []) as $shipment) {
+            if (! is_array($shipment) || (string) ($shipment['status'] ?? '') === 'error') {
+                continue;
+            }
+
+            $matchesReference = str_contains((string) ($shipment['reference'] ?? ''), $reference);
+            $matchesTracking = filled($shipment['tracking_number'] ?? null)
+                && in_array((string) $shipment['tracking_number'], $trackingNumbers, true);
+
+            if ($matchesReference || $matchesTracking) {
+                return $shipment;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Wyciąga z meta zamówienia kandydatów na ID przesyłki ShipX i numery
+     * śledzenia InPost (24-cyfrowe).
+     *
+     * @return array{0:list<string>,1:list<string>}
+     */
+    private function shipmentCandidatesFromMeta(ExternalOrder $order): array
+    {
+        $shipmentIds = [];
+        $trackingNumbers = [];
+
+        $metaSources = [(array) data_get($order->raw_payload, 'meta_data', [])];
+
+        foreach ((array) data_get($order->raw_payload, 'shipping_lines', []) as $shippingLine) {
+            $metaSources[] = (array) ($shippingLine['meta_data'] ?? []);
+        }
+
+        foreach ($metaSources as $metaData) {
+            foreach ($metaData as $meta) {
+                if (! is_array($meta)) {
+                    continue;
+                }
+
+                $key = mb_strtolower((string) ($meta['key'] ?? ''));
+
+                if (! str_contains($key, 'inpost') && ! str_contains($key, 'shipx') && ! str_contains($key, 'easypack')) {
+                    continue;
+                }
+
+                $value = trim((string) ($meta['value'] ?? ''));
+
+                if ($value === '') {
+                    continue;
+                }
+
+                if (preg_match('/^\d{20,26}$/', $value) === 1) {
+                    $trackingNumbers[] = $value;
+                } elseif ((str_contains($key, 'shipment') || str_contains($key, 'id')) && preg_match('/^\d{1,12}$/', $value) === 1) {
+                    $shipmentIds[] = $value;
+                }
+            }
+        }
+
+        return [array_values(array_unique($shipmentIds)), array_values(array_unique($trackingNumbers))];
     }
 
     /**
@@ -113,12 +228,12 @@ final class InPostShipmentService
             $shipment = (array) $response->json();
             $status = (string) ($shipment['status'] ?? '');
 
-            if (in_array($status, self::LABEL_READY_STATUSES, true)) {
-                return $shipment;
-            }
-
             if ($status === 'error') {
                 throw new RuntimeException($this->errorMessage($shipment, 'InPost odrzucił przesyłkę.'));
+            }
+
+            if ($status !== '' && ! in_array($status, self::LABEL_PENDING_STATUSES, true)) {
+                return $shipment;
             }
 
             usleep(self::LABEL_POLL_DELAY_MS * 1000);

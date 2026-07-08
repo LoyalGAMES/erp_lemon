@@ -134,6 +134,7 @@ class PackingLogisticsUpgradeTest extends TestCase
     public function test_label_can_be_generated_via_selected_inpost_account(): void
     {
         Http::fake([
+            '*/v1/organizations/222/shipments?*' => Http::response(['items' => []], 200),
             '*/v1/organizations/222/shipments' => Http::response(['id' => 'SHIP-2', 'status' => 'created'], 201),
             '*/v1/shipments/SHIP-2/label*' => Http::response('%PDF-1.4 test-label', 200, ['Content-Type' => 'application/pdf']),
             '*/v1/shipments/SHIP-2' => Http::response([
