@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\StockReservation;
 use App\Services\Orders\OrderFulfillmentStatusService;
 use App\Services\Orders\OrderSplitService;
 use App\Services\Packing\ProductSegmentService;
+use App\Services\Shipping\ShippingLabelService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -64,7 +66,41 @@ class ExternalOrderController extends Controller
             'orderNotes' => collect(data_get($order->raw_payload, 'erp_imported_order_notes', [])),
             'orderSegments' => $segments->segmentsForOrder($order),
             'shippingDecision' => data_get($order->raw_payload, 'sempre_erp_shipping_decision'),
+            'courierAccounts' => CourierAccount::query()
+                ->where('provider', 'inpost')
+                ->where('is_active', true)
+                ->orderByDesc('is_default')
+                ->orderBy('name')
+                ->get(),
         ]);
+    }
+
+    public function generateLabel(
+        Request $request,
+        ExternalOrder $order,
+        ShippingLabelService $shippingLabels,
+    ): RedirectResponse {
+        $data = $request->validate([
+            'courier_account_id' => ['nullable', 'integer', 'exists:courier_accounts,id'],
+        ]);
+
+        $account = filled($data['courier_account_id'] ?? null)
+            ? CourierAccount::query()->where('is_active', true)->find((int) $data['courier_account_id'])
+            : null;
+
+        try {
+            $label = $shippingLabels->generateForOrder($order, $account);
+        } catch (RuntimeException $exception) {
+            return back()->with('error', 'Nie udało się wygenerować przesyłki: ' . $exception->getMessage());
+        }
+
+        $message = "Przesyłka dla zamówienia {$order->external_number} została wygenerowana: {$label->filename()}.";
+
+        if ($account instanceof CourierAccount) {
+            $message .= " Konto nadawcze: {$account->name}.";
+        }
+
+        return back()->with('status', $message);
     }
 
     public function split(

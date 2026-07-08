@@ -99,6 +99,14 @@ class SettingsController extends Controller
             'sending_method' => ['required', 'string', 'in:dispatch_order,parcel_locker,pok,branch'],
             'is_default' => ['nullable', 'boolean'],
             'is_active' => ['nullable', 'boolean'],
+            'return_name' => ['nullable', 'string', 'max:120'],
+            'return_phone' => ['nullable', 'string', 'max:32'],
+            'return_email' => ['nullable', 'email', 'max:255'],
+            'return_target_point' => ['nullable', 'string', 'max:20'],
+            'return_street' => ['nullable', 'string', 'max:160'],
+            'return_building_number' => ['nullable', 'string', 'max:20'],
+            'return_post_code' => ['nullable', 'string', 'max:12'],
+            'return_city' => ['nullable', 'string', 'max:80'],
         ]);
 
         DB::transaction(function () use ($account, $validated): void {
@@ -109,6 +117,19 @@ class SettingsController extends Controller
                 'sending_method' => $validated['sending_method'],
                 'is_default' => (bool) ($validated['is_default'] ?? false),
                 'is_active' => (bool) ($validated['is_active'] ?? false),
+                'metadata' => array_merge((array) $account->metadata, [
+                    'return' => [
+                        'name' => trim((string) ($validated['return_name'] ?? '')),
+                        'phone' => trim((string) ($validated['return_phone'] ?? '')),
+                        'email' => trim((string) ($validated['return_email'] ?? '')),
+                        'target_point' => strtoupper(trim((string) ($validated['return_target_point'] ?? ''))),
+                        'street' => trim((string) ($validated['return_street'] ?? '')),
+                        'building_number' => trim((string) ($validated['return_building_number'] ?? '')),
+                        'post_code' => trim((string) ($validated['return_post_code'] ?? '')),
+                        'city' => trim((string) ($validated['return_city'] ?? '')),
+                        'country_code' => 'PL',
+                    ],
+                ]),
             ]);
 
             if (filled($validated['api_token'] ?? null)) {

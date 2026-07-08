@@ -7,6 +7,7 @@ namespace App\Services\Shipping;
 use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\IntegrationSyncLog;
+use App\Models\ReturnCase;
 use App\Models\ShippingLabel;
 use App\Models\WordpressIntegration;
 use App\Services\Audit\AuditLogService;
@@ -91,6 +92,63 @@ final class ShippingLabelService
             $this->audit->record('shipping_label.failed', $order, null, null, [
                 'sales_channel' => $order->salesChannel?->code,
                 'integration_id' => $integration->id,
+                'error' => $exception->getMessage(),
+            ]);
+
+            throw new RuntimeException($exception->getMessage(), previous: $exception);
+        }
+    }
+
+    /**
+     * Generuje etykietę zwrotną InPost (klient → magazyn) dla zgłoszenia zwrotu.
+     */
+    public function generateReturnLabel(ReturnCase $returnCase, CourierAccount $account): ShippingLabel
+    {
+        $returnCase->loadMissing('externalOrder');
+
+        try {
+            $labelData = $this->inpost->createReturnShipmentWithLabel($returnCase, $account);
+
+            $contents = $labelData['contents'];
+            $filename = 'zwrot-' . preg_replace('/[^A-Za-z0-9._-]+/', '-', $returnCase->number) . '-' . now()->format('YmdHis') . '.pdf';
+            $path = 'shipping-labels/returns/' . now()->format('Y/m') . '/' . $filename;
+
+            Storage::disk('local')->put($path, $contents);
+
+            $label = ShippingLabel::query()->create([
+                'sales_channel_id' => $returnCase->externalOrder?->sales_channel_id,
+                'external_order_id' => $returnCase->external_order_id,
+                'return_case_id' => $returnCase->id,
+                'courier_account_id' => $account->id,
+                'status' => 'generated',
+                'provider' => 'inpost',
+                'label_number' => $labelData['shipment_id'],
+                'tracking_number' => $labelData['tracking_number'],
+                'disk' => 'local',
+                'path' => $path,
+                'mime_type' => $labelData['mime_type'],
+                'size' => strlen($contents),
+                'sha256' => hash('sha256', $contents),
+                'response_payload' => [
+                    'courier_account' => $account->code,
+                    'direction' => 'return',
+                    'shipment' => $labelData['response_payload'],
+                ],
+                'generated_at' => now(),
+            ]);
+
+            $this->audit->record('shipping_label.return_generated', $label, null, [
+                'return_number' => $returnCase->number,
+                'label_id' => $label->id,
+                'tracking_number' => $label->tracking_number,
+                'courier_account' => $account->code,
+            ]);
+
+            return $label;
+        } catch (Throwable $exception) {
+            $this->audit->record('shipping_label.return_failed', $returnCase, null, null, [
+                'return_number' => $returnCase->number,
+                'courier_account' => $account->code,
                 'error' => $exception->getMessage(),
             ]);
 

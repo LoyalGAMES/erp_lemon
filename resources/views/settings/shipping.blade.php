@@ -63,6 +63,36 @@
                             <label class="inline-flag"><input type="checkbox" name="is_active" value="1" @checked($account->is_active)> Konto aktywne</label>
                         </div>
                     </div>
+                    @php $returnConfig = (array) data_get($account->metadata, 'return', []); @endphp
+                    <details class="shipping-return-config" @if (filled($returnConfig['name'] ?? null)) open @endif>
+                        <summary>Adres zwrotów (etykiety zwrotne klient → magazyn)</summary>
+                        <div class="shipping-account-grid">
+                            <label>Nazwa odbiorcy zwrotów
+                                <input name="return_name" value="{{ $returnConfig['name'] ?? '' }}" maxlength="120" placeholder="np. Sempre — Magazyn zwrotów">
+                            </label>
+                            <label>Telefon
+                                <input name="return_phone" value="{{ $returnConfig['phone'] ?? '' }}" maxlength="32">
+                            </label>
+                            <label>E-mail
+                                <input name="return_email" type="email" value="{{ $returnConfig['email'] ?? '' }}" maxlength="255">
+                            </label>
+                            <label>Paczkomat zwrotów (opcjonalnie)
+                                <input name="return_target_point" value="{{ $returnConfig['target_point'] ?? '' }}" maxlength="20" placeholder="np. KRA010">
+                            </label>
+                            <label>Ulica (gdy brak Paczkomatu)
+                                <input name="return_street" value="{{ $returnConfig['street'] ?? '' }}" maxlength="160">
+                            </label>
+                            <label>Nr budynku
+                                <input name="return_building_number" value="{{ $returnConfig['building_number'] ?? '' }}" maxlength="20">
+                            </label>
+                            <label>Kod pocztowy
+                                <input name="return_post_code" value="{{ $returnConfig['post_code'] ?? '' }}" maxlength="12">
+                            </label>
+                            <label>Miasto
+                                <input name="return_city" value="{{ $returnConfig['city'] ?? '' }}" maxlength="80">
+                            </label>
+                        </div>
+                    </details>
                     <div class="shipping-account-actions">
                         <button class="button" type="submit">Zapisz konto</button>
                         <button class="button danger" type="submit" form="delete-account-{{ $account->id }}" onclick="return confirm('Usunąć konto {{ $account->name }}?');">Usuń</button>
@@ -132,6 +162,8 @@
         .inline-flag { display: inline-flex; align-items: center; gap: 7px; font-weight: 720; }
         .inline-flag input { width: 17px; height: 17px; }
         .shipping-account-actions { display: flex; gap: 10px; }
+        .shipping-return-config summary { cursor: pointer; font-weight: 740; color: var(--green-dark); }
+        .shipping-return-config .shipping-account-grid { margin-top: 10px; }
         .packing-empty { padding: 14px; color: var(--muted); border: 1px dashed var(--border); border-radius: 8px; }
         @media (max-width: 760px) {
             .shipping-account-grid { grid-template-columns: 1fr; }

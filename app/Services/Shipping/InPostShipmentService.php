@@ -6,6 +6,7 @@ namespace App\Services\Shipping;
 
 use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
+use App\Models\ReturnCase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Http\Client\PendingRequest;
 use RuntimeException;
@@ -41,12 +42,42 @@ final class InPostShipmentService
     }
 
     /**
+     * Tworzy przesyłkę zwrotną (klient → magazyn) i pobiera etykietę PDF,
+     * którą klient nakleja na paczkę. Odbiorcą jest adres zwrotów
+     * skonfigurowany na koncie kurierskim.
+     *
+     * @return array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>}
+     */
+    public function createReturnShipmentWithLabel(ReturnCase $returnCase, CourierAccount $account): array
+    {
+        $payload = $this->returnShipmentPayload($returnCase, $account);
+        $shipment = $this->postShipment($account, $payload);
+        $shipmentId = (string) $shipment['id'];
+        $shipment = $this->waitForConfirmation($account, $shipmentId);
+
+        return [
+            'shipment_id' => $shipmentId,
+            'tracking_number' => filled($shipment['tracking_number'] ?? null) ? (string) $shipment['tracking_number'] : null,
+            'contents' => $this->fetchLabel($account, $shipmentId),
+            'mime_type' => 'application/pdf',
+            'response_payload' => $shipment,
+        ];
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function createShipment(ExternalOrder $order, CourierAccount $account): array
     {
-        $payload = $this->shipmentPayload($order, $account);
+        return $this->postShipment($account, $this->shipmentPayload($order, $account));
+    }
 
+    /**
+     * @param array<string, mixed> $payload
+     * @return array<string, mixed>
+     */
+    private function postShipment(CourierAccount $account, array $payload): array
+    {
         $response = $this->request($account)->post(
             "/v1/organizations/{$account->organization_id}/shipments",
             $payload,
@@ -154,6 +185,67 @@ final class InPostShipmentService
                 'city' => (string) (data_get($shipping, 'city') ?: data_get($billing, 'city', '')),
                 'post_code' => (string) (data_get($shipping, 'postcode') ?: data_get($billing, 'postcode', '')),
                 'country_code' => (string) (data_get($shipping, 'country') ?: data_get($billing, 'country', 'PL')),
+            ];
+        }
+
+        return $payload;
+    }
+
+    /**
+     * Payload przesyłki zwrotnej: odbiorcą jest magazyn (adres zwrotów konta),
+     * klient nadaje paczkę w dowolnym Paczkomacie albo punkcie.
+     *
+     * @return array<string, mixed>
+     */
+    private function returnShipmentPayload(ReturnCase $returnCase, CourierAccount $account): array
+    {
+        $returnAddress = (array) data_get($account->metadata, 'return', []);
+        $name = trim((string) ($returnAddress['name'] ?? ''));
+        $phone = preg_replace('/\D+/', '', (string) ($returnAddress['phone'] ?? '')) ?? '';
+        $email = trim((string) ($returnAddress['email'] ?? ''));
+
+        if ($name === '' || $phone === '' || $email === '') {
+            throw new RuntimeException("Konto {$account->name} nie ma skonfigurowanego adresu zwrotów (nazwa, telefon, e-mail). Uzupełnij go w Ustawienia → Wysyłki.");
+        }
+
+        $receiver = [
+            'company_name' => $name,
+            'email' => $email,
+            'phone' => mb_substr($phone, -9),
+        ];
+
+        $targetPoint = strtoupper(trim((string) ($returnAddress['target_point'] ?? '')));
+
+        $payload = [
+            'receiver' => $receiver,
+            'parcels' => [
+                ['template' => $account->default_parcel_template ?: 'small'],
+            ],
+            'service' => $targetPoint !== '' ? 'inpost_locker_standard' : 'inpost_courier_standard',
+            'reference' => 'ZWROT ' . $returnCase->number,
+            'comments' => 'Zwrot ' . $returnCase->number,
+            'custom_attributes' => [
+                'sending_method' => 'parcel_locker',
+            ],
+        ];
+
+        if ($targetPoint !== '') {
+            $payload['custom_attributes']['target_point'] = $targetPoint;
+        } else {
+            $street = trim((string) ($returnAddress['street'] ?? ''));
+            $city = trim((string) ($returnAddress['city'] ?? ''));
+            $postCode = trim((string) ($returnAddress['post_code'] ?? ''));
+
+            if ($street === '' || $city === '' || $postCode === '') {
+                throw new RuntimeException("Konto {$account->name} nie ma Paczkomatu zwrotów ani pełnego adresu magazynu. Uzupełnij konfigurację w Ustawienia → Wysyłki.");
+            }
+
+            $payload['receiver']['address'] = [
+                'street' => $street,
+                'building_number' => trim((string) ($returnAddress['building_number'] ?? '')) ?: '1',
+                'city' => $city,
+                'post_code' => $postCode,
+                'country_code' => trim((string) ($returnAddress['country_code'] ?? '')) ?: 'PL',
             ];
         }
 

@@ -69,4 +69,9 @@ class ReturnCase extends Model
     {
         return $this->belongsTo(Invoice::class, 'correction_invoice_id');
     }
+
+    public function shippingLabels(): HasMany
+    {
+        return $this->hasMany(ShippingLabel::class);
+    }
 }

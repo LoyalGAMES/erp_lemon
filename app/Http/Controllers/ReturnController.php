@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\Product;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
+use App\Models\ShippingLabel;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Services\Automation\DocumentAutomationSettingsService;
@@ -19,6 +21,9 @@ use App\Services\Returns\ReturnReceivingService;
 use App\Services\Returns\ReturnSettingsService;
 use App\Services\Returns\ReturnStatusPushService;
 use App\Services\Returns\StoreReturnIntakeService;
+use App\Services\Shipping\ShippingLabelService;
+use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -47,6 +52,7 @@ class ReturnController extends Controller
                 'warehouseDocument',
                 'externalOrder',
                 'correctionInvoice',
+                'shippingLabels',
             ])
             ->when($tab === 'pending', fn ($query) => $query->where('status', StoreReturnIntakeService::STATUS_PENDING))
             ->when($search !== '', function ($query) use ($search): void {
@@ -83,6 +89,12 @@ class ReturnController extends Controller
             'products' => Product::query()->where('is_active', true)->orderBy('sku')->get(),
             'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'returnSettings' => $returnSettings,
+            'courierAccounts' => CourierAccount::query()
+                ->where('provider', 'inpost')
+                ->where('is_active', true)
+                ->orderByDesc('is_default')
+                ->orderBy('name')
+                ->get(),
             'module' => 'returns',
         ]);
     }
@@ -501,6 +513,49 @@ class ReturnController extends Controller
         }
 
         return back()->with('status', $successMessage.' Sklep został powiadomiony i utworzy zwrot w zamówieniu.');
+    }
+
+    public function createShippingLabel(
+        Request $request,
+        ReturnCase $returnCase,
+        ShippingLabelService $shippingLabels,
+    ): RedirectResponse {
+        $data = $request->validate([
+            'courier_account_id' => ['required', 'integer', 'exists:courier_accounts,id'],
+        ]);
+
+        $account = CourierAccount::query()
+            ->where('is_active', true)
+            ->find((int) $data['courier_account_id']);
+
+        if (! $account instanceof CourierAccount) {
+            return back()->with('error', 'Wybrane konto kurierskie jest nieaktywne.');
+        }
+
+        if ($returnCase->shippingLabels()->where('status', 'generated')->exists()) {
+            return back()->with('error', "Zwrot {$returnCase->number} ma już wygenerowaną etykietę zwrotną.");
+        }
+
+        try {
+            $label = $shippingLabels->generateReturnLabel($returnCase, $account);
+        } catch (RuntimeException $exception) {
+            return back()->with('error', 'Nie udało się wygenerować przesyłki zwrotnej: ' . $exception->getMessage());
+        }
+
+        return back()->with('status', "Etykieta zwrotna dla {$returnCase->number} została wygenerowana ({$account->name}). Pobierz PDF i wyślij klientowi.");
+    }
+
+    public function downloadLabel(ShippingLabel $label): StreamedResponse
+    {
+        abort_if($label->return_case_id === null, 404);
+
+        if (! Storage::disk($label->disk)->exists($label->path)) {
+            abort(404);
+        }
+
+        return Storage::disk($label->disk)->download($label->path, $label->filename(), [
+            'Content-Type' => $label->mime_type ?? 'application/pdf',
+        ]);
     }
 
     public function destroy(ReturnCase $returnCase): RedirectResponse

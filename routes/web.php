@@ -99,6 +99,8 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::put('/returns/{returnCase}', [ReturnController::class, 'update'])->name('returns.update');
         Route::post('/returns/{returnCase}/approve', [ReturnController::class, 'approve'])->name('returns.approve');
         Route::post('/returns/{returnCase}/reject', [ReturnController::class, 'reject'])->name('returns.reject');
+        Route::post('/returns/{returnCase}/shipping-label', [ReturnController::class, 'createShippingLabel'])->name('returns.shipping-label.create');
+        Route::get('/returns/labels/{label}/download', [ReturnController::class, 'downloadLabel'])->name('returns.labels.download');
         Route::post('/returns/{returnCase}/document', [ReturnController::class, 'createDocument'])->name('returns.document.create');
         Route::post('/returns/{returnCase}/correction', [ReturnController::class, 'createCorrection'])->name('returns.correction.create');
         Route::delete('/returns/{returnCase}', [ReturnController::class, 'destroy'])->name('returns.destroy');
@@ -180,6 +182,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::get('/orders/{order}', [ExternalOrderController::class, 'show'])->name('orders.show');
         Route::post('/orders/{order}/split', [ExternalOrderController::class, 'split'])->name('orders.split');
         Route::post('/orders/{order}/shipping-decision', [ExternalOrderController::class, 'shippingDecision'])->name('orders.shipping-decision');
+        Route::post('/orders/{order}/label', [ExternalOrderController::class, 'generateLabel'])->name('orders.label.generate');
         Route::post('/orders/{order}/wz', [ExternalOrderFulfillmentController::class, 'createWz'])
             ->name('orders.wz.create');
 

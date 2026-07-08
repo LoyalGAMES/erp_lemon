@@ -1,0 +1,240 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tests\Feature;
+
+use App\Models\CourierAccount;
+use App\Models\ExternalOrder;
+use App\Models\Product;
+use App\Models\ReturnCase;
+use App\Models\SalesChannel;
+use App\Models\ShippingLabel;
+use App\Models\Warehouse;
+use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Http;
+use Tests\TestCase;
+
+class ShipmentGenerationTest extends TestCase
+{
+    use RefreshDatabase;
+
+    public function test_order_page_shows_generate_shipment_form_and_creates_inpost_label(): void
+    {
+        Http::fake([
+            '*/v1/organizations/111/shipments' => Http::response(['id' => 'SHIP-9', 'status' => 'created'], 201),
+            '*/v1/shipments/SHIP-9/label*' => Http::response('%PDF-1.4 order-label', 200, ['Content-Type' => 'application/pdf']),
+            '*/v1/shipments/SHIP-9' => Http::response([
+                'id' => 'SHIP-9',
+                'status' => 'confirmed',
+                'tracking_number' => '520000123123123123123123',
+            ], 200),
+        ]);
+
+        $order = $this->createOrder();
+        $account = $this->createAccount();
+
+        $this->get(route('orders.show', $order))
+            ->assertOk()
+            ->assertSee('Generuj przesyłkę')
+            ->assertSee('InPost: Konto główne');
+
+        $this->post(route('orders.label.generate', $order), [
+            'courier_account_id' => $account->id,
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $label = ShippingLabel::query()->firstOrFail();
+
+        $this->assertSame($order->id, $label->external_order_id);
+        $this->assertSame('inpost', $label->provider);
+        $this->assertSame($account->id, $label->courier_account_id);
+
+        $this->get(route('orders.show', $order))
+            ->assertOk()
+            ->assertSee('Pobierz etykietę')
+            ->assertDontSee('Generuj przesyłkę</button>', false);
+    }
+
+    public function test_return_label_is_generated_with_reversed_direction_to_warehouse(): void
+    {
+        Http::fake([
+            '*/v1/organizations/111/shipments' => Http::response(['id' => 'SHIP-RET', 'status' => 'created'], 201),
+            '*/v1/shipments/SHIP-RET/label*' => Http::response('%PDF-1.4 return-label', 200, ['Content-Type' => 'application/pdf']),
+            '*/v1/shipments/SHIP-RET' => Http::response([
+                'id' => 'SHIP-RET',
+                'status' => 'confirmed',
+                'tracking_number' => '520000999999999999999999',
+            ], 200),
+        ]);
+
+        $returnCase = $this->createReturnCase();
+        $account = $this->createAccount(withReturnAddress: true);
+
+        $this->get(route('returns.index'))
+            ->assertOk()
+            ->assertSee('Generuj przesyłkę zwrotną');
+
+        $this->post(route('returns.shipping-label.create', $returnCase), [
+            'courier_account_id' => $account->id,
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $label = ShippingLabel::query()->firstOrFail();
+
+        $this->assertSame($returnCase->id, $label->return_case_id);
+        $this->assertSame('return', data_get($label->response_payload, 'direction'));
+
+        Http::assertSent(function ($request): bool {
+            if (! str_contains($request->url(), '/shipments') || $request->method() !== 'POST') {
+                return true;
+            }
+
+            return data_get($request->data(), 'receiver.company_name') === 'Sempre Magazyn'
+                && data_get($request->data(), 'custom_attributes.target_point') === 'KRA010'
+                && data_get($request->data(), 'custom_attributes.sending_method') === 'parcel_locker'
+                && str_starts_with((string) data_get($request->data(), 'reference'), 'ZWROT ');
+        });
+
+        $this->get(route('returns.labels.download', $label))
+            ->assertOk()
+            ->assertHeader('Content-Type', 'application/pdf');
+
+        $this->get(route('returns.index'))
+            ->assertOk()
+            ->assertSee('Etykieta zwrotna');
+    }
+
+    public function test_return_label_requires_configured_return_address(): void
+    {
+        $returnCase = $this->createReturnCase();
+        $account = $this->createAccount(withReturnAddress: false);
+
+        $this->post(route('returns.shipping-label.create', $returnCase), [
+            'courier_account_id' => $account->id,
+        ])->assertRedirect()->assertSessionHas('error');
+
+        $this->assertSame(0, ShippingLabel::query()->count());
+    }
+
+    public function test_return_address_can_be_saved_on_courier_account(): void
+    {
+        $account = $this->createAccount();
+
+        $this->put(route('settings.shipping.accounts.update', $account), [
+            'name' => $account->name,
+            'organization_id' => $account->organization_id,
+            'default_parcel_template' => 'small',
+            'sending_method' => 'dispatch_order',
+            'is_default' => 1,
+            'is_active' => 1,
+            'return_name' => 'Sempre Magazyn',
+            'return_phone' => '48123456789',
+            'return_email' => 'magazyn@sempre.test',
+            'return_target_point' => 'kra010',
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $returnConfig = data_get($account->fresh()->metadata, 'return');
+
+        $this->assertSame('Sempre Magazyn', $returnConfig['name']);
+        $this->assertSame('KRA010', $returnConfig['target_point']);
+    }
+
+    private function createOrder(): ExternalOrder
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '801',
+            'external_number' => '801',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 150,
+            'billing_data' => [
+                'first_name' => 'Jan',
+                'last_name' => 'Klient',
+                'email' => 'jan@example.test',
+                'phone' => '+48111222333',
+                'address_1' => 'ul. Prosta 1',
+                'postcode' => '00-001',
+                'city' => 'Warszawa',
+                'country' => 'PL',
+            ],
+            'shipping_data' => [
+                'first_name' => 'Jan',
+                'last_name' => 'Klient',
+                'address_1' => 'ul. Krzywa 2',
+                'postcode' => '30-002',
+                'city' => 'Kraków',
+                'country' => 'PL',
+            ],
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-LBL',
+            'name' => 'Sukienka Etykieta',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => '31',
+            'sku' => 'SKU-LBL',
+            'name' => 'Sukienka Etykieta',
+            'quantity' => 1,
+            'unit_gross_price' => 150,
+        ]);
+
+        return $order;
+    }
+
+    private function createReturnCase(): ReturnCase
+    {
+        Warehouse::query()->create([
+            'code' => 'RET',
+            'name' => 'Magazyn zwrotów',
+            'type' => 'returns',
+            'is_active' => true,
+        ]);
+
+        return ReturnCase::query()->create([
+            'number' => 'RET/2026/000009',
+            'status' => 'pending',
+            'customer_email' => 'jan@example.test',
+            'metadata' => ['source' => 'store_form', 'return_reference' => 'LLR-TEST-9'],
+        ]);
+    }
+
+    private function createAccount(bool $withReturnAddress = false): CourierAccount
+    {
+        $account = new CourierAccount([
+            'provider' => 'inpost',
+            'code' => 'glowne',
+            'name' => 'Konto główne',
+            'organization_id' => '111',
+            'default_parcel_template' => 'small',
+            'sending_method' => 'dispatch_order',
+            'is_default' => true,
+            'is_active' => true,
+            'metadata' => $withReturnAddress ? [
+                'return' => [
+                    'name' => 'Sempre Magazyn',
+                    'phone' => '48123456789',
+                    'email' => 'magazyn@sempre.test',
+                    'target_point' => 'KRA010',
+                ],
+            ] : null,
+        ]);
+        $account->setApiToken('token-main');
+        $account->save();
+
+        return $account;
+    }
+}

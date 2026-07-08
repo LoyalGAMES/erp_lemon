@@ -38,6 +38,8 @@
         .order-grid { display: grid; grid-template-columns: minmax(320px, .9fr) minmax(0, 1.4fr); gap: 16px; margin-bottom: 16px; }
         .order-section { margin-bottom: 16px; }
         .order-section-body { padding: 16px; }
+        .order-label-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+        .order-label-form select { min-height: 44px; min-width: 260px; }
         .address-grid { display: grid; gap: 14px; }
         .address-box { border: 1px solid var(--border); border-radius: 8px; padding: 13px; }
         .address-box strong { display: block; margin-bottom: 6px; }
@@ -364,6 +366,19 @@
                 @empty
                     <span class="muted">Brak wygenerowanej etykiety kurierskiej.</span>
                 @endforelse
+
+                @if ($order->shippingLabels->where('status', 'generated')->isEmpty())
+                    <form class="order-label-form" method="POST" action="{{ route('orders.label.generate', $order) }}">
+                        @csrf
+                        <select name="courier_account_id" aria-label="Konto nadawcze">
+                            <option value="">Etykieta ze sklepu (WooCommerce)</option>
+                            @foreach ($courierAccounts as $courierAccount)
+                                <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default)>InPost: {{ $courierAccount->name }}</option>
+                            @endforeach
+                        </select>
+                        <button class="button" type="submit">Generuj przesyłkę</button>
+                    </form>
+                @endif
             </div>
         </article>
 

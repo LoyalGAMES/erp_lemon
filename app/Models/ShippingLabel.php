@@ -17,6 +17,7 @@ class ShippingLabel extends Model
         'external_order_id',
         'wordpress_integration_id',
         'courier_account_id',
+        'return_case_id',
         'status',
         'provider',
         'label_number',
@@ -49,6 +50,11 @@ class ShippingLabel extends Model
     public function integration(): BelongsTo
     {
         return $this->belongsTo(WordpressIntegration::class, 'wordpress_integration_id');
+    }
+
+    public function returnCase(): BelongsTo
+    {
+        return $this->belongsTo(ReturnCase::class);
     }
 
     public function filename(): string
