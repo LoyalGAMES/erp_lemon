@@ -196,6 +196,39 @@
         </div>
     </article>
 
+    @if (count($orderSegments) > 1)
+        <article class="card order-section shipping-decision-card">
+            <div class="panel-header">
+                <span>Wysyłka częściowa — obuwie i odzież</span>
+                <span>To zamówienie łączy obuwie z odzieżą</span>
+            </div>
+            <div class="order-section-body">
+                @if (is_array($shippingDecision))
+                    <p class="shipping-decision-current">
+                        Decyzja: <strong>{{ ($shippingDecision['decision'] ?? '') === 'ship_footwear_now' ? 'Wyślij buty od razu' : 'Czekaj na resztę zamówienia' }}</strong>
+                        <span class="muted">
+                            ({{ $shippingDecision['decided_by'] ?? 'ERP' }}, {{ \Illuminate\Support\Carbon::parse($shippingDecision['decided_at'] ?? now())->format('Y-m-d H:i') }})
+                        </span>
+                    </p>
+                @else
+                    <p class="muted" style="margin-top: 0;">Zdecyduj, czy buty mają jechać do klienta osobno, nie czekając na skompletowanie odzieży. Wydzielone buty trafią do osobnego zamówienia z własną kompletacją, pakowaniem i etykietą.</p>
+                @endif
+                <div class="inline-actions">
+                    <form method="POST" action="{{ route('orders.shipping-decision', $order) }}" onsubmit="return confirm('Wydzielić buty do osobnego zamówienia i wysłać od razu?');">
+                        @csrf
+                        <input type="hidden" name="decision" value="ship_footwear_now">
+                        <button class="button" type="submit">Wyślij buty od razu</button>
+                    </form>
+                    <form method="POST" action="{{ route('orders.shipping-decision', $order) }}">
+                        @csrf
+                        <input type="hidden" name="decision" value="wait_for_all">
+                        <button class="button secondary" type="submit">Czekaj na resztę zamówienia</button>
+                    </form>
+                </div>
+            </div>
+        </article>
+    @endif
+
     <article class="card order-section">
         <div class="panel-header">
             <span>Podziel zamówienie</span>

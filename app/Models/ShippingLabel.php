@@ -16,6 +16,7 @@ class ShippingLabel extends Model
         'sales_channel_id',
         'external_order_id',
         'wordpress_integration_id',
+        'courier_account_id',
         'status',
         'provider',
         'label_number',

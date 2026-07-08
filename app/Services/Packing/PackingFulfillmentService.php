@@ -204,6 +204,66 @@ final class PackingFulfillmentService
     }
 
     /**
+     * Oznacza pojedyncze zamówienie jako odebrane przez kuriera — używane przez
+     * automatyczne śledzenie przesyłek. Zwraca liczbę zaktualizowanych pozycji.
+     *
+     * @param array<string, mixed> $context np. tracking_number, tracking_status, source
+     * @return array{tasks:int,warnings:list<string>}
+     */
+    public function markOrderPickedUpByCourier(ExternalOrder $order, array $context = []): array
+    {
+        $tasks = PackingTask::query()
+            ->where('external_order_id', $order->id)
+            ->where('status', 'packed')
+            ->get();
+
+        if ($tasks->isEmpty()) {
+            return ['tasks' => 0, 'warnings' => []];
+        }
+
+        $warnings = [];
+
+        try {
+            $this->orderStatuses->markShipped($order);
+        } catch (Throwable $exception) {
+            $warnings[] = "Status WooCommerce {$order->external_number}: {$exception->getMessage()}";
+        }
+
+        if ($this->automationSettings->actionEnabled('packing.courier.picked_up', 'order.invoice.create_upload')) {
+            try {
+                $invoice = $this->invoices->createForOrder($order);
+                if (data_get($invoice->metadata, 'woocommerce_upload.status') !== 'success') {
+                    $this->invoiceUpload->upload($invoice);
+                }
+            } catch (Throwable $exception) {
+                $warnings[] = "Faktura {$order->external_number}: {$exception->getMessage()}";
+            }
+        }
+
+        foreach ($tasks as $task) {
+            $metadata = (array) $task->metadata;
+            $metadata['courier_pickup'] = array_merge([
+                'courier' => $task->courier,
+                'picked_up_at' => now()->toISOString(),
+                'source' => 'tracking',
+            ], $context);
+
+            $task->update([
+                'status' => 'shipped',
+                'metadata' => $metadata,
+            ]);
+        }
+
+        $this->audit->record('packing.courier_picked_up_tracked', $order, null, [
+            'tasks' => $tasks->count(),
+            'context' => $context,
+            'warnings' => $warnings,
+        ]);
+
+        return ['tasks' => $tasks->count(), 'warnings' => $warnings];
+    }
+
+    /**
      * @return array{tasks:int,woo_status:?string,warnings:list<string>}
      */
     public function undoPackedOrder(ExternalOrder $order, ?string $reason = null): array

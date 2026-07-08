@@ -35,6 +35,10 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::put('/settings/locations', [SettingsController::class, 'updateLocations'])->name('settings.locations.update');
         Route::put('/settings/document-automation', [SettingsController::class, 'updateDocumentAutomation'])->name('settings.document_automation.update');
         Route::put('/settings/returns', [SettingsController::class, 'updateReturns'])->name('settings.returns.update');
+        Route::get('/settings/shipping', [SettingsController::class, 'shipping'])->name('settings.shipping');
+        Route::post('/settings/shipping/accounts', [SettingsController::class, 'storeCourierAccount'])->name('settings.shipping.accounts.store');
+        Route::put('/settings/shipping/accounts/{account}', [SettingsController::class, 'updateCourierAccount'])->name('settings.shipping.accounts.update');
+        Route::delete('/settings/shipping/accounts/{account}', [SettingsController::class, 'destroyCourierAccount'])->name('settings.shipping.accounts.destroy');
     });
     Route::middleware(EnsureErpRole::class.':users')->group(function (): void {
         Route::get('/settings/users', [UserController::class, 'index'])->name('settings.users');
@@ -103,6 +107,8 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
     Route::middleware(EnsureErpRole::class.':packing')->group(function (): void {
         Route::get('/packing', [PackingController::class, 'index'])->name('packing.index');
         Route::post('/packing/mode', [PackingController::class, 'mode'])->name('packing.mode');
+        Route::post('/packing/station', [PackingController::class, 'station'])->name('packing.station');
+        Route::post('/packing/stations', [PackingController::class, 'updateStations'])->name('packing.stations.update');
         Route::post('/packing/scan', [PackingController::class, 'scan'])->name('packing.scan');
         Route::post('/packing/groups/pick', [PackingController::class, 'pick'])->name('packing.groups.pick');
         Route::post('/packing/groups/problem', [PackingController::class, 'problem'])->name('packing.groups.problem');
@@ -173,6 +179,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
     Route::middleware(EnsureErpRole::class.':orders')->group(function (): void {
         Route::get('/orders/{order}', [ExternalOrderController::class, 'show'])->name('orders.show');
         Route::post('/orders/{order}/split', [ExternalOrderController::class, 'split'])->name('orders.split');
+        Route::post('/orders/{order}/shipping-decision', [ExternalOrderController::class, 'shippingDecision'])->name('orders.shipping-decision');
         Route::post('/orders/{order}/wz', [ExternalOrderFulfillmentController::class, 'createWz'])
             ->name('orders.wz.create');
 

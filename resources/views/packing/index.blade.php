@@ -50,6 +50,23 @@
         .collect-actions .button { width: 100%; min-height: 64px; font-size: 19px; border-radius: 8px; }
         .button.danger { background: #ffecec; color: var(--red); border: 1px solid #f0c3c3; }
         .packing-empty { padding: 18px 16px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+        .segment-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
+        .segment-tab { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; font-weight: 760; color: var(--muted); text-decoration: none; background: var(--surface); }
+        .segment-tab.active { border-color: var(--brand); color: var(--brand-dark); background: var(--brand-soft); }
+        .segment-tab-count { display: inline-flex; align-items: center; justify-content: center; min-width: 21px; min-height: 21px; border-radius: 999px; padding: 0 6px; background: rgba(134, 115, 100, .16); font-size: 12px; }
+        .station-chip { margin-left: auto; display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 8px 13px; background: #fffdfb; font-weight: 740; color: var(--green-dark); }
+        .pick-badge.segment-footwear { background: #fff0e8; color: var(--orange); }
+        .pick-badge.segment-clothing { background: var(--brand-soft); color: var(--brand-dark); }
+        .station-config summary { cursor: pointer; font-weight: 760; color: var(--green-dark); }
+        .station-config-form { display: grid; gap: 12px; margin-top: 12px; }
+        .station-config-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fffdfb; }
+        .label-account-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
+        .label-account-form select { min-height: 42px; }
+        .label-account-form .button { min-height: 42px; }
+        @media (max-width: 760px) {
+            .station-config-row { grid-template-columns: 1fr; }
+            .station-chip { margin-left: 0; }
+        }
         .history-panel { margin-top: 16px; }
         .history-list { display: grid; gap: 8px; padding: 12px; }
         .history-card { padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; box-shadow: none; }
@@ -160,7 +177,16 @@
             'packed' => 'Spakowane',
             'shipped' => 'Wysłane',
         ];
+        $segmentLabels = [
+            'all' => 'Wszystko',
+            'clothing' => 'Odzież',
+            'footwear' => 'Obuwie',
+        ];
         $waitingCourierOrders = $waitingCourierGroups->sum('orders_count');
+        $segmentQuery = fn (string $segment): array => array_filter([
+            'view' => $packingView,
+            'segment' => $segment,
+        ]);
     @endphp
 
     @if ($packingView === 'home')
@@ -189,6 +215,58 @@
                         </form>
                     @endforeach
                 </div>
+
+                <div class="mode-copy">
+                    <strong>Twoje stanowisko pakowania</strong>
+                    Stanowisko ustawia domyślny widok kompletacji i pakowania oraz drukarkę etykiet.
+                </div>
+                <div class="mode-actions" aria-label="Stanowisko pakowania">
+                    @foreach ($packingStations as $stationOption)
+                        <form method="POST" action="{{ route('packing.station') }}">
+                            @csrf
+                            <input type="hidden" name="station" value="{{ $stationOption['code'] }}">
+                            <button @class(['mode-button', 'active' => ($activeStation['code'] ?? null) === $stationOption['code']]) type="submit">
+                                {{ $stationOption['name'] }} · {{ $segmentLabels[$stationOption['segment']] ?? $stationOption['segment'] }}
+                                @if ($stationOption['printer_name'] !== '')
+                                    · {{ $stationOption['printer_name'] }}
+                                @endif
+                            </button>
+                        </form>
+                    @endforeach
+                    <form method="POST" action="{{ route('packing.station') }}">
+                        @csrf
+                        <button @class(['mode-button', 'active' => $activeStation === null]) type="submit">Bez stanowiska (wszystkie produkty)</button>
+                    </form>
+                </div>
+
+                <details class="station-config">
+                    <summary>Konfiguracja stanowisk i podziału asortymentu</summary>
+                    <form class="station-config-form" method="POST" action="{{ route('packing.stations.update') }}">
+                        @csrf
+                        @foreach ($packingStations as $index => $stationOption)
+                            <div class="station-config-row">
+                                <input type="hidden" name="stations[{{ $index }}][code]" value="{{ $stationOption['code'] }}">
+                                <label>Nazwa
+                                    <input name="stations[{{ $index }}][name]" value="{{ $stationOption['name'] }}" maxlength="80" required>
+                                </label>
+                                <label>Drukarka etykiet
+                                    <input name="stations[{{ $index }}][printer_name]" value="{{ $stationOption['printer_name'] }}" maxlength="120" placeholder="np. Zebra ZD421 — stanowisko 1">
+                                </label>
+                                <label>Asortyment
+                                    <select name="stations[{{ $index }}][segment]">
+                                        @foreach ($segmentLabels as $segmentValue => $segmentLabel)
+                                            <option value="{{ $segmentValue }}" @selected($stationOption['segment'] === $segmentValue)>{{ $segmentLabel }}</option>
+                                        @endforeach
+                                    </select>
+                                </label>
+                            </div>
+                        @endforeach
+                        <label>Słowa kluczowe obuwia (kategorie/nazwy produktów, po przecinku lub w liniach)
+                            <textarea name="footwear_keywords" rows="3">{{ implode(', ', $footwearKeywords) }}</textarea>
+                        </label>
+                        <button class="button" type="submit">Zapisz stanowiska</button>
+                    </form>
+                </details>
             </div>
         </aside>
 
@@ -232,6 +310,22 @@
         </div>
     @endif
 
+    @if (in_array($packingView, ['collect', 'pack'], true))
+        <nav class="segment-tabs" aria-label="Podział asortymentu">
+            @foreach ($segmentLabels as $segmentValue => $segmentLabel)
+                <a @class(['segment-tab', 'active' => $activeSegment === $segmentValue]) href="{{ route('packing.index', $segmentQuery($segmentValue)) }}">
+                    {{ $segmentLabel }}
+                    @if ($packingView === 'collect')
+                        <span class="segment-tab-count">{{ $segmentCounts[$segmentValue] ?? 0 }}</span>
+                    @endif
+                </a>
+            @endforeach
+            @if ($activeStation !== null)
+                <span class="station-chip">{{ $activeStation['name'] }}@if ($activeStation['printer_name'] !== '') · {{ $activeStation['printer_name'] }}@endif</span>
+            @endif
+        </nav>
+    @endif
+
     @if ($packingView === 'collect')
         <div class="collection-workspace">
             <div class="queue-list">
@@ -256,6 +350,7 @@
                             <div class="qty-pill">{{ $qty($group['quantity']) }} szt.</div>
                         </div>
                         <div class="pick-badges">
+                            <span class="pick-badge segment-{{ $group['segment'] }}">{{ $segmentLabels[$group['segment']] ?? $group['segment'] }}</span>
                             <span class="pick-badge">Lok. {{ $group['location'] ?: '-' }}</span>
                             <span class="pick-badge">{{ $group['courier'] }}</span>
                             <span class="pick-badge">{{ $group['orders_count'] }} zam.</span>
@@ -339,6 +434,12 @@
                                 <div class="order-meta">{{ $order->salesChannel?->code ?? '-' }} · {{ $firstTask?->customer_name ?: '-' }}</div>
                             </div>
                             <div class="order-badges">
+                                @php $orderSegments = $order->packing_segments ?? []; @endphp
+                                @if (count($orderSegments) > 1)
+                                    <span class="status orange">Mieszane</span>
+                                @elseif ($orderSegments !== [])
+                                    <span class="status">{{ $segmentLabels[$orderSegments[0]] ?? $orderSegments[0] }}</span>
+                                @endif
                                 <span class="status blue">{{ $firstTask?->courier ?: 'Kurier' }}</span>
                                 <span class="status">{{ $tasksForOrder->count() }} poz.</span>
                             </div>
@@ -391,6 +492,17 @@
                         <div class="order-actions">
                             @if ($shippingLabel)
                                 <a class="button secondary" href="{{ route('packing.labels.download', $shippingLabel) }}">Pobierz etykietę</a>
+                            @elseif ($courierAccounts->isNotEmpty())
+                                <form class="label-account-form" method="POST" action="{{ route('packing.orders.label', $order) }}">
+                                    @csrf
+                                    <select name="courier_account_id" aria-label="Konto nadawcze InPost">
+                                        <option value="">Etykieta ze sklepu</option>
+                                        @foreach ($courierAccounts as $courierAccount)
+                                            <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default)>InPost: {{ $courierAccount->name }}</option>
+                                        @endforeach
+                                    </select>
+                                    <button class="button secondary" type="submit">Etykieta</button>
+                                </form>
                             @else
                                 <span class="button secondary" aria-disabled="true">Etykieta automatycznie</span>
                             @endif

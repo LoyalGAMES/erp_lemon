@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Shipping;
 
+use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\IntegrationSyncLog;
 use App\Models\ShippingLabel;
@@ -18,12 +19,17 @@ final class ShippingLabelService
 {
     public function __construct(
         private readonly WooCommerceClient $client,
+        private readonly InPostShipmentService $inpost,
         private readonly AuditLogService $audit,
     ) {
     }
 
-    public function generateForOrder(ExternalOrder $order): ShippingLabel
+    public function generateForOrder(ExternalOrder $order, ?CourierAccount $courierAccount = null): ShippingLabel
     {
+        if ($courierAccount instanceof CourierAccount) {
+            return $this->generateViaInPost($order, $courierAccount);
+        }
+
         $order = ExternalOrder::query()
             ->with('salesChannel')
             ->findOrFail($order->id);
@@ -85,6 +91,65 @@ final class ShippingLabelService
             $this->audit->record('shipping_label.failed', $order, null, null, [
                 'sales_channel' => $order->salesChannel?->code,
                 'integration_id' => $integration->id,
+                'error' => $exception->getMessage(),
+            ]);
+
+            throw new RuntimeException($exception->getMessage(), previous: $exception);
+        }
+    }
+
+    private function generateViaInPost(ExternalOrder $order, CourierAccount $account): ShippingLabel
+    {
+        $order = ExternalOrder::query()
+            ->with('salesChannel')
+            ->findOrFail($order->id);
+
+        try {
+            $labelData = $this->inpost->createShipmentWithLabel($order, $account);
+
+            $contents = $labelData['contents'];
+            $filename = 'inpost-' . ($order->external_number ?: $order->external_id ?: $order->id);
+            $filename = preg_replace('/[^A-Za-z0-9._-]+/', '-', $filename) . '-' . now()->format('YmdHis') . '.pdf';
+            $path = 'shipping-labels/' . now()->format('Y/m') . '/' . $filename;
+
+            Storage::disk('local')->put($path, $contents);
+
+            $label = ShippingLabel::query()->create([
+                'sales_channel_id' => $order->sales_channel_id,
+                'external_order_id' => $order->id,
+                'courier_account_id' => $account->id,
+                'status' => 'generated',
+                'provider' => 'inpost',
+                'label_number' => $labelData['shipment_id'],
+                'tracking_number' => $labelData['tracking_number'],
+                'disk' => 'local',
+                'path' => $path,
+                'mime_type' => $labelData['mime_type'],
+                'size' => strlen($contents),
+                'sha256' => hash('sha256', $contents),
+                'response_payload' => [
+                    'courier_account' => $account->code,
+                    'shipment' => $labelData['response_payload'],
+                ],
+                'generated_at' => now(),
+            ]);
+
+            $this->audit->record('shipping_label.generated', $label, null, [
+                'order_number' => $order->external_number,
+                'label_id' => $label->id,
+                'tracking_number' => $label->tracking_number,
+                'provider' => 'inpost',
+                'courier_account' => $account->code,
+            ], [
+                'sales_channel' => $order->salesChannel?->code,
+            ]);
+
+            return $label;
+        } catch (Throwable $exception) {
+            $this->audit->record('shipping_label.failed', $order, null, null, [
+                'sales_channel' => $order->salesChannel?->code,
+                'provider' => 'inpost',
+                'courier_account' => $account->code,
                 'error' => $exception->getMessage(),
             ]);
 

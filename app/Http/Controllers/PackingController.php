@@ -4,11 +4,14 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\PackingTask;
 use App\Models\ShippingLabel;
 use App\Services\Packing\PackingFulfillmentService;
+use App\Services\Packing\PackingSettingsService;
 use App\Services\Packing\PackingTaskService;
+use App\Services\Packing\ProductSegmentService;
 use App\Services\Shipping\ShippingLabelService;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Carbon;
@@ -21,10 +24,16 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class PackingController extends Controller
 {
-    public function index(Request $request, PackingTaskService $packing): View
-    {
+    public function index(
+        Request $request,
+        PackingTaskService $packing,
+        PackingSettingsService $settings,
+        ProductSegmentService $segments,
+    ): View {
         $sync = $packing->syncReadyOrders();
         $mode = (string) session('packing_mode', 'hybrid');
+        $packingSettings = $settings->data();
+        $activeStation = $settings->station((string) session('packing_station', ''));
         $requestedView = (string) $request->query('view', 'home');
         $availableViews = ['home', 'collect', 'pack', 'history'];
 
@@ -72,13 +81,42 @@ class PackingController extends Controller
             ->orderBy('packed_at')
             ->get();
 
+        $requestedSegment = (string) $request->query('segment', '');
+        $activeSegment = in_array($requestedSegment, ['all', ProductSegmentService::SEGMENT_CLOTHING, ProductSegmentService::SEGMENT_FOOTWEAR], true)
+            ? $requestedSegment
+            : ($activeStation['segment'] ?? 'all');
+
+        $pickGroups = $this->pickGroups($tasks->where('status', 'open')->values(), $segments);
+        $readyOrders = $this->readyOrders($tasks, $segments);
+
         return view('packing.index', [
             'sync' => $sync,
             'tasks' => $tasks,
             'openTasks' => $tasks->where('status', 'open')->values(),
             'pickedTasks' => $tasks->where('status', 'picked')->values(),
-            'pickGroups' => $this->pickGroups($tasks->where('status', 'open')->values()),
-            'readyOrders' => $this->readyOrders($tasks),
+            'pickGroups' => $activeSegment === 'all'
+                ? $pickGroups
+                : $pickGroups->where('segment', $activeSegment)->values(),
+            'segmentCounts' => [
+                'all' => $pickGroups->count(),
+                ProductSegmentService::SEGMENT_CLOTHING => $pickGroups->where('segment', ProductSegmentService::SEGMENT_CLOTHING)->count(),
+                ProductSegmentService::SEGMENT_FOOTWEAR => $pickGroups->where('segment', ProductSegmentService::SEGMENT_FOOTWEAR)->count(),
+            ],
+            'activeSegment' => $activeSegment,
+            'packingStations' => $packingSettings['stations'],
+            'activeStation' => $activeStation,
+            'footwearKeywords' => $packingSettings['footwear_keywords'],
+            'courierAccounts' => CourierAccount::query()
+                ->where('provider', 'inpost')
+                ->where('is_active', true)
+                ->orderByDesc('is_default')
+                ->orderBy('name')
+                ->get(),
+            'readyOrders' => $activeSegment === 'all'
+                ? $readyOrders
+                : $readyOrders
+                    ->filter(fn (ExternalOrder $order): bool => in_array($activeSegment, $order->packing_segments ?? [], true))
+                    ->values(),
             'problemTasks' => $problemTasks,
             'recentPickedTasks' => $recentPickedTasks,
             'waitingCourierGroups' => $this->waitingCourierGroups($waitingCourierTasks),
@@ -108,6 +146,55 @@ class PackingController extends Controller
             'scanner' => 'Tryb pakowania ustawiony na skaner.',
             default => 'Tryb pakowania ustawiony na hybrydowy.',
         });
+    }
+
+    public function station(Request $request, PackingSettingsService $settings): RedirectResponse
+    {
+        $data = $request->validate([
+            'station' => ['nullable', 'string', 'max:40'],
+        ]);
+
+        $station = $settings->station($data['station'] ?? null);
+
+        if ($station === null) {
+            session()->forget('packing_station');
+
+            return back()->with('status', 'Praca bez przypisanego stanowiska pakowania.');
+        }
+
+        session(['packing_station' => $station['code']]);
+
+        $printer = $station['printer_name'] !== '' ? " Etykiety: {$station['printer_name']}." : '';
+
+        return back()->with('status', "Pracujesz na: {$station['name']} ({$this->segmentLabel($station['segment'])}).{$printer}");
+    }
+
+    public function updateStations(Request $request, PackingSettingsService $settings): RedirectResponse
+    {
+        $data = $request->validate([
+            'stations' => ['required', 'array', 'min:1', 'max:6'],
+            'stations.*.code' => ['nullable', 'string', 'max:40'],
+            'stations.*.name' => ['nullable', 'string', 'max:80'],
+            'stations.*.printer_name' => ['nullable', 'string', 'max:120'],
+            'stations.*.segment' => ['nullable', 'string', 'in:all,clothing,footwear'],
+            'footwear_keywords' => ['nullable', 'string', 'max:2000'],
+        ]);
+
+        $settings->update([
+            'stations' => $data['stations'],
+            'footwear_keywords' => $data['footwear_keywords'] ?? null,
+        ]);
+
+        return back()->with('status', 'Ustawienia stanowisk pakowania zostały zapisane.');
+    }
+
+    private function segmentLabel(string $segment): string
+    {
+        return match ($segment) {
+            ProductSegmentService::SEGMENT_CLOTHING => 'Odzież',
+            ProductSegmentService::SEGMENT_FOOTWEAR => 'Obuwie',
+            default => 'Wszystkie produkty',
+        };
     }
 
     public function scan(Request $request, PackingTaskService $packing): RedirectResponse
@@ -264,15 +351,39 @@ class PackingController extends Controller
         return back()->with('status', "Przywrócono pozycję {$task->sku} do kolejki.");
     }
 
-    public function label(ExternalOrder $order, ShippingLabelService $shippingLabels): RedirectResponse
-    {
+    public function label(
+        Request $request,
+        ExternalOrder $order,
+        ShippingLabelService $shippingLabels,
+        PackingSettingsService $settings,
+    ): RedirectResponse {
+        $data = $request->validate([
+            'courier_account_id' => ['nullable', 'integer', 'exists:courier_accounts,id'],
+        ]);
+
+        $account = filled($data['courier_account_id'] ?? null)
+            ? CourierAccount::query()->where('is_active', true)->find((int) $data['courier_account_id'])
+            : null;
+
         try {
-            $label = $shippingLabels->generateForOrder($order);
+            $label = $shippingLabels->generateForOrder($order, $account);
         } catch (RuntimeException $exception) {
             return back()->with('error', 'Nie udało się wygenerować etykiety: ' . $exception->getMessage());
         }
 
-        return back()->with('status', "Etykieta dla zamówienia {$order->external_number} została pobrana do ERP: {$label->filename()}.");
+        $message = "Etykieta dla zamówienia {$order->external_number} została pobrana do ERP: {$label->filename()}.";
+
+        if ($account instanceof CourierAccount) {
+            $message .= " Konto nadawcze: {$account->name}.";
+        }
+
+        $station = $settings->station((string) session('packing_station', ''));
+
+        if ($station !== null && $station['printer_name'] !== '') {
+            $message .= " Drukuj na: {$station['printer_name']}.";
+        }
+
+        return back()->with('status', $message);
     }
 
     public function downloadLabel(ShippingLabel $label): StreamedResponse
@@ -290,7 +401,7 @@ class PackingController extends Controller
      * @param Collection<int, PackingTask> $openTasks
      * @return Collection<int, array<string, mixed>>
      */
-    private function pickGroups(Collection $openTasks): Collection
+    private function pickGroups(Collection $openTasks, ProductSegmentService $segments): Collection
     {
         return $openTasks
             ->groupBy(fn (PackingTask $task): string => implode('|', [
@@ -300,13 +411,14 @@ class PackingController extends Controller
                 (string) ($task->product_id ?: 0),
                 $task->product_name,
             ]))
-            ->map(function (Collection $group): array {
+            ->map(function (Collection $group) use ($segments): array {
                 /** @var PackingTask $first */
                 $first = $group->first();
                 $oldest = $group->sortBy('order_date')->first()?->order_date;
                 $location = $this->taskLocation($first);
 
                 return [
+                    'segment' => $segments->segmentForTask($first),
                     'product_name' => $first->product_name,
                     'sku' => $first->sku,
                     'courier' => $first->courier ?: 'Nieznany kurier',
@@ -353,13 +465,13 @@ class PackingController extends Controller
      * @param Collection<int, PackingTask> $tasks
      * @return Collection<int, ExternalOrder>
      */
-    private function readyOrders(Collection $tasks): Collection
+    private function readyOrders(Collection $tasks, ProductSegmentService $segments): Collection
     {
         return $tasks
             ->groupBy('external_order_id')
             ->filter(fn (Collection $group): bool => $group->where('status', 'open')->isEmpty()
                 && $group->where('status', 'picked')->isNotEmpty())
-            ->map(function (Collection $group): ?ExternalOrder {
+            ->map(function (Collection $group) use ($segments): ?ExternalOrder {
                 /** @var PackingTask|null $first */
                 $first = $group->first();
                 $order = $first?->order;
@@ -369,6 +481,11 @@ class PackingController extends Controller
                 }
 
                 $order->setRelation('packingTasks', $group->sortBy('product_name')->values());
+                $order->packing_segments = $group
+                    ->map(fn (PackingTask $task): string => $segments->segmentForTask($task))
+                    ->unique()
+                    ->values()
+                    ->all();
 
                 return $order;
             })

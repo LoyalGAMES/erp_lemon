@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Models\CourierAccount;
 use App\Models\Warehouse;
 use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Inventory\WarehouseDocumentSettingsService;
 use App\Services\Returns\ReturnSettingsService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\View\View;
 
 class SettingsController extends Controller
@@ -37,6 +39,106 @@ class SettingsController extends Controller
             'documentAutomation' => $automationSettings->data(),
             'documentAutomationRules' => $automationSettings->rules(),
         ]);
+    }
+
+    public function shipping(): View
+    {
+        return view('settings.shipping', [
+            'title' => 'Ustawienia wysyłek',
+            'subtitle' => 'Konta kurierskie InPost do generowania etykiet. Każde konto ma własny token API i organizację nadawczą.',
+            'module' => 'settings',
+            'accounts' => CourierAccount::query()
+                ->where('provider', 'inpost')
+                ->orderByDesc('is_default')
+                ->orderBy('name')
+                ->get(),
+        ]);
+    }
+
+    public function storeCourierAccount(Request $request): RedirectResponse
+    {
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:120'],
+            'code' => ['required', 'string', 'max:40', 'regex:/^[A-Za-z0-9_-]+$/'],
+            'organization_id' => ['required', 'string', 'max:40'],
+            'api_token' => ['required', 'string', 'max:2000'],
+            'default_parcel_template' => ['required', 'string', 'in:small,medium,large'],
+            'sending_method' => ['required', 'string', 'in:dispatch_order,parcel_locker,pok,branch'],
+            'is_default' => ['nullable', 'boolean'],
+        ]);
+
+        DB::transaction(function () use ($validated): void {
+            $account = new CourierAccount([
+                'provider' => 'inpost',
+                'code' => mb_strtolower($validated['code']),
+                'name' => $validated['name'],
+                'organization_id' => $validated['organization_id'],
+                'default_parcel_template' => $validated['default_parcel_template'],
+                'sending_method' => $validated['sending_method'],
+                'is_default' => (bool) ($validated['is_default'] ?? false),
+                'is_active' => true,
+            ]);
+            $account->setApiToken($validated['api_token']);
+            $account->save();
+
+            if ($account->is_default) {
+                $this->demoteOtherDefaults($account);
+            }
+        });
+
+        return back()->with('status', "Konto kurierskie {$validated['name']} zostało dodane.");
+    }
+
+    public function updateCourierAccount(Request $request, CourierAccount $account): RedirectResponse
+    {
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:120'],
+            'organization_id' => ['required', 'string', 'max:40'],
+            'api_token' => ['nullable', 'string', 'max:2000'],
+            'default_parcel_template' => ['required', 'string', 'in:small,medium,large'],
+            'sending_method' => ['required', 'string', 'in:dispatch_order,parcel_locker,pok,branch'],
+            'is_default' => ['nullable', 'boolean'],
+            'is_active' => ['nullable', 'boolean'],
+        ]);
+
+        DB::transaction(function () use ($account, $validated): void {
+            $account->fill([
+                'name' => $validated['name'],
+                'organization_id' => $validated['organization_id'],
+                'default_parcel_template' => $validated['default_parcel_template'],
+                'sending_method' => $validated['sending_method'],
+                'is_default' => (bool) ($validated['is_default'] ?? false),
+                'is_active' => (bool) ($validated['is_active'] ?? false),
+            ]);
+
+            if (filled($validated['api_token'] ?? null)) {
+                $account->setApiToken($validated['api_token']);
+            }
+
+            $account->save();
+
+            if ($account->is_default) {
+                $this->demoteOtherDefaults($account);
+            }
+        });
+
+        return back()->with('status', "Konto kurierskie {$account->name} zostało zaktualizowane.");
+    }
+
+    public function destroyCourierAccount(CourierAccount $account): RedirectResponse
+    {
+        $name = $account->name;
+        $account->delete();
+
+        return back()->with('status', "Konto kurierskie {$name} zostało usunięte. Wystawione etykiety pozostają w historii.");
+    }
+
+    private function demoteOtherDefaults(CourierAccount $account): void
+    {
+        CourierAccount::query()
+            ->where('provider', $account->provider)
+            ->whereKeyNot($account->id)
+            ->update(['is_default' => false]);
     }
 
     public function returns(ReturnSettingsService $returnSettings): View

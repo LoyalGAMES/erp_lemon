@@ -159,6 +159,24 @@ Artisan::command('erp:refresh-invoice-template {--regenerate : Regenerate HTML/P
     return 0;
 })->purpose('Refresh the managed Sempre invoice template and optionally regenerate invoice files.');
 
+Artisan::command('erp:track-courier-pickups {--limit=50 : Maximum number of shipments to check}', function (): int {
+    $limit = max(1, (int) $this->option('limit'));
+    $result = app(\App\Services\Shipping\CourierPickupTrackingService::class)->trackPackedOrders($limit);
+
+    $this->info(sprintf(
+        'Courier pickup tracking: checked %d, picked up %d, orders shipped %d.',
+        $result['checked'],
+        $result['picked_up'],
+        $result['orders'],
+    ));
+
+    foreach ($result['warnings'] as $warning) {
+        $this->warn($warning);
+    }
+
+    return 0;
+})->purpose('Check courier tracking for packed orders and mark physically picked up parcels as shipped.');
+
 Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation check}', function (): int {
     $failures = 0;
     $runCheck = function (string $label, callable $callback) use (&$failures): void {
@@ -282,5 +300,10 @@ Schedule::command('erp:dispatch-stock-sync --limit=100 --release-minutes=30')
 
 Schedule::command('erp:refresh-ksef-submissions --limit=25 --minutes=2')
     ->cron('*/10 * * * *')
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:track-courier-pickups --limit=50')
+    ->cron('*/15 * * * *')
     ->withoutOverlapping(10)
     ->runInBackground();
