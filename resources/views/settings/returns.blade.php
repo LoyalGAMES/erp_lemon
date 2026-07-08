@@ -7,6 +7,8 @@
         $settingDispositions = old('dispositions', $returnSettings['dispositions'] ?? []);
         $defaultCondition = old('default_condition', $returnSettings['default_condition'] ?? 'unchecked');
         $defaultDisposition = old('default_disposition', $returnSettings['default_disposition'] ?? 'restock');
+        $storeApiConfigured = filled(old('store_api_token', $returnSettings['store_api_token'] ?? ''));
+        $storeWebhookConfigured = filled(old('store_webhook_secret', $returnSettings['store_webhook_secret'] ?? ''));
     @endphp
 
     <div class="page-toolbar">
@@ -132,12 +134,31 @@
             <section class="settings-section">
                 <h2>Formularz zwrotów w sklepie (wtyczka lemon-woo-returns)</h2>
                 <p class="muted">Token API uwierzytelnia zgłoszenia przychodzące ze sklepu. Sekret webhooka pozwala ERP natychmiast powiadomić sklep o zatwierdzeniu zwrotu — wpisz te same wartości w ustawieniach wtyczki (WooCommerce → Ustawienia zwrotów).</p>
-                <div class="settings-fields">
+                <div @class(['integration-status', 'ready' => $storeApiConfigured, 'warning' => ! $storeApiConfigured])>
+                    <strong>{{ $storeApiConfigured ? 'API formularza zwrotów aktywne' : 'API formularza zwrotów nieaktywne' }}</strong>
+                    <span>
+                        @if ($storeApiConfigured)
+                            ERP przyjmie zgłoszenia ze sklepu, jeśli dokładnie ten sam token jest zapisany we wtyczce WooCommerce.
+                        @else
+                            Brakuje tokena API. Zgłoszenia z formularza zwrotów w sklepie będą odrzucane statusem HTTP 403 i nie trafią do ERP.
+                        @endif
+                    </span>
+                    @unless ($storeWebhookConfigured)
+                        <span>Brakuje też sekretu webhooka, więc ERP nie wyśle automatycznie statusu zwrotu z powrotem do sklepu.</span>
+                    @endunless
+                </div>
+                <div class="settings-fields store-integration-fields">
                     <label>Token API (Bearer / X-API-Key)
-                        <input name="store_api_token" value="{{ old('store_api_token', $returnSettings['store_api_token']) }}" maxlength="120" autocomplete="off" spellcheck="false">
+                        <span class="token-field">
+                            <input name="store_api_token" value="{{ old('store_api_token', $returnSettings['store_api_token']) }}" maxlength="120" autocomplete="off" spellcheck="false">
+                            <button class="button secondary" type="button" data-token-generate="store_api_token">Generuj token API</button>
+                        </span>
                     </label>
                     <label>Sekret webhooka (X-Lemon-Returns-Token)
-                        <input name="store_webhook_secret" value="{{ old('store_webhook_secret', $returnSettings['store_webhook_secret']) }}" maxlength="120" autocomplete="off" spellcheck="false">
+                        <span class="token-field">
+                            <input name="store_webhook_secret" value="{{ old('store_webhook_secret', $returnSettings['store_webhook_secret']) }}" maxlength="120" autocomplete="off" spellcheck="false">
+                            <button class="button secondary" type="button" data-token-generate="store_webhook_secret">Generuj sekret</button>
+                        </span>
                     </label>
                 </div>
                 <p class="muted">
@@ -196,23 +217,63 @@
         .settings-section { display: grid; gap: 10px; border-bottom: 1px solid var(--border); padding-bottom: 16px; }
         .settings-section h2 { margin: 0; font-size: 18px; }
         .settings-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+        .settings-fields.store-integration-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .settings-repeat { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
         .settings-option-list { display: grid; gap: 10px; }
         .settings-option-row { display: grid; grid-template-columns: minmax(160px, .7fr) minmax(220px, 1fr); gap: 12px; align-items: end; }
         .settings-option-row.disposition-row { grid-template-columns: minmax(140px, .55fr) minmax(200px, .85fr) minmax(260px, 1fr); }
+        .integration-status { display: grid; gap: 4px; border: 1px solid rgba(134, 115, 100, .28); border-radius: 8px; padding: 12px; background: #fffdfb; color: var(--muted); line-height: 1.45; }
+        .integration-status strong { color: var(--text); font-size: 15px; }
+        .integration-status.warning { border-color: rgba(216, 52, 52, .28); background: rgba(216, 52, 52, .07); color: #8f2525; }
+        .integration-status.warning strong { color: var(--red); }
+        .integration-status.ready { border-color: rgba(95, 80, 69, .30); background: var(--green-soft); color: var(--green-dark); }
+        .integration-status.ready strong { color: var(--green-dark); }
+        .token-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+        .token-field .button { min-height: 42px; white-space: nowrap; }
         .settings-form .button { width: fit-content; }
         @media (max-width: 900px) {
             .settings-fields,
+            .settings-fields.store-integration-fields,
             .settings-repeat,
             .settings-option-row,
-            .settings-option-row.disposition-row { grid-template-columns: 1fr; }
+            .settings-option-row.disposition-row,
+            .token-field { grid-template-columns: 1fr; }
         }
     </style>
 @endpush
 
 @push('scripts')
     <script>
+        function generateReturnToken(length = 48) {
+            const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789_-';
+            const values = new Uint32Array(length);
+
+            if (window.crypto?.getRandomValues) {
+                window.crypto.getRandomValues(values);
+            } else {
+                for (let index = 0; index < length; index += 1) {
+                    values[index] = Math.floor(Math.random() * chars.length);
+                }
+            }
+
+            return Array.from(values, (value) => chars[value % chars.length]).join('');
+        }
+
         document.addEventListener('click', (event) => {
+            const tokenButton = event.target.closest('[data-token-generate]');
+
+            if (tokenButton) {
+                const target = document.querySelector(`[name="${tokenButton.dataset.tokenGenerate}"]`);
+
+                if (target) {
+                    target.value = generateReturnToken();
+                    target.dispatchEvent(new Event('input', { bubbles: true }));
+                    target.focus();
+                }
+
+                return;
+            }
+
             const button = event.target.closest('[data-repeat-add]');
 
             if (!button) {

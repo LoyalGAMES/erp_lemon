@@ -495,6 +495,13 @@ class ReturnWorkflowTest extends TestCase
             'unit_gross_price' => 200,
         ]);
 
+        $this->get(route('settings.returns'))
+            ->assertOk()
+            ->assertSee('API formularza zwrotów nieaktywne')
+            ->assertSee('HTTP 403')
+            ->assertSee('Generuj token API')
+            ->assertSee('Generuj sekret');
+
         $this->put(route('settings.returns.update'), [
             'numbering_prefix' => 'RMA',
             'numbering_pattern' => '{PREFIX}/{MM}/{YYYY}/{SEQ}',
@@ -514,6 +521,8 @@ class ReturnWorkflowTest extends TestCase
                 ['code' => 'restock', 'label' => 'Przywróć na stan', 'warehouse_id' => null],
                 ['code' => 'inspection', 'label' => 'Do kontroli', 'warehouse_id' => $warehouse->id],
             ],
+            'store_api_token' => 'store-return-token-4870',
+            'store_webhook_secret' => 'store-return-webhook-4870',
         ])->assertRedirect()->assertSessionHas('status');
 
         $this->get(route('settings.index'))
@@ -530,6 +539,7 @@ class ReturnWorkflowTest extends TestCase
             ->assertSee('RMA - Zwroty po kontroli')
             ->assertSee('Dyspozycje i magazyny domyślne')
             ->assertSee('Przywróć na stan')
+            ->assertSee('API formularza zwrotów aktywne')
             ->assertSee('Przykład: RMA/'.now()->format('m/Y').'/0001');
 
         $this->get(route('returns.index'))
