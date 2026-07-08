@@ -9,13 +9,12 @@ use App\Models\StockBalance;
 use App\Models\StockReservation;
 use App\Models\WarehouseDocument;
 use App\Services\Orders\OrderFulfillmentStatusService;
+use App\Services\Orders\OrderStatusPolicyService;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 
 final class StockReservationService
 {
-    private const RESERVING_STATUSES = ['pending', 'processing', 'on-hold'];
-
     private const ACTIVE_STATUS = 'active';
 
     private const WAITING_STATUS = 'waiting';
@@ -26,6 +25,7 @@ final class StockReservationService
         private readonly SalesChannelWarehouseResolver $warehouseResolver,
         private readonly OrderFulfillmentStatusService $fulfillmentStatus,
         private readonly StockSyncQueueService $stockSyncQueue,
+        private readonly OrderStatusPolicyService $statusPolicy,
     ) {}
 
     /**
@@ -277,7 +277,7 @@ final class StockReservationService
 
     private function shouldReserve(string $status): bool
     {
-        return in_array($status, self::RESERVING_STATUSES, true);
+        return $this->statusPolicy->shouldReserve($status);
     }
 
     /**

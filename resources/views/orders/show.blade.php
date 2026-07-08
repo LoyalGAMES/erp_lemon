@@ -46,6 +46,20 @@
         .note-list { display: grid; gap: 10px; }
         .note-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }
         .note-card-header { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+        .customer-message-form { display: grid; gap: 10px; margin-bottom: 16px; }
+        .customer-message-form-actions { display: flex; justify-content: flex-end; }
+        .customer-message-history { display: grid; gap: 10px; }
+        .customer-message-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }
+        .customer-message-card header { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
+        .customer-message-card strong { display: block; }
+        .customer-message-meta { color: var(--muted); font-size: 12px; }
+        .customer-message-preview { margin-top: 7px; white-space: pre-wrap; }
+        .compact-form { display: grid; gap: 10px; }
+        .compact-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+        .payment-balance { font-size: 22px; font-weight: 780; }
+        .payment-history { display: grid; gap: 9px; margin-top: 14px; }
+        .payment-row { border-top: 1px solid var(--border); padding-top: 9px; display: flex; justify-content: space-between; gap: 12px; }
+        .payment-row strong { display: block; }
         .wrap-cell { white-space: normal; min-width: 220px; }
         .split-line-grid { display: grid; grid-template-columns: minmax(0, 1fr) 120px 160px; gap: 10px; align-items: end; padding: 10px 0; border-bottom: 1px solid var(--border); }
         .split-line-grid:last-of-type { border-bottom: 0; }
@@ -57,6 +71,7 @@
         @media (max-width: 560px) {
             .order-summary { grid-template-columns: 1fr; }
             .split-line-grid { grid-template-columns: 1fr; }
+            .compact-form-grid { grid-template-columns: 1fr; }
         }
     </style>
 @endpush
@@ -384,6 +399,164 @@
 
         <article class="card order-section">
             <div class="panel-header">
+                <span>Komunikacja z klientem</span>
+                <span>{{ $order->customerMessages->count() }} wiadomości</span>
+            </div>
+            <div class="order-section-body">
+                @php
+                    $orderEmailTemplates = $emailTemplates ?? collect();
+                    $orderTemplateContext = [
+                        'order_number' => $order->external_number ?: $order->external_id,
+                        'customer_name' => $person($order->billing_data),
+                        'customer_email' => data_get($order->billing_data, 'email', ''),
+                        'from_name' => config('mail.from.name', config('app.name', 'Sempre ERP')),
+                    ];
+                @endphp
+                <form class="customer-message-form" method="POST" action="{{ route('orders.message.send', $order) }}" data-email-template-form data-email-template-context="{{ e(json_encode($orderTemplateContext, JSON_UNESCAPED_UNICODE)) }}">
+                    @csrf
+                    @if ($orderEmailTemplates->isNotEmpty())
+                        <label>Szablon
+                            <select data-email-template-select>
+                                <option value="">Własna wiadomość</option>
+                                @foreach ($orderEmailTemplates as $template)
+                                    <option value="{{ $template->id }}" data-subject="{{ $template->subject }}" data-body="{{ $template->body }}">{{ $template->name }}</option>
+                                @endforeach
+                            </select>
+                        </label>
+                    @endif
+                    <label>Temat
+                        <input name="subject" maxlength="160" value="{{ old('subject') }}" placeholder="Np. Informacja o zamówieniu {{ $order->external_number }}" required>
+                    </label>
+                    <label>Wiadomość
+                        <textarea name="body" rows="5" maxlength="5000" required>{{ old('body') }}</textarea>
+                    </label>
+                    <div class="customer-message-form-actions">
+                        <button class="button" type="submit">Wyślij maila</button>
+                    </div>
+                </form>
+
+                <div class="customer-message-history">
+                    @forelse ($order->customerMessages->take(8) as $message)
+                        <article class="customer-message-card">
+                            <header>
+                                <div>
+                                    <strong>{{ $message->subject }}</strong>
+                                    <span class="customer-message-meta">
+                                        {{ $message->recipient_email }} · {{ $message->type === 'automated' ? 'automat' : 'ręcznie' }}{{ $message->trigger ? ' · '.$message->trigger : '' }}
+                                    </span>
+                                </div>
+                                <span @class(['status', 'blue' => $message->status === 'pending', 'red' => $message->status === 'failed', 'orange' => $message->status === 'skipped'])>{{ $message->status }}</span>
+                            </header>
+                            <div class="customer-message-meta">
+                                {{ $message->sent_at?->format('Y-m-d H:i') ?? $message->failed_at?->format('Y-m-d H:i') ?? $message->created_at?->format('Y-m-d H:i') }}
+                                @if ($message->error_message)
+                                    · {{ $message->error_message }}
+                                @endif
+                            </div>
+                            <div class="customer-message-preview">{{ \Illuminate\Support\Str::limit($message->body, 220) }}</div>
+                        </article>
+                    @empty
+                        <span class="muted">Brak wiadomości wysłanych do klienta tego zamówienia.</span>
+                    @endforelse
+                </div>
+            </div>
+        </article>
+    </section>
+
+    <section class="order-grid">
+        <article class="card order-section">
+            <div class="panel-header">
+                <span>Rozliczenia klienta</span>
+                @php
+                    $incomingPayments = (float) $order->customerPayments->where('direction', 'incoming')->sum(fn ($payment) => (float) $payment->amount);
+                    $outgoingPayments = (float) $order->customerPayments->where('direction', 'outgoing')->sum(fn ($payment) => (float) $payment->amount);
+                    $paymentBalance = $incomingPayments - $outgoingPayments;
+                @endphp
+                <span>{{ $money($paymentBalance, $order->currency) }}</span>
+            </div>
+            <div class="order-section-body">
+                <div class="payment-balance">{{ $money($paymentBalance, $order->currency) }}</div>
+                <div class="muted">Suma ręcznie zaksięgowanych dopłat pomniejszona o wypłaty/refundy zarejestrowane w ERP.</div>
+
+                <form class="compact-form" method="POST" action="{{ route('orders.payments.store', $order) }}" style="margin-top: 14px;">
+                    @csrf
+                    <div class="compact-form-grid">
+                        <label>Kwota
+                            <input name="amount" type="number" min="0.01" step="0.01" required>
+                        </label>
+                        <label>Metoda
+                            <select name="method" required>
+                                <option value="blik">BLIK</option>
+                                <option value="bank_transfer">Przelew</option>
+                                <option value="cash">Gotówka</option>
+                                <option value="card">Karta</option>
+                                <option value="payu">PayU</option>
+                                <option value="other">Inna</option>
+                            </select>
+                        </label>
+                        <label>Data księgowania
+                            <input name="booked_at" type="datetime-local">
+                        </label>
+                        <label>Referencja
+                            <input name="reference" maxlength="160" placeholder="np. BLIK, ID transakcji">
+                        </label>
+                    </div>
+                    <label>Opis
+                        <textarea name="description" rows="2" maxlength="1000" placeholder="np. dopłata BLIK za przesyłkę wymienną"></textarea>
+                    </label>
+                    <button class="button secondary" type="submit">Zaksięguj wpłatę</button>
+                </form>
+
+                <div class="payment-history">
+                    @forelse ($order->customerPayments->take(8) as $payment)
+                        <div class="payment-row">
+                            <div>
+                                <strong>{{ $payment->direction === 'outgoing' ? '-' : '+' }}{{ $money($payment->amount, $payment->currency) }}</strong>
+                                <span class="muted">{{ $payment->method }} · {{ $payment->reference ?: 'bez referencji' }}</span>
+                                @if ($payment->description)
+                                    <div class="muted">{{ $payment->description }}</div>
+                                @endif
+                            </div>
+                            <span @class(['status', 'blue' => $payment->status === 'pending', 'red' => $payment->status === 'failed'])>{{ $payment->status }}</span>
+                        </div>
+                    @empty
+                        <span class="muted">Brak ręcznych księgowań dla tego zamówienia.</span>
+                    @endforelse
+                </div>
+            </div>
+        </article>
+
+        <article class="card order-section">
+            <div class="panel-header">
+                <span>Notatki wewnętrzne ERP</span>
+                <span>{{ $order->internalNotes->count() }} wpisów</span>
+            </div>
+            <div class="order-section-body note-list">
+                <form class="compact-form" method="POST" action="{{ route('orders.notes.store', $order) }}">
+                    @csrf
+                    <label>Nowa notatka
+                        <textarea name="body" rows="4" maxlength="3000" required></textarea>
+                    </label>
+                    <button class="button secondary" type="submit">Dodaj notatkę</button>
+                </form>
+                @forelse ($order->internalNotes->take(8) as $note)
+                    <div class="note-card">
+                        <div class="note-card-header">
+                            <span>{{ $note->author_name ?: 'ERP' }}</span>
+                            <span>{{ $note->created_at?->format('Y-m-d H:i') }}</span>
+                        </div>
+                        <div>{{ $note->body }}</div>
+                    </div>
+                @empty
+                    <span class="muted">Brak notatek wewnętrznych ERP.</span>
+                @endforelse
+            </div>
+        </article>
+    </section>
+
+    <section class="order-grid">
+        <article class="card order-section">
+            <div class="panel-header">
                 <span>Notatki WooCommerce</span>
                 <span>{{ $orderNotes->count() }} rekordów</span>
             </div>
@@ -406,3 +579,45 @@
         </article>
     </section>
 @endsection
+
+@push('scripts')
+    <script>
+        (() => {
+            const renderTemplate = (value, context) => String(value || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) => {
+                return Object.prototype.hasOwnProperty.call(context, key) ? String(context[key] ?? '') : match;
+            });
+
+            document.querySelectorAll('[data-email-template-select]').forEach((select) => {
+                select.addEventListener('change', () => {
+                    const form = select.closest('[data-email-template-form]');
+
+                    if (!form) {
+                        return;
+                    }
+
+                    let context = {};
+                    try {
+                        context = JSON.parse(form.dataset.emailTemplateContext || '{}');
+                    } catch (error) {
+                        context = {};
+                    }
+
+                    const option = select.selectedOptions[0];
+                    const subject = form.querySelector('input[name="subject"]');
+                    const body = form.querySelector('textarea[name="body"]');
+
+                    if (!option || option.value === '') {
+                        return;
+                    }
+
+                    if (subject) {
+                        subject.value = renderTemplate(option.dataset.subject, context);
+                    }
+                    if (body) {
+                        body.value = renderTemplate(option.dataset.body, context);
+                    }
+                });
+            });
+        })();
+    </script>
+@endpush

@@ -5,8 +5,11 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Models\CourierAccount;
+use App\Models\CustomerPayment;
+use App\Models\EmailTemplate;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
+use App\Models\InternalNote;
 use App\Models\Product;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
@@ -14,30 +17,39 @@ use App\Models\ShippingLabel;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Services\Automation\DocumentAutomationSettingsService;
+use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\Invoices\ReturnCorrectionInvoiceService;
+use App\Services\Payments\MbankTransferBasketService;
+use App\Services\Payments\PayuRefundService;
 use App\Services\Returns\ReturnNumberService;
 use App\Services\Returns\ReturnReceivingService;
 use App\Services\Returns\ReturnSettingsService;
 use App\Services\Returns\ReturnStatusPushService;
 use App\Services\Returns\StoreReturnIntakeService;
 use App\Services\Shipping\ShippingLabelService;
-use Illuminate\Support\Facades\Storage;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\View\View;
 use RuntimeException;
+use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
 
 class ReturnController extends Controller
 {
-    public function index(Request $request, ReturnSettingsService $settings): View
+    public function index(
+        Request $request,
+        ReturnSettingsService $settings,
+        MbankTransferBasketService $mbankBasket,
+    ): View
     {
         $returnSettings = $settings->data();
         $tab = $request->query('tab') === 'pending' ? 'pending' : 'all';
@@ -46,6 +58,7 @@ class ReturnController extends Controller
         $returnsQuery = ReturnCase::query()
             ->with([
                 'lines.product',
+                'lines.externalOrderLine',
                 'lines.targetWarehouse',
                 'lines.warehouseDocument',
                 'targetWarehouse',
@@ -53,6 +66,9 @@ class ReturnController extends Controller
                 'externalOrder',
                 'correctionInvoice',
                 'shippingLabels',
+                'customerMessages',
+                'internalNotes',
+                'customerPayments',
             ])
             ->when($tab === 'pending', fn ($query) => $query->where('status', StoreReturnIntakeService::STATUS_PENDING))
             ->when($search !== '', function ($query) use ($search): void {
@@ -93,6 +109,12 @@ class ReturnController extends Controller
                 ->where('provider', 'inpost')
                 ->where('is_active', true)
                 ->orderByDesc('is_default')
+                ->orderBy('name')
+                ->get(),
+            'mbankPayoutCount' => $mbankBasket->eligibleReturns()->count(),
+            'emailTemplates' => EmailTemplate::query()
+                ->where('is_active', true)
+                ->whereIn('context', ['return', 'both'])
                 ->orderBy('name')
                 ->get(),
             'module' => 'returns',
@@ -160,6 +182,7 @@ class ReturnController extends Controller
         DocumentAutomationSettingsService $automationSettings,
         ReturnReceivingService $receivingService,
         WarehouseDocumentPostingService $postingService,
+        CustomerCommunicationService $communication,
     ): RedirectResponse {
         $returnSettings = $settings->data();
         $conditionCodes = collect($returnSettings['conditions'] ?? [])->pluck('code')->filter()->implode(',');
@@ -177,6 +200,8 @@ class ReturnController extends Controller
             'condition' => array_merge(['nullable', 'string', 'max:40'], $conditionRule),
             'disposition' => array_merge(['nullable', 'string', 'max:40'], $dispositionRule),
             'customer_email' => ['nullable', 'email', 'max:255'],
+            'refund_recipient_name' => ['nullable', 'string', 'max:143'],
+            'refund_bank_account' => ['nullable', 'string', 'max:34'],
             'notes' => ['nullable', 'string', 'max:2000'],
             'lines' => ['nullable', 'array'],
             'lines.*.external_order_line_id' => ['nullable', 'integer', 'exists:external_order_lines,id'],
@@ -256,6 +281,8 @@ class ReturnController extends Controller
                 'metadata' => [
                     'source' => 'manual_panel',
                     'external_order_number' => $order?->external_number,
+                    'refund_recipient_name' => trim((string) ($validated['refund_recipient_name'] ?? '')),
+                    'refund_bank_account' => trim((string) ($validated['refund_bank_account'] ?? '')),
                 ],
             ]);
 
@@ -300,6 +327,8 @@ class ReturnController extends Controller
                 $warnings[] = 'Automatyzacja RX: '.$exception->getMessage();
             }
         }
+
+        $communication->sendReturnStatus($returnCase, 'return_waiting_for_package');
 
         $response = back()->with('status', "Zwrot {$returnCase->number} został utworzony.");
 
@@ -358,6 +387,8 @@ class ReturnController extends Controller
             'target_warehouse_id' => ['required', 'integer', 'exists:warehouses,id'],
             'reason' => ['nullable', 'string', 'max:255'],
             'customer_email' => ['nullable', 'email', 'max:255'],
+            'refund_recipient_name' => ['nullable', 'string', 'max:143'],
+            'refund_bank_account' => ['nullable', 'string', 'max:34'],
             'notes' => ['nullable', 'string', 'max:2000'],
             'lines' => ['required', 'array', 'min:1'],
             'lines.*.external_order_line_id' => ['nullable', 'integer', 'exists:external_order_lines,id'],
@@ -392,6 +423,10 @@ class ReturnController extends Controller
                 'reason' => $validated['reason'] ?? null,
                 'customer_email' => $validated['customer_email'] ?? null,
                 'notes' => $validated['notes'] ?? null,
+                'metadata' => array_merge($returnCase->metadata ?? [], [
+                    'refund_recipient_name' => trim((string) ($validated['refund_recipient_name'] ?? '')),
+                    'refund_bank_account' => trim((string) ($validated['refund_bank_account'] ?? '')),
+                ]),
             ]);
 
             $returnCase->lines()->delete();
@@ -443,6 +478,8 @@ class ReturnController extends Controller
         ReturnCase $returnCase,
         ReturnCorrectionInvoiceService $corrections,
         InvoiceWooCommerceUploadService $uploader,
+        CustomerCommunicationService $communication,
+        PayuRefundService $payuRefunds,
     ): RedirectResponse {
         try {
             $invoice = $corrections->createForReturn($returnCase);
@@ -457,6 +494,33 @@ class ReturnController extends Controller
                 'error',
                 "Wystawiono fakturę korygującą {$invoice->number}, ale nie dodano jej do zamówienia WooCommerce: {$exception->getMessage()} Po poprawieniu integracji kliknij Wyślij do WooCommerce przy tej korekcie.",
             );
+        }
+
+        $freshReturn = $returnCase->fresh() ?? $returnCase;
+
+        $communication->sendReturnStatus($freshReturn, 'return_refunded', [
+            'invoice_number' => $invoice->number,
+        ]);
+
+        try {
+            $payuPayment = $payuRefunds->attemptAutomaticRefund($freshReturn, $invoice);
+        } catch (RuntimeException $exception) {
+            $this->appendAutomationWarning($freshReturn, 'payu_refund', $exception->getMessage());
+
+            return back()->with(
+                'error',
+                "Wystawiono fakturę korygującą {$invoice->number}, ale automatyczny refund PayU nie przeszedł: {$exception->getMessage()}",
+            );
+        }
+
+        if (isset($payuPayment) && $payuPayment instanceof CustomerPayment) {
+            $communication->sendReturnStatus($freshReturn, 'return_payout_queued', [
+                'invoice_number' => $invoice->number,
+                'payment_reference' => $payuPayment->reference,
+                'payment_status' => $payuPayment->status,
+            ]);
+
+            return back()->with('status', "Wystawiono fakturę korygującą {$invoice->number} i wysłano refund PayU dla zwrotu {$returnCase->number}.");
         }
 
         return back()->with('status', "Wystawiono fakturę korygującą {$invoice->number} dla zwrotu {$returnCase->number} i dodano ją do zamówienia WooCommerce.");
@@ -522,7 +586,9 @@ class ReturnController extends Controller
     ): RedirectResponse {
         $data = $request->validate([
             'courier_account_id' => ['required', 'integer', 'exists:courier_accounts,id'],
+            'purpose' => ['nullable', 'string', 'in:return,exchange'],
         ]);
+        $purpose = $data['purpose'] ?? 'return';
 
         $account = CourierAccount::query()
             ->where('is_active', true)
@@ -532,17 +598,162 @@ class ReturnController extends Controller
             return back()->with('error', 'Wybrane konto kurierskie jest nieaktywne.');
         }
 
-        if ($returnCase->shippingLabels()->where('status', 'generated')->exists()) {
+        if ($purpose === 'return' && $returnCase->shippingLabels()->where('status', 'generated')->where('purpose', 'return')->exists()) {
             return back()->with('error', "Zwrot {$returnCase->number} ma już wygenerowaną etykietę zwrotną.");
         }
 
         try {
-            $label = $shippingLabels->generateReturnLabel($returnCase, $account);
+            $label = $purpose === 'exchange'
+                ? $shippingLabels->generateExchangeLabel($returnCase, $account)
+                : $shippingLabels->generateReturnLabel($returnCase, $account);
         } catch (RuntimeException $exception) {
-            return back()->with('error', 'Nie udało się wygenerować przesyłki zwrotnej: ' . $exception->getMessage());
+            return back()->with('error', 'Nie udało się wygenerować przesyłki: ' . $exception->getMessage());
         }
 
-        return back()->with('status', "Etykieta zwrotna dla {$returnCase->number} została wygenerowana ({$account->name}). Pobierz PDF i wyślij klientowi.");
+        $kind = $purpose === 'exchange' ? 'wymiany do klienta' : 'zwrotna';
+
+        return back()->with('status', "Etykieta {$kind} dla {$returnCase->number} została wygenerowana ({$account->name}): {$label->filename()}.");
+    }
+
+    public function sendMessage(
+        Request $request,
+        ReturnCase $returnCase,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'subject' => ['required', 'string', 'max:160'],
+            'body' => ['required', 'string', 'max:5000'],
+        ]);
+
+        try {
+            $communication->sendManualForReturn($returnCase, $validated['subject'], $validated['body']);
+        } catch (RuntimeException $exception) {
+            return back()->withInput()->with('error', $exception->getMessage());
+        }
+
+        return back()->with('status', "Wiadomość do klienta zwrotu {$returnCase->number} została wysłana.");
+    }
+
+    public function storeNote(Request $request, ReturnCase $returnCase): RedirectResponse
+    {
+        $validated = $request->validate([
+            'body' => ['required', 'string', 'max:3000'],
+        ]);
+
+        InternalNote::query()->create([
+            'return_case_id' => $returnCase->id,
+            'external_order_id' => $returnCase->external_order_id,
+            'user_id' => Auth::id(),
+            'author_name' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
+            'body' => $validated['body'],
+            'metadata' => ['source' => 'return_view'],
+        ]);
+
+        return back()->with('status', 'Notatka wewnętrzna została dodana do zwrotu.');
+    }
+
+    public function storePayment(
+        Request $request,
+        ReturnCase $returnCase,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse
+    {
+        $validated = $request->validate([
+            'amount' => ['required', 'numeric', 'min:0.01', 'max:99999999.99'],
+            'currency' => ['nullable', 'string', 'size:3'],
+            'method' => ['required', 'string', 'in:blik,bank_transfer,cash,card,payu,other'],
+            'reference' => ['nullable', 'string', 'max:160'],
+            'payment_url' => ['nullable', 'url', 'max:1000'],
+            'description' => ['nullable', 'string', 'max:1000'],
+            'booked_at' => ['nullable', 'date'],
+            'send_payment_request' => ['nullable', 'boolean'],
+        ]);
+
+        $payment = CustomerPayment::query()->create([
+            'external_order_id' => $returnCase->external_order_id,
+            'return_case_id' => $returnCase->id,
+            'direction' => 'incoming',
+            'method' => $validated['method'],
+            'status' => 'booked',
+            'amount' => round((float) $validated['amount'], 2),
+            'currency' => mb_strtoupper($validated['currency'] ?? $returnCase->externalOrder?->currency ?? 'PLN'),
+            'reference' => $validated['reference'] ?? null,
+            'description' => $validated['description'] ?? null,
+            'booked_at' => $validated['booked_at'] ?? now(),
+            'metadata' => [
+                'source' => 'return_view',
+                'booked_by' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
+                'payment_url' => trim((string) ($validated['payment_url'] ?? '')) ?: null,
+                'send_payment_request' => $request->boolean('send_payment_request'),
+            ],
+        ]);
+
+        if ($request->boolean('send_payment_request')) {
+            $communication->sendReturnStatus($returnCase, 'exchange_payment_requested', [
+                'amount' => number_format((float) $payment->amount, 2, ',', ' '),
+                'currency' => $payment->currency,
+                'payment_url' => trim((string) ($validated['payment_url'] ?? '')),
+                'payment_reference' => $payment->reference,
+                'payment_description' => $payment->description,
+                'customer_payment_id' => $payment->id,
+            ]);
+
+            return back()->with('status', 'Wpłata klienta została zaksięgowana i wysłano prośbę o dopłatę do wymiany.');
+        }
+
+        return back()->with('status', 'Wpłata klienta została zaksięgowana w saldzie zwrotu/wymiany.');
+    }
+
+    public function refundWithPayu(
+        ReturnCase $returnCase,
+        PayuRefundService $payuRefunds,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse
+    {
+        try {
+            $payment = $payuRefunds->refundReturn($returnCase);
+        } catch (RuntimeException $exception) {
+            return back()->with('error', 'Nie udało się wysłać refundu PayU: '.$exception->getMessage());
+        }
+
+        $returnCase->loadMissing('correctionInvoice');
+        $communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_payout_queued', [
+            'invoice_number' => $returnCase->correctionInvoice?->number,
+            'payment_reference' => $payment->reference,
+            'payment_status' => $payment->status,
+        ]);
+
+        return back()->with('status', "Refund PayU dla zwrotu {$returnCase->number} został wysłany. Status: {$payment->status}.");
+    }
+
+    public function mbankPayouts(MbankTransferBasketService $mbankBasket): View
+    {
+        $returns = $mbankBasket->eligibleReturns();
+
+        return view('returns.mbank-payouts', [
+            'title' => 'Koszyk przelewów mBank',
+            'subtitle' => 'Zatwierdzone zwroty pobraniowe gotowe do wypłaty przelewem.',
+            'module' => 'returns',
+            'returns' => $returns,
+            'totalAmount' => $returns->sum(fn (ReturnCase $returnCase): float => $mbankBasket->amount($returnCase)),
+            'mbankBasket' => $mbankBasket,
+        ]);
+    }
+
+    public function downloadMbankPayouts(MbankTransferBasketService $mbankBasket): Response
+    {
+        $returns = $mbankBasket->eligibleReturns();
+
+        if ($returns->isEmpty()) {
+            return back()->with('error', 'Brak zwrotów pobraniowych gotowych do exportu mBank.');
+        }
+
+        $csv = $mbankBasket->csv($returns);
+
+        return response($csv, 200, [
+            'Content-Type' => 'text/plain; charset=Windows-1250',
+            'Content-Disposition' => 'attachment; filename="mbank-koszyk-zwrotow-'.now()->format('Ymd-His').'.txt"',
+        ]);
     }
 
     public function downloadLabel(ShippingLabel $label): StreamedResponse
@@ -567,10 +778,10 @@ class ReturnController extends Controller
         }
 
         $documents = $this->returnDocuments($returnCase);
-        $blockingDocument = $documents->first(fn (WarehouseDocument $document): bool => $document->status !== 'draft');
+        $firstDocument = $documents->first();
 
-        if ($blockingDocument instanceof WarehouseDocument) {
-            return back()->with('error', "Nie można usunąć zwrotu z dokumentem RX {$blockingDocument->number} w statusie {$blockingDocument->status}. Dokument został już objęty historią magazynową.");
+        if ($firstDocument instanceof WarehouseDocument) {
+            return back()->with('error', "Nie można usunąć zwrotu z utworzonym dokumentem RX {$firstDocument->number}. Usuń albo anuluj dokument w module Dokumenty.");
         }
 
         $number = $returnCase->number;
@@ -868,6 +1079,22 @@ class ReturnController extends Controller
             ->filter(fn ($document): bool => $document instanceof WarehouseDocument)
             ->unique('id')
             ->values();
+    }
+
+    private function appendAutomationWarning(ReturnCase $returnCase, string $type, string $message): void
+    {
+        $warnings = (array) data_get($returnCase->metadata, 'automation_warnings', []);
+        $warnings[] = [
+            'type' => $type,
+            'message' => $message,
+            'created_at' => now()->toISOString(),
+        ];
+
+        $returnCase->update([
+            'metadata' => array_merge($returnCase->metadata ?? [], [
+                'automation_warnings' => array_slice($warnings, -10),
+            ]),
+        ]);
     }
 
     private function formatQuantityForMessage(float $quantity): string

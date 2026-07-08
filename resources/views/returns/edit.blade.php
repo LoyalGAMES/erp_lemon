@@ -45,6 +45,14 @@
             <label>Email klienta
                 <input name="customer_email" type="email" value="{{ old('customer_email', $returnCase->customer_email) }}">
             </label>
+            <div class="return-line-grid">
+                <label>Odbiorca zwrotu środków
+                    <input name="refund_recipient_name" value="{{ old('refund_recipient_name', data_get($returnCase->metadata, 'refund_recipient_name')) }}" maxlength="143">
+                </label>
+                <label>Rachunek klienta do zwrotu
+                    <input name="refund_bank_account" value="{{ old('refund_bank_account', data_get($returnCase->metadata, 'refund_bank_account')) }}" maxlength="34" placeholder="26 cyfr albo PL...">
+                </label>
+            </div>
             <label>Notatka
                 <textarea name="notes" rows="3">{{ old('notes', $returnCase->notes) }}</textarea>
             </label>

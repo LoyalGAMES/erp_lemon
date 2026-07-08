@@ -28,7 +28,10 @@
 
     <div class="page-toolbar">
         <div class="toolbar-note">Zwrot wybierasz po zamówieniu, a pozycje dodajesz tylko z produktów faktycznie zamówionych i jeszcze możliwych do zwrotu.</div>
-        <label class="button" for="return-drawer">Dodaj zwrot</label>
+        <div class="inline-actions">
+            <a class="button secondary" href="{{ route('returns.payouts.mbank') }}">mBank wypłaty ({{ $mbankPayoutCount }})</a>
+            <label class="button" for="return-drawer">Dodaj zwrot</label>
+        </div>
     </div>
 
     <label class="drawer-backdrop" for="return-drawer"></label>
@@ -66,6 +69,14 @@
                 </select>
             </label>
             <label>Email klienta <input name="customer_email" type="email" value="{{ old('customer_email') }}" autocomplete="off"></label>
+            <div class="return-line-grid">
+                <label>Odbiorca zwrotu środków
+                    <input name="refund_recipient_name" value="{{ old('refund_recipient_name') }}" maxlength="143" autocomplete="off">
+                </label>
+                <label>Rachunek klienta do zwrotu
+                    <input name="refund_bank_account" value="{{ old('refund_bank_account') }}" maxlength="34" placeholder="26 cyfr albo PL..." autocomplete="off">
+                </label>
+            </div>
             <label>Notatka <textarea name="notes" rows="3">{{ old('notes') }}</textarea></label>
 
             <section class="return-lines-editor" data-return-lines>
@@ -122,6 +133,7 @@
             'opened' => ['label' => 'Otwarty', 'class' => 'blue'],
             'document_created' => ['label' => 'Dokument RX', 'class' => 'blue'],
             'completed' => ['label' => 'Zrealizowany', 'class' => ''],
+            'corrected' => ['label' => 'Korekta', 'class' => ''],
             'rejected' => ['label' => 'Odrzucony', 'class' => 'red'],
             'cancelled' => ['label' => 'Anulowany', 'class' => 'red'],
         ];
@@ -269,8 +281,18 @@
         .returns-tab-count { display: inline-flex; align-items: center; justify-content: center; min-width: 21px; min-height: 21px; border-radius: 999px; padding: 0 6px; background: var(--orange); color: #fff; font-size: 12px; }
         .returns-search { display: flex; gap: 8px; flex: 1 1 340px; max-width: 560px; }
         .returns-search input { flex: 1; min-width: 0; }
+        .return-label-list { display: grid; gap: 6px; align-items: start; max-width: 260px; }
         .return-label-form { display: grid; gap: 6px; margin-top: 6px; }
         .return-label-form select { min-height: 38px; max-width: 220px; }
+        .return-message-panel { min-width: 240px; margin-top: 8px; white-space: normal; }
+        .return-message-panel summary { cursor: pointer; color: var(--brand-dark); font-weight: 760; font-size: 12px; }
+        .return-message-form { display: grid; gap: 7px; margin-top: 8px; }
+        .return-message-form input,
+        .return-message-form select,
+        .return-message-form textarea { max-width: 280px; }
+        .return-message-form .inline-flag { display: inline-flex; align-items: center; gap: 7px; max-width: 280px; font-weight: 720; }
+        .return-message-form .inline-flag input { width: 17px; height: 17px; }
+        .return-message-history { display: grid; gap: 5px; margin-top: 8px; font-size: 12px; }
         @media (max-width: 760px) {
             .returns-filters { align-items: stretch; flex-direction: column; }
             .returns-search { max-width: none; }
@@ -353,6 +375,9 @@
                 .replaceAll('>', '&gt;')
                 .replaceAll('"', '&quot;')
                 .replaceAll("'", '&#039;');
+            const renderTemplate = (value, context) => String(value || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) => {
+                return Object.prototype.hasOwnProperty.call(context, key) ? String(context[key] ?? '') : match;
+            });
 
             const quantityLabel = (value) => {
                 const number = Number(value || 0);
@@ -650,6 +675,39 @@
                 checked.forEach((checkbox) => addLine(selectedOrder.lines[Number(checkbox.value)]));
                 productModal.hidden = true;
                 lineList?.querySelector('input[name$="[quantity]"]')?.focus();
+            });
+
+            document.querySelectorAll('[data-email-template-select]').forEach((select) => {
+                select.addEventListener('change', () => {
+                    const form = select.closest('[data-email-template-form]');
+
+                    if (!form) {
+                        return;
+                    }
+
+                    let context = {};
+                    try {
+                        context = JSON.parse(form.dataset.emailTemplateContext || '{}');
+                    } catch (error) {
+                        context = {};
+                    }
+
+                    const option = select.selectedOptions[0];
+
+                    if (!option || option.value === '') {
+                        return;
+                    }
+
+                    const subject = form.querySelector('input[name="subject"]');
+                    const body = form.querySelector('textarea[name="body"]');
+
+                    if (subject) {
+                        subject.value = renderTemplate(option.dataset.subject, context);
+                    }
+                    if (body) {
+                        body.value = renderTemplate(option.dataset.body, context);
+                    }
+                });
             });
 
             document.addEventListener('click', (event) => {

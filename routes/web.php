@@ -11,8 +11,8 @@ use App\Http\Controllers\KsefController;
 use App\Http\Controllers\LedgerController;
 use App\Http\Controllers\ModuleController;
 use App\Http\Controllers\PackingController;
-use App\Http\Controllers\ProductController;
 use App\Http\Controllers\ProductConfigurationController;
+use App\Http\Controllers\ProductController;
 use App\Http\Controllers\ProductImageThumbnailController;
 use App\Http\Controllers\ReturnController;
 use App\Http\Controllers\SettingsController;
@@ -35,6 +35,14 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::put('/settings/locations', [SettingsController::class, 'updateLocations'])->name('settings.locations.update');
         Route::put('/settings/document-automation', [SettingsController::class, 'updateDocumentAutomation'])->name('settings.document_automation.update');
         Route::put('/settings/returns', [SettingsController::class, 'updateReturns'])->name('settings.returns.update');
+        Route::get('/settings/mail', [SettingsController::class, 'mail'])->name('settings.mail');
+        Route::put('/settings/mail', [SettingsController::class, 'updateMail'])->name('settings.mail.update');
+        Route::post('/settings/mail/test', [SettingsController::class, 'testMail'])->name('settings.mail.test');
+        Route::post('/settings/mail/templates', [SettingsController::class, 'storeEmailTemplate'])->name('settings.mail.templates.store');
+        Route::put('/settings/mail/templates/{template}', [SettingsController::class, 'updateEmailTemplate'])->name('settings.mail.templates.update');
+        Route::delete('/settings/mail/templates/{template}', [SettingsController::class, 'destroyEmailTemplate'])->name('settings.mail.templates.destroy');
+        Route::get('/settings/payments', [SettingsController::class, 'payments'])->name('settings.payments');
+        Route::put('/settings/payments', [SettingsController::class, 'updatePayments'])->name('settings.payments.update');
         Route::get('/settings/shipping', [SettingsController::class, 'shipping'])->name('settings.shipping');
         Route::post('/settings/shipping/accounts', [SettingsController::class, 'storeCourierAccount'])->name('settings.shipping.accounts.store');
         Route::put('/settings/shipping/accounts/{account}', [SettingsController::class, 'updateCourierAccount'])->name('settings.shipping.accounts.update');
@@ -94,12 +102,18 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
     Route::middleware(EnsureErpRole::class.':returns')->group(function (): void {
         Route::get('/returns', [ReturnController::class, 'index'])->name('returns.index');
         Route::get('/returns/orders/lookup', [ReturnController::class, 'lookupOrder'])->name('returns.orders.lookup');
+        Route::get('/returns/payouts/mbank', [ReturnController::class, 'mbankPayouts'])->name('returns.payouts.mbank');
+        Route::get('/returns/payouts/mbank/download', [ReturnController::class, 'downloadMbankPayouts'])->name('returns.payouts.mbank.download');
         Route::post('/returns', [ReturnController::class, 'store'])->name('returns.store');
         Route::get('/returns/{returnCase}/edit', [ReturnController::class, 'edit'])->name('returns.edit');
         Route::put('/returns/{returnCase}', [ReturnController::class, 'update'])->name('returns.update');
         Route::post('/returns/{returnCase}/approve', [ReturnController::class, 'approve'])->name('returns.approve');
         Route::post('/returns/{returnCase}/reject', [ReturnController::class, 'reject'])->name('returns.reject');
         Route::post('/returns/{returnCase}/shipping-label', [ReturnController::class, 'createShippingLabel'])->name('returns.shipping-label.create');
+        Route::post('/returns/{returnCase}/message', [ReturnController::class, 'sendMessage'])->name('returns.message.send');
+        Route::post('/returns/{returnCase}/notes', [ReturnController::class, 'storeNote'])->name('returns.notes.store');
+        Route::post('/returns/{returnCase}/payments', [ReturnController::class, 'storePayment'])->name('returns.payments.store');
+        Route::post('/returns/{returnCase}/payu-refund', [ReturnController::class, 'refundWithPayu'])->name('returns.payu-refund');
         Route::get('/returns/labels/{label}/download', [ReturnController::class, 'downloadLabel'])->name('returns.labels.download');
         Route::post('/returns/{returnCase}/document', [ReturnController::class, 'createDocument'])->name('returns.document.create');
         Route::post('/returns/{returnCase}/correction', [ReturnController::class, 'createCorrection'])->name('returns.correction.create');
@@ -111,6 +125,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::post('/packing/mode', [PackingController::class, 'mode'])->name('packing.mode');
         Route::post('/packing/station', [PackingController::class, 'station'])->name('packing.station');
         Route::post('/packing/stations', [PackingController::class, 'updateStations'])->name('packing.stations.update');
+        Route::post('/packing/listener/printers', [PackingController::class, 'listenerPrinters'])->name('packing.listener.printers');
         Route::post('/packing/scan', [PackingController::class, 'scan'])->name('packing.scan');
         Route::post('/packing/groups/pick', [PackingController::class, 'pick'])->name('packing.groups.pick');
         Route::post('/packing/groups/problem', [PackingController::class, 'problem'])->name('packing.groups.problem');
@@ -183,6 +198,9 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::post('/orders/{order}/split', [ExternalOrderController::class, 'split'])->name('orders.split');
         Route::post('/orders/{order}/shipping-decision', [ExternalOrderController::class, 'shippingDecision'])->name('orders.shipping-decision');
         Route::post('/orders/{order}/label', [ExternalOrderController::class, 'generateLabel'])->name('orders.label.generate');
+        Route::post('/orders/{order}/message', [ExternalOrderController::class, 'sendMessage'])->name('orders.message.send');
+        Route::post('/orders/{order}/notes', [ExternalOrderController::class, 'storeNote'])->name('orders.notes.store');
+        Route::post('/orders/{order}/payments', [ExternalOrderController::class, 'storePayment'])->name('orders.payments.store');
         Route::post('/orders/{order}/wz', [ExternalOrderFulfillmentController::class, 'createWz'])
             ->name('orders.wz.create');
 

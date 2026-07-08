@@ -5,9 +5,13 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Models\CourierAccount;
+use App\Models\CustomerPayment;
+use App\Models\EmailTemplate;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
+use App\Models\InternalNote;
 use App\Models\StockReservation;
+use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Orders\OrderFulfillmentStatusService;
 use App\Services\Orders\OrderSplitService;
 use App\Services\Packing\ProductSegmentService;
@@ -32,6 +36,9 @@ class ExternalOrderController extends Controller
             'invoices.ksefSubmissions',
             'packingTasks',
             'shippingLabels',
+            'customerMessages',
+            'internalNotes',
+            'customerPayments',
         ]);
 
         $reservations = StockReservation::query()
@@ -72,7 +79,78 @@ class ExternalOrderController extends Controller
                 ->orderByDesc('is_default')
                 ->orderBy('name')
                 ->get(),
+            'emailTemplates' => EmailTemplate::query()
+                ->where('is_active', true)
+                ->whereIn('context', ['order', 'both'])
+                ->orderBy('name')
+                ->get(),
         ]);
+    }
+
+    public function sendMessage(
+        Request $request,
+        ExternalOrder $order,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'subject' => ['required', 'string', 'max:160'],
+            'body' => ['required', 'string', 'max:5000'],
+        ]);
+
+        try {
+            $communication->sendManualForOrder($order, $validated['subject'], $validated['body']);
+        } catch (RuntimeException $exception) {
+            return back()->withInput()->with('error', $exception->getMessage());
+        }
+
+        return back()->with('status', "Wiadomość do klienta zamówienia {$order->external_number} została wysłana.");
+    }
+
+    public function storeNote(Request $request, ExternalOrder $order): RedirectResponse
+    {
+        $validated = $request->validate([
+            'body' => ['required', 'string', 'max:3000'],
+        ]);
+
+        InternalNote::query()->create([
+            'external_order_id' => $order->id,
+            'user_id' => Auth::id(),
+            'author_name' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
+            'body' => $validated['body'],
+            'metadata' => ['source' => 'order_view'],
+        ]);
+
+        return back()->with('status', 'Notatka wewnętrzna została dodana.');
+    }
+
+    public function storePayment(Request $request, ExternalOrder $order): RedirectResponse
+    {
+        $validated = $request->validate([
+            'amount' => ['required', 'numeric', 'min:0.01', 'max:99999999.99'],
+            'currency' => ['nullable', 'string', 'size:3'],
+            'method' => ['required', 'string', 'in:blik,bank_transfer,cash,card,payu,other'],
+            'reference' => ['nullable', 'string', 'max:160'],
+            'description' => ['nullable', 'string', 'max:1000'],
+            'booked_at' => ['nullable', 'date'],
+        ]);
+
+        CustomerPayment::query()->create([
+            'external_order_id' => $order->id,
+            'direction' => 'incoming',
+            'method' => $validated['method'],
+            'status' => 'booked',
+            'amount' => round((float) $validated['amount'], 2),
+            'currency' => mb_strtoupper($validated['currency'] ?? $order->currency),
+            'reference' => $validated['reference'] ?? null,
+            'description' => $validated['description'] ?? null,
+            'booked_at' => $validated['booked_at'] ?? now(),
+            'metadata' => [
+                'source' => 'order_view',
+                'booked_by' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
+            ],
+        ]);
+
+        return back()->with('status', 'Wpłata klienta została zaksięgowana w saldzie zamówienia.');
     }
 
     public function generateLabel(

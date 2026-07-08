@@ -6,6 +6,7 @@ namespace App\Services\Orders;
 
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
+use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Inventory\StockReservationService;
 use App\Services\Packing\PackingTaskService;
 use Illuminate\Support\Facades\DB;
@@ -16,6 +17,7 @@ final class OrderSplitService
     public function __construct(
         private readonly StockReservationService $reservations,
         private readonly PackingTaskService $packingTasks,
+        private readonly CustomerCommunicationService $communication,
     ) {
     }
 
@@ -145,6 +147,12 @@ final class OrderSplitService
         $this->reservations->syncForOrder($splitOrder);
         $this->packingTasks->syncForOrder($order);
         $this->packingTasks->syncForOrder($splitOrder);
+        $this->communication->sendOrderStatus($order->fresh() ?? $order, 'order_partial_created', [
+            'child_order_id' => $splitOrder->id,
+            'child_order_number' => $splitOrder->external_number ?: $splitOrder->external_id,
+            'source' => $source,
+            'note' => $note,
+        ]);
 
         return $splitOrder;
     }

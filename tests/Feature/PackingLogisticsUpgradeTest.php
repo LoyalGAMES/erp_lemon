@@ -10,6 +10,8 @@ use App\Models\PackingTask;
 use App\Models\Product;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
+use App\Services\Packing\PackingSettingsService;
+use App\Services\Packing\PackingTaskService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -63,15 +65,16 @@ class PackingLogisticsUpgradeTest extends TestCase
     {
         $this->post(route('packing.stations.update'), [
             'stations' => [
-                ['code' => 'station-1', 'name' => 'Stanowisko odzież', 'printer_name' => 'Zebra ZD421', 'segment' => 'clothing'],
-                ['code' => 'station-2', 'name' => 'Stanowisko obuwie', 'printer_name' => 'Zebra ZD621', 'segment' => 'footwear'],
+                ['code' => 'station-1', 'name' => 'Stanowisko odzież', 'printer_name' => 'Zebra ZD421', 'listener_url' => 'http://192.168.1.25:17777', 'segment' => 'clothing'],
+                ['code' => 'station-2', 'name' => 'Stanowisko obuwie', 'printer_name' => 'Zebra ZD621', 'listener_url' => '', 'segment' => 'footwear'],
             ],
             'footwear_keywords' => "obuwie, buty\nsneakersy",
         ])->assertRedirect()->assertSessionHas('status');
 
-        $settings = app(\App\Services\Packing\PackingSettingsService::class)->data();
+        $settings = app(PackingSettingsService::class)->data();
 
         $this->assertSame('Zebra ZD421', $settings['stations'][0]['printer_name']);
+        $this->assertSame('http://192.168.1.25:17777', $settings['stations'][0]['listener_url']);
         $this->assertSame('Zebra ZD621', $settings['stations'][1]['printer_name']);
         $this->assertContains('sneakersy', $settings['footwear_keywords']);
     }
@@ -147,6 +150,13 @@ class PackingLogisticsUpgradeTest extends TestCase
         [$order] = $this->createMixedOrder();
         $this->pickAllTasks($order);
         $secondAccount = $this->createInPostAccounts()[1];
+        $this->post(route('packing.stations.update'), [
+            'stations' => [
+                ['code' => 'station-1', 'name' => 'Stanowisko pakowania', 'printer_name' => 'Zebra ZD421', 'segment' => 'all'],
+            ],
+            'footwear_keywords' => 'obuwie, buty',
+        ])->assertRedirect();
+        $this->post(route('packing.station'), ['station' => 'station-1'])->assertRedirect();
 
         $this->post(route('packing.orders.label', $order), [
             'courier_account_id' => $secondAccount->id,
@@ -158,6 +168,13 @@ class PackingLogisticsUpgradeTest extends TestCase
         $this->assertSame($secondAccount->id, $label->courier_account_id);
         $this->assertSame('520000123456789012345678', $label->tracking_number);
         $this->assertSame('drugie', data_get($label->response_payload, 'courier_account'));
+        $this->assertDatabaseHas('print_jobs', [
+            'shipping_label_id' => $label->id,
+            'status' => 'pending',
+            'station_code' => 'station-1',
+            'printer_name' => 'Zebra ZD421',
+            'source' => 'packing.label.generated',
+        ]);
     }
 
     public function test_tracking_command_marks_picked_up_parcels_as_shipped(): void
@@ -165,7 +182,7 @@ class PackingLogisticsUpgradeTest extends TestCase
         [$order] = $this->createMixedOrder();
         $account = $this->createInPostAccounts()[0];
 
-        app(\App\Services\Packing\PackingTaskService::class)->syncReadyOrders();
+        app(PackingTaskService::class)->syncReadyOrders();
         PackingTask::query()
             ->where('external_order_id', $order->id)
             ->update(['status' => 'packed', 'packed_at' => now()]);
@@ -215,7 +232,7 @@ class PackingLogisticsUpgradeTest extends TestCase
     {
         [$order] = $this->createMixedOrder();
 
-        app(\App\Services\Packing\PackingTaskService::class)->syncReadyOrders();
+        app(PackingTaskService::class)->syncReadyOrders();
         PackingTask::query()
             ->where('external_order_id', $order->id)
             ->update(['status' => 'packed', 'packed_at' => now()]);

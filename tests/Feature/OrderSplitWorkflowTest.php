@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
 use App\Models\PackingTask;
 use App\Models\Product;
@@ -18,6 +19,7 @@ use App\Services\WooCommerce\WooCommerceImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
@@ -27,6 +29,8 @@ class OrderSplitWorkflowTest extends TestCase
 
     public function test_operator_can_split_order_and_recalculate_reservations(): void
     {
+        Mail::fake();
+
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
             'name' => 'Sklep B2C',
@@ -83,6 +87,11 @@ class OrderSplitWorkflowTest extends TestCase
             'status' => 'processing',
             'currency' => 'PLN',
             'total_gross' => 500,
+            'billing_data' => [
+                'email' => 'client@example.test',
+                'first_name' => 'Jan',
+                'last_name' => 'Klient',
+            ],
         ]);
 
         $order->lines()->create([
@@ -133,6 +142,14 @@ class OrderSplitWorkflowTest extends TestCase
             'product_id' => $secondProduct->id,
             'status' => 'active',
         ]);
+        $this->assertDatabaseHas('customer_messages', [
+            'external_order_id' => $order->id,
+            'type' => 'automated',
+            'trigger' => 'order_partial_created',
+            'status' => 'sent',
+            'recipient_email' => 'client@example.test',
+        ]);
+        $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_partial_created')->count());
     }
 
     public function test_split_order_waits_for_stock_and_is_allocated_after_pz_posting(): void

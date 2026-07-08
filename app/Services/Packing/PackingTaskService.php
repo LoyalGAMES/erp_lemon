@@ -7,13 +7,17 @@ namespace App\Services\Packing;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\PackingTask;
+use App\Services\Orders\OrderStatusPolicyService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Collection;
 use RuntimeException;
 
 final class PackingTaskService
 {
-    private const READY_STATUSES = ['processing'];
+    public function __construct(
+        private readonly OrderStatusPolicyService $statusPolicy,
+    ) {
+    }
 
     /**
      * @return array{created:int,updated:int,cancelled:int}
@@ -27,7 +31,7 @@ final class PackingTaskService
         DB::transaction(function () use (&$created, &$updated, &$cancelled): void {
             ExternalOrder::query()
                 ->with(['lines.product', 'salesChannel'])
-                ->whereIn('status', self::READY_STATUSES)
+                ->whereIn('status', $this->statusPolicy->packingReadyStatuses())
                 ->orderBy('external_created_at')
                 ->get()
                 ->each(function (ExternalOrder $order) use (&$created, &$updated, &$cancelled): void {
@@ -41,7 +45,7 @@ final class PackingTaskService
 
         $cancelled += PackingTask::query()
             ->whereIn('status', ['open', 'picked', 'problem'])
-            ->whereHas('order', fn ($query) => $query->whereNotIn('status', self::READY_STATUSES))
+            ->whereHas('order', fn ($query) => $query->whereNotIn('status', $this->statusPolicy->packingReadyStatuses()))
             ->update(['status' => 'cancelled']);
 
         return [
@@ -62,7 +66,7 @@ final class PackingTaskService
                 ->lockForUpdate()
                 ->findOrFail($order->id);
 
-            if (! in_array($order->status, self::READY_STATUSES, true)) {
+            if (! in_array($order->status, $this->statusPolicy->packingReadyStatuses(), true)) {
                 return [
                     'created' => 0,
                     'updated' => 0,
@@ -400,7 +404,7 @@ final class PackingTaskService
 
     public function readyStatuses(): array
     {
-        return self::READY_STATUSES;
+        return $this->statusPolicy->packingReadyStatuses();
     }
 
     private function customerName(ExternalOrder $order): string

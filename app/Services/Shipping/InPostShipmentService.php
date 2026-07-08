@@ -180,6 +180,39 @@ final class InPostShipmentService
     }
 
     /**
+     * Tworzy dodatkową przesyłkę do klienta dla wymiany towaru. Nie szuka
+     * istniejącej przesyłki po numerze zamówienia, bo wymiana musi dostać
+     * osobny list przewozowy.
+     *
+     * @return array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>}
+     */
+    public function createExchangeShipmentWithLabel(ReturnCase $returnCase, CourierAccount $account): array
+    {
+        $returnCase->loadMissing('externalOrder');
+        $order = $returnCase->externalOrder;
+
+        if (! $order instanceof ExternalOrder) {
+            throw new RuntimeException('Etykieta wymiany wymaga zwrotu powiązanego z zamówieniem.');
+        }
+
+        $payload = $this->shipmentPayload($order, $account);
+        $payload['reference'] = 'WYMIANA '.$returnCase->number;
+        $payload['comments'] = 'Wymiana towaru '.$returnCase->number.' / zam. '.($order->external_number ?: $order->external_id);
+
+        $shipment = $this->postShipment($account, $payload);
+        $shipmentId = (string) $shipment['id'];
+        $shipment = $this->waitForConfirmation($account, $shipmentId);
+
+        return [
+            'shipment_id' => $shipmentId,
+            'tracking_number' => filled($shipment['tracking_number'] ?? null) ? (string) $shipment['tracking_number'] : null,
+            'contents' => $this->fetchLabel($account, $shipmentId),
+            'mime_type' => 'application/pdf',
+            'response_payload' => $shipment,
+        ];
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function createShipment(ExternalOrder $order, CourierAccount $account): array

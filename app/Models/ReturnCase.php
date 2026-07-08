@@ -72,6 +72,21 @@ class ReturnCase extends Model
 
     public function shippingLabels(): HasMany
     {
-        return $this->hasMany(ShippingLabel::class);
+        return $this->hasMany(ShippingLabel::class)->latest('generated_at');
+    }
+
+    public function customerMessages(): HasMany
+    {
+        return $this->hasMany(CustomerMessage::class)->latest();
+    }
+
+    public function internalNotes(): HasMany
+    {
+        return $this->hasMany(InternalNote::class)->latest();
+    }
+
+    public function customerPayments(): HasMany
+    {
+        return $this->hasMany(CustomerPayment::class)->latest('booked_at')->latest();
     }
 }

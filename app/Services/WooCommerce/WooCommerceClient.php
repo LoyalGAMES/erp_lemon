@@ -198,6 +198,7 @@ final class WooCommerceClient
             $query = [
                 'per_page' => 100,
                 'page' => $page,
+                'status' => 'any',
                 'orderby' => 'date',
                 'order' => 'desc',
             ];

@@ -5,13 +5,16 @@ declare(strict_types=1);
 namespace App\Services\Inventory;
 
 use App\Domain\Inventory\Enums\WarehouseDocumentType;
+use App\Models\CustomerPayment;
 use App\Models\ReturnCase;
 use App\Models\StockBalance;
 use App\Models\StockLedgerEntry;
 use App\Models\WarehouseDocument;
 use App\Services\Audit\AuditLogService;
 use App\Services\Automation\DocumentAutomationSettingsService;
+use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Invoices\ReturnCorrectionInvoiceService;
+use App\Services\Payments\PayuRefundService;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -26,6 +29,8 @@ final class WarehouseDocumentPostingService
         private readonly DocumentAutomationSettingsService $automationSettings,
         private readonly ReturnCorrectionInvoiceService $returnCorrections,
         private readonly InvoiceWooCommerceUploadService $invoiceUpload,
+        private readonly CustomerCommunicationService $communication,
+        private readonly PayuRefundService $payuRefunds,
     ) {}
 
     public function post(WarehouseDocument $document): void
@@ -159,6 +164,7 @@ final class WarehouseDocumentPostingService
             );
         });
 
+        $this->notifyReturnReceivedAfterPosting($completedReturnCaseIds);
         $this->issueReturnCorrectionsAfterPosting($completedReturnCaseIds);
     }
 
@@ -395,6 +401,20 @@ final class WarehouseDocumentPostingService
     /**
      * @param  list<int>  $returnCaseIds
      */
+    private function notifyReturnReceivedAfterPosting(array $returnCaseIds): void
+    {
+        foreach (array_unique($returnCaseIds) as $returnCaseId) {
+            $returnCase = ReturnCase::query()->find($returnCaseId);
+
+            if ($returnCase instanceof ReturnCase) {
+                $this->communication->sendReturnStatus($returnCase, 'return_received_warehouse');
+            }
+        }
+    }
+
+    /**
+     * @param  list<int>  $returnCaseIds
+     */
     private function issueReturnCorrectionsAfterPosting(array $returnCaseIds): void
     {
         if (
@@ -406,8 +426,22 @@ final class WarehouseDocumentPostingService
 
         foreach (array_unique($returnCaseIds) as $returnCaseId) {
             try {
-                $invoice = $this->returnCorrections->createForReturn(ReturnCase::query()->findOrFail($returnCaseId));
+                $returnCase = ReturnCase::query()->findOrFail($returnCaseId);
+                $invoice = $this->returnCorrections->createForReturn($returnCase);
                 $this->invoiceUpload->upload($invoice);
+                $this->communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_refunded', [
+                    'invoice_number' => $invoice->number,
+                ]);
+                $payment = $this->payuRefunds->attemptAutomaticRefund($returnCase->fresh() ?? $returnCase, $invoice);
+
+                if ($payment instanceof CustomerPayment) {
+                    $freshReturn = $returnCase->fresh() ?? $returnCase;
+                    $this->communication->sendReturnStatus($freshReturn, 'return_payout_queued', [
+                        'invoice_number' => $invoice->number,
+                        'payment_reference' => $payment->reference,
+                        'payment_status' => $payment->status,
+                    ]);
+                }
             } catch (Throwable $exception) {
                 $returnCase = ReturnCase::query()->find($returnCaseId);
 

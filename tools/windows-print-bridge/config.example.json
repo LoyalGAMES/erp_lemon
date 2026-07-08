@@ -1,0 +1,8 @@
+{
+  "baseUrl": "https://erp.example.test",
+  "token": "change-me",
+  "station": "station-1",
+  "workerName": "PACK-PC-1",
+  "pollSeconds": 2,
+  "sumatraPath": "C:\\Program Files\\SumatraPDF\\SumatraPDF.exe"
+}

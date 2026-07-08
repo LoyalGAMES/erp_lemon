@@ -8,6 +8,7 @@ use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
+use App\Services\Communication\CustomerCommunicationService;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -20,6 +21,7 @@ final class StoreReturnIntakeService
     public function __construct(
         private readonly ReturnNumberService $numbers,
         private readonly ReturnSettingsService $settings,
+        private readonly CustomerCommunicationService $communication,
     ) {
     }
 
@@ -122,7 +124,7 @@ final class StoreReturnIntakeService
             $email = $contact;
         }
 
-        return DB::transaction(function () use ($payload, $order, $items, $settings, $contact, $email, $returnReference): ReturnCase {
+        $returnCase = DB::transaction(function () use ($payload, $order, $items, $settings, $contact, $email, $returnReference): ReturnCase {
             $returnCase = ReturnCase::query()->create([
                 'number' => $this->numbers->next(),
                 'external_order_id' => $order?->id,
@@ -168,6 +170,10 @@ final class StoreReturnIntakeService
 
             return $returnCase;
         });
+
+        $this->communication->sendReturnStatus($returnCase, 'return_waiting_for_package');
+
+        return $returnCase;
     }
 
     public function findByReference(?string $returnReference, ?string $externalId): ?ReturnCase
