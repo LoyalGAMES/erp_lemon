@@ -474,7 +474,42 @@ final class PackingTaskService
             }
         }
 
+        foreach ([$line->product?->name, $line->name] as $name) {
+            $value = $this->sizeLabelFromName((string) $name);
+
+            if ($value !== null) {
+                return $value;
+            }
+        }
+
         return '-';
+    }
+
+    private function sizeLabelFromName(string $name): ?string
+    {
+        $name = trim($name);
+
+        if ($name === '' || ! preg_match('/.*\s[-–—]\s(?<size>.+)$/u', $name, $matches)) {
+            return null;
+        }
+
+        $candidate = trim((string) $matches['size']);
+        $candidate = preg_replace('/\s+/', ' ', $candidate) ?: '';
+        $normalized = mb_strtoupper($candidate);
+
+        if (preg_match('/^(?:XXS|XS|S|M|L|XL|XXL|XXXL|[2-6]XL)(?:[\/-](?:XXS|XS|S|M|L|XL|XXL|XXXL|[2-6]XL))*$/u', $normalized) === 1) {
+            return $normalized;
+        }
+
+        if (preg_match('/^(?:ONE SIZE|ONESIZE|UNI|UNIWERSALNY)$/u', $normalized) === 1) {
+            return $candidate;
+        }
+
+        if (preg_match('/^\d{2,3}(?:[,.]5)?(?:[\/-]\d{2,3}(?:[,.]5)?)*$/u', $normalized) === 1) {
+            return $candidate;
+        }
+
+        return null;
     }
 
     /**

@@ -103,7 +103,7 @@
             @foreach ($returnMessages->take(3) as $message)
                 <div>
                     <span @class(['status', 'blue' => $message->status === 'pending', 'red' => $message->status === 'failed', 'orange' => $message->status === 'skipped'])>{{ $message->status }}</span>
-                    <span class="muted">{{ $message->subject }} · {{ $message->created_at?->format('Y-m-d H:i') }}</span>
+                    <span class="muted">{{ $message->renderedSubject() }} · {{ $message->created_at?->format('Y-m-d H:i') }}</span>
                 </div>
             @endforeach
         </div>

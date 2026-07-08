@@ -28,19 +28,23 @@ class CustomerMessageMail extends Mailable
         $fromName = $mailLayout['from_name'] ?: (string) config('mail.from.name', config('app.name', 'Sempre ERP'));
         $replyToAddress = $mailLayout['support_email'] ?: $fromAddress;
         $replyToName = $mailLayout['brand_name'] ?: $fromName;
+        $messageSubject = $this->customerMessage->renderedSubject();
+        $messageBody = $this->customerMessage->renderedBody();
 
         return $this
             ->from($fromAddress, $fromName)
             ->replyTo($replyToAddress, $replyToName)
-            ->subject($this->customerMessage->subject)
+            ->subject($messageSubject)
             ->view('emails.customer-message', [
                 'customerMessage' => $this->customerMessage,
-                'messageBody' => $this->customerMessage->body,
+                'messageSubject' => $messageSubject,
+                'messageBody' => $messageBody,
                 'mailLayout' => $mailLayout,
             ])
             ->text('emails.customer-message-text', [
                 'customerMessage' => $this->customerMessage,
-                'messageBody' => $this->customerMessage->body,
+                'messageSubject' => $messageSubject,
+                'messageBody' => $messageBody,
                 'mailLayout' => $mailLayout,
             ])
             ->withSymfonyMessage(function (Email $email): void {

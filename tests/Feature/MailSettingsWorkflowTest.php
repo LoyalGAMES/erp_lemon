@@ -149,8 +149,8 @@ class MailSettingsWorkflowTest extends TestCase
             'trigger' => 'exchange_payment_requested',
             'status' => 'pending',
             'recipient_email' => 'client@example.test',
-            'subject' => 'Dopłata do wymiany RET/1',
-            'body' => 'Prosimy o opłacenie dopłaty.',
+            'subject' => 'Dopłata do wymiany {{return_number}}',
+            'body' => 'Prosimy o opłacenie dopłaty {{payment_url}}.',
             'metadata' => [
                 'return_number' => 'RET/1',
                 'payment_url' => 'https://pay.example.test/ret/1',
@@ -162,6 +162,8 @@ class MailSettingsWorkflowTest extends TestCase
         $this->assertStringContainsString('Sempre Premium', $html);
         $this->assertStringContainsString('https://cdn.example.test/logo.png', $html);
         $this->assertStringContainsString('Obsługa klienta Sempre', $html);
+        $this->assertStringContainsString('Dopłata do wymiany RET/1', $html);
+        $this->assertStringNotContainsString('{{return_number}}', $html);
         $this->assertStringContainsString('Przejdź do płatności', $html);
         $this->assertStringContainsString('https://pay.example.test/ret/1', $html);
         $this->assertStringContainsString('Sempre WL - wiadomość systemowa.', $html);
@@ -170,6 +172,7 @@ class MailSettingsWorkflowTest extends TestCase
         $mailable = new CustomerMessageMail($message);
         $mailable->build();
 
+        $this->assertSame('Dopłata do wymiany RET/1', $mailable->subject);
         $this->assertSame('emails.customer-message-text', $mailable->textView);
         $this->assertEquals([['address' => 'sklep@example.test', 'name' => 'Sempre Sklep']], $mailable->from);
         $this->assertEquals([['address' => 'bok@example.test', 'name' => 'Sempre Premium']], $mailable->replyTo);

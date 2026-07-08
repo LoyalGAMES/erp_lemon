@@ -440,7 +440,7 @@
                         <article class="customer-message-card">
                             <header>
                                 <div>
-                                    <strong>{{ $message->subject }}</strong>
+                                    <strong>{{ $message->renderedSubject() }}</strong>
                                     <span class="customer-message-meta">
                                         {{ $message->recipient_email }} · {{ $message->type === 'automated' ? 'automat' : 'ręcznie' }}{{ $message->trigger ? ' · '.$message->trigger : '' }}
                                     </span>
@@ -453,7 +453,7 @@
                                     · {{ $message->error_message }}
                                 @endif
                             </div>
-                            <div class="customer-message-preview">{{ \Illuminate\Support\Str::limit($message->body, 220) }}</div>
+                            <div class="customer-message-preview">{{ \Illuminate\Support\Str::limit($message->renderedBody(), 220) }}</div>
                         </article>
                     @empty
                         <span class="muted">Brak wiadomości wysłanych do klienta tego zamówienia.</span>
