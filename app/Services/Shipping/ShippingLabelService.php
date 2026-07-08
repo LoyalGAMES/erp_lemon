@@ -29,7 +29,9 @@ final class ShippingLabelService
     public function generateForOrder(ExternalOrder $order, ?CourierAccount $courierAccount = null): ShippingLabel
     {
         if ($courierAccount instanceof CourierAccount) {
-            return $this->generateViaInPost($order, $courierAccount);
+            return $courierAccount->provider === 'blpaczka'
+                ? $this->generateViaBLPaczka($order, $courierAccount)
+                : $this->generateViaInPost($order, $courierAccount);
         }
 
         $order = ExternalOrder::query()
@@ -45,14 +47,22 @@ final class ShippingLabelService
         $integration = $this->integrationWithLabelsForOrder($order);
 
         if (! $integration instanceof WordpressIntegration) {
-            $fallbackAccount = CourierAccount::defaultFor('inpost');
+            if ($this->looksLikeInPostShipping($order)) {
+                $inpostAccount = CourierAccount::defaultFor('inpost');
 
-            if ($fallbackAccount instanceof CourierAccount && $this->looksLikeInPostShipping($order)) {
-                return $this->generateViaInPost($order, $fallbackAccount);
+                if ($inpostAccount instanceof CourierAccount) {
+                    return $this->generateViaInPost($order, $inpostAccount);
+                }
+            } else {
+                $blpaczkaAccount = CourierAccount::defaultFor('blpaczka');
+
+                if ($blpaczkaAccount instanceof CourierAccount) {
+                    return $this->generateViaBLPaczka($order, $blpaczkaAccount);
+                }
             }
 
             throw new RuntimeException(
-                'Brak konfiguracji etykiet dla kanału tego zamówienia. Włącz etykiety kurierskie w Integracjach (endpoint wtyczki sklepu), dodaj konto InPost w Ustawienia → Wysyłki (dla wysyłek InPost) albo wygeneruj etykietę ręcznie i wybierz konto przy zamówieniu.',
+                'Brak konfiguracji etykiet dla kanału tego zamówienia. Włącz etykiety kurierskie w Integracjach (endpoint wtyczki sklepu), dodaj konto InPost/BLPaczka w Ustawienia → Wysyłki albo wygeneruj etykietę ręcznie i wybierz konto przy zamówieniu.',
             );
         }
 
@@ -236,6 +246,88 @@ final class ShippingLabelService
     }
 
     /**
+     * Tworzy nową przesyłkę BLPaczka (wycena + automatyczny dobór kuriera)
+     * i zapisuje jej etykietę.
+     */
+    private function generateViaBLPaczka(ExternalOrder $order, CourierAccount $account): ShippingLabel
+    {
+        $order = ExternalOrder::query()
+            ->with('salesChannel')
+            ->findOrFail($order->id);
+
+        $existing = $this->fetchBLPaczkaLabelIfAvailable($order);
+
+        if ($existing instanceof ShippingLabel) {
+            return $existing;
+        }
+
+        try {
+            $labelData = $this->blpaczka->createShipmentWithLabel($order, $account);
+
+            return $this->storeBLPaczkaLabel($order, $account, $labelData, reused: false);
+        } catch (Throwable $exception) {
+            $this->audit->record('shipping_label.failed', $order, null, null, [
+                'sales_channel' => $order->salesChannel?->code,
+                'provider' => 'blpaczka',
+                'courier_account' => $account->code,
+                'error' => $exception->getMessage(),
+            ]);
+
+            throw new RuntimeException($exception->getMessage(), previous: $exception);
+        }
+    }
+
+    /**
+     * @param array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>} $labelData
+     */
+    private function storeBLPaczkaLabel(
+        ExternalOrder $order,
+        CourierAccount $account,
+        array $labelData,
+        bool $reused,
+    ): ShippingLabel {
+        $extension = str_contains(mb_strtolower($labelData['mime_type']), 'pdf') ? 'pdf' : 'bin';
+        $filename = 'blpaczka-'.preg_replace('/[^A-Za-z0-9._-]+/', '-', (string) ($order->external_number ?: $order->external_id))
+            .'-'.now()->format('YmdHis').'.'.$extension;
+        $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
+
+        Storage::disk('local')->put($path, $labelData['contents']);
+
+        $label = ShippingLabel::query()->create([
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_order_id' => $order->id,
+            'courier_account_id' => $account->id,
+            'status' => 'generated',
+            'provider' => 'blpaczka',
+            'label_number' => $labelData['shipment_id'],
+            'tracking_number' => $labelData['tracking_number'],
+            'disk' => 'local',
+            'path' => $path,
+            'mime_type' => $labelData['mime_type'],
+            'size' => strlen($labelData['contents']),
+            'sha256' => hash('sha256', $labelData['contents']),
+            'response_payload' => [
+                'courier_account' => $account->code,
+                'reused_existing_shipment' => $reused,
+                'blpaczka' => $labelData['response_payload'],
+            ],
+            'generated_at' => now(),
+        ]);
+
+        $this->audit->record('shipping_label.generated', $label, null, [
+            'order_number' => $order->external_number,
+            'label_id' => $label->id,
+            'provider' => 'blpaczka',
+            'blpaczka_order_id' => $labelData['shipment_id'],
+            'reused_existing_shipment' => $reused,
+        ], [
+            'sales_channel' => $order->salesChannel?->code,
+        ]);
+
+        return $label;
+    }
+
+    /**
      * Jeśli przesyłka dla zamówienia została utworzona wtyczką BLPaczka
      * (meta BLPACZKA_blpaczka_order_id), pobiera jej etykietę z API BLPaczki.
      */
@@ -258,44 +350,7 @@ final class ShippingLabelService
         try {
             $labelData = $this->blpaczka->fetchLabelForShipment($blpaczkaOrderId, $account);
 
-            $extension = str_contains(mb_strtolower($labelData['mime_type']), 'pdf') ? 'pdf' : 'bin';
-            $filename = 'blpaczka-'.preg_replace('/[^A-Za-z0-9._-]+/', '-', (string) ($order->external_number ?: $order->external_id))
-                .'-'.now()->format('YmdHis').'.'.$extension;
-            $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
-
-            Storage::disk('local')->put($path, $labelData['contents']);
-
-            $label = ShippingLabel::query()->create([
-                'sales_channel_id' => $order->sales_channel_id,
-                'external_order_id' => $order->id,
-                'courier_account_id' => $account->id,
-                'status' => 'generated',
-                'provider' => 'blpaczka',
-                'label_number' => $labelData['shipment_id'],
-                'tracking_number' => $labelData['tracking_number'],
-                'disk' => 'local',
-                'path' => $path,
-                'mime_type' => $labelData['mime_type'],
-                'size' => strlen($labelData['contents']),
-                'sha256' => hash('sha256', $labelData['contents']),
-                'response_payload' => [
-                    'courier_account' => $account->code,
-                    'reused_existing_shipment' => true,
-                    'blpaczka' => $labelData['response_payload'],
-                ],
-                'generated_at' => now(),
-            ]);
-
-            $this->audit->record('shipping_label.generated', $label, null, [
-                'order_number' => $order->external_number,
-                'label_id' => $label->id,
-                'provider' => 'blpaczka',
-                'blpaczka_order_id' => $blpaczkaOrderId,
-            ], [
-                'sales_channel' => $order->salesChannel?->code,
-            ]);
-
-            return $label;
+            return $this->storeBLPaczkaLabel($order, $account, $labelData, reused: true);
         } catch (Throwable $exception) {
             $this->audit->record('shipping_label.failed', $order, null, null, [
                 'sales_channel' => $order->salesChannel?->code,

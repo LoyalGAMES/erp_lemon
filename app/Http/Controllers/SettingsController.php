@@ -108,6 +108,19 @@ class SettingsController extends Controller
             'return_building_number' => ['nullable', 'string', 'max:20'],
             'return_post_code' => ['nullable', 'string', 'max:12'],
             'return_city' => ['nullable', 'string', 'max:80'],
+            'sender_name' => ['nullable', 'string', 'max:120'],
+            'sender_street' => ['nullable', 'string', 'max:160'],
+            'sender_house_no' => ['nullable', 'string', 'max:20'],
+            'sender_locum_no' => ['nullable', 'string', 'max:20'],
+            'sender_postal' => ['nullable', 'string', 'max:12'],
+            'sender_city' => ['nullable', 'string', 'max:80'],
+            'sender_phone' => ['nullable', 'string', 'max:32'],
+            'sender_email' => ['nullable', 'email', 'max:255'],
+            'parcel_weight' => ['nullable', 'numeric', 'min:0.1', 'max:1000'],
+            'parcel_side_x' => ['nullable', 'integer', 'min:1', 'max:500'],
+            'parcel_side_y' => ['nullable', 'integer', 'min:1', 'max:500'],
+            'parcel_side_z' => ['nullable', 'integer', 'min:1', 'max:500'],
+            'payment' => ['nullable', 'string', 'in:bank,pay_later'],
         ]);
 
         DB::transaction(function () use ($account, $validated): void {
@@ -130,6 +143,23 @@ class SettingsController extends Controller
                         'city' => trim((string) ($validated['return_city'] ?? '')),
                         'country_code' => 'PL',
                     ],
+                    'sender' => [
+                        'name' => trim((string) ($validated['sender_name'] ?? '')),
+                        'street' => trim((string) ($validated['sender_street'] ?? '')),
+                        'house_no' => trim((string) ($validated['sender_house_no'] ?? '')),
+                        'locum_no' => trim((string) ($validated['sender_locum_no'] ?? '')),
+                        'postal' => trim((string) ($validated['sender_postal'] ?? '')),
+                        'city' => trim((string) ($validated['sender_city'] ?? '')),
+                        'phone' => trim((string) ($validated['sender_phone'] ?? '')),
+                        'email' => trim((string) ($validated['sender_email'] ?? '')),
+                    ],
+                    'parcel' => [
+                        'weight' => (float) ($validated['parcel_weight'] ?? 0),
+                        'side_x' => (int) ($validated['parcel_side_x'] ?? 0),
+                        'side_y' => (int) ($validated['parcel_side_y'] ?? 0),
+                        'side_z' => (int) ($validated['parcel_side_z'] ?? 0),
+                    ],
+                    'payment' => (string) ($validated['payment'] ?? 'bank'),
                 ]),
             ]);
 

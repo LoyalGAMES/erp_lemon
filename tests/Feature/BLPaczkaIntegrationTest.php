@@ -177,7 +177,102 @@ class BLPaczkaIntegrationTest extends TestCase
             ->assertSee('BLPaczka');
     }
 
-    private function createOrderWithBLPaczkaMeta(): ExternalOrder
+    public function test_new_blpaczka_shipment_is_created_with_courier_matched_from_cart_method(): void
+    {
+        Http::fake([
+            '*/api/getValuation.json' => Http::response([
+                'success' => true,
+                'data' => ['results' => [
+                    ['Courier' => ['name' => 'GLS', 'courier_code' => 'gls'], 'Price' => ['value' => '11.99']],
+                    ['Courier' => ['name' => 'Kurier DPD', 'courier_code' => 'dpd_classic'], 'Price' => ['value' => '14.50']],
+                ]],
+            ], 200),
+            '*/api/createOrderV2.json' => Http::response([
+                'success' => true,
+                'data' => ['blpaczka_order_id' => 778899],
+            ], 200),
+            '*/api/getWaybill.json' => Http::response([
+                'success' => true,
+                'data' => [[
+                    'filename' => 'dpd.pdf',
+                    'mime' => 'application/pdf',
+                    'content' => base64_encode('%PDF-1.4 created-label'),
+                ]],
+            ], 200),
+            '*/api/getOrderDetails.json' => Http::response([
+                'success' => true,
+                'data' => ['Order' => ['waybill_number' => '9988776655']],
+            ], 200),
+        ]);
+
+        $order = $this->createOrderWithBLPaczkaMeta(withPluginShipment: false);
+        $account = $this->createBLPaczkaAccount(withSenderAndParcel: true);
+
+        $label = app(ShippingLabelService::class)->generateForOrder($order, $account);
+
+        $this->assertSame('blpaczka', $label->provider);
+        $this->assertSame('778899', $label->label_number);
+        $this->assertSame('9988776655', $label->tracking_number);
+        $this->assertFalse((bool) data_get($label->response_payload, 'reused_existing_shipment'));
+        $this->assertSame('dpd_classic', data_get($label->response_payload, 'blpaczka.courier_code'));
+
+        Http::assertSent(function ($request): bool {
+            if (! str_contains($request->url(), 'createOrderV2.json')) {
+                return true;
+            }
+
+            return data_get($request->data(), 'CourierSearch.courier_code') === 'dpd_classic'
+                && data_get($request->data(), 'Cart.0.Order.name') === 'Sempre Sp. z o.o.'
+                && data_get($request->data(), 'Cart.0.Order.taker_city') === 'Kraków'
+                && data_get($request->data(), 'CartOrder.payment') === 'bank'
+                && data_get($request->data(), 'CourierSearch.weight') === 2.0;
+        });
+    }
+
+    public function test_new_blpaczka_shipment_falls_back_to_cheapest_offer(): void
+    {
+        Http::fake([
+            '*/api/getValuation.json' => Http::response([
+                'success' => true,
+                'data' => ['results' => [
+                    ['Courier' => ['name' => 'UPS Standard', 'courier_code' => 'ups'], 'Price' => ['value' => '19.99']],
+                    ['Courier' => ['name' => 'GLS', 'courier_code' => 'gls'], 'Price' => ['value' => '11.99']],
+                ]],
+            ], 200),
+            '*/api/createOrderV2.json' => Http::response([
+                'success' => true,
+                'data' => ['blpaczka_order_id' => 111222],
+            ], 200),
+            '*/api/getWaybill.json' => Http::response([
+                'success' => true,
+                'data' => [[
+                    'filename' => 'gls.pdf',
+                    'mime' => 'application/pdf',
+                    'content' => base64_encode('%PDF-1.4 gls-label'),
+                ]],
+            ], 200),
+            '*/api/getOrderDetails.json' => Http::response(['success' => true, 'data' => ['Order' => []]], 200),
+        ]);
+
+        $order = $this->createOrderWithBLPaczkaMeta(withPluginShipment: false, methodTitle: 'Kurier standardowy');
+        $this->createBLPaczkaAccount(withSenderAndParcel: true);
+
+        $label = app(ShippingLabelService::class)->generateForOrder($order);
+
+        $this->assertSame('gls', data_get($label->response_payload, 'blpaczka.courier_code'));
+    }
+
+    public function test_new_blpaczka_shipment_requires_sender_and_parcel_config(): void
+    {
+        $order = $this->createOrderWithBLPaczkaMeta(withPluginShipment: false);
+        $account = $this->createBLPaczkaAccount(withSenderAndParcel: false);
+
+        $this->expectExceptionMessage('danych nadawcy BLPaczka');
+
+        app(ShippingLabelService::class)->generateForOrder($order, $account);
+    }
+
+    private function createOrderWithBLPaczkaMeta(bool $withPluginShipment = true, string $methodTitle = 'Kurier DPD (BLPaczka)'): ExternalOrder
     {
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
@@ -203,12 +298,20 @@ class BLPaczkaIntegrationTest extends TestCase
             'currency' => 'PLN',
             'total_gross' => 250,
             'billing_data' => ['email' => 'k@example.test', 'first_name' => 'Jan', 'last_name' => 'Klient'],
-            'shipping_data' => ['first_name' => 'Jan', 'last_name' => 'Klient'],
+            'shipping_data' => [
+                'first_name' => 'Jan',
+                'last_name' => 'Klient',
+                'address_1' => 'ul. Krzywa 2',
+                'postcode' => '30-002',
+                'city' => 'Kraków',
+                'country' => 'PL',
+                'phone' => '500600700',
+            ],
             'raw_payload' => [
-                'shipping_lines' => [['method_title' => 'Kurier DPD (BLPaczka)']],
-                'meta_data' => [
-                    ['key' => 'BLPACZKA_blpaczka_order_id', 'value' => '445566'],
-                ],
+                'shipping_lines' => [['method_title' => $methodTitle]],
+                'meta_data' => $withPluginShipment
+                    ? [['key' => 'BLPACZKA_blpaczka_order_id', 'value' => '445566']]
+                    : [],
             ],
         ]);
 
@@ -224,7 +327,7 @@ class BLPaczkaIntegrationTest extends TestCase
         return $order;
     }
 
-    private function createBLPaczkaAccount(): CourierAccount
+    private function createBLPaczkaAccount(bool $withSenderAndParcel = false): CourierAccount
     {
         $account = new CourierAccount([
             'provider' => 'blpaczka',
@@ -235,6 +338,19 @@ class BLPaczkaIntegrationTest extends TestCase
             'sending_method' => 'dispatch_order',
             'is_default' => true,
             'is_active' => true,
+            'metadata' => $withSenderAndParcel ? [
+                'sender' => [
+                    'name' => 'Sempre Sp. z o.o.',
+                    'street' => 'Magazynowa',
+                    'house_no' => '5',
+                    'postal' => '30-001',
+                    'city' => 'Kraków',
+                    'phone' => '48123456789',
+                    'email' => 'magazyn@sempre.test',
+                ],
+                'parcel' => ['weight' => 2, 'side_x' => 40, 'side_y' => 30, 'side_z' => 15],
+                'payment' => 'bank',
+            ] : null,
         ]);
         $account->setApiToken('klucz-blp');
         $account->save();
