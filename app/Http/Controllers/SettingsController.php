@@ -108,6 +108,8 @@ class SettingsController extends Controller
             'dispositions.*.code' => ['nullable', 'string', 'max:40', 'regex:/^[A-Za-z0-9_-]+$/'],
             'dispositions.*.label' => ['nullable', 'string', 'max:80'],
             'dispositions.*.warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
+            'store_api_token' => ['nullable', 'string', 'max:120'],
+            'store_webhook_secret' => ['nullable', 'string', 'max:120'],
         ]);
 
         $returnSettings->update($validated);

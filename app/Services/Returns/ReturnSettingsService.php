@@ -22,7 +22,9 @@ final class ReturnSettingsService
      *     return_reasons:list<string>,
      *     conditions:list<array{code:string,label:string}>,
      *     dispositions:list<array{code:string,label:string,warehouse_id:?int}>,
-     *     disposition_warehouse_ids:array<string, ?int>
+     *     disposition_warehouse_ids:array<string, ?int>,
+     *     store_api_token:string,
+     *     store_webhook_secret:string
      * }
      */
     public function data(): array
@@ -53,6 +55,8 @@ final class ReturnSettingsService
             'conditions' => $conditions,
             'dispositions' => $dispositions,
             'disposition_warehouse_ids' => $this->dispositionWarehouseMap($dispositions),
+            'store_api_token' => $this->cleanToken((string) ($data['store_api_token'] ?? '')),
+            'store_webhook_secret' => $this->cleanToken((string) ($data['store_webhook_secret'] ?? '')),
         ];
     }
 
@@ -80,6 +84,8 @@ final class ReturnSettingsService
             'conditions' => $conditions,
             'dispositions' => $dispositions,
             'disposition_warehouse_ids' => $this->dispositionWarehouseMap($dispositions),
+            'store_api_token' => $this->cleanToken((string) ($data['store_api_token'] ?? '')),
+            'store_webhook_secret' => $this->cleanToken((string) ($data['store_webhook_secret'] ?? '')),
         ];
 
         AppSetting::query()->updateOrCreate(
@@ -159,7 +165,17 @@ final class ReturnSettingsService
                 'laundry' => null,
                 'scrap' => null,
             ],
+            'store_api_token' => '',
+            'store_webhook_secret' => '',
         ];
+    }
+
+    private function cleanToken(string $value): string
+    {
+        $value = trim($value);
+        $value = preg_replace('/[^\x21-\x7E]+/', '', $value) ?? '';
+
+        return mb_substr($value, 0, 120);
     }
 
     /**
