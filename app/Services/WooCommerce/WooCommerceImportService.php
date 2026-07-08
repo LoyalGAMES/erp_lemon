@@ -13,9 +13,11 @@ use App\Models\StockBalance;
 use App\Models\Warehouse;
 use App\Models\WordpressIntegration;
 use App\Services\Automation\DocumentAutomationSettingsService;
+use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Inventory\SalesChannelWarehouseResolver;
 use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderWzDocumentService;
+use App\Services\Orders\OrderStatusPolicyService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Throwable;
@@ -28,6 +30,8 @@ final class WooCommerceImportService
         private readonly StockReservationService $reservationService,
         private readonly DocumentAutomationSettingsService $automationSettings,
         private readonly OrderWzDocumentService $wzDocuments,
+        private readonly CustomerCommunicationService $communication,
+        private readonly OrderStatusPolicyService $statusPolicy,
     ) {
     }
 
@@ -249,13 +253,17 @@ final class WooCommerceImportService
 
         foreach ($this->client->orders($integration) as $item) {
             $item['erp_imported_order_notes'] = $this->safeOrderNotes($integration, (string) $item['id']);
+            $wasCreated = false;
+            $previousStatus = null;
 
-            $order = DB::transaction(function () use ($integration, $item, &$created, &$updated, &$lines, &$reserved, &$released, &$reservationSkipped): ExternalOrder {
+            $order = DB::transaction(function () use ($integration, $item, &$created, &$updated, &$lines, &$reserved, &$released, &$reservationSkipped, &$wasCreated, &$previousStatus): ExternalOrder {
                 $order = ExternalOrder::query()->firstOrNew([
                     'sales_channel_id' => $integration->sales_channel_id,
                     'external_id' => (string) $item['id'],
                 ]);
                 $isNew = ! $order->exists;
+                $wasCreated = $isNew;
+                $previousStatus = $order->exists ? (string) $order->status : null;
                 $existingRawPayload = (array) $order->raw_payload;
                 $splitAllocations = $order->exists ? $this->splitAllocationsForOrder($order) : [];
                 $importLines = $this->importableOrderLines($item, $splitAllocations);
@@ -312,7 +320,12 @@ final class WooCommerceImportService
                 return $order->fresh();
             });
 
-            if ($this->automationSettings->actionEnabled('order.imported', 'order.wz.create')) {
+            $isFulfillmentStatus = $this->statusPolicy->isFulfillmentStatus((string) $order->status);
+
+            if (
+                $isFulfillmentStatus
+                && $this->automationSettings->actionEnabled('order.imported', 'order.wz.create')
+            ) {
                 try {
                     $this->wzDocuments->ensureDrafts(
                         $order,
@@ -322,6 +335,18 @@ final class WooCommerceImportService
                 } catch (Throwable) {
                     // Import zamówienia i rezerwacji jest ważniejszy niż automatyczny szkic WZ.
                 }
+            }
+
+            if ($wasCreated && $isFulfillmentStatus) {
+                $this->communication->sendOrderStatus($order, 'order_received');
+            } elseif ($wasCreated && $this->shouldNotifyOrderCreated((string) $order->status)) {
+                $this->communication->sendOrderStatus($order, 'order_created');
+            } elseif (
+                ! $wasCreated
+                && ! $this->statusPolicy->isFulfillmentStatus($previousStatus)
+                && $isFulfillmentStatus
+            ) {
+                $this->communication->sendOrderStatus($order, 'order_received');
             }
         }
 
@@ -333,6 +358,11 @@ final class WooCommerceImportService
             'released' => $released,
             'reservation_skipped' => $reservationSkipped,
         ];
+    }
+
+    private function shouldNotifyOrderCreated(string $status): bool
+    {
+        return in_array(mb_strtolower(trim($status)), ['pending', 'on-hold'], true);
     }
 
     /**

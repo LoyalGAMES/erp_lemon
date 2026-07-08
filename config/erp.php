@@ -18,5 +18,6 @@ return [
     'basic_user' => env('ERP_BASIC_USER', ''),
     'basic_password' => env('ERP_BASIC_PASSWORD', ''),
     'fallback_email' => env('ERP_FALLBACK_EMAIL', ''),
+    'print_bridge_token' => env('PRINT_BRIDGE_TOKEN', ''),
 
 ];

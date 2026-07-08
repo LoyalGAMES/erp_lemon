@@ -1,8 +1,20 @@
 <?php
 
+use App\Http\Controllers\Api\PrintBridgeController;
 use App\Http\Controllers\Api\StoreReturnsController;
+use App\Http\Middleware\VerifyPrintBridgeToken;
 use App\Http\Middleware\VerifyStoreReturnsToken;
 use Illuminate\Support\Facades\Route;
+
+Route::middleware(VerifyPrintBridgeToken::class)
+    ->prefix('print-bridge')
+    ->name('api.print-bridge.')
+    ->group(function (): void {
+        Route::get('/jobs/next', [PrintBridgeController::class, 'next'])->name('jobs.next');
+        Route::get('/jobs/{job}/file', [PrintBridgeController::class, 'file'])->name('jobs.file');
+        Route::post('/jobs/{job}/printed', [PrintBridgeController::class, 'printed'])->name('jobs.printed');
+        Route::post('/jobs/{job}/failed', [PrintBridgeController::class, 'failed'])->name('jobs.failed');
+    });
 
 Route::middleware(VerifyStoreReturnsToken::class)
     ->prefix('store-returns')

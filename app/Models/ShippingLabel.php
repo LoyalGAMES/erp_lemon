@@ -7,6 +7,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class ShippingLabel extends Model
 {
@@ -18,6 +19,7 @@ class ShippingLabel extends Model
         'wordpress_integration_id',
         'courier_account_id',
         'return_case_id',
+        'purpose',
         'status',
         'provider',
         'label_number',
@@ -60,6 +62,11 @@ class ShippingLabel extends Model
     public function courierAccount(): BelongsTo
     {
         return $this->belongsTo(CourierAccount::class);
+    }
+
+    public function printJobs(): HasMany
+    {
+        return $this->hasMany(PrintJob::class);
     }
 
     public function filename(): string

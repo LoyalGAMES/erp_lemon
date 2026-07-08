@@ -7,20 +7,25 @@ namespace App\Http\Controllers;
 use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\PackingTask;
+use App\Models\PrintJob;
 use App\Models\ShippingLabel;
 use App\Services\Packing\PackingFulfillmentService;
 use App\Services\Packing\PackingSettingsService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
+use App\Services\Printing\ShippingLabelPrintQueueService;
 use App\Services\Shipping\ShippingLabelService;
-use Illuminate\Support\Collection;
-use Illuminate\Support\Carbon;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\View\View;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
+use Throwable;
 
 class PackingController extends Controller
 {
@@ -176,6 +181,7 @@ class PackingController extends Controller
             'stations.*.code' => ['nullable', 'string', 'max:40'],
             'stations.*.name' => ['nullable', 'string', 'max:80'],
             'stations.*.printer_name' => ['nullable', 'string', 'max:120'],
+            'stations.*.listener_url' => ['nullable', 'url', 'max:180'],
             'stations.*.segment' => ['nullable', 'string', 'in:all,clothing,footwear'],
             'footwear_keywords' => ['nullable', 'string', 'max:2000'],
         ]);
@@ -186,6 +192,47 @@ class PackingController extends Controller
         ]);
 
         return back()->with('status', 'Ustawienia stanowisk pakowania zostały zapisane.');
+    }
+
+    public function listenerPrinters(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'listener_url' => ['required', 'url', 'max:180'],
+        ]);
+
+        $listenerUrl = rtrim((string) $data['listener_url'], '/');
+
+        try {
+            $response = Http::timeout(6)
+                ->acceptJson()
+                ->get($listenerUrl.'/printers');
+        } catch (Throwable $exception) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Nie udało się połączyć z aplikacją Windows: '.$exception->getMessage(),
+            ], 422);
+        }
+
+        if ($response->failed()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Aplikacja Windows zwróciła HTTP '.$response->status().': '.mb_substr($response->body(), 0, 500),
+            ], 422);
+        }
+
+        return response()->json([
+            'success' => true,
+            'printers' => collect((array) $response->json('printers', []))
+                ->map(fn (array $printer): array => [
+                    'name' => trim((string) ($printer['name'] ?? '')),
+                    'driver' => trim((string) ($printer['driver'] ?? '')),
+                    'port' => trim((string) ($printer['port'] ?? '')),
+                    'default' => (bool) ($printer['default'] ?? false),
+                ])
+                ->filter(fn (array $printer): bool => $printer['name'] !== '')
+                ->values()
+                ->all(),
+        ]);
     }
 
     private function segmentLabel(string $segment): string
@@ -264,18 +311,28 @@ class PackingController extends Controller
         return back()->with('status', "Oznaczono pozycję {$task->sku} jako spakowaną.");
     }
 
-    public function packOrder(ExternalOrder $order, PackingFulfillmentService $fulfillment): RedirectResponse
-    {
+    public function packOrder(
+        ExternalOrder $order,
+        PackingFulfillmentService $fulfillment,
+        PackingSettingsService $settings,
+    ): RedirectResponse {
         try {
-            $result = $fulfillment->completePackedOrder($order);
+            $result = $fulfillment->completePackedOrder(
+                $order,
+                $settings->station((string) session('packing_station', '')),
+            );
         } catch (RuntimeException $exception) {
             return back()->with('error', $exception->getMessage());
         }
 
         $message = "Spakowano zamówienie {$order->external_number}: {$result['packed']} pozycji. Zamówienie trafiło do listy oczekujących na kuriera.";
 
+        if ($result['print_job'] !== null) {
+            $message .= $this->printJobMessage($result['print_job']);
+        }
+
         if ($result['warnings'] !== []) {
-            $message .= ' Ostrzeżenia automatyzacji: ' . implode(' | ', $result['warnings']);
+            $message .= ' Ostrzeżenia automatyzacji: '.implode(' | ', $result['warnings']);
         }
 
         return back()->with('status', $message);
@@ -296,7 +353,7 @@ class PackingController extends Controller
         $message = "Cofnięto pakowanie zamówienia {$order->external_number}: {$result['tasks']} pozycji wróciło do kolejki pakowania. WZ, faktura i etykieta pozostają w historii.";
 
         if ($result['warnings'] !== []) {
-            $message .= ' Ostrzeżenia: ' . implode(' | ', $result['warnings']);
+            $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
         }
 
         return back()->with('status', $message);
@@ -317,7 +374,7 @@ class PackingController extends Controller
         $message = "Oznaczono odbiór kuriera {$data['courier']}: {$result['orders']} zamówień, {$result['tasks']} pozycji. Status w WooCommerce zmieniono na wysłano.";
 
         if ($result['warnings'] !== []) {
-            $message .= ' Ostrzeżenia: ' . implode(' | ', $result['warnings']);
+            $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
         }
 
         return back()->with('status', $message);
@@ -356,6 +413,7 @@ class PackingController extends Controller
         ExternalOrder $order,
         ShippingLabelService $shippingLabels,
         PackingSettingsService $settings,
+        ShippingLabelPrintQueueService $printQueue,
     ): RedirectResponse {
         $data = $request->validate([
             'courier_account_id' => ['nullable', 'integer', 'exists:courier_accounts,id'],
@@ -368,7 +426,7 @@ class PackingController extends Controller
         try {
             $label = $shippingLabels->generateForOrder($order, $account);
         } catch (RuntimeException $exception) {
-            return back()->with('error', 'Nie udało się wygenerować etykiety: ' . $exception->getMessage());
+            return back()->with('error', 'Nie udało się wygenerować etykiety: '.$exception->getMessage());
         }
 
         $message = "Etykieta dla zamówienia {$order->external_number} została pobrana do ERP: {$label->filename()}.";
@@ -379,8 +437,16 @@ class PackingController extends Controller
 
         $station = $settings->station((string) session('packing_station', ''));
 
-        if ($station !== null && $station['printer_name'] !== '') {
-            $message .= " Drukuj na: {$station['printer_name']}.";
+        if ($station !== null) {
+            try {
+                $printJob = $printQueue->enqueueForStation($label, $station, 'packing.label.generated');
+
+                if ($printJob !== null) {
+                    $message .= $this->printJobMessage($printJob);
+                }
+            } catch (Throwable $exception) {
+                $message .= ' Nie udało się dodać wydruku do kolejki: '.$exception->getMessage();
+            }
         }
 
         return back()->with('status', $message);
@@ -397,8 +463,21 @@ class PackingController extends Controller
         ]);
     }
 
+    private function printJobMessage(PrintJob $printJob): string
+    {
+        if ($printJob->status === 'printed' && filled($printJob->listener_url)) {
+            return " Etykieta została wysłana do aplikacji Windows: {$printJob->printer_name}.";
+        }
+
+        if (filled($printJob->last_error)) {
+            return " Nie udało się wysłać etykiety do aplikacji Windows ({$printJob->printer_name}): {$printJob->last_error}";
+        }
+
+        return " Etykieta została dodana do kolejki wydruku: {$printJob->printer_name}.";
+    }
+
     /**
-     * @param Collection<int, PackingTask> $openTasks
+     * @param  Collection<int, PackingTask>  $openTasks
      * @return Collection<int, array<string, mixed>>
      */
     private function pickGroups(Collection $openTasks, ProductSegmentService $segments): Collection
@@ -462,7 +541,7 @@ class PackingController extends Controller
     }
 
     /**
-     * @param Collection<int, PackingTask> $tasks
+     * @param  Collection<int, PackingTask>  $tasks
      * @return Collection<int, ExternalOrder>
      */
     private function readyOrders(Collection $tasks, ProductSegmentService $segments): Collection
@@ -499,7 +578,7 @@ class PackingController extends Controller
     }
 
     /**
-     * @param Collection<int, PackingTask> $packedTasks
+     * @param  Collection<int, PackingTask>  $packedTasks
      * @return Collection<int, array<string, mixed>>
      */
     private function waitingCourierGroups(Collection $packedTasks): Collection
@@ -547,7 +626,7 @@ class PackingController extends Controller
     {
         try {
             return Carbon::parse($date)->startOfDay();
-        } catch (\Throwable) {
+        } catch (Throwable) {
             return now()->startOfDay();
         }
     }

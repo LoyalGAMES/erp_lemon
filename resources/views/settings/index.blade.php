@@ -38,6 +38,14 @@
             <strong>Wysyłki i konta kurierskie</strong>
             <span>Konta InPost (ShipX) do generowania etykiet z wyborem konta nadawczego.</span>
         </a>
+        <a class="settings-card" href="{{ route('settings.mail') }}">
+            <strong>Maile SMTP</strong>
+            <span>Host SMTP, nadawca i test wysyłki dla komunikacji z klientami.</span>
+        </a>
+        <a class="settings-card" href="{{ route('settings.payments') }}">
+            <strong>Płatności i zwroty</strong>
+            <span>Refundy PayU oraz konto źródłowe do koszyka przelewów mBank.</span>
+        </a>
         <a class="settings-card" href="{{ route('settings.users') }}">
             <strong>Użytkownicy</strong>
             <span>Konta ERP, role robocze, aktywność i hasła dostępu do aplikacji.</span>

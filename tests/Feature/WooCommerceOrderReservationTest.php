@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\CustomerMessage;
+use App\Models\ExternalOrder;
 use App\Models\Product;
+use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
 use App\Models\StockReservation;
@@ -14,6 +17,7 @@ use App\Services\WooCommerce\WooCommerceImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Mail;
 use Tests\TestCase;
 
 class WooCommerceOrderReservationTest extends TestCase
@@ -61,6 +65,13 @@ class WooCommerceOrderReservationTest extends TestCase
             'quantity_precision' => 0,
             'is_active' => true,
         ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '7001',
+            'external_sku' => 'SKU-RES',
+            'stock_sync_enabled' => true,
+        ]);
 
         StockBalance::query()->create([
             'warehouse_id' => $warehouse->id,
@@ -107,6 +118,176 @@ class WooCommerceOrderReservationTest extends TestCase
         $this->assertSame('10.0000', (string) $balance->quantity_available);
     }
 
+    public function test_pending_order_is_imported_for_customer_communication_and_reserves_stock(): void
+    {
+        Mail::fake();
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+        ]);
+
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Main',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $warehouse->routes()->create([
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 100,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-RES',
+            'name' => 'Reserved product',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '7001',
+            'external_sku' => 'SKU-RES',
+            'stock_sync_enabled' => true,
+        ]);
+
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 10,
+            'quantity_reserved' => 0,
+            'quantity_available' => 10,
+        ]);
+
+        $status = 'pending';
+        Http::fake($this->ordersResponse($status));
+
+        $stats = app(WooCommerceImportService::class)->importOrders($integration);
+
+        $this->assertSame(1, $stats['created']);
+        $this->assertSame(1, $stats['reserved']);
+        $this->assertSame(0, $stats['released']);
+        $this->assertSame(1, StockReservation::query()->where('status', 'active')->count());
+
+        $balance = StockBalance::query()->firstOrFail();
+        $this->assertSame('2.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('8.0000', (string) $balance->quantity_available);
+
+        $order = ExternalOrder::query()->firstOrFail();
+        $this->assertSame('pending', $order->status);
+
+        $this->assertDatabaseHas('customer_messages', [
+            'external_order_id' => $order->id,
+            'type' => 'automated',
+            'trigger' => 'order_created',
+            'status' => 'sent',
+            'recipient_email' => 'client@example.test',
+        ]);
+        $this->assertSame(0, CustomerMessage::query()->where('trigger', 'order_received')->count());
+
+        Http::assertSent(function ($request): bool {
+            $url = $request->url();
+
+            return str_contains($url, '/wp-json/wc/v3/orders?')
+                && str_contains($url, 'status=any');
+        });
+    }
+
+    public function test_order_transition_from_pending_to_processing_keeps_reservation_and_sends_realization_message(): void
+    {
+        Mail::fake();
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+        ]);
+
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Main',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $warehouse->routes()->create([
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 100,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-RES',
+            'name' => 'Reserved product',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '7001',
+            'external_sku' => 'SKU-RES',
+            'stock_sync_enabled' => true,
+        ]);
+
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 10,
+            'quantity_reserved' => 0,
+            'quantity_available' => 10,
+        ]);
+
+        $status = 'pending';
+        Http::fake($this->ordersResponse($status));
+        $pendingStats = app(WooCommerceImportService::class)->importOrders($integration);
+
+        $this->assertSame(1, $pendingStats['reserved']);
+        $this->assertSame(1, StockReservation::query()->where('status', 'active')->count());
+
+        $status = 'processing';
+        $stats = app(WooCommerceImportService::class)->importOrders($integration);
+
+        $order = ExternalOrder::query()->firstOrFail();
+        $this->assertSame('processing', $order->status);
+        $this->assertSame(0, $stats['reserved']);
+        $this->assertSame(1, StockReservation::query()->where('status', 'active')->count());
+        $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_created')->count());
+        $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_received')->count());
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -127,6 +308,11 @@ class WooCommerceOrderReservationTest extends TestCase
                         'status' => $status,
                         'currency' => 'PLN',
                         'total' => '199.00',
+                        'billing' => [
+                            'email' => 'client@example.test',
+                            'first_name' => 'Jan',
+                            'last_name' => 'Klient',
+                        ],
                         'line_items' => [
                             [
                                 'id' => 9001,

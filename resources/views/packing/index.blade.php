@@ -59,7 +59,11 @@
         .pick-badge.segment-clothing { background: var(--brand-soft); color: var(--brand-dark); }
         .station-config summary { cursor: pointer; font-weight: 760; color: var(--green-dark); }
         .station-config-form { display: grid; gap: 12px; margin-top: 12px; }
-        .station-config-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fffdfb; }
+        .station-config-row { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fffdfb; }
+        .printer-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: end; }
+        .printer-field input, .printer-field select { grid-column: 1 / -1; }
+        .printer-field button { min-height: 38px; align-self: stretch; }
+        .printer-status { grid-column: 1 / -1; color: var(--muted); font-size: 12px; min-height: 18px; }
         .label-account-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
         .label-account-form select { min-height: 42px; }
         .label-account-form .button { min-height: 42px; }
@@ -250,7 +254,17 @@
                                     <input name="stations[{{ $index }}][name]" value="{{ $stationOption['name'] }}" maxlength="80" required>
                                 </label>
                                 <label>Drukarka etykiet
-                                    <input name="stations[{{ $index }}][printer_name]" value="{{ $stationOption['printer_name'] }}" maxlength="120" placeholder="np. Zebra ZD421 — stanowisko 1">
+                                    <span class="printer-field" data-printer-picker>
+                                        <input name="stations[{{ $index }}][printer_name]" value="{{ $stationOption['printer_name'] }}" maxlength="120" placeholder="np. Zebra ZD421 — stanowisko 1" data-printer-name>
+                                        <select data-printer-select hidden>
+                                            <option value="">Wybierz drukarkę</option>
+                                        </select>
+                                        <button class="button secondary" type="button" data-load-printers>Pobierz</button>
+                                        <span class="printer-status" data-printer-status></span>
+                                    </span>
+                                </label>
+                                <label>Aplikacja Windows
+                                    <input name="stations[{{ $index }}][listener_url]" value="{{ $stationOption['listener_url'] ?? '' }}" maxlength="180" placeholder="http://192.168.1.25:17777" data-listener-url>
                                 </label>
                                 <label>Asortyment
                                     <select name="stations[{{ $index }}][segment]">
@@ -687,3 +701,76 @@
         </div>
     @endif
 @endsection
+
+@push('scripts')
+    <script>
+        (() => {
+            const endpoint = @json(route('packing.listener.printers'));
+            const token = @json(csrf_token());
+
+            document.querySelectorAll('[data-load-printers]').forEach((button) => {
+                button.addEventListener('click', async () => {
+                    const row = button.closest('.station-config-row');
+                    const listenerInput = row?.querySelector('[data-listener-url]');
+                    const printerInput = row?.querySelector('[data-printer-name]');
+                    const printerSelect = row?.querySelector('[data-printer-select]');
+                    const status = row?.querySelector('[data-printer-status]');
+                    const listenerUrl = String(listenerInput?.value || '').trim();
+
+                    if (!listenerUrl) {
+                        if (status) status.textContent = 'Najpierw wpisz adres aplikacji Windows.';
+                        listenerInput?.focus();
+                        return;
+                    }
+
+                    button.disabled = true;
+                    if (status) status.textContent = 'Pobieranie listy drukarek...';
+
+                    try {
+                        const response = await fetch(endpoint, {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'Accept': 'application/json',
+                                'X-CSRF-TOKEN': token,
+                            },
+                            body: JSON.stringify({ listener_url: listenerUrl }),
+                        });
+                        const payload = await response.json();
+
+                        if (!response.ok || !payload.success) {
+                            throw new Error(payload.message || 'Nie udało się pobrać drukarek.');
+                        }
+
+                        const printers = Array.isArray(payload.printers) ? payload.printers : [];
+                        if (printerSelect) {
+                            printerSelect.innerHTML = '<option value="">Wybierz drukarkę</option>';
+
+                            printers.forEach((printer) => {
+                                const option = document.createElement('option');
+                                option.value = printer.name;
+                                option.textContent = `${printer.default ? 'Domyślna · ' : ''}${printer.name}${printer.driver ? ' · ' + printer.driver : ''}`;
+                                printerSelect.append(option);
+                            });
+
+                            printerSelect.hidden = printers.length === 0;
+                            printerSelect.onchange = () => {
+                                if (printerInput) printerInput.value = printerSelect.value;
+                            };
+                        }
+
+                        if (printers.length === 1 && printerInput) {
+                            printerInput.value = printers[0].name;
+                        }
+
+                        if (status) status.textContent = printers.length > 0 ? `Znaleziono drukarki: ${printers.length}.` : 'Aplikacja Windows nie zwróciła drukarek.';
+                    } catch (error) {
+                        if (status) status.textContent = error.message || 'Nie udało się pobrać drukarek.';
+                    } finally {
+                        button.disabled = false;
+                    }
+                });
+            });
+        })();
+    </script>
+@endpush

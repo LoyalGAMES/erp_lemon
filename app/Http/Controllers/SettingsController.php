@@ -5,13 +5,20 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Models\CourierAccount;
+use App\Models\EmailTemplate;
 use App\Models\Warehouse;
 use App\Services\Automation\DocumentAutomationSettingsService;
+use App\Services\Communication\MailSettingsService;
 use App\Services\Inventory\WarehouseDocumentSettingsService;
+use App\Services\Payments\MbankTransferBasketSettingsService;
+use App\Services\Payments\PayuRefundSettingsService;
 use App\Services\Returns\ReturnSettingsService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Mail\Message;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 use Illuminate\View\View;
 
 class SettingsController extends Controller
@@ -53,6 +60,175 @@ class SettingsController extends Controller
                 ->orderBy('name')
                 ->get(),
         ]);
+    }
+
+    public function mail(MailSettingsService $mailSettings): View
+    {
+        return view('settings.mail', [
+            'title' => 'Ustawienia maili',
+            'subtitle' => 'Konfiguracja SMTP oraz szablony ręcznej komunikacji z klientami.',
+            'module' => 'settings',
+            'mailSettings' => $mailSettings->data(),
+            'emailTemplates' => EmailTemplate::query()
+                ->orderBy('context')
+                ->orderBy('name')
+                ->get(),
+            'runtimeMailer' => config('mail.default'),
+        ]);
+    }
+
+    public function payments(
+        PayuRefundSettingsService $payuSettings,
+        MbankTransferBasketSettingsService $mbankSettings,
+    ): View {
+        return view('settings.payments', [
+            'title' => 'Ustawienia płatności',
+            'subtitle' => 'PayU refundy i eksport koszyka przelewów mBank dla zwrotów pobraniowych.',
+            'module' => 'settings',
+            'payuSettings' => $payuSettings->data(),
+            'mbankSettings' => $mbankSettings->data(),
+        ]);
+    }
+
+    public function updatePayments(
+        Request $request,
+        PayuRefundSettingsService $payuSettings,
+        MbankTransferBasketSettingsService $mbankSettings,
+    ): RedirectResponse {
+        $payuEnabled = $request->boolean('payu_enabled');
+        $validated = $request->validate([
+            'payu_enabled' => ['nullable', 'boolean'],
+            'payu_auto_refund_enabled' => ['nullable', 'boolean'],
+            'payu_environment' => ['required', 'string', 'in:sandbox,production'],
+            'payu_client_id' => [$payuEnabled ? 'required' : 'nullable', 'string', 'max:120'],
+            'payu_pos_id' => ['nullable', 'string', 'max:120'],
+            'payu_client_secret' => ['nullable', 'string', 'max:2000'],
+            'payu_clear_client_secret' => ['nullable', 'boolean'],
+            'payu_refund_type' => ['required', 'string', 'in:REFUND_PAYMENT_STANDARD,FAST'],
+            'mbank_source_account' => ['nullable', 'string', 'max:34'],
+            'mbank_source_bank_code' => ['required', 'string', 'max:8'],
+            'mbank_source_name' => ['required', 'string', 'max:143'],
+            'mbank_encoding' => ['required', 'string', 'in:UTF-8,Windows-1250,CP852'],
+        ]);
+
+        $payuSettings->update([
+            'enabled' => $payuEnabled,
+            'auto_refund_enabled' => $request->boolean('payu_auto_refund_enabled'),
+            'environment' => $validated['payu_environment'],
+            'client_id' => $validated['payu_client_id'] ?? '',
+            'pos_id' => $validated['payu_pos_id'] ?? '',
+            'client_secret' => $validated['payu_client_secret'] ?? '',
+            'clear_client_secret' => $request->boolean('payu_clear_client_secret'),
+            'refund_type' => $validated['payu_refund_type'],
+        ]);
+
+        $mbankSettings->update([
+            'source_account' => $validated['mbank_source_account'] ?? '',
+            'source_bank_code' => $validated['mbank_source_bank_code'],
+            'source_name' => $validated['mbank_source_name'],
+            'encoding' => $validated['mbank_encoding'],
+        ]);
+
+        return back()->with('status', 'Ustawienia płatności i zwrotów zostały zapisane.');
+    }
+
+    public function updateMail(Request $request, MailSettingsService $mailSettings): RedirectResponse
+    {
+        $enabled = $request->boolean('enabled');
+        $validated = $request->validate([
+            'enabled' => ['nullable', 'boolean'],
+            'host' => [$enabled ? 'required' : 'nullable', 'string', 'max:255'],
+            'port' => [$enabled ? 'required' : 'nullable', 'integer', 'min:1', 'max:65535'],
+            'encryption' => ['required', 'string', 'in:none,tls,ssl'],
+            'username' => ['nullable', 'string', 'max:255'],
+            'password' => ['nullable', 'string', 'max:2000'],
+            'clear_password' => ['nullable', 'boolean'],
+            'from_address' => [$enabled ? 'required' : 'nullable', 'email', 'max:255'],
+            'from_name' => [$enabled ? 'required' : 'nullable', 'string', 'max:120'],
+            'ehlo_domain' => ['nullable', 'string', 'max:255'],
+            'timeout' => ['required', 'integer', 'min:3', 'max:120'],
+            'brand_name' => ['nullable', 'string', 'max:120'],
+            'logo_url' => ['nullable', 'url', 'max:1000'],
+            'accent_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
+            'header_text' => ['nullable', 'string', 'max:160'],
+            'signature' => ['nullable', 'string', 'max:1000'],
+            'footer_text' => ['nullable', 'string', 'max:1000'],
+            'support_email' => ['nullable', 'email', 'max:255'],
+            'support_phone' => ['nullable', 'string', 'max:40'],
+        ]);
+
+        $validated['enabled'] = $enabled;
+        $validated['clear_password'] = $request->boolean('clear_password');
+        $mailSettings->update($validated);
+
+        return back()->with('status', 'Ustawienia poczty zostały zapisane.');
+    }
+
+    public function testMail(Request $request, MailSettingsService $mailSettings): RedirectResponse
+    {
+        $validated = $request->validate([
+            'recipient' => ['required', 'email', 'max:255'],
+        ]);
+
+        $settings = $mailSettings->data();
+
+        if (! $settings['enabled']) {
+            return back()->with('error', 'Najpierw włącz konfigurację poczty i zapisz ustawienia.');
+        }
+
+        try {
+            $mailSettings->apply();
+            Mail::raw(
+                "To jest test konfiguracji maili z Sempre ERP.\n\nJeśli widzisz tę wiadomość, SMTP działa poprawnie.",
+                function (Message $message) use ($validated): void {
+                    $message
+                        ->to($validated['recipient'])
+                        ->subject('Test konfiguracji maili Sempre ERP');
+                },
+            );
+        } catch (\Throwable $exception) {
+            return back()->with('error', 'Nie udało się wysłać maila testowego: '.$exception->getMessage());
+        }
+
+        return back()->with('status', 'Mail testowy został wysłany na '.$validated['recipient'].'.');
+    }
+
+    public function storeEmailTemplate(Request $request): RedirectResponse
+    {
+        $validated = $this->emailTemplateData($request);
+        $codeBase = Str::slug($validated['name']) ?: 'szablon';
+        $code = $codeBase;
+        $suffix = 2;
+
+        while (EmailTemplate::query()->where('code', $code)->exists()) {
+            $code = $codeBase.'-'.$suffix;
+            $suffix++;
+        }
+
+        EmailTemplate::query()->create(array_merge($validated, [
+            'code' => $code,
+            'is_active' => $request->boolean('is_active', true),
+        ]));
+
+        return back()->with('status', 'Szablon maila został dodany.');
+    }
+
+    public function updateEmailTemplate(Request $request, EmailTemplate $template): RedirectResponse
+    {
+        $validated = $this->emailTemplateData($request);
+        $template->update(array_merge($validated, [
+            'is_active' => $request->boolean('is_active'),
+        ]));
+
+        return back()->with('status', 'Szablon maila został zapisany.');
+    }
+
+    public function destroyEmailTemplate(EmailTemplate $template): RedirectResponse
+    {
+        $name = $template->name;
+        $template->delete();
+
+        return back()->with('status', "Szablon {$name} został usunięty.");
     }
 
     public function storeCourierAccount(Request $request): RedirectResponse
@@ -191,6 +367,20 @@ class SettingsController extends Controller
             ->where('provider', $account->provider)
             ->whereKeyNot($account->id)
             ->update(['is_default' => false]);
+    }
+
+    /**
+     * @return array{name:string,context:string,subject:string,body:string}
+     */
+    private function emailTemplateData(Request $request): array
+    {
+        return $request->validate([
+            'name' => ['required', 'string', 'max:120'],
+            'context' => ['required', 'string', 'in:order,return,both'],
+            'subject' => ['required', 'string', 'max:160'],
+            'body' => ['required', 'string', 'max:5000'],
+            'is_active' => ['nullable', 'boolean'],
+        ]);
     }
 
     public function returns(ReturnSettingsService $returnSettings): View

@@ -13,7 +13,7 @@ final class PackingSettingsService
     /**
      * @return array{
      *     footwear_keywords:list<string>,
-     *     stations:list<array{code:string,name:string,printer_name:string,segment:string}>
+     *     stations:list<array{code:string,name:string,printer_name:string,listener_url:string,segment:string}>
      * }
      */
     public function data(): array
@@ -31,7 +31,7 @@ final class PackingSettingsService
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      * @return array<string, mixed>
      */
     public function update(array $data): array
@@ -56,7 +56,7 @@ final class PackingSettingsService
     }
 
     /**
-     * @return array{code:string,name:string,printer_name:string,segment:string}|null
+     * @return array{code:string,name:string,printer_name:string,listener_url:string,segment:string}|null
      */
     public function station(?string $code): ?array
     {
@@ -85,12 +85,14 @@ final class PackingSettingsService
                     'code' => 'station-1',
                     'name' => 'Stanowisko 1',
                     'printer_name' => 'Drukarka 1',
+                    'listener_url' => '',
                     'segment' => 'clothing',
                 ],
                 [
                     'code' => 'station-2',
                     'name' => 'Stanowisko 2',
                     'printer_name' => 'Drukarka 2',
+                    'listener_url' => '',
                     'segment' => 'footwear',
                 ],
             ],
@@ -120,7 +122,6 @@ final class PackingSettingsService
     }
 
     /**
-     * @param mixed $keywords
      * @return list<string>
      */
     private function cleanKeywords(mixed $keywords): array
@@ -143,8 +144,7 @@ final class PackingSettingsService
     }
 
     /**
-     * @param mixed $stations
-     * @return list<array{code:string,name:string,printer_name:string,segment:string}>
+     * @return list<array{code:string,name:string,printer_name:string,listener_url:string,segment:string}>
      */
     private function cleanStations(mixed $stations): array
     {
@@ -169,6 +169,7 @@ final class PackingSettingsService
                 'code' => mb_substr($code, 0, 40),
                 'name' => mb_substr($name, 0, 80),
                 'printer_name' => mb_substr(trim((string) ($station['printer_name'] ?? '')), 0, 120),
+                'listener_url' => mb_substr(trim((string) ($station['listener_url'] ?? '')), 0, 180),
                 'segment' => in_array($segment, ['all', 'clothing', 'footwear'], true) ? $segment : 'all',
             ];
         }

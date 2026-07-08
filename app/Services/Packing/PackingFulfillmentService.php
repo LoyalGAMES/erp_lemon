@@ -7,14 +7,17 @@ namespace App\Services\Packing;
 use App\Models\ExternalOrder;
 use App\Models\Invoice;
 use App\Models\PackingTask;
+use App\Models\PrintJob;
 use App\Models\ShippingLabel;
 use App\Models\WarehouseDocument;
-use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Audit\AuditLogService;
+use App\Services\Automation\DocumentAutomationSettingsService;
+use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\Invoices\OrderInvoiceService;
 use App\Services\Orders\OrderFulfillmentStatusService;
 use App\Services\Orders\OrderWzDocumentService;
+use App\Services\Printing\ShippingLabelPrintQueueService;
 use App\Services\Shipping\ShippingLabelService;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use App\Services\WooCommerce\WooCommerceOrderStatusService;
@@ -35,13 +38,15 @@ final class PackingFulfillmentService
         private readonly WooCommerceOrderStatusService $orderStatuses,
         private readonly AuditLogService $audit,
         private readonly DocumentAutomationSettingsService $automationSettings,
-    ) {
-    }
+        private readonly ShippingLabelPrintQueueService $printQueue,
+        private readonly CustomerCommunicationService $communication,
+    ) {}
 
     /**
-     * @return array{packed:int,label:?ShippingLabel,wz:list<WarehouseDocument>,invoice:?Invoice,woo_status:?string,warnings:list<string>}
+     * @param  array{code:string,name:string,printer_name:string,listener_url?:string,segment:string}|null  $printStation
+     * @return array{packed:int,label:?ShippingLabel,print_job:?PrintJob,wz:list<WarehouseDocument>,invoice:?Invoice,woo_status:?string,warnings:list<string>}
      */
-    public function completePackedOrder(ExternalOrder $order): array
+    public function completePackedOrder(ExternalOrder $order, ?array $printStation = null): array
     {
         $warnings = [];
         $createWzIfMissing = $this->automationSettings->actionEnabled('packing.order.packed', 'order.wz.create_if_missing');
@@ -55,7 +60,16 @@ final class PackingFulfillmentService
             try {
                 $label = $this->shippingLabels->generateForOrder($order);
             } catch (Throwable $exception) {
-                $warnings[] = 'Etykieta: ' . $exception->getMessage();
+                $warnings[] = 'Etykieta: '.$exception->getMessage();
+            }
+        }
+
+        $printJob = null;
+        if ($label instanceof ShippingLabel) {
+            try {
+                $printJob = $this->printQueue->enqueueForStation($label, $printStation, 'packing.order.packed');
+            } catch (Throwable $exception) {
+                $warnings[] = 'Wydruk: '.$exception->getMessage();
             }
         }
 
@@ -64,17 +78,17 @@ final class PackingFulfillmentService
             try {
                 $wzDocuments = $this->ensurePostedWz($order, $createWzIfMissing);
             } catch (Throwable $exception) {
-                $warnings[] = 'WZ: ' . $exception->getMessage();
+                $warnings[] = 'WZ: '.$exception->getMessage();
             }
         } elseif ($createWzIfMissing) {
             try {
                 $wzDocuments = $this->orderWzDocuments->ensureDrafts(
                     $order,
                     'packing',
-                    'Automatyczne WZ z pakowania zamówienia WooCommerce ' . $order->external_number,
+                    'Automatyczne WZ z pakowania zamówienia WooCommerce '.$order->external_number,
                 );
             } catch (Throwable $exception) {
-                $warnings[] = 'WZ: ' . $exception->getMessage();
+                $warnings[] = 'WZ: '.$exception->getMessage();
             }
         }
 
@@ -86,7 +100,7 @@ final class PackingFulfillmentService
                     $this->invoiceUpload->upload($invoice);
                 }
             } catch (Throwable $exception) {
-                $warnings[] = 'Faktura/WooCommerce: ' . $exception->getMessage();
+                $warnings[] = 'Faktura/WooCommerce: '.$exception->getMessage();
             }
         }
 
@@ -95,11 +109,12 @@ final class PackingFulfillmentService
             $result = $this->orderStatuses->markReadyForShipment($order);
             $wooStatus = (string) ($result['status'] ?? '');
         } catch (Throwable $exception) {
-            $warnings[] = 'Status WooCommerce: ' . $exception->getMessage();
+            $warnings[] = 'Status WooCommerce: '.$exception->getMessage();
         }
 
         $this->markPackedTasksMetadata($order, [
             'label_id' => $label?->id,
+            'print_job_id' => $printJob?->id,
             'wz_document_ids' => collect($wzDocuments)->pluck('id')->values()->all(),
             'invoice_id' => $invoice?->id,
             'woo_status' => $wooStatus,
@@ -109,15 +124,22 @@ final class PackingFulfillmentService
         $this->audit->record('packing.order_completed', $order, null, [
             'packed_tasks' => $packed,
             'label_id' => $label?->id,
+            'print_job_id' => $printJob?->id,
             'wz_document_ids' => collect($wzDocuments)->pluck('id')->values()->all(),
             'invoice_id' => $invoice?->id,
             'woo_status' => $wooStatus,
             'warnings' => $warnings,
         ]);
 
+        $this->communication->sendOrderStatus($order, 'order_packed', [
+            'label_id' => $label?->id,
+            'tracking_number' => $label?->tracking_number,
+        ]);
+
         return [
             'packed' => $packed,
             'label' => $label,
+            'print_job' => $printJob,
             'wz' => $wzDocuments,
             'invoice' => $invoice,
             'woo_status' => $wooStatus,
@@ -158,6 +180,7 @@ final class PackingFulfillmentService
                 $this->orderStatuses->markShipped($order);
             } catch (Throwable $exception) {
                 $warnings[] = "Zamówienie {$order->external_number}: {$exception->getMessage()}";
+
                 continue;
             }
 
@@ -186,6 +209,11 @@ final class PackingFulfillmentService
                 ]);
                 $taskCount++;
             }
+
+            $this->communication->sendOrderStatus($order, 'order_courier_picked_up', [
+                'courier' => $courier,
+                'tracking_number' => $this->latestTrackingNumber($order),
+            ]);
         }
 
         $this->audit->record('packing.courier_picked_up', null, null, [
@@ -207,7 +235,7 @@ final class PackingFulfillmentService
      * Oznacza pojedyncze zamówienie jako odebrane przez kuriera — używane przez
      * automatyczne śledzenie przesyłek. Zwraca liczbę zaktualizowanych pozycji.
      *
-     * @param array<string, mixed> $context np. tracking_number, tracking_status, source
+     * @param  array<string, mixed>  $context  np. tracking_number, tracking_status, source
      * @return array{tasks:int,warnings:list<string>}
      */
     public function markOrderPickedUpByCourier(ExternalOrder $order, array $context = []): array
@@ -253,6 +281,12 @@ final class PackingFulfillmentService
                 'metadata' => $metadata,
             ]);
         }
+
+        $this->communication->sendOrderStatus($order, 'order_courier_picked_up', [
+            'courier' => $tasks->first()?->courier,
+            'tracking_number' => $context['tracking_number'] ?? $this->latestTrackingNumber($order),
+            'source' => $context['source'] ?? 'tracking',
+        ]);
 
         $this->audit->record('packing.courier_picked_up_tracked', $order, null, [
             'tasks' => $tasks->count(),
@@ -310,7 +344,7 @@ final class PackingFulfillmentService
             $wooStatus = (string) ($result['status'] ?? '');
         } catch (Throwable $exception) {
             $wooStatus = 'processing';
-            $warnings[] = 'Status WooCommerce: ' . $exception->getMessage();
+            $warnings[] = 'Status WooCommerce: '.$exception->getMessage();
 
             $order->refresh();
             $raw = (array) $order->raw_payload;
@@ -365,7 +399,7 @@ final class PackingFulfillmentService
         $documents = $this->orderWzDocuments->ensureDrafts(
             $order,
             'packing',
-            'Automatyczne WZ z pakowania zamówienia WooCommerce ' . $order->external_number,
+            'Automatyczne WZ z pakowania zamówienia WooCommerce '.$order->external_number,
         );
 
         if ($documents === []) {
@@ -381,7 +415,7 @@ final class PackingFulfillmentService
     }
 
     /**
-     * @param array<string, mixed> $result
+     * @param  array<string, mixed>  $result
      */
     private function markPackedTasksMetadata(ExternalOrder $order, array $result): void
     {
@@ -396,5 +430,16 @@ final class PackingFulfillmentService
 
                 $task->update(['metadata' => $metadata]);
             });
+    }
+
+    private function latestTrackingNumber(ExternalOrder $order): ?string
+    {
+        $label = ShippingLabel::query()
+            ->where('external_order_id', $order->id)
+            ->whereNotNull('tracking_number')
+            ->latest('generated_at')
+            ->first();
+
+        return $label instanceof ShippingLabel ? $label->tracking_number : null;
     }
 }
