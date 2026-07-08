@@ -45,10 +45,10 @@ class SettingsController extends Controller
     {
         return view('settings.shipping', [
             'title' => 'Ustawienia wysyłek',
-            'subtitle' => 'Konta kurierskie InPost do generowania etykiet. Każde konto ma własny token API i organizację nadawczą.',
+            'subtitle' => 'Konta kurierskie do etykiet: InPost (ShipX) i BLPaczka. Każde konto ma własny token API.',
             'module' => 'settings',
             'accounts' => CourierAccount::query()
-                ->where('provider', 'inpost')
+                ->orderBy('provider')
                 ->orderByDesc('is_default')
                 ->orderBy('name')
                 ->get(),
@@ -58,9 +58,10 @@ class SettingsController extends Controller
     public function storeCourierAccount(Request $request): RedirectResponse
     {
         $validated = $request->validate([
+            'provider' => ['required', 'string', 'in:inpost,blpaczka'],
             'name' => ['required', 'string', 'max:120'],
             'code' => ['required', 'string', 'max:40', 'regex:/^[A-Za-z0-9_-]+$/'],
-            'organization_id' => ['required', 'string', 'max:40'],
+            'organization_id' => ['required', 'string', 'max:255'],
             'api_token' => ['required', 'string', 'max:2000'],
             'default_parcel_template' => ['required', 'string', 'in:small,medium,large'],
             'sending_method' => ['required', 'string', 'in:dispatch_order,parcel_locker,pok,branch'],
@@ -69,7 +70,7 @@ class SettingsController extends Controller
 
         DB::transaction(function () use ($validated): void {
             $account = new CourierAccount([
-                'provider' => 'inpost',
+                'provider' => $validated['provider'],
                 'code' => mb_strtolower($validated['code']),
                 'name' => $validated['name'],
                 'organization_id' => $validated['organization_id'],

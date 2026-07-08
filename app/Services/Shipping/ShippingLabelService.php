@@ -21,6 +21,7 @@ final class ShippingLabelService
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly InPostShipmentService $inpost,
+        private readonly BLPaczkaShipmentService $blpaczka,
         private readonly AuditLogService $audit,
     ) {
     }
@@ -34,6 +35,12 @@ final class ShippingLabelService
         $order = ExternalOrder::query()
             ->with('salesChannel')
             ->findOrFail($order->id);
+
+        $blpaczkaLabel = $this->fetchBLPaczkaLabelIfAvailable($order);
+
+        if ($blpaczkaLabel instanceof ShippingLabel) {
+            return $blpaczkaLabel;
+        }
 
         $integration = $this->integrationWithLabelsForOrder($order);
 
@@ -221,6 +228,79 @@ final class ShippingLabelService
                 'sales_channel' => $order->salesChannel?->code,
                 'provider' => 'inpost',
                 'courier_account' => $account->code,
+                'error' => $exception->getMessage(),
+            ]);
+
+            throw new RuntimeException($exception->getMessage(), previous: $exception);
+        }
+    }
+
+    /**
+     * Jeśli przesyłka dla zamówienia została utworzona wtyczką BLPaczka
+     * (meta BLPACZKA_blpaczka_order_id), pobiera jej etykietę z API BLPaczki.
+     */
+    private function fetchBLPaczkaLabelIfAvailable(ExternalOrder $order): ?ShippingLabel
+    {
+        $blpaczkaOrderId = $this->blpaczka->orderIdFromMeta($order);
+
+        if ($blpaczkaOrderId === null) {
+            return null;
+        }
+
+        $account = CourierAccount::defaultFor('blpaczka');
+
+        if (! $account instanceof CourierAccount) {
+            throw new RuntimeException(
+                'Zamówienie ma przesyłkę BLPaczka (nr '.$blpaczkaOrderId.'), ale w ERP nie ma konta BLPaczka. Dodaj je w Ustawienia → Wysyłki (login + klucz API z panelu BLPaczki).',
+            );
+        }
+
+        try {
+            $labelData = $this->blpaczka->fetchLabelForShipment($blpaczkaOrderId, $account);
+
+            $extension = str_contains(mb_strtolower($labelData['mime_type']), 'pdf') ? 'pdf' : 'bin';
+            $filename = 'blpaczka-'.preg_replace('/[^A-Za-z0-9._-]+/', '-', (string) ($order->external_number ?: $order->external_id))
+                .'-'.now()->format('YmdHis').'.'.$extension;
+            $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
+
+            Storage::disk('local')->put($path, $labelData['contents']);
+
+            $label = ShippingLabel::query()->create([
+                'sales_channel_id' => $order->sales_channel_id,
+                'external_order_id' => $order->id,
+                'courier_account_id' => $account->id,
+                'status' => 'generated',
+                'provider' => 'blpaczka',
+                'label_number' => $labelData['shipment_id'],
+                'tracking_number' => $labelData['tracking_number'],
+                'disk' => 'local',
+                'path' => $path,
+                'mime_type' => $labelData['mime_type'],
+                'size' => strlen($labelData['contents']),
+                'sha256' => hash('sha256', $labelData['contents']),
+                'response_payload' => [
+                    'courier_account' => $account->code,
+                    'reused_existing_shipment' => true,
+                    'blpaczka' => $labelData['response_payload'],
+                ],
+                'generated_at' => now(),
+            ]);
+
+            $this->audit->record('shipping_label.generated', $label, null, [
+                'order_number' => $order->external_number,
+                'label_id' => $label->id,
+                'provider' => 'blpaczka',
+                'blpaczka_order_id' => $blpaczkaOrderId,
+            ], [
+                'sales_channel' => $order->salesChannel?->code,
+            ]);
+
+            return $label;
+        } catch (Throwable $exception) {
+            $this->audit->record('shipping_label.failed', $order, null, null, [
+                'sales_channel' => $order->salesChannel?->code,
+                'provider' => 'blpaczka',
+                'blpaczka_order_id' => $blpaczkaOrderId,
                 'error' => $exception->getMessage(),
             ]);
 

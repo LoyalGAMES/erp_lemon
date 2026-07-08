@@ -57,6 +57,11 @@ class ShippingLabel extends Model
         return $this->belongsTo(ReturnCase::class);
     }
 
+    public function courierAccount(): BelongsTo
+    {
+        return $this->belongsTo(CourierAccount::class);
+    }
+
     public function filename(): string
     {
         return basename($this->path);

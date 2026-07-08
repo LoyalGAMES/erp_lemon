@@ -25,7 +25,7 @@
                     <div class="shipping-account-header">
                         <div>
                             <strong>{{ $account->name }}</strong>
-                            <span class="muted">kod: {{ $account->code }}</span>
+                            <span class="muted">{{ $account->provider === 'blpaczka' ? 'BLPaczka' : 'InPost (ShipX)' }} · kod: {{ $account->code }}</span>
                         </div>
                         <div class="shipping-account-badges">
                             @if ($account->is_default)
@@ -110,17 +110,24 @@
         <div class="panel-header"><span>Dodaj konto</span><span></span></div>
         <form class="shipping-account-card" method="POST" action="{{ route('settings.shipping.accounts.store') }}">
             @csrf
+            <p class="muted" style="margin: 0;">InPost: ID organizacji + token z Menedżera Paczek (ShipX). BLPaczka: w polu „ID organizacji / login" wpisz login (e-mail) konta BLPaczki, a w polu tokenu — klucz API z panelu BLPaczki (Edytuj dane → Wygeneruj klucz API). Konta BLPaczki służą do pobierania etykiet przesyłek utworzonych wtyczką w sklepie i śledzenia odbioru.</p>
             <div class="shipping-account-grid">
+                <label>Dostawca
+                    <select name="provider">
+                        <option value="inpost" @selected(old('provider', 'inpost') === 'inpost')>InPost (ShipX)</option>
+                        <option value="blpaczka" @selected(old('provider') === 'blpaczka')>BLPaczka</option>
+                    </select>
+                </label>
                 <label>Nazwa konta
                     <input name="name" value="{{ old('name') }}" required maxlength="120" placeholder="np. Konto główne">
                 </label>
                 <label>Kod (unikalny)
                     <input name="code" value="{{ old('code') }}" required maxlength="40" pattern="[A-Za-z0-9_-]+" placeholder="np. glowne">
                 </label>
-                <label>ID organizacji ShipX
-                    <input name="organization_id" value="{{ old('organization_id') }}" required maxlength="40">
+                <label>ID organizacji ShipX / login BLPaczka
+                    <input name="organization_id" value="{{ old('organization_id') }}" required maxlength="255">
                 </label>
-                <label>Token API ShipX
+                <label>Token API / klucz API
                     <input name="api_token" type="password" autocomplete="new-password" required>
                 </label>
                 <label>Domyślny gabaryt paczki
