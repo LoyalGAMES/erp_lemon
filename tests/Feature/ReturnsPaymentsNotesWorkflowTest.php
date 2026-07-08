@@ -118,6 +118,87 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
         $this->assertStringContainsString('https://pay.example.test/doplata/1', $message->body);
     }
 
+    public function test_return_detail_card_groups_operational_information_outside_index(): void
+    {
+        $order = $this->createOrder();
+        $returnCase = $this->createReturnCase($order, [
+            'notes' => 'Klient zgłosił wymianę rozmiaru.',
+        ]);
+        $orderLine = $order->lines()->firstOrFail();
+
+        $returnCase->lines()->create([
+            'product_id' => $orderLine->product_id,
+            'external_order_line_id' => $orderLine->id,
+            'quantity_expected' => 1,
+            'quantity_accepted' => 1,
+            'condition' => 'opened',
+            'disposition' => 'exchange',
+            'target_warehouse_id' => $returnCase->target_warehouse_id,
+            'notes' => 'Rozmiar za mały.',
+        ]);
+
+        CustomerMessage::query()->create([
+            'return_case_id' => $returnCase->id,
+            'type' => 'manual',
+            'status' => 'sent',
+            'recipient_email' => 'jan@example.test',
+            'subject' => 'Instrukcja wymiany',
+            'body' => 'Wyślij paczkę do magazynu.',
+            'sent_at' => now(),
+        ]);
+
+        CustomerPayment::query()->create([
+            'return_case_id' => $returnCase->id,
+            'direction' => 'incoming',
+            'method' => 'blik',
+            'status' => 'booked',
+            'amount' => 24.99,
+            'currency' => 'PLN',
+            'description' => 'Dopłata do wymiany.',
+            'booked_at' => now(),
+        ]);
+
+        InternalNote::query()->create([
+            'return_case_id' => $returnCase->id,
+            'author_name' => 'BOK',
+            'body' => 'Sprawdzić kompletność przed wysyłką wymiany.',
+        ]);
+
+        ShippingLabel::query()->create([
+            'return_case_id' => $returnCase->id,
+            'external_order_id' => $order->id,
+            'purpose' => 'exchange',
+            'status' => 'generated',
+            'provider' => 'inpost',
+            'label_number' => 'LBL-EX-1',
+            'tracking_number' => '520000111111111111111111',
+            'disk' => 'local',
+            'path' => 'labels/exchange.pdf',
+            'generated_at' => now(),
+        ]);
+
+        $this->get(route('returns.index'))
+            ->assertOk()
+            ->assertSee('Otwórz kartę')
+            ->assertDontSee('Mail do klienta');
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Karta zwrotu '.$returnCase->number)
+            ->assertSee('Produkty w zwrocie')
+            ->assertSee('SKU-RET')
+            ->assertSee('Rozmiar za mały')
+            ->assertSee('Wypłaty i rozliczenia')
+            ->assertSee('24,99 PLN')
+            ->assertSee('Komunikacja z klientem')
+            ->assertSee('Instrukcja wymiany')
+            ->assertSee('Notatki wewnętrzne')
+            ->assertSee('Sprawdzić kompletność')
+            ->assertSee('Etykiety wymiany i zwrotu')
+            ->assertSee('LBL-EX-1')
+            ->assertSee('Historia zwrotu');
+    }
+
     public function test_mbank_payout_export_contains_cod_returns_in_elixir_record(): void
     {
         app(MbankTransferBasketSettingsService::class)->update([

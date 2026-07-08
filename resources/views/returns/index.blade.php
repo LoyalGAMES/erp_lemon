@@ -188,7 +188,7 @@
                         @endphp
                         <tr>
                             <td>
-                                <strong>{{ $returnCase->number }}</strong>
+                                <a class="return-number-link" href="{{ route('returns.show', $returnCase) }}"><strong>{{ $returnCase->number }}</strong></a>
                                 @if (data_get($returnCase->metadata, 'source') === 'store_form')
                                     <br><span class="muted">{{ data_get($returnCase->metadata, 'return_reference') }}</span>
                                 @endif
@@ -198,6 +198,9 @@
                                 <span class="status {{ $statusMeta['class'] }}">{{ $statusMeta['label'] }}</span>
                                 @if (data_get($returnCase->metadata, 'return_method') === 'wygodne_zwroty')
                                     <br><span class="muted">Wygodne Zwroty</span>
+                                @endif
+                                @if ($returnCase->correctionInvoice)
+                                    <br><a class="status" href="{{ route('invoices.preview', $returnCase->correctionInvoice) }}" target="_blank" rel="noopener">Korekta {{ $returnCase->correctionInvoice->number }}</a>
                                 @endif
                                 @if ($automationWarnings->isNotEmpty())
                                     <details class="return-automation-details">
@@ -233,7 +236,9 @@
                             </td>
                             <td>{{ $returnCase->reason ?? '-' }}</td>
                             <td>{{ $returnCase->customer_email ?? '-' }}</td>
-                            <td>@include('partials.return-actions', ['returnCase' => $returnCase])</td>
+                            <td>
+                                <a class="button secondary return-open-button" href="{{ route('returns.show', $returnCase) }}">Otwórz kartę</a>
+                            </td>
                         </tr>
                     @empty
                         <tr>
@@ -281,6 +286,9 @@
         .returns-tab-count { display: inline-flex; align-items: center; justify-content: center; min-width: 21px; min-height: 21px; border-radius: 999px; padding: 0 6px; background: var(--orange); color: #fff; font-size: 12px; }
         .returns-search { display: flex; gap: 8px; flex: 1 1 340px; max-width: 560px; }
         .returns-search input { flex: 1; min-width: 0; }
+        .return-number-link { color: var(--text); text-decoration: none; }
+        .return-number-link:hover { color: var(--brand-dark); text-decoration: underline; }
+        .return-open-button { white-space: nowrap; }
         .return-label-list { display: grid; gap: 6px; align-items: start; max-width: 260px; }
         .return-label-form { display: grid; gap: 6px; margin-top: 6px; }
         .return-label-form select { min-height: 38px; max-width: 220px; }

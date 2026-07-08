@@ -157,6 +157,11 @@ class StoreReturnsApiTest extends TestCase
         $this->get(route('returns.index', ['tab' => 'pending']))
             ->assertOk()
             ->assertSee($returnCase->number)
+            ->assertSee('Otwórz kartę')
+            ->assertDontSee('Zatwierdź');
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
             ->assertSee('Zatwierdź');
 
         $this->get(route('returns.index', ['q' => 'LLR-20260708-TEST03']))

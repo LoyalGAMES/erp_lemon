@@ -105,6 +105,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::get('/returns/payouts/mbank', [ReturnController::class, 'mbankPayouts'])->name('returns.payouts.mbank');
         Route::get('/returns/payouts/mbank/download', [ReturnController::class, 'downloadMbankPayouts'])->name('returns.payouts.mbank.download');
         Route::post('/returns', [ReturnController::class, 'store'])->name('returns.store');
+        Route::get('/returns/{returnCase}', [ReturnController::class, 'show'])->name('returns.show');
         Route::get('/returns/{returnCase}/edit', [ReturnController::class, 'edit'])->name('returns.edit');
         Route::put('/returns/{returnCase}', [ReturnController::class, 'update'])->name('returns.update');
         Route::post('/returns/{returnCase}/approve', [ReturnController::class, 'approve'])->name('returns.approve');
