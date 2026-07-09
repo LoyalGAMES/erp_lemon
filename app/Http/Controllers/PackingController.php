@@ -15,12 +15,10 @@ use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
 use App\Services\Printing\ShippingLabelPrintQueueService;
 use App\Services\Shipping\ShippingLabelService;
-use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\View\View;
 use RuntimeException;
@@ -110,7 +108,6 @@ class PackingController extends Controller
             'activeSegment' => $activeSegment,
             'packingStations' => $packingSettings['stations'],
             'activeStation' => $activeStation,
-            'footwearKeywords' => $packingSettings['footwear_keywords'],
             'courierAccounts' => CourierAccount::query()
                 ->where('is_active', true)
                 ->orderBy('provider')
@@ -172,67 +169,6 @@ class PackingController extends Controller
         $printer = $station['printer_name'] !== '' ? " Etykiety: {$station['printer_name']}." : '';
 
         return back()->with('status', "Pracujesz na: {$station['name']} ({$this->segmentLabel($station['segment'])}).{$printer}");
-    }
-
-    public function updateStations(Request $request, PackingSettingsService $settings): RedirectResponse
-    {
-        $data = $request->validate([
-            'stations' => ['required', 'array', 'min:1', 'max:6'],
-            'stations.*.code' => ['nullable', 'string', 'max:40'],
-            'stations.*.name' => ['nullable', 'string', 'max:80'],
-            'stations.*.printer_name' => ['nullable', 'string', 'max:120'],
-            'stations.*.listener_url' => ['nullable', 'url', 'max:180'],
-            'stations.*.segment' => ['nullable', 'string', 'in:all,clothing,footwear'],
-            'footwear_keywords' => ['nullable', 'string', 'max:2000'],
-        ]);
-
-        $settings->update([
-            'stations' => $data['stations'],
-            'footwear_keywords' => $data['footwear_keywords'] ?? null,
-        ]);
-
-        return back()->with('status', 'Ustawienia stanowisk pakowania zostały zapisane.');
-    }
-
-    public function listenerPrinters(Request $request): JsonResponse
-    {
-        $data = $request->validate([
-            'listener_url' => ['required', 'url', 'max:180'],
-        ]);
-
-        $listenerUrl = rtrim((string) $data['listener_url'], '/');
-
-        try {
-            $response = Http::timeout(6)
-                ->acceptJson()
-                ->get($listenerUrl.'/printers');
-        } catch (Throwable $exception) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Nie udało się połączyć z aplikacją Windows: '.$exception->getMessage(),
-            ], 422);
-        }
-
-        if ($response->failed()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Aplikacja Windows zwróciła HTTP '.$response->status().': '.mb_substr($response->body(), 0, 500),
-            ], 422);
-        }
-
-        return response()->json([
-            'success' => true,
-            'printers' => collect((array) $response->json('printers', []))
-                ->map(fn (array $printer): array => [
-                    'name' => trim((string) ($printer['name'] ?? '')),
-                    'driver' => trim((string) ($printer['driver'] ?? '')),
-                    'port' => trim((string) ($printer['port'] ?? '')),
-                    'default' => (bool) ($printer['default'] ?? false),
-                ])
-                ->filter(fn (array $printer): bool => $printer['name'] !== '')
-                ->values()
-                ->all(),
-        ]);
     }
 
     private function segmentLabel(string $segment): string
