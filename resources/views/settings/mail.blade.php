@@ -180,18 +180,29 @@
 
                         <p class="muted">{{ $workflowMail['description'] }}</p>
 
-                        <div class="mail-settings-fields">
+                        @if ($workflowMail['editable_content'])
+                            <div class="mail-settings-fields">
+                                <label>Etap workflow
+                                    <input name="workflow[{{ $workflowCode }}][stage]" value="{{ old('workflow.'.$workflowCode.'.stage', $workflowMail['stage']) }}" maxlength="160">
+                                </label>
+                                <label>Temat
+                                    <input name="workflow[{{ $workflowCode }}][subject]" value="{{ old('workflow.'.$workflowCode.'.subject', $workflowMail['subject']) }}" maxlength="160">
+                                </label>
+                            </div>
+
+                            <label>Treść automatycznego maila
+                                <textarea name="workflow[{{ $workflowCode }}][body]" rows="4" maxlength="5000">{{ old('workflow.'.$workflowCode.'.body', $workflowMail['body']) }}</textarea>
+                            </label>
+                        @else
+                            <input type="hidden" name="workflow[{{ $workflowCode }}][subject]" value="{{ $workflowMail['subject'] }}">
+                            <input type="hidden" name="workflow[{{ $workflowCode }}][body]" value="{{ $workflowMail['body'] }}">
                             <label>Etap workflow
                                 <input name="workflow[{{ $workflowCode }}][stage]" value="{{ old('workflow.'.$workflowCode.'.stage', $workflowMail['stage']) }}" maxlength="160">
                             </label>
-                            <label>Temat
-                                <input name="workflow[{{ $workflowCode }}][subject]" value="{{ old('workflow.'.$workflowCode.'.subject', $workflowMail['subject']) }}" maxlength="160">
-                            </label>
-                        </div>
-
-                        <label>Treść automatycznego maila
-                            <textarea name="workflow[{{ $workflowCode }}][body]" rows="4" maxlength="5000">{{ old('workflow.'.$workflowCode.'.body', $workflowMail['body']) }}</textarea>
-                        </label>
+                            <div class="workflow-external-note">
+                                Treść i temat tej wiadomości są obsługiwane przez szablon WooCommerce. ERP kontroluje tutaj tylko to, czy wykona akcję statusu, która uruchamia mail sklepu.
+                            </div>
+                        @endif
                     </article>
                 @endforeach
             </div>
@@ -336,6 +347,7 @@
         .workflow-mail-header div { display: grid; gap: 2px; }
         .workflow-mail-header span { color: var(--muted); font-size: 12px; font-weight: 720; }
         .workflow-toggle { min-height: 34px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: #fff; }
+        .workflow-external-note { border: 1px dashed var(--border); border-radius: 8px; padding: 10px 12px; background: #fffdfb; color: var(--muted); font-size: 13px; line-height: 1.45; }
         .template-settings-panel { margin-top: 14px; }
         .template-settings-body { display: grid; gap: 18px; }
         .template-variable-help { display: grid; gap: 9px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: #fffdfb; }
