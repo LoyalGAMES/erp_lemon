@@ -89,6 +89,11 @@ class ErpDashboardTest extends TestCase
     {
         $this->get('/integrations')
             ->assertOk()
+            ->assertSee('data-integration-tab="woocommerce"', false)
+            ->assertSee('data-integration-tab="ksef"', false)
+            ->assertSee('data-integration-tab="gs1"', false)
+            ->assertSee('data-integration-tab="logs"', false)
+            ->assertSee('data-integration-panel="woocommerce"', false)
             ->assertSee('Dodaj sklep WooCommerce')
             ->assertSee('Import zamówień')
             ->assertSee('Brak integracji');
