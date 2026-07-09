@@ -10,6 +10,7 @@ use App\Models\ExternalOrder;
 use App\Models\ReturnCase;
 use App\Models\SalesChannel;
 use App\Services\Communication\CustomerCommunicationService;
+use App\Services\Communication\CustomerEmailWorkflowSettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Mail;
 use Tests\TestCase;
@@ -111,6 +112,55 @@ class CustomerCommunicationWorkflowTest extends TestCase
 
         Mail::assertSent(CustomerMessageMail::class, function (CustomerMessageMail $mail): bool {
             return $mail->customerMessage->trigger === 'order_received';
+        });
+    }
+
+    public function test_disabled_workflow_message_is_logged_as_skipped_and_not_sent(): void
+    {
+        Mail::fake();
+
+        app(CustomerEmailWorkflowSettingsService::class)->update([
+            'order_received' => [
+                'enabled' => false,
+                'stage' => 'Wyłączony',
+                'subject' => 'Nie wysyłać {{order_number}}',
+                'body' => 'Wyłączone.',
+            ],
+        ]);
+
+        $order = $this->createOrder('client@example.test');
+        $message = app(CustomerCommunicationService::class)->sendOrderStatus($order, 'order_received');
+
+        $this->assertInstanceOf(CustomerMessage::class, $message);
+        $this->assertSame('skipped', $message->status);
+        $this->assertSame('Wysyłka wyłączona w workflow maili.', $message->error_message);
+
+        Mail::assertNothingSent();
+    }
+
+    public function test_workflow_content_overrides_automatic_message_copy(): void
+    {
+        Mail::fake();
+
+        app(CustomerEmailWorkflowSettingsService::class)->update([
+            'order_packed' => [
+                'enabled' => true,
+                'stage' => 'Po pakowaniu',
+                'subject' => 'Spakowaliśmy {{order_number}}',
+                'body' => 'Paczka {{order_number}} czeka.',
+            ],
+        ]);
+
+        $order = $this->createOrder('client@example.test');
+        $message = app(CustomerCommunicationService::class)->sendOrderStatus($order, 'order_packed');
+
+        $this->assertInstanceOf(CustomerMessage::class, $message);
+        $this->assertSame('sent', $message->status);
+        $this->assertSame('Spakowaliśmy 9001', $message->subject);
+        $this->assertSame('Paczka 9001 czeka.', $message->body);
+
+        Mail::assertSent(CustomerMessageMail::class, function (CustomerMessageMail $mail) use ($message): bool {
+            return $mail->customerMessage->is($message);
         });
     }
 

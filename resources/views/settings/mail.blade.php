@@ -142,6 +142,62 @@
         </article>
     </section>
 
+    <section class="card settings-panel mail-workflow-panel">
+        <div class="panel-header">
+            <span>Workflow maili do klientów</span>
+            <span>{{ count($mailWorkflow) }} etapów</span>
+        </div>
+        <form method="POST" action="{{ route('settings.mail.workflow.update') }}" class="mail-workflow-body">
+            @csrf
+            @method('PUT')
+
+            <div class="workflow-intro">
+                <div>
+                    <strong>Automatyczne wiadomości statusowe</strong>
+                    <span class="muted">Tutaj decydujesz, które maile wychodzą do klienta i na jakim etapie procesu. Wyłączony etap zostanie zapisany w historii komunikacji jako pominięty.</span>
+                </div>
+                <button class="button" type="submit">Zapisz workflow maili</button>
+            </div>
+
+            <div class="workflow-mail-list">
+                @foreach ($mailWorkflow as $workflowMail)
+                    @php
+                        $workflowCode = $workflowMail['code'];
+                        $workflowEnabled = (bool) old('workflow.'.$workflowCode.'.enabled', $workflowMail['enabled']);
+                    @endphp
+                    <article @class(['workflow-mail-card', 'disabled' => ! $workflowEnabled])>
+                        <div class="workflow-mail-header">
+                            <div>
+                                <strong>{{ $workflowMail['name'] }}</strong>
+                                <span>{{ $workflowMail['context_label'] }} · {{ $workflowCode }}</span>
+                            </div>
+                            <label class="inline-flag workflow-toggle">
+                                <input type="hidden" name="workflow[{{ $workflowCode }}][enabled]" value="0">
+                                <input type="checkbox" name="workflow[{{ $workflowCode }}][enabled]" value="1" @checked($workflowEnabled)>
+                                Wysyłaj do klienta
+                            </label>
+                        </div>
+
+                        <p class="muted">{{ $workflowMail['description'] }}</p>
+
+                        <div class="mail-settings-fields">
+                            <label>Etap workflow
+                                <input name="workflow[{{ $workflowCode }}][stage]" value="{{ old('workflow.'.$workflowCode.'.stage', $workflowMail['stage']) }}" maxlength="160">
+                            </label>
+                            <label>Temat
+                                <input name="workflow[{{ $workflowCode }}][subject]" value="{{ old('workflow.'.$workflowCode.'.subject', $workflowMail['subject']) }}" maxlength="160">
+                            </label>
+                        </div>
+
+                        <label>Treść automatycznego maila
+                            <textarea name="workflow[{{ $workflowCode }}][body]" rows="4" maxlength="5000">{{ old('workflow.'.$workflowCode.'.body', $workflowMail['body']) }}</textarea>
+                        </label>
+                    </article>
+                @endforeach
+            </div>
+        </form>
+    </section>
+
     <section class="card settings-panel template-settings-panel">
         <div class="panel-header">
             <span>Szablony e-mail</span>
@@ -268,6 +324,18 @@
         .toggle-row small { color: var(--muted); line-height: 1.4; }
         .inline-flag { display: inline-flex; align-items: center; gap: 7px; font-weight: 720; }
         .inline-flag input { width: 17px; height: 17px; }
+        .mail-workflow-panel { margin-top: 14px; }
+        .mail-workflow-body { padding: 16px; display: grid; gap: 14px; }
+        .workflow-intro { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
+        .workflow-intro > div { display: grid; gap: 4px; max-width: 760px; }
+        .workflow-intro .button { white-space: nowrap; }
+        .workflow-mail-list { display: grid; gap: 12px; }
+        .workflow-mail-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); display: grid; gap: 10px; }
+        .workflow-mail-card.disabled { background: rgba(134, 115, 100, 0.045); }
+        .workflow-mail-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+        .workflow-mail-header div { display: grid; gap: 2px; }
+        .workflow-mail-header span { color: var(--muted); font-size: 12px; font-weight: 720; }
+        .workflow-toggle { min-height: 34px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: #fff; }
         .template-settings-panel { margin-top: 14px; }
         .template-settings-body { display: grid; gap: 18px; }
         .template-variable-help { display: grid; gap: 9px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: #fffdfb; }
@@ -283,6 +351,7 @@
             .mail-settings-grid,
             .mail-settings-fields,
             .template-list { grid-template-columns: 1fr; }
+            .workflow-intro { display: grid; }
         }
     </style>
 @endpush
