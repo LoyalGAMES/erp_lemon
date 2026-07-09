@@ -166,6 +166,44 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertDontSee('5,0000');
     }
 
+    public function test_product_catalog_defaults_to_newest_products_first(): void
+    {
+        Product::query()->create([
+            'sku' => 'SKU-OLD',
+            'name' => 'Aardvark stary produkt',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'publication_date' => '2026-01-02T09:00',
+                ],
+            ],
+        ]);
+
+        Product::query()->create([
+            'sku' => 'SKU-NEW',
+            'name' => 'Zeta najnowszy produkt',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'publication_date' => '2026-07-08T12:30',
+                ],
+            ],
+        ]);
+
+        $this->get(route('products.index'))
+            ->assertOk()
+            ->assertSeeInOrder([
+                'Zeta najnowszy produkt',
+                'Aardvark stary produkt',
+            ]);
+    }
+
     public function test_product_catalog_has_search_filters_and_custom_pagination(): void
     {
         $channel = SalesChannel::query()->create([
