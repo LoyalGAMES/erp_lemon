@@ -288,6 +288,65 @@ class WooCommerceOrderReservationTest extends TestCase
         $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_received')->count());
     }
 
+    public function test_order_import_prefers_gmt_dates_to_avoid_dst_gap_datetime_errors(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+        ]);
+
+        Http::fake([
+            '*' => function ($request) {
+                parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+                if ((int) ($query['page'] ?? 1) > 1) {
+                    return Http::response([]);
+                }
+
+                return Http::response([
+                    [
+                        'id' => 448869,
+                        'number' => '448869',
+                        'status' => 'refunded',
+                        'currency' => 'PLN',
+                        'total' => '520.90',
+                        'date_created' => '2026-03-29T02:06:07',
+                        'date_created_gmt' => '2026-03-29T00:06:07',
+                        'date_modified' => '2026-04-14T20:00:26',
+                        'date_modified_gmt' => '2026-04-14T18:00:26',
+                        'billing' => [
+                            'email' => 'client@example.test',
+                            'first_name' => 'Natalia',
+                            'last_name' => 'Pawlowska',
+                        ],
+                        'line_items' => [],
+                    ],
+                ]);
+            },
+        ]);
+
+        $stats = app(WooCommerceImportService::class)->importOrders($integration);
+
+        $this->assertSame(1, $stats['created']);
+
+        $order = ExternalOrder::query()->where('external_id', '448869')->firstOrFail();
+
+        $this->assertSame('2026-03-29 00:06:07', $order->external_created_at?->toDateTimeString());
+        $this->assertSame('2026-04-14 18:00:26', $order->external_updated_at?->toDateTimeString());
+    }
+
     /**
      * @return array<string, mixed>
      */

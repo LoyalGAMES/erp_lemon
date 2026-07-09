@@ -18,6 +18,7 @@ use App\Services\Inventory\SalesChannelWarehouseResolver;
 use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderWzDocumentService;
 use App\Services\Orders\OrderStatusPolicyService;
+use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Throwable;
@@ -279,8 +280,8 @@ final class WooCommerceImportService
                     'billing_data' => $item['billing'] ?? null,
                     'shipping_data' => $item['shipping'] ?? null,
                     'raw_payload' => $rawPayload,
-                    'external_created_at' => $item['date_created'] ?? null,
-                    'external_updated_at' => $item['date_modified'] ?? null,
+                    'external_created_at' => $this->wooCommerceDateTime($item, 'date_created'),
+                    'external_updated_at' => $this->wooCommerceDateTime($item, 'date_modified'),
                 ]);
                 $order->save();
 
@@ -945,6 +946,37 @@ final class WooCommerceImportService
         $value = $this->nullableString($value);
 
         return $value === null ? null : mb_substr(str_replace(' ', 'T', $value), 0, 16);
+    }
+
+    /**
+     * @param array<string, mixed> $item
+     */
+    private function wooCommerceDateTime(array $item, string $localKey): ?string
+    {
+        $gmtValue = $this->nullableString($item[$localKey.'_gmt'] ?? null);
+
+        if ($gmtValue !== null) {
+            return $this->parseDateTimeForDatabase($gmtValue, 'UTC');
+        }
+
+        $localValue = $this->nullableString($item[$localKey] ?? null);
+
+        if ($localValue === null) {
+            return null;
+        }
+
+        return $this->parseDateTimeForDatabase($localValue, 'Europe/Warsaw');
+    }
+
+    private function parseDateTimeForDatabase(string $value, string $timezone): ?string
+    {
+        try {
+            return CarbonImmutable::parse($value, $timezone)
+                ->utc()
+                ->format('Y-m-d H:i:s');
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     private function stockImportWarehouse(WordpressIntegration $integration): Warehouse
