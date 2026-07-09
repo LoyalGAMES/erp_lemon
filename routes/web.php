@@ -48,6 +48,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::put('/settings/shipping/accounts/{account}', [SettingsController::class, 'updateCourierAccount'])->name('settings.shipping.accounts.update');
         Route::delete('/settings/shipping/accounts/{account}', [SettingsController::class, 'destroyCourierAccount'])->name('settings.shipping.accounts.destroy');
         Route::get('/settings/packing', [SettingsController::class, 'packing'])->name('settings.packing');
+        Route::get('/settings/packing/windows-listener/download', [SettingsController::class, 'downloadWindowsPrintListener'])->name('settings.packing.windows-listener.download');
         Route::put('/settings/packing', [SettingsController::class, 'updatePacking'])->name('settings.packing.update');
         Route::post('/settings/packing/listener/printers', [SettingsController::class, 'packingListenerPrinters'])->name('settings.packing.listener.printers');
     });

@@ -24,6 +24,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\View\View;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Throwable;
 
 class SettingsController extends Controller
@@ -104,6 +105,22 @@ class SettingsController extends Controller
             'subtitle' => 'Stanowiska pakowania, drukarki etykiet Zebra i podział asortymentu do kompletacji.',
             'module' => 'settings',
             'packingSettings' => $packingSettings->data(),
+            'printListenerApp' => $this->windowsPrintListenerAppData(),
+        ]);
+    }
+
+    public function downloadWindowsPrintListener(): BinaryFileResponse
+    {
+        $path = $this->windowsPrintListenerPath();
+
+        if (! is_file($path)) {
+            abort(404, 'Aplikacja Windows do wydruku nie jest dostępna na serwerze ERP.');
+        }
+
+        return response()->download($path, 'lemon-print-listener.exe', [
+            'Content-Type' => 'application/vnd.microsoft.portable-executable',
+            'Cache-Control' => 'no-store, max-age=0',
+            'X-Content-Type-Options' => 'nosniff',
         ]);
     }
 
@@ -166,6 +183,31 @@ class SettingsController extends Controller
                 ->values()
                 ->all(),
         ]);
+    }
+
+    /**
+     * @return array{available:bool,download_url:string,filename:string,size_mb:string|null,updated_at:string|null}
+     */
+    private function windowsPrintListenerAppData(): array
+    {
+        $path = $this->windowsPrintListenerPath();
+        $mtime = is_file($path) ? filemtime($path) : false;
+        $size = is_file($path) ? filesize($path) : false;
+
+        return [
+            'available' => is_file($path),
+            'download_url' => route('settings.packing.windows-listener.download', [
+                'v' => $mtime ?: now()->timestamp,
+            ]),
+            'filename' => 'lemon-print-listener.exe',
+            'size_mb' => $size !== false ? number_format($size / 1048576, 1, ',', ' ') . ' MB' : null,
+            'updated_at' => $mtime !== false ? date('Y-m-d H:i', $mtime) : null,
+        ];
+    }
+
+    private function windowsPrintListenerPath(): string
+    {
+        return base_path('tools/windows-print-listener/dist/lemon-print-listener.exe');
     }
 
     public function updatePayments(

@@ -102,6 +102,16 @@
             <div class="packing-help">
                 <p>Adres aplikacji Windows jest zapisywany per stanowisko. Po wpisaniu adresu użyj przycisku pobierania, żeby wybrać drukarkę z listy zwróconej przez aplikację nasłuchującą.</p>
                 <p>Etykiety wygenerowane podczas pakowania trafią do kolejki wydruku wybranego stanowiska i drukarki.</p>
+                <div class="windows-listener-download">
+                    <strong>Aplikacja na Windows</strong>
+                    <span>Pobierz aktualną wersję mostu wydruku z tego serwera ERP.</span>
+                    @if ($printListenerApp['available'])
+                        <a class="button" href="{{ $printListenerApp['download_url'] }}">Pobierz {{ $printListenerApp['filename'] }}</a>
+                        <small>Aktualizacja: {{ $printListenerApp['updated_at'] }} · {{ $printListenerApp['size_mb'] }}</small>
+                    @else
+                        <span class="alert error">Brak pliku aplikacji na serwerze ERP.</span>
+                    @endif
+                </div>
             </div>
         </article>
     </section>
@@ -132,6 +142,10 @@
         .keywords-field { display: grid; gap: 6px; }
         .packing-help { padding: 16px; display: grid; gap: 10px; color: var(--muted); line-height: 1.45; }
         .packing-help p { margin: 0; }
+        .windows-listener-download { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); }
+        .windows-listener-download strong { color: var(--text); }
+        .windows-listener-download .button { justify-self: start; text-decoration: none; }
+        .windows-listener-download small { color: var(--muted); font-size: 12px; }
         @media (max-width: 1180px) {
             .settings-packing-grid { grid-template-columns: 1fr; }
             .packing-station-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }

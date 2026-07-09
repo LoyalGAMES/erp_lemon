@@ -66,7 +66,10 @@ class PackingLogisticsUpgradeTest extends TestCase
         $this->get(route('settings.packing'))
             ->assertOk()
             ->assertSee('Stanowiska i drukarki etykiet')
-            ->assertSee('Most wydruku Windows');
+            ->assertSee('Most wydruku Windows')
+            ->assertSee('Aplikacja na Windows')
+            ->assertSee('Pobierz lemon-print-listener.exe')
+            ->assertSee(route('settings.packing.windows-listener.download'), false);
 
         $this->put(route('settings.packing.update'), [
             'stations' => [
@@ -82,6 +85,21 @@ class PackingLogisticsUpgradeTest extends TestCase
         $this->assertSame('http://192.168.1.25:17777', $settings['stations'][0]['listener_url']);
         $this->assertSame('Zebra ZD621', $settings['stations'][1]['printer_name']);
         $this->assertContains('sneakersy', $settings['footwear_keywords']);
+    }
+
+    public function test_windows_print_listener_can_be_downloaded_from_packing_settings(): void
+    {
+        $response = $this->get(route('settings.packing.windows-listener.download'));
+
+        $response->assertOk();
+        $this->assertStringContainsString(
+            'attachment; filename=lemon-print-listener.exe',
+            (string) $response->headers->get('Content-Disposition'),
+        );
+        $this->assertSame(
+            'application/vnd.microsoft.portable-executable',
+            (string) $response->headers->get('Content-Type'),
+        );
     }
 
     public function test_mixed_order_shows_shipping_decision_and_footwear_split_creates_partial_order(): void
