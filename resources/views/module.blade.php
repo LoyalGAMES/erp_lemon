@@ -1,6 +1,18 @@
 @extends('layouts.app', ['title' => $title, 'subtitle' => $subtitle, 'module' => $module])
 
 @section('content')
+    @php
+        $rowsCount = count($rows);
+        $hasPagination = is_object($rows) && method_exists($rows, 'hasPages');
+        $recordLabel = $rowsCount.' rekordów';
+
+        if (is_object($rows) && method_exists($rows, 'total')) {
+            $recordLabel = number_format((int) $rows->total(), 0, ',', ' ').' rekordów';
+        } elseif (is_object($rows) && method_exists($rows, 'firstItem') && $rows->firstItem() !== null) {
+            $recordLabel = $rows->firstItem().' - '.$rows->lastItem();
+        }
+    @endphp
+
     @if (! empty($summaryCards))
         <section class="metrics" aria-label="Stan kolejek">
             @foreach ($summaryCards as $card)
@@ -39,7 +51,7 @@
     <article class="card">
         <div class="panel-header">
             <span>{{ $title }}</span>
-            <span>{{ count($rows) }} rekordów</span>
+            <span>{{ $recordLabel }}</span>
         </div>
         <div class="table-scroll">
             <table class="dense-table">
@@ -71,5 +83,51 @@
                 </tbody>
             </table>
         </div>
+        @if ($hasPagination && $rows->hasPages())
+            <div class="module-pagination">
+                <div class="module-pagination-range">
+                    @if (method_exists($rows, 'firstItem') && $rows->firstItem() !== null)
+                        Wyświetlono {{ $rows->firstItem() }} - {{ $rows->lastItem() }}
+                    @else
+                        Wyświetlono {{ $rowsCount }} rekordów
+                    @endif
+                </div>
+                <div class="inline-actions">
+                    @if (method_exists($rows, 'onFirstPage') && $rows->onFirstPage())
+                        <span class="button secondary disabled">Poprzednie</span>
+                    @elseif (method_exists($rows, 'previousPageUrl') && $rows->previousPageUrl())
+                        <a class="button secondary" href="{{ $rows->previousPageUrl() }}">Poprzednie</a>
+                    @endif
+
+                    @if (method_exists($rows, 'hasMorePages') && $rows->hasMorePages() && method_exists($rows, 'nextPageUrl'))
+                        <a class="button secondary" href="{{ $rows->nextPageUrl() }}">Następne</a>
+                    @else
+                        <span class="button secondary disabled">Następne</span>
+                    @endif
+                </div>
+            </div>
+        @endif
     </article>
 @endsection
+
+@push('styles')
+    <style>
+        .module-pagination {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            padding: 12px 16px;
+            border-top: 1px solid var(--border);
+        }
+        .module-pagination-range {
+            color: var(--muted);
+            font-size: 13px;
+        }
+        .module-pagination .disabled {
+            cursor: default;
+            opacity: .55;
+        }
+    </style>
+@endpush
