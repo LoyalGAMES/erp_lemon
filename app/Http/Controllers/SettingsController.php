@@ -13,14 +13,18 @@ use App\Services\Communication\MailSettingsService;
 use App\Services\Inventory\WarehouseDocumentSettingsService;
 use App\Services\Payments\MbankTransferBasketSettingsService;
 use App\Services\Payments\PayuRefundSettingsService;
+use App\Services\Packing\PackingSettingsService;
 use App\Services\Returns\ReturnSettingsService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Mail\Message;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\View\View;
+use Throwable;
 
 class SettingsController extends Controller
 {
@@ -90,6 +94,77 @@ class SettingsController extends Controller
             'module' => 'settings',
             'payuSettings' => $payuSettings->data(),
             'mbankSettings' => $mbankSettings->data(),
+        ]);
+    }
+
+    public function packing(PackingSettingsService $packingSettings): View
+    {
+        return view('settings.packing', [
+            'title' => 'Ustawienia pakowania',
+            'subtitle' => 'Stanowiska pakowania, drukarki etykiet Zebra i podział asortymentu do kompletacji.',
+            'module' => 'settings',
+            'packingSettings' => $packingSettings->data(),
+        ]);
+    }
+
+    public function updatePacking(Request $request, PackingSettingsService $packingSettings): RedirectResponse
+    {
+        $data = $request->validate([
+            'stations' => ['required', 'array', 'min:1', 'max:6'],
+            'stations.*.code' => ['nullable', 'string', 'max:40'],
+            'stations.*.name' => ['nullable', 'string', 'max:80'],
+            'stations.*.printer_name' => ['nullable', 'string', 'max:120'],
+            'stations.*.listener_url' => ['nullable', 'url', 'max:180'],
+            'stations.*.segment' => ['nullable', 'string', 'in:all,clothing,footwear'],
+            'footwear_keywords' => ['nullable', 'string', 'max:2000'],
+        ]);
+
+        $packingSettings->update([
+            'stations' => $data['stations'],
+            'footwear_keywords' => $data['footwear_keywords'] ?? null,
+        ]);
+
+        return back()->with('status', 'Ustawienia stanowisk pakowania i drukarek zostały zapisane.');
+    }
+
+    public function packingListenerPrinters(Request $request): JsonResponse
+    {
+        $data = $request->validate([
+            'listener_url' => ['required', 'url', 'max:180'],
+        ]);
+
+        $listenerUrl = rtrim((string) $data['listener_url'], '/');
+
+        try {
+            $response = Http::timeout(6)
+                ->acceptJson()
+                ->get($listenerUrl.'/printers');
+        } catch (Throwable $exception) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Nie udało się połączyć z aplikacją Windows: '.$exception->getMessage(),
+            ], 422);
+        }
+
+        if ($response->failed()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Aplikacja Windows zwróciła HTTP '.$response->status().': '.mb_substr($response->body(), 0, 500),
+            ], 422);
+        }
+
+        return response()->json([
+            'success' => true,
+            'printers' => collect((array) $response->json('printers', []))
+                ->map(fn (array $printer): array => [
+                    'name' => trim((string) ($printer['name'] ?? '')),
+                    'driver' => trim((string) ($printer['driver'] ?? '')),
+                    'port' => trim((string) ($printer['port'] ?? '')),
+                    'default' => (bool) ($printer['default'] ?? false),
+                ])
+                ->filter(fn (array $printer): bool => $printer['name'] !== '')
+                ->values()
+                ->all(),
         ]);
     }
 

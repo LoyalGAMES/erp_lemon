@@ -63,7 +63,12 @@ class PackingLogisticsUpgradeTest extends TestCase
 
     public function test_stations_configuration_can_be_updated_with_custom_printers(): void
     {
-        $this->post(route('packing.stations.update'), [
+        $this->get(route('settings.packing'))
+            ->assertOk()
+            ->assertSee('Stanowiska i drukarki etykiet')
+            ->assertSee('Most wydruku Windows');
+
+        $this->put(route('settings.packing.update'), [
             'stations' => [
                 ['code' => 'station-1', 'name' => 'Stanowisko odzież', 'printer_name' => 'Zebra ZD421', 'listener_url' => 'http://192.168.1.25:17777', 'segment' => 'clothing'],
                 ['code' => 'station-2', 'name' => 'Stanowisko obuwie', 'printer_name' => 'Zebra ZD621', 'listener_url' => '', 'segment' => 'footwear'],
@@ -150,7 +155,7 @@ class PackingLogisticsUpgradeTest extends TestCase
         [$order] = $this->createMixedOrder();
         $this->pickAllTasks($order);
         $secondAccount = $this->createInPostAccounts()[1];
-        $this->post(route('packing.stations.update'), [
+        $this->put(route('settings.packing.update'), [
             'stations' => [
                 ['code' => 'station-1', 'name' => 'Stanowisko pakowania', 'printer_name' => 'Zebra ZD421', 'segment' => 'all'],
             ],

@@ -47,6 +47,9 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::post('/settings/shipping/accounts', [SettingsController::class, 'storeCourierAccount'])->name('settings.shipping.accounts.store');
         Route::put('/settings/shipping/accounts/{account}', [SettingsController::class, 'updateCourierAccount'])->name('settings.shipping.accounts.update');
         Route::delete('/settings/shipping/accounts/{account}', [SettingsController::class, 'destroyCourierAccount'])->name('settings.shipping.accounts.destroy');
+        Route::get('/settings/packing', [SettingsController::class, 'packing'])->name('settings.packing');
+        Route::put('/settings/packing', [SettingsController::class, 'updatePacking'])->name('settings.packing.update');
+        Route::post('/settings/packing/listener/printers', [SettingsController::class, 'packingListenerPrinters'])->name('settings.packing.listener.printers');
     });
     Route::middleware(EnsureErpRole::class.':users')->group(function (): void {
         Route::get('/settings/users', [UserController::class, 'index'])->name('settings.users');
@@ -126,8 +129,6 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::get('/packing', [PackingController::class, 'index'])->name('packing.index');
         Route::post('/packing/mode', [PackingController::class, 'mode'])->name('packing.mode');
         Route::post('/packing/station', [PackingController::class, 'station'])->name('packing.station');
-        Route::post('/packing/stations', [PackingController::class, 'updateStations'])->name('packing.stations.update');
-        Route::post('/packing/listener/printers', [PackingController::class, 'listenerPrinters'])->name('packing.listener.printers');
         Route::post('/packing/scan', [PackingController::class, 'scan'])->name('packing.scan');
         Route::post('/packing/groups/pick', [PackingController::class, 'pick'])->name('packing.groups.pick');
         Route::post('/packing/groups/problem', [PackingController::class, 'problem'])->name('packing.groups.problem');

@@ -117,7 +117,7 @@ class PrintBridgeWorkflowTest extends TestCase
             ], 200),
         ]);
 
-        $this->postJson(route('packing.listener.printers'), [
+        $this->postJson(route('settings.packing.listener.printers'), [
             'listener_url' => 'http://192.168.1.25:17777',
         ])
             ->assertOk()

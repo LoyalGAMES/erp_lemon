@@ -30,9 +30,9 @@
             <strong>Audyt</strong>
             <span>Historia operacji wykonanych w aplikacji.</span>
         </a>
-        <a class="settings-card" href="{{ route('packing.index') }}?settings=1">
+        <a class="settings-card" href="{{ route('settings.packing') }}">
             <strong>Stanowiska pakowania</strong>
-            <span>Tryb pracy, pakowanie i przygotowanie pod drukarki etykiet.</span>
+            <span>Stanowiska, adresy aplikacji Windows, drukarki etykiet i podział asortymentu.</span>
         </a>
         <a class="settings-card" href="{{ route('settings.shipping') }}">
             <strong>Wysyłki i konta kurierskie</strong>

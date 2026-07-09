@@ -12,7 +12,10 @@
 
 @push('styles')
     <style>
-        .packing-home-toolbar { display: flex; justify-content: flex-end; align-items: center; margin-bottom: 14px; }
+        .packing-control-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .packing-control-section { padding: 14px; display: grid; gap: 12px; align-content: start; }
+        .packing-control-header { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+        .packing-control-header .button { min-height: 38px; white-space: nowrap; }
         .packing-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
         .packing-stat { padding: 14px 16px; }
         .packing-stat strong { display: block; font-size: 25px; line-height: 1; margin-top: 3px; }
@@ -23,7 +26,6 @@
         .workflow-card small { color: var(--muted); font-weight: 650; }
         .packing-home-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
         .packing-home-links .button { min-height: 46px; }
-        .settings-body { padding: 16px; display: grid; gap: 14px; }
         .mode-copy { color: var(--muted); }
         .mode-copy strong { display: block; color: var(--text); font-size: 16px; margin-bottom: 3px; }
         .mode-actions { display: grid; gap: 8px; }
@@ -57,18 +59,12 @@
         .station-chip { margin-left: auto; display: inline-flex; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 8px 13px; background: #fffdfb; font-weight: 740; color: var(--green-dark); }
         .pick-badge.segment-footwear { background: #fff0e8; color: var(--orange); }
         .pick-badge.segment-clothing { background: var(--brand-soft); color: var(--brand-dark); }
-        .station-config summary { cursor: pointer; font-weight: 760; color: var(--green-dark); }
-        .station-config-form { display: grid; gap: 12px; margin-top: 12px; }
-        .station-config-row { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fffdfb; }
-        .printer-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: end; }
-        .printer-field input, .printer-field select { grid-column: 1 / -1; }
-        .printer-field button { min-height: 38px; align-self: stretch; }
-        .printer-status { grid-column: 1 / -1; color: var(--muted); font-size: 12px; min-height: 18px; }
         .label-account-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
         .label-account-form select { min-height: 42px; }
         .label-account-form .button { min-height: 42px; }
         @media (max-width: 760px) {
-            .station-config-row { grid-template-columns: 1fr; }
+            .packing-control-panel { grid-template-columns: 1fr; }
+            .packing-control-header { display: grid; }
             .station-chip { margin-left: 0; }
         }
         .history-panel { margin-top: 16px; }
@@ -122,7 +118,6 @@
             .order-problem-form { grid-template-columns: 1fr; }
         }
         @media (max-width: 760px) {
-            .packing-home-toolbar { margin-top: -4px; }
             .packing-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .workflow-picker { grid-template-columns: 1fr; }
             .workflow-card { min-height: 118px; padding: 18px; }
@@ -186,6 +181,10 @@
             'clothing' => 'Odzież',
             'footwear' => 'Obuwie',
         ];
+        $erpUser = request()->attributes->get('erp_user') ?: auth()->user();
+        $canManagePackingSettings = ! is_object($erpUser)
+            || ! method_exists($erpUser, 'canAccessArea')
+            || $erpUser->canAccessArea('settings');
         $waitingCourierOrders = $waitingCourierGroups->sum('orders_count');
         $segmentQuery = fn (string $segment): array => array_filter([
             'view' => $packingView,
@@ -194,18 +193,8 @@
     @endphp
 
     @if ($packingView === 'home')
-        <div class="packing-home-toolbar">
-            <label class="button secondary" for="packing-settings-drawer">Ustawienia</label>
-        </div>
-
-        <input id="packing-settings-drawer" class="drawer-toggle" type="checkbox">
-        <label class="drawer-backdrop" for="packing-settings-drawer" aria-label="Zamknij ustawienia"></label>
-        <aside class="drawer-panel" aria-label="Ustawienia pakowania">
-            <div class="drawer-header">
-                <div class="drawer-title">Ustawienia pakowania</div>
-                <label class="drawer-close" for="packing-settings-drawer" aria-label="Zamknij">&times;</label>
-            </div>
-            <div class="settings-body">
+        <section class="packing-control-panel" aria-label="Tryb i stanowisko pakowania">
+            <article class="card packing-control-section">
                 <div class="mode-copy">
                     <strong>Sposób pracy</strong>
                     Bez skanera system sortuje kompletację po lokalizacji magazynowej. Tryb skanera zostaje jako ustawienie procesu, kiedy magazyn będzie gotowy na skanowanie.
@@ -219,10 +208,17 @@
                         </form>
                     @endforeach
                 </div>
+            </article>
 
-                <div class="mode-copy">
-                    <strong>Twoje stanowisko pakowania</strong>
-                    Stanowisko ustawia domyślny widok kompletacji i pakowania oraz drukarkę etykiet.
+            <article class="card packing-control-section">
+                <div class="packing-control-header">
+                    <div class="mode-copy">
+                        <strong>Twoje stanowisko pakowania</strong>
+                        Stanowisko ustawia domyślny widok kompletacji i pakowania oraz drukarkę etykiet.
+                    </div>
+                    @if ($canManagePackingSettings)
+                        <a class="button secondary" href="{{ route('settings.packing') }}">Konfiguracja</a>
+                    @endif
                 </div>
                 <div class="mode-actions" aria-label="Stanowisko pakowania">
                     @foreach ($packingStations as $stationOption)
@@ -242,47 +238,8 @@
                         <button @class(['mode-button', 'active' => $activeStation === null]) type="submit">Bez stanowiska (wszystkie produkty)</button>
                     </form>
                 </div>
-
-                <details class="station-config">
-                    <summary>Konfiguracja stanowisk i podziału asortymentu</summary>
-                    <form class="station-config-form" method="POST" action="{{ route('packing.stations.update') }}">
-                        @csrf
-                        @foreach ($packingStations as $index => $stationOption)
-                            <div class="station-config-row">
-                                <input type="hidden" name="stations[{{ $index }}][code]" value="{{ $stationOption['code'] }}">
-                                <label>Nazwa
-                                    <input name="stations[{{ $index }}][name]" value="{{ $stationOption['name'] }}" maxlength="80" required>
-                                </label>
-                                <label>Drukarka etykiet
-                                    <span class="printer-field" data-printer-picker>
-                                        <input name="stations[{{ $index }}][printer_name]" value="{{ $stationOption['printer_name'] }}" maxlength="120" placeholder="np. Zebra ZD421 — stanowisko 1" data-printer-name>
-                                        <select data-printer-select hidden>
-                                            <option value="">Wybierz drukarkę</option>
-                                        </select>
-                                        <button class="button secondary" type="button" data-load-printers>Pobierz</button>
-                                        <span class="printer-status" data-printer-status></span>
-                                    </span>
-                                </label>
-                                <label>Aplikacja Windows
-                                    <input name="stations[{{ $index }}][listener_url]" value="{{ $stationOption['listener_url'] ?? '' }}" maxlength="180" placeholder="http://192.168.1.25:17777" data-listener-url>
-                                </label>
-                                <label>Asortyment
-                                    <select name="stations[{{ $index }}][segment]">
-                                        @foreach ($segmentLabels as $segmentValue => $segmentLabel)
-                                            <option value="{{ $segmentValue }}" @selected($stationOption['segment'] === $segmentValue)>{{ $segmentLabel }}</option>
-                                        @endforeach
-                                    </select>
-                                </label>
-                            </div>
-                        @endforeach
-                        <label>Słowa kluczowe obuwia (kategorie/nazwy produktów, po przecinku lub w liniach)
-                            <textarea name="footwear_keywords" rows="3">{{ implode(', ', $footwearKeywords) }}</textarea>
-                        </label>
-                        <button class="button" type="submit">Zapisz stanowiska</button>
-                    </form>
-                </details>
-            </div>
-        </aside>
+            </article>
+        </section>
 
         <section class="packing-stats" aria-label="Status wysyłki">
             <article class="card packing-stat">
@@ -701,76 +658,3 @@
         </div>
     @endif
 @endsection
-
-@push('scripts')
-    <script>
-        (() => {
-            const endpoint = @json(route('packing.listener.printers'));
-            const token = @json(csrf_token());
-
-            document.querySelectorAll('[data-load-printers]').forEach((button) => {
-                button.addEventListener('click', async () => {
-                    const row = button.closest('.station-config-row');
-                    const listenerInput = row?.querySelector('[data-listener-url]');
-                    const printerInput = row?.querySelector('[data-printer-name]');
-                    const printerSelect = row?.querySelector('[data-printer-select]');
-                    const status = row?.querySelector('[data-printer-status]');
-                    const listenerUrl = String(listenerInput?.value || '').trim();
-
-                    if (!listenerUrl) {
-                        if (status) status.textContent = 'Najpierw wpisz adres aplikacji Windows.';
-                        listenerInput?.focus();
-                        return;
-                    }
-
-                    button.disabled = true;
-                    if (status) status.textContent = 'Pobieranie listy drukarek...';
-
-                    try {
-                        const response = await fetch(endpoint, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Accept': 'application/json',
-                                'X-CSRF-TOKEN': token,
-                            },
-                            body: JSON.stringify({ listener_url: listenerUrl }),
-                        });
-                        const payload = await response.json();
-
-                        if (!response.ok || !payload.success) {
-                            throw new Error(payload.message || 'Nie udało się pobrać drukarek.');
-                        }
-
-                        const printers = Array.isArray(payload.printers) ? payload.printers : [];
-                        if (printerSelect) {
-                            printerSelect.innerHTML = '<option value="">Wybierz drukarkę</option>';
-
-                            printers.forEach((printer) => {
-                                const option = document.createElement('option');
-                                option.value = printer.name;
-                                option.textContent = `${printer.default ? 'Domyślna · ' : ''}${printer.name}${printer.driver ? ' · ' + printer.driver : ''}`;
-                                printerSelect.append(option);
-                            });
-
-                            printerSelect.hidden = printers.length === 0;
-                            printerSelect.onchange = () => {
-                                if (printerInput) printerInput.value = printerSelect.value;
-                            };
-                        }
-
-                        if (printers.length === 1 && printerInput) {
-                            printerInput.value = printers[0].name;
-                        }
-
-                        if (status) status.textContent = printers.length > 0 ? `Znaleziono drukarki: ${printers.length}.` : 'Aplikacja Windows nie zwróciła drukarek.';
-                    } catch (error) {
-                        if (status) status.textContent = error.message || 'Nie udało się pobrać drukarek.';
-                    } finally {
-                        button.disabled = false;
-                    }
-                });
-            });
-        })();
-    </script>
-@endpush
