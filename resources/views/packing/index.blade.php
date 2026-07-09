@@ -12,8 +12,18 @@
 
 @push('styles')
     <style>
-        .packing-control-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
-        .packing-control-section { padding: 14px; display: grid; gap: 12px; align-content: start; }
+        .packing-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 16px; }
+        .packing-toolbar-summary { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+        .packing-toolbar-chip { display: inline-flex; align-items: center; min-height: 38px; border: 1px solid var(--border); border-radius: 8px; padding: 7px 12px; background: var(--surface); color: var(--green-dark); font-weight: 760; box-shadow: var(--shadow); }
+        .packing-settings-trigger { min-height: 42px; white-space: nowrap; }
+        .packing-settings-overlay[hidden] { display: none; }
+        .packing-settings-overlay { position: fixed; inset: 0; z-index: 90; display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 430px); }
+        .packing-settings-backdrop { grid-column: 1 / -1; grid-row: 1; border: 0; background: rgba(33, 28, 24, .36); cursor: default; }
+        .packing-settings-drawer { position: relative; z-index: 1; grid-column: 2; grid-row: 1; height: 100vh; overflow-y: auto; padding: 18px; background: var(--surface); border-left: 1px solid var(--border); box-shadow: -18px 0 38px rgba(33, 28, 24, .18); display: grid; gap: 14px; align-content: start; }
+        .packing-drawer-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding-bottom: 12px; border-bottom: 1px solid var(--border); }
+        .packing-drawer-header h2 { margin: 0; font-size: 20px; line-height: 1.15; }
+        .drawer-close { min-width: 42px; min-height: 42px; padding: 0; border-radius: 8px; }
+        .packing-control-section { border: 1px solid var(--border); border-radius: 8px; padding: 14px; display: grid; gap: 12px; align-content: start; background: #fffdfb; }
         .packing-control-header { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
         .packing-control-header .button { min-height: 38px; white-space: nowrap; }
         .packing-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
@@ -63,7 +73,9 @@
         .label-account-form select { min-height: 42px; }
         .label-account-form .button { min-height: 42px; }
         @media (max-width: 760px) {
-            .packing-control-panel { grid-template-columns: 1fr; }
+            .packing-toolbar { display: grid; }
+            .packing-settings-overlay { grid-template-columns: 1fr; }
+            .packing-settings-drawer { grid-column: 1; width: min(100vw, 430px); margin-left: auto; }
             .packing-control-header { display: grid; }
             .station-chip { margin-left: 0; }
         }
@@ -190,56 +202,81 @@
             'view' => $packingView,
             'segment' => $segment,
         ]);
+        $activeModeLabel = $modeLabels[$packingMode] ?? $packingMode;
+        $activeStationLabel = $activeStation !== null
+            ? $activeStation['name'] . ($activeStation['printer_name'] !== '' ? ' · ' . $activeStation['printer_name'] : '')
+            : 'Bez stanowiska';
     @endphp
 
     @if ($packingView === 'home')
-        <section class="packing-control-panel" aria-label="Tryb i stanowisko pakowania">
-            <article class="card packing-control-section">
-                <div class="mode-copy">
-                    <strong>Sposób pracy</strong>
-                    Bez skanera system sortuje kompletację po lokalizacji magazynowej. Tryb skanera zostaje jako ustawienie procesu, kiedy magazyn będzie gotowy na skanowanie.
-                </div>
-                <div class="mode-actions" aria-label="Tryb pakowania">
-                    @foreach ($modeLabels as $mode => $label)
-                        <form method="POST" action="{{ route('packing.mode') }}">
-                            @csrf
-                            <input type="hidden" name="mode" value="{{ $mode }}">
-                            <button @class(['mode-button', 'active' => $packingMode === $mode]) type="submit">{{ $label }}</button>
-                        </form>
-                    @endforeach
-                </div>
-            </article>
+        <section class="packing-toolbar" aria-label="Ustawienia pracy pakowania">
+            <div class="packing-toolbar-summary">
+                <span class="packing-toolbar-chip">Tryb: {{ $activeModeLabel }}</span>
+                <span class="packing-toolbar-chip">Stanowisko: {{ $activeStationLabel }}</span>
+            </div>
+            <button class="button secondary packing-settings-trigger" type="button" data-packing-settings-open>
+                Ustawienia pracy
+            </button>
+        </section>
 
-            <article class="card packing-control-section">
-                <div class="packing-control-header">
-                    <div class="mode-copy">
-                        <strong>Twoje stanowisko pakowania</strong>
-                        Stanowisko ustawia domyślny widok kompletacji i pakowania oraz drukarkę etykiet.
+        <div class="packing-settings-overlay" data-packing-settings-overlay hidden>
+            <button class="packing-settings-backdrop" type="button" aria-label="Zamknij ustawienia pracy" data-packing-settings-close></button>
+            <aside class="packing-settings-drawer" role="dialog" aria-modal="true" aria-labelledby="packing-settings-title">
+                <div class="packing-drawer-header">
+                    <div>
+                        <h2 id="packing-settings-title">Ustawienia pracy</h2>
+                        <span class="muted">Tryb kompletacji, stanowisko i domyślna drukarka dla tej sesji.</span>
                     </div>
-                    @if ($canManagePackingSettings)
-                        <a class="button secondary" href="{{ route('settings.packing') }}">Konfiguracja</a>
-                    @endif
+                    <button class="button secondary drawer-close" type="button" aria-label="Zamknij" data-packing-settings-close>&times;</button>
                 </div>
-                <div class="mode-actions" aria-label="Stanowisko pakowania">
-                    @foreach ($packingStations as $stationOption)
+
+                <article class="packing-control-section">
+                    <div class="mode-copy">
+                        <strong>Sposób pracy</strong>
+                        Bez skanera system sortuje kompletację po lokalizacji magazynowej. Tryb skanera zostaje jako ustawienie procesu, kiedy magazyn będzie gotowy na skanowanie.
+                    </div>
+                    <div class="mode-actions" aria-label="Tryb pakowania">
+                        @foreach ($modeLabels as $mode => $label)
+                            <form method="POST" action="{{ route('packing.mode') }}">
+                                @csrf
+                                <input type="hidden" name="mode" value="{{ $mode }}">
+                                <button @class(['mode-button', 'active' => $packingMode === $mode]) type="submit">{{ $label }}</button>
+                            </form>
+                        @endforeach
+                    </div>
+                </article>
+
+                <article class="packing-control-section">
+                    <div class="packing-control-header">
+                        <div class="mode-copy">
+                            <strong>Twoje stanowisko pakowania</strong>
+                            Stanowisko ustawia domyślny widok kompletacji i pakowania oraz drukarkę etykiet.
+                        </div>
+                        @if ($canManagePackingSettings)
+                            <a class="button secondary" href="{{ route('settings.packing') }}">Konfiguracja</a>
+                        @endif
+                    </div>
+                    <div class="mode-actions" aria-label="Stanowisko pakowania">
+                        @foreach ($packingStations as $stationOption)
+                            <form method="POST" action="{{ route('packing.station') }}">
+                                @csrf
+                                <input type="hidden" name="station" value="{{ $stationOption['code'] }}">
+                                <button @class(['mode-button', 'active' => ($activeStation['code'] ?? null) === $stationOption['code']]) type="submit">
+                                    {{ $stationOption['name'] }} · {{ $segmentLabels[$stationOption['segment']] ?? $stationOption['segment'] }}
+                                    @if ($stationOption['printer_name'] !== '')
+                                        · {{ $stationOption['printer_name'] }}
+                                    @endif
+                                </button>
+                            </form>
+                        @endforeach
                         <form method="POST" action="{{ route('packing.station') }}">
                             @csrf
-                            <input type="hidden" name="station" value="{{ $stationOption['code'] }}">
-                            <button @class(['mode-button', 'active' => ($activeStation['code'] ?? null) === $stationOption['code']]) type="submit">
-                                {{ $stationOption['name'] }} · {{ $segmentLabels[$stationOption['segment']] ?? $stationOption['segment'] }}
-                                @if ($stationOption['printer_name'] !== '')
-                                    · {{ $stationOption['printer_name'] }}
-                                @endif
-                            </button>
+                            <button @class(['mode-button', 'active' => $activeStation === null]) type="submit">Bez stanowiska (wszystkie produkty)</button>
                         </form>
-                    @endforeach
-                    <form method="POST" action="{{ route('packing.station') }}">
-                        @csrf
-                        <button @class(['mode-button', 'active' => $activeStation === null]) type="submit">Bez stanowiska (wszystkie produkty)</button>
-                    </form>
-                </div>
-            </article>
-        </section>
+                    </div>
+                </article>
+            </aside>
+        </div>
 
         <section class="packing-stats" aria-label="Status wysyłki">
             <article class="card packing-stat">
@@ -658,3 +695,37 @@
         </div>
     @endif
 @endsection
+
+@push('scripts')
+    <script>
+        (() => {
+            const overlay = document.querySelector('[data-packing-settings-overlay]');
+            const openButton = document.querySelector('[data-packing-settings-open]');
+            const closeButtons = document.querySelectorAll('[data-packing-settings-close]');
+
+            if (!overlay || !openButton) {
+                return;
+            }
+
+            const openDrawer = () => {
+                overlay.hidden = false;
+                document.body.style.overflow = 'hidden';
+                overlay.querySelector('.drawer-close')?.focus();
+            };
+
+            const closeDrawer = () => {
+                overlay.hidden = true;
+                document.body.style.overflow = '';
+                openButton.focus();
+            };
+
+            openButton.addEventListener('click', openDrawer);
+            closeButtons.forEach((button) => button.addEventListener('click', closeDrawer));
+            document.addEventListener('keydown', (event) => {
+                if (event.key === 'Escape' && !overlay.hidden) {
+                    closeDrawer();
+                }
+            });
+        })();
+    </script>
+@endpush

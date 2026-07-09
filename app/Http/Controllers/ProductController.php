@@ -37,8 +37,8 @@ class ProductController extends Controller
     {
         $allProducts = Product::query()
             ->with(['stockBalances.warehouse', 'channelMappings.salesChannel'])
-            ->orderBy('name')
-            ->orderBy('sku')
+            ->latest('created_at')
+            ->latest('id')
             ->get();
         $filters = $this->productFilters($request);
         $productRows = $this->paginatedProductTreeRows($allProducts, $filters, (int) $request->query('page', 1));
@@ -139,6 +139,7 @@ class ProductController extends Controller
             'parameterOptions' => $this->parameterOptions(),
             'productLookupOptions' => $this->productLookupOptions($product),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
+            'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'module' => 'products',
             'title' => 'Edycja produktu',
             'subtitle' => $product->name . ' | ' . $this->productSubtitle($product),
@@ -326,6 +327,7 @@ class ProductController extends Controller
             'warehouse_id' => ['required', 'integer', 'exists:warehouses,id'],
             'new_quantity' => ['required', 'numeric', 'min:0', 'max:99999999'],
             'notes' => ['nullable', 'string', 'max:500'],
+            'redirect_url' => ['nullable', 'string', 'max:1000'],
         ]);
 
         $warehouse = Warehouse::query()
@@ -341,7 +343,8 @@ class ProductController extends Controller
         $delta = round($target - $current, 4);
 
         if (abs($delta) < 0.0001) {
-            return back()->with('status', "Stan SKU {$product->sku} w magazynie {$warehouse->code} już wynosi {$this->formatQuantity($target)}.");
+            return $this->redirectAfterStockAdjustment($request, $product)
+                ->with('status', "Stan SKU {$product->sku} w magazynie {$warehouse->code} już wynosi {$this->formatQuantity($target)}.");
         }
 
         $document = DB::transaction(function () use ($product, $warehouse, $validated, $numbers, $current, $target, $delta): WarehouseDocument {
@@ -393,7 +396,8 @@ class ProductController extends Controller
                 'error' => $exception->getMessage(),
             ]);
 
-            return back()->with('error', 'Nie zaksięgowano korekty stanu: '.$exception->getMessage());
+            return $this->redirectAfterStockAdjustment($request, $product)
+                ->with('error', 'Nie zaksięgowano korekty stanu: '.$exception->getMessage());
         }
 
         $audit->record('product.stock_adjusted', $product, [
@@ -407,9 +411,36 @@ class ProductController extends Controller
             'document_number' => $document->number,
         ]);
 
-        return redirect()
-            ->route('products.show', $product)
+        return $this->redirectAfterStockAdjustment($request, $product)
             ->with('status', "Zmieniono stan SKU {$product->sku} w magazynie {$warehouse->code} z {$this->formatQuantity($current)} na {$this->formatQuantity($target)} dokumentem {$document->number}.");
+    }
+
+    private function redirectAfterStockAdjustment(Request $request, Product $product): RedirectResponse
+    {
+        $redirectUrl = $this->safeStockAdjustmentRedirectUrl($request);
+
+        if ($redirectUrl !== null) {
+            return redirect()->to($redirectUrl);
+        }
+
+        return redirect()->route('products.show', $product);
+    }
+
+    private function safeStockAdjustmentRedirectUrl(Request $request): ?string
+    {
+        $url = trim((string) $request->input('redirect_url', ''));
+
+        if ($url === '') {
+            return null;
+        }
+
+        if (Str::startsWith($url, '/') && ! Str::startsWith($url, '//')) {
+            return $url;
+        }
+
+        $host = parse_url($url, PHP_URL_HOST);
+
+        return is_string($host) && $host === $request->getHost() ? $url : null;
     }
 
     public function exportToWooCommerce(
@@ -852,7 +883,7 @@ class ProductController extends Controller
                     ]))
                     ->values()
             )
-            ->sortBy(fn (array $row): string => mb_strtolower($row['product']->name . ' ' . $row['product']->sku))
+            ->sort(fn (array $left, array $right): int => $this->compareProductTreeRowsByFreshness($left, $right))
             ->values();
 
         $rows = $this->filterProductTreeRows($rows, $filters);
@@ -870,6 +901,61 @@ class ProductController extends Controller
                 'query' => request()->query(),
             ],
         );
+    }
+
+    /**
+     * @param array{product:Product,variants:Collection<int, Product>} $left
+     * @param array{product:Product,variants:Collection<int, Product>} $right
+     */
+    private function compareProductTreeRowsByFreshness(array $left, array $right): int
+    {
+        $dateCompare = $this->productTreeRowFreshnessTimestamp($right) <=> $this->productTreeRowFreshnessTimestamp($left);
+
+        if ($dateCompare !== 0) {
+            return $dateCompare;
+        }
+
+        $idCompare = (int) $right['product']->id <=> (int) $left['product']->id;
+
+        if ($idCompare !== 0) {
+            return $idCompare;
+        }
+
+        return strnatcasecmp(
+            $this->productSortLabel($left['product']),
+            $this->productSortLabel($right['product']),
+        );
+    }
+
+    /**
+     * @param array{product:Product,variants:Collection<int, Product>} $row
+     */
+    private function productTreeRowFreshnessTimestamp(array $row): int
+    {
+        return collect([$row['product']])
+            ->concat($row['variants'])
+            ->map(fn (Product $product): int => $this->productFreshnessTimestamp($product))
+            ->max() ?? 0;
+    }
+
+    private function productFreshnessTimestamp(Product $product): int
+    {
+        $publicationDate = $this->nullableString(data_get($product->masterData(), 'publication_date'));
+
+        if ($publicationDate !== null) {
+            try {
+                return CarbonImmutable::parse($publicationDate)->getTimestamp();
+            } catch (\Throwable) {
+                // Fall back to ERP creation time if imported metadata contains an unexpected date format.
+            }
+        }
+
+        return $product->created_at?->getTimestamp() ?? 0;
+    }
+
+    private function productSortLabel(Product $product): string
+    {
+        return mb_strtolower($product->name . ' ' . $product->sku);
     }
 
     /**

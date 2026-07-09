@@ -8,6 +8,7 @@ use App\Models\CourierAccount;
 use App\Models\EmailTemplate;
 use App\Models\Warehouse;
 use App\Services\Automation\DocumentAutomationSettingsService;
+use App\Services\Communication\CustomerEmailWorkflowSettingsService;
 use App\Services\Communication\EmailTemplateRenderer;
 use App\Services\Communication\MailSettingsService;
 use App\Services\Inventory\WarehouseDocumentSettingsService;
@@ -24,6 +25,7 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\View\View;
+use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Throwable;
 
 class SettingsController extends Controller
@@ -67,7 +69,11 @@ class SettingsController extends Controller
         ]);
     }
 
-    public function mail(MailSettingsService $mailSettings, EmailTemplateRenderer $templateRenderer): View
+    public function mail(
+        MailSettingsService $mailSettings,
+        EmailTemplateRenderer $templateRenderer,
+        CustomerEmailWorkflowSettingsService $mailWorkflow,
+    ): View
     {
         return view('settings.mail', [
             'title' => 'Ustawienia maili',
@@ -75,6 +81,7 @@ class SettingsController extends Controller
             'module' => 'settings',
             'mailSettings' => $mailSettings->data(),
             'mailDeliverability' => $mailSettings->deliverabilityReport(),
+            'mailWorkflow' => $mailWorkflow->data(),
             'templateVariables' => $templateRenderer->variables(),
             'emailTemplates' => EmailTemplate::query()
                 ->orderBy('context')
@@ -104,6 +111,22 @@ class SettingsController extends Controller
             'subtitle' => 'Stanowiska pakowania, drukarki etykiet Zebra i podział asortymentu do kompletacji.',
             'module' => 'settings',
             'packingSettings' => $packingSettings->data(),
+            'printListenerApp' => $this->windowsPrintListenerAppData(),
+        ]);
+    }
+
+    public function downloadWindowsPrintListener(): BinaryFileResponse
+    {
+        $path = $this->windowsPrintListenerPath();
+
+        if (! is_file($path)) {
+            abort(404, 'Aplikacja Windows do wydruku nie jest dostępna na serwerze ERP.');
+        }
+
+        return response()->download($path, 'lemon-print-listener.exe', [
+            'Content-Type' => 'application/vnd.microsoft.portable-executable',
+            'Cache-Control' => 'no-store, max-age=0',
+            'X-Content-Type-Options' => 'nosniff',
         ]);
     }
 
@@ -166,6 +189,31 @@ class SettingsController extends Controller
                 ->values()
                 ->all(),
         ]);
+    }
+
+    /**
+     * @return array{available:bool,download_url:string,filename:string,size_mb:string|null,updated_at:string|null}
+     */
+    private function windowsPrintListenerAppData(): array
+    {
+        $path = $this->windowsPrintListenerPath();
+        $mtime = is_file($path) ? filemtime($path) : false;
+        $size = is_file($path) ? filesize($path) : false;
+
+        return [
+            'available' => is_file($path),
+            'download_url' => route('settings.packing.windows-listener.download', [
+                'v' => $mtime ?: now()->timestamp,
+            ]),
+            'filename' => 'lemon-print-listener.exe',
+            'size_mb' => $size !== false ? number_format($size / 1048576, 1, ',', ' ') . ' MB' : null,
+            'updated_at' => $mtime !== false ? date('Y-m-d H:i', $mtime) : null,
+        ];
+    }
+
+    private function windowsPrintListenerPath(): string
+    {
+        return base_path('tools/windows-print-listener/dist/lemon-print-listener.exe');
     }
 
     public function updatePayments(
@@ -240,6 +288,21 @@ class SettingsController extends Controller
         $mailSettings->update($validated);
 
         return back()->with('status', 'Ustawienia poczty zostały zapisane.');
+    }
+
+    public function updateMailWorkflow(Request $request, CustomerEmailWorkflowSettingsService $mailWorkflow): RedirectResponse
+    {
+        $validated = $request->validate([
+            'workflow' => ['nullable', 'array'],
+            'workflow.*.enabled' => ['nullable', 'boolean'],
+            'workflow.*.stage' => ['nullable', 'string', 'max:160'],
+            'workflow.*.subject' => ['nullable', 'string', 'max:160'],
+            'workflow.*.body' => ['nullable', 'string', 'max:5000'],
+        ]);
+
+        $mailWorkflow->update((array) ($validated['workflow'] ?? []));
+
+        return back()->with('status', 'Workflow maili do klientów został zapisany.');
     }
 
     public function testMail(Request $request, MailSettingsService $mailSettings): RedirectResponse

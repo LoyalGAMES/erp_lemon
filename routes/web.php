@@ -37,6 +37,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::put('/settings/returns', [SettingsController::class, 'updateReturns'])->name('settings.returns.update');
         Route::get('/settings/mail', [SettingsController::class, 'mail'])->name('settings.mail');
         Route::put('/settings/mail', [SettingsController::class, 'updateMail'])->name('settings.mail.update');
+        Route::put('/settings/mail/workflow', [SettingsController::class, 'updateMailWorkflow'])->name('settings.mail.workflow.update');
         Route::post('/settings/mail/test', [SettingsController::class, 'testMail'])->name('settings.mail.test');
         Route::post('/settings/mail/templates', [SettingsController::class, 'storeEmailTemplate'])->name('settings.mail.templates.store');
         Route::put('/settings/mail/templates/{template}', [SettingsController::class, 'updateEmailTemplate'])->name('settings.mail.templates.update');
@@ -48,6 +49,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
         Route::put('/settings/shipping/accounts/{account}', [SettingsController::class, 'updateCourierAccount'])->name('settings.shipping.accounts.update');
         Route::delete('/settings/shipping/accounts/{account}', [SettingsController::class, 'destroyCourierAccount'])->name('settings.shipping.accounts.destroy');
         Route::get('/settings/packing', [SettingsController::class, 'packing'])->name('settings.packing');
+        Route::get('/settings/packing/windows-listener/download', [SettingsController::class, 'downloadWindowsPrintListener'])->name('settings.packing.windows-listener.download');
         Route::put('/settings/packing', [SettingsController::class, 'updatePacking'])->name('settings.packing.update');
         Route::post('/settings/packing/listener/printers', [SettingsController::class, 'packingListenerPrinters'])->name('settings.packing.listener.printers');
     });

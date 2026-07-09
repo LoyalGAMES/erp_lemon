@@ -123,24 +123,6 @@
                 'available' => $balances->sum(fn ($balance) => (float) $balance->quantity_available),
             ];
         };
-        $warehouseTiles = function ($products) {
-            return collect($products)
-                ->flatMap(fn ($product) => $product->stockBalances)
-                ->groupBy(fn ($balance) => (string) ($balance->warehouse_id ?? 'none'))
-                ->map(function ($balances) {
-                    $first = $balances->first();
-
-                    return [
-                        'code' => $first?->warehouse?->code ?? 'MAG?',
-                        'name' => $first?->warehouse?->name ?? '',
-                        'on_hand' => $balances->sum(fn ($balance) => (float) $balance->quantity_on_hand),
-                        'reserved' => $balances->sum(fn ($balance) => (float) $balance->quantity_reserved),
-                        'available' => $balances->sum(fn ($balance) => (float) $balance->quantity_available),
-                    ];
-                })
-                ->sortBy('code')
-                ->values();
-        };
         $channels = function ($products) {
             return collect($products)
                 ->flatMap(fn ($product) => $product->channelMappings)
@@ -480,7 +462,6 @@
                             $imageUrl = $product->imageUrl();
                             $thumbnailUrl = $product->thumbnailUrl();
                             $stock = $stockTotals($familyProducts);
-                            $warehouses = $warehouseTiles($familyProducts);
                             $channelNames = $channels($familyProducts);
                             $price = $retailPrice($product, $variants);
                             $displaySku = $product->displaySku();
@@ -536,19 +517,14 @@
                                         <span class="stock-pill available">Dostępne <strong>{{ $qty($stock['available'], $product) }}</strong></span>
                                     </div>
                                     <details class="warehouse-details">
-                                        <summary>Magazyny</summary>
-                                        <div class="warehouse-tile-grid">
-                                            @forelse ($warehouses as $warehouse)
-                                                <div class="warehouse-tile">
-                                                    <strong>{{ $warehouse['code'] }} {{ $warehouse['name'] }}</strong>
-                                                    <span>Stan: <b>{{ $qty($warehouse['on_hand'], $product) }}</b></span>
-                                                    <span>Rez.: {{ $qty($warehouse['reserved'], $product) }}</span>
-                                                    <span>Dost.: {{ $qty($warehouse['available'], $product) }}</span>
-                                                </div>
-                                            @empty
-                                                <span class="muted">Brak stanu w magazynach</span>
-                                            @endforelse
-                                        </div>
+                                        <summary>Magazyny i korekta</summary>
+                                        @if ($variants->isNotEmpty())
+                                            <div class="toolbar-note">Stan ogółem obejmuje warianty. Korektę konkretnego wariantu wykonaj po rozwinięciu wariantów.</div>
+                                        @endif
+                                        @include('products._stock_readonly_panel', [
+                                            'stockProduct' => $product,
+                                            'stockWarehouses' => $warehouseOptions,
+                                        ])
                                     </details>
                                 </div>
                             </td>
@@ -583,7 +559,6 @@
                                 $variantImage = $variant->imageUrl();
                                 $variantThumbnailUrl = $variant->thumbnailUrl(88, 112);
                                 $variantStock = $stockTotals(collect([$variant]));
-                                $variantWarehouses = $warehouseTiles(collect([$variant]));
                                 $variantChannels = $channels(collect([$variant]));
                                 $variantPrice = $retailPrice($variant, collect());
                                 $variantDisplaySku = $variant->displaySku();
@@ -650,19 +625,11 @@
                                             <span class="stock-pill available">Dostępne <strong>{{ $qty($variantStock['available'], $variant) }}</strong></span>
                                         </div>
                                         <details class="warehouse-details">
-                                            <summary>Magazyny</summary>
-                                            <div class="warehouse-tile-grid">
-                                                @forelse ($variantWarehouses as $warehouse)
-                                                    <div class="warehouse-tile">
-                                                        <strong>{{ $warehouse['code'] }} {{ $warehouse['name'] }}</strong>
-                                                        <span>Stan: <b>{{ $qty($warehouse['on_hand'], $variant) }}</b></span>
-                                                        <span>Rez.: {{ $qty($warehouse['reserved'], $variant) }}</span>
-                                                        <span>Dost.: {{ $qty($warehouse['available'], $variant) }}</span>
-                                                    </div>
-                                                @empty
-                                                    <span class="muted">Brak stanu w magazynach</span>
-                                                @endforelse
-                                            </div>
+                                            <summary>Magazyny i korekta</summary>
+                                            @include('products._stock_readonly_panel', [
+                                                'stockProduct' => $variant,
+                                                'stockWarehouses' => $warehouseOptions,
+                                            ])
                                         </details>
                                     </div>
                                 </td>

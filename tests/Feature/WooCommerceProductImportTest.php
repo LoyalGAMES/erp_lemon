@@ -77,6 +77,7 @@ class WooCommerceProductImportTest extends TestCase
                             'name' => 'Koszula VIVIEN Biala',
                             'type' => 'variable',
                             'status' => 'publish',
+                            'date_created' => '2026-07-08T14:20:00',
                             'permalink' => 'https://shop.test/produkt/koszula-vivien-biala',
                             'images' => [
                                 [
@@ -119,6 +120,7 @@ class WooCommerceProductImportTest extends TestCase
 
         $this->assertSame('Koszula VIVIEN Biala', $parent->name);
         $this->assertSame('variable', data_get($parent->attributes, 'woocommerce_type'));
+        $this->assertSame('2026-07-08T14:20', data_get($parent->attributes, 'master.publication_date'));
         $this->assertSame(2, Product::query()->count());
         $this->assertSame('Koszula VIVIEN Biala - 36', $product->name);
         $this->assertSame('https://shop.test/wp-content/uploads/koszula-vivien.jpg', $product->imageUrl());

@@ -166,6 +166,44 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertDontSee('5,0000');
     }
 
+    public function test_product_catalog_defaults_to_newest_products_first(): void
+    {
+        Product::query()->create([
+            'sku' => 'SKU-OLD',
+            'name' => 'Aardvark stary produkt',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'publication_date' => '2026-01-02T09:00',
+                ],
+            ],
+        ]);
+
+        Product::query()->create([
+            'sku' => 'SKU-NEW',
+            'name' => 'Zeta najnowszy produkt',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'publication_date' => '2026-07-08T12:30',
+                ],
+            ],
+        ]);
+
+        $this->get(route('products.index'))
+            ->assertOk()
+            ->assertSeeInOrder([
+                'Zeta najnowszy produkt',
+                'Aardvark stary produkt',
+            ]);
+    }
+
     public function test_product_catalog_has_search_filters_and_custom_pagination(): void
     {
         $channel = SalesChannel::query()->create([
@@ -511,7 +549,22 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->get(route('products.show', $product))
             ->assertOk()
             ->assertSee('Magazyny tego SKU i ręczna korekta stanu')
-            ->assertSee('Ustaw stan');
+            ->assertSee('Ustaw stan')
+            ->assertSee('Szybka edycja produktu')
+            ->assertSee('Ręczna zmiana tworzy dokument KOR')
+            ->assertSee('data-stock-adjust-submit', false);
+
+        $this->get(route('products.edit', $product))
+            ->assertOk()
+            ->assertSee('Sprzedaż i magazyn')
+            ->assertSee('Ręczna zmiana tworzy dokument KOR')
+            ->assertSee('data-stock-adjust-submit', false);
+
+        $this->get(route('products.index'))
+            ->assertOk()
+            ->assertSee('Magazyny i korekta')
+            ->assertSee('Ręczna zmiana tworzy dokument KOR')
+            ->assertSee('data-stock-adjust-submit', false);
 
         $this->post(route('products.stock.adjust', $product), [
             'warehouse_id' => $warehouse->id,
@@ -542,6 +595,22 @@ class ProductCatalogWorkflowTest extends TestCase
 
         $this->assertSame(1, AuditLog::query()->where('action', 'product.stock_adjusted')->count());
         $this->assertSame(1, AuditLog::query()->where('action', 'warehouse_document.posted')->count());
+
+        $this->post(route('products.stock.adjust', $product), [
+            'warehouse_id' => $warehouse->id,
+            'new_quantity' => 6,
+            'notes' => 'Korekta z listy produktów',
+            'redirect_url' => route('products.index'),
+        ])->assertRedirect(route('products.index'))
+            ->assertSessionHas('status');
+
+        $balance->refresh();
+        $this->assertSame('6.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('2.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('4.0000', (string) $balance->quantity_available);
+        $this->assertSame(2, WarehouseDocument::query()->where('type', 'KOR')->where('status', 'posted')->count());
+        $this->assertSame(2, AuditLog::query()->where('action', 'product.stock_adjusted')->count());
+        $this->assertSame(2, AuditLog::query()->where('action', 'warehouse_document.posted')->count());
     }
 
     public function test_operator_can_edit_product_master_data_in_erp(): void

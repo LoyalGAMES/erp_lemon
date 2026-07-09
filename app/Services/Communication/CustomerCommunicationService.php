@@ -20,6 +20,7 @@ final class CustomerCommunicationService
     public function __construct(
         private readonly MailSettingsService $mailSettings,
         private readonly EmailTemplateRenderer $templateRenderer,
+        private readonly CustomerEmailWorkflowSettingsService $emailWorkflow,
     ) {
     }
 
@@ -80,9 +81,11 @@ final class CustomerCommunicationService
 
         $recipient = $this->orderRecipient($order);
         $templateContext = $this->orderTemplateContext($order, $recipient, $context);
-        $content = $this->renderContent($this->orderStatusContent($order, $trigger, $templateContext), $templateContext);
-
-        return $this->createAutomated([
+        $content = $this->renderContent(
+            $this->emailWorkflow->contentFor($trigger) ?? $this->orderStatusContent($order, $trigger, $templateContext),
+            $templateContext,
+        );
+        $attributes = [
             'external_order_id' => $order->id,
             'trigger' => $trigger,
             'recipient_email' => $recipient['email'],
@@ -90,7 +93,13 @@ final class CustomerCommunicationService
             'subject' => $content['subject'],
             'body' => $content['body'],
             'metadata' => $templateContext,
-        ]);
+        ];
+
+        if (! $this->emailWorkflow->isEnabled($trigger)) {
+            return $this->createWorkflowSkipped($attributes);
+        }
+
+        return $this->createAutomated($attributes);
     }
 
     /**
@@ -105,9 +114,11 @@ final class CustomerCommunicationService
         $returnCase->loadMissing('externalOrder');
         $recipient = $this->returnRecipient($returnCase);
         $templateContext = $this->returnTemplateContext($returnCase, $recipient, $context);
-        $content = $this->renderContent($this->returnStatusContent($returnCase, $trigger, $templateContext), $templateContext);
-
-        return $this->createAutomated([
+        $content = $this->renderContent(
+            $this->emailWorkflow->contentFor($trigger) ?? $this->returnStatusContent($returnCase, $trigger, $templateContext),
+            $templateContext,
+        );
+        $attributes = [
             'return_case_id' => $returnCase->id,
             'external_order_id' => $returnCase->external_order_id,
             'trigger' => $trigger,
@@ -116,7 +127,13 @@ final class CustomerCommunicationService
             'subject' => $content['subject'],
             'body' => $content['body'],
             'metadata' => $templateContext,
-        ]);
+        ];
+
+        if (! $this->emailWorkflow->isEnabled($trigger)) {
+            return $this->createWorkflowSkipped($attributes);
+        }
+
+        return $this->createAutomated($attributes);
     }
 
     /**
@@ -147,6 +164,19 @@ final class CustomerCommunicationService
                 'error_message' => $exception->getMessage(),
             ]));
         }
+    }
+
+    /**
+     * @param array<string, mixed> $attributes
+     */
+    private function createWorkflowSkipped(array $attributes): CustomerMessage
+    {
+        return CustomerMessage::query()->create(array_merge($attributes, [
+            'direction' => 'outgoing',
+            'type' => self::TYPE_AUTOMATED,
+            'status' => 'skipped',
+            'error_message' => 'Wysyłka wyłączona w workflow maili.',
+        ]));
     }
 
     /**

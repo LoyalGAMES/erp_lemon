@@ -195,9 +195,40 @@ class MailSettingsWorkflowTest extends TestCase
         $this->get(route('settings.mail'))
             ->assertOk()
             ->assertSee('Dostarczalność')
+            ->assertSee('Workflow maili do klientów')
+            ->assertSee('order_created')
+            ->assertSee('return_refunded')
+            ->assertSee('Wysyłaj do klienta')
             ->assertSee('DNS domeny semprelove.pl')
             ->assertSee('Login SMTP jest w innej domenie')
             ->assertSee('{{return_number}}')
             ->assertSee('{{order_number}}');
+    }
+
+    public function test_customer_email_workflow_can_be_configured_from_mail_settings(): void
+    {
+        $this->put(route('settings.mail.workflow.update'), [
+            'workflow' => [
+                'order_received' => [
+                    'enabled' => '0',
+                    'stage' => 'Po płatności - ręczna decyzja',
+                    'subject' => 'Nie wysyłaj {{order_number}}',
+                    'body' => 'Ten mail jest wyłączony.',
+                ],
+                'order_packed' => [
+                    'enabled' => '1',
+                    'stage' => 'Po pakowaniu',
+                    'subject' => 'Spakowaliśmy {{order_number}}',
+                    'body' => 'Paczka {{order_number}} czeka na kuriera.',
+                ],
+            ],
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $setting = AppSetting::query()->where('key', 'customer_email_workflow')->firstOrFail();
+
+        $this->assertFalse($setting->value['order_received']['enabled']);
+        $this->assertSame('Po płatności - ręczna decyzja', $setting->value['order_received']['stage']);
+        $this->assertSame('Spakowaliśmy {{order_number}}', $setting->value['order_packed']['subject']);
+        $this->assertSame('Paczka {{order_number}} czeka na kuriera.', $setting->value['order_packed']['body']);
     }
 }
