@@ -549,7 +549,22 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->get(route('products.show', $product))
             ->assertOk()
             ->assertSee('Magazyny tego SKU i ręczna korekta stanu')
-            ->assertSee('Ustaw stan');
+            ->assertSee('Ustaw stan')
+            ->assertSee('Szybka edycja produktu')
+            ->assertSee('Ręczna zmiana tworzy dokument KOR')
+            ->assertSee('data-stock-adjust-submit', false);
+
+        $this->get(route('products.edit', $product))
+            ->assertOk()
+            ->assertSee('Sprzedaż i magazyn')
+            ->assertSee('Ręczna zmiana tworzy dokument KOR')
+            ->assertSee('data-stock-adjust-submit', false);
+
+        $this->get(route('products.index'))
+            ->assertOk()
+            ->assertSee('Magazyny i korekta')
+            ->assertSee('Ręczna zmiana tworzy dokument KOR')
+            ->assertSee('data-stock-adjust-submit', false);
 
         $this->post(route('products.stock.adjust', $product), [
             'warehouse_id' => $warehouse->id,
@@ -580,6 +595,22 @@ class ProductCatalogWorkflowTest extends TestCase
 
         $this->assertSame(1, AuditLog::query()->where('action', 'product.stock_adjusted')->count());
         $this->assertSame(1, AuditLog::query()->where('action', 'warehouse_document.posted')->count());
+
+        $this->post(route('products.stock.adjust', $product), [
+            'warehouse_id' => $warehouse->id,
+            'new_quantity' => 6,
+            'notes' => 'Korekta z listy produktów',
+            'redirect_url' => route('products.index'),
+        ])->assertRedirect(route('products.index'))
+            ->assertSessionHas('status');
+
+        $balance->refresh();
+        $this->assertSame('6.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('2.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('4.0000', (string) $balance->quantity_available);
+        $this->assertSame(2, WarehouseDocument::query()->where('type', 'KOR')->where('status', 'posted')->count());
+        $this->assertSame(2, AuditLog::query()->where('action', 'product.stock_adjusted')->count());
+        $this->assertSame(2, AuditLog::query()->where('action', 'warehouse_document.posted')->count());
     }
 
     public function test_operator_can_edit_product_master_data_in_erp(): void

@@ -139,6 +139,7 @@ class ProductController extends Controller
             'parameterOptions' => $this->parameterOptions(),
             'productLookupOptions' => $this->productLookupOptions($product),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
+            'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'module' => 'products',
             'title' => 'Edycja produktu',
             'subtitle' => $product->name . ' | ' . $this->productSubtitle($product),
@@ -326,6 +327,7 @@ class ProductController extends Controller
             'warehouse_id' => ['required', 'integer', 'exists:warehouses,id'],
             'new_quantity' => ['required', 'numeric', 'min:0', 'max:99999999'],
             'notes' => ['nullable', 'string', 'max:500'],
+            'redirect_url' => ['nullable', 'string', 'max:1000'],
         ]);
 
         $warehouse = Warehouse::query()
@@ -341,7 +343,8 @@ class ProductController extends Controller
         $delta = round($target - $current, 4);
 
         if (abs($delta) < 0.0001) {
-            return back()->with('status', "Stan SKU {$product->sku} w magazynie {$warehouse->code} już wynosi {$this->formatQuantity($target)}.");
+            return $this->redirectAfterStockAdjustment($request, $product)
+                ->with('status', "Stan SKU {$product->sku} w magazynie {$warehouse->code} już wynosi {$this->formatQuantity($target)}.");
         }
 
         $document = DB::transaction(function () use ($product, $warehouse, $validated, $numbers, $current, $target, $delta): WarehouseDocument {
@@ -393,7 +396,8 @@ class ProductController extends Controller
                 'error' => $exception->getMessage(),
             ]);
 
-            return back()->with('error', 'Nie zaksięgowano korekty stanu: '.$exception->getMessage());
+            return $this->redirectAfterStockAdjustment($request, $product)
+                ->with('error', 'Nie zaksięgowano korekty stanu: '.$exception->getMessage());
         }
 
         $audit->record('product.stock_adjusted', $product, [
@@ -407,9 +411,36 @@ class ProductController extends Controller
             'document_number' => $document->number,
         ]);
 
-        return redirect()
-            ->route('products.show', $product)
+        return $this->redirectAfterStockAdjustment($request, $product)
             ->with('status', "Zmieniono stan SKU {$product->sku} w magazynie {$warehouse->code} z {$this->formatQuantity($current)} na {$this->formatQuantity($target)} dokumentem {$document->number}.");
+    }
+
+    private function redirectAfterStockAdjustment(Request $request, Product $product): RedirectResponse
+    {
+        $redirectUrl = $this->safeStockAdjustmentRedirectUrl($request);
+
+        if ($redirectUrl !== null) {
+            return redirect()->to($redirectUrl);
+        }
+
+        return redirect()->route('products.show', $product);
+    }
+
+    private function safeStockAdjustmentRedirectUrl(Request $request): ?string
+    {
+        $url = trim((string) $request->input('redirect_url', ''));
+
+        if ($url === '') {
+            return null;
+        }
+
+        if (Str::startsWith($url, '/') && ! Str::startsWith($url, '//')) {
+            return $url;
+        }
+
+        $host = parse_url($url, PHP_URL_HOST);
+
+        return is_string($host) && $host === $request->getHost() ? $url : null;
     }
 
     public function exportToWooCommerce(
