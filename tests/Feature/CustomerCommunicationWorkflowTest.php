@@ -7,11 +7,16 @@ namespace Tests\Feature;
 use App\Mail\CustomerMessageMail;
 use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
+use App\Models\IntegrationSyncLog;
 use App\Models\ReturnCase;
 use App\Models\SalesChannel;
+use App\Models\WordpressIntegration;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Communication\CustomerEmailWorkflowSettingsService;
+use App\Services\WooCommerce\WooCommerceOrderStatusService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 use Tests\TestCase;
 
@@ -162,6 +167,44 @@ class CustomerCommunicationWorkflowTest extends TestCase
         Mail::assertSent(CustomerMessageMail::class, function (CustomerMessageMail $mail) use ($message): bool {
             return $mail->customerMessage->is($message);
         });
+    }
+
+    public function test_disabled_woocommerce_status_workflow_skips_indirect_store_email_trigger(): void
+    {
+        Http::fake();
+        $order = $this->createOrder('client@example.test');
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $order->sales_channel_id,
+            'name' => 'Woo B2C',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => [
+                'order_statuses' => [
+                    'ready_to_ship' => 'ready-to-ship',
+                    'shipped' => 'completed',
+                    'packing_rollback' => 'processing',
+                ],
+            ],
+        ]);
+
+        app(CustomerEmailWorkflowSettingsService::class)->update([
+            'order_ready_for_shipment' => [
+                'enabled' => false,
+                'stage' => 'Po pakowaniu',
+            ],
+        ]);
+
+        $result = app(WooCommerceOrderStatusService::class)->markReadyForShipment($order);
+
+        $this->assertTrue((bool) ($result['skipped'] ?? false));
+        $this->assertNull($result['status']);
+        $this->assertSame('ready-to-ship', $result['target_status']);
+        Http::assertNothingSent();
+
+        $log = IntegrationSyncLog::query()->where('operation', 'order_ready_for_shipment')->firstOrFail();
+        $this->assertSame('skipped', $log->status);
+        $this->assertTrue((bool) data_get($log->response_payload, 'workflow_disabled'));
     }
 
     private function createOrder(string $email): ExternalOrder

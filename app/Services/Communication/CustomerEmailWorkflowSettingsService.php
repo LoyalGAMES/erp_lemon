@@ -20,6 +20,7 @@ final class CustomerEmailWorkflowSettingsService
      *     description:string,
      *     subject:string,
      *     body:string,
+     *     editable_content:bool,
      *     enabled:bool
      * }>
      */
@@ -37,12 +38,13 @@ final class CustomerEmailWorkflowSettingsService
                 return [$code => [
                     'code' => $code,
                     'context' => $definition['context'],
-                    'context_label' => $definition['context'] === 'return' ? 'Zwroty' : 'Zamówienia',
+                    'context_label' => $this->contextLabel($definition['context']),
                     'name' => $definition['name'],
                     'stage' => $this->text($override['stage'] ?? $definition['stage'], $definition['stage'], 160),
                     'description' => $definition['description'],
                     'subject' => $this->text($override['subject'] ?? $definition['subject'], $definition['subject'], 160),
                     'body' => $this->text($override['body'] ?? $definition['body'], $definition['body'], 5000),
+                    'editable_content' => (bool) ($definition['editable_content'] ?? true),
                     'enabled' => array_key_exists('enabled', $override)
                         ? (bool) $override['enabled']
                         : (bool) $definition['enabled'],
@@ -113,6 +115,15 @@ final class CustomerEmailWorkflowSettingsService
         return mb_substr($text !== '' ? $text : $fallback, 0, $limit);
     }
 
+    private function contextLabel(string $context): string
+    {
+        return match ($context) {
+            'return' => 'Zwroty',
+            'warehouse' => 'Magazyn i WooCommerce',
+            default => 'Zamówienia',
+        };
+    }
+
     /**
      * @return array<string, array{
      *     context:string,
@@ -121,6 +132,7 @@ final class CustomerEmailWorkflowSettingsService
      *     description:string,
      *     subject:string,
      *     body:string,
+     *     editable_content?:bool,
      *     enabled:bool
      * }>
      */
@@ -170,6 +182,36 @@ final class CustomerEmailWorkflowSettingsService
                 'description' => 'Wysyłane, gdy ERP wydziela część produktów do osobnej wysyłki.',
                 'subject' => 'Zamówienie {{order_number}} zostało podzielone',
                 'body' => "Dzień dobry,\n\nczęść produktów z zamówienia {{order_number}} została wydzielona do osobnej wysyłki.\n\nNumer zamówienia częściowego: {{child_order_number}}.",
+                'enabled' => true,
+            ],
+            'order_ready_for_shipment' => [
+                'context' => 'warehouse',
+                'name' => 'WooCommerce: gotowe do wysyłki',
+                'stage' => 'Po spakowaniu zamówienia',
+                'description' => 'Pośredni mail WooCommerce wywoływany zmianą statusu na „gotowe do wysyłki”. Wyłączenie zatrzymuje zmianę statusu WooCommerce z ERP, bo to ona uruchamia wiadomość sklepu.',
+                'subject' => '',
+                'body' => '',
+                'editable_content' => false,
+                'enabled' => true,
+            ],
+            'order_shipped' => [
+                'context' => 'warehouse',
+                'name' => 'WooCommerce: zamówienie wysłane',
+                'stage' => 'Po oznaczeniu odbioru przez kuriera',
+                'description' => 'Pośredni mail WooCommerce wywoływany zmianą statusu na status wysłany/zakończony. Wyłączenie zatrzymuje zmianę statusu WooCommerce z ERP.',
+                'subject' => '',
+                'body' => '',
+                'editable_content' => false,
+                'enabled' => true,
+            ],
+            'order_packing_rollback' => [
+                'context' => 'warehouse',
+                'name' => 'WooCommerce: cofnięcie pakowania',
+                'stage' => 'Po cofnięciu paczki do pakowania',
+                'description' => 'Pośredni mail WooCommerce, jeśli sklep wysyła wiadomość po powrocie zamówienia na status realizacji. Wyłączenie zatrzymuje zmianę statusu WooCommerce z ERP przy cofnięciu pakowania.',
+                'subject' => '',
+                'body' => '',
+                'editable_content' => false,
                 'enabled' => true,
             ],
             'return_waiting_for_package' => [

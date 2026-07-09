@@ -10,6 +10,7 @@ use App\Models\IntegrationSyncLog;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Services\Wordpress\LemonErpWooCommercePluginPackageService;
+use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Crypt;
@@ -330,6 +331,29 @@ class IntegrationRetryWorkflowTest extends TestCase
             ->assertExitCode(0);
 
         $this->assertSame(5, IntegrationSyncLog::query()->count());
+    }
+
+    public function test_integration_log_times_are_displayed_in_warsaw_timezone(): void
+    {
+        $this->assertSame('Europe/Warsaw', config('app.timezone'));
+
+        [$integration] = $this->createIntegration();
+        $log = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'queued',
+            'attempts' => 1,
+        ]);
+        $log->created_at = CarbonImmutable::create(2026, 7, 9, 8, 45, 28, 'Europe/Warsaw');
+        $log->updated_at = $log->created_at;
+        $log->save();
+
+        $this->get(route('integrations.index', ['tab' => 'logs']))
+            ->assertOk()
+            ->assertSee('2026-07-09 08:45:28')
+            ->assertDontSee('2026-07-09 06:45:28');
     }
 
     public function test_retry_does_not_duplicate_active_import(): void
