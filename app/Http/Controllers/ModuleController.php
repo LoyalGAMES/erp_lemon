@@ -18,18 +18,19 @@ use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
-use App\Services\Orders\OrderFulfillmentStatusService;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Collection;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class ModuleController extends Controller
 {
+    private const ORDER_LIST_PER_PAGE = 50;
+
     public function __invoke(Request $request, string $module)
     {
-        $fulfillmentStatus = app(OrderFulfillmentStatusService::class);
-
         $payload = match ($module) {
             'products' => [
                 'title' => 'Produkty',
@@ -101,45 +102,7 @@ class ModuleController extends Controller
                         $integration->invoice_upload_enabled ? 'Tak' : 'Nie',
                     ]),
             ],
-            'orders' => [
-                'title' => 'Zamówienia',
-                'subtitle' => 'Zamówienia importowane z WooCommerce tworzą rezerwacje, dokumenty WZ i faktury.',
-                'columns' => ['Kanał', 'Nr zewnętrzny', 'Status', 'Rezerwacje', 'Kwota brutto', 'Utworzone', 'Akcja'],
-                'rows' => ExternalOrder::query()
-                    ->with(['salesChannel', 'invoices'])
-                    ->latest()
-                    ->get()
-                    ->map(function (ExternalOrder $order) use ($fulfillmentStatus): array {
-                        $activeReservations = (float) StockReservation::query()
-                            ->where('sales_channel_id', $order->sales_channel_id)
-                            ->where('external_order_id', $order->external_id)
-                            ->where('status', 'active')
-                            ->sum('quantity');
-
-                        return [
-                            $order->salesChannel->code,
-                            $order->external_number,
-                            $order->status,
-                            number_format($activeReservations, 0, ',', ' '),
-                            number_format((float) $order->total_gross, 2, ',', ' ') . ' ' . $order->currency,
-                            $order->external_created_at?->format('Y-m-d H:i') ?? '-',
-                            view('partials.order-actions', [
-                                'order' => $order,
-                                'wzDocument' => $fulfillmentStatus->latestWz($order),
-                                'invoice' => $order->invoices
-                                    ->reject(fn ($invoice): bool => $invoice->type === 'proforma')
-                                    ->sortByDesc('id')
-                                    ->first(),
-                                'proforma' => $order->invoices
-                                    ->where('type', 'proforma')
-                                    ->sortByDesc('id')
-                                    ->first(),
-                                'activeReservations' => $activeReservations,
-                            ])->render(),
-                        ];
-                    }),
-                'html_last_column' => true,
-            ],
+            'orders' => $this->ordersPayload($request),
             'returns' => [
                 'title' => 'Zwroty',
                 'subtitle' => 'Zwrot może przyjąć towar na dowolny magazyn przez dokument RX/ZW.',
@@ -235,6 +198,187 @@ class ModuleController extends Controller
         };
 
         return view('module', $payload + ['module' => $module]);
+    }
+
+    /**
+     * @return array{title:string,subtitle:string,columns:list<string>,rows:\Illuminate\Contracts\Pagination\Paginator,html_last_column:bool}
+     */
+    private function ordersPayload(Request $request): array
+    {
+        $orders = ExternalOrder::query()
+            ->select([
+                'id',
+                'sales_channel_id',
+                'external_id',
+                'external_number',
+                'status',
+                'currency',
+                'total_gross',
+                'external_created_at',
+                'created_at',
+            ])
+            ->with([
+                'salesChannel:id,code,name',
+                'invoices:id,external_order_id,number,type,status',
+            ])
+            ->orderByDesc('external_created_at')
+            ->orderByDesc('id')
+            ->simplePaginate($this->orderListPerPage($request))
+            ->withQueryString();
+
+        $pageOrders = $orders->getCollection();
+        $activeReservationSums = $this->activeReservationSumsForOrders($pageOrders);
+        $latestWzDocuments = $this->latestWzDocumentsForOrders($pageOrders);
+
+        $orders->setCollection($pageOrders->map(function (ExternalOrder $order) use ($activeReservationSums, $latestWzDocuments): array {
+            $activeReservations = (float) ($activeReservationSums[$this->reservationLookupKey($order->sales_channel_id, $order->external_id)] ?? 0);
+
+            return [
+                $order->salesChannel?->code ?? '-',
+                $order->external_number,
+                $order->status,
+                number_format($activeReservations, 0, ',', ' '),
+                number_format((float) $order->total_gross, 2, ',', ' ') . ' ' . $order->currency,
+                $order->external_created_at?->format('Y-m-d H:i') ?? $order->created_at?->format('Y-m-d H:i') ?? '-',
+                view('partials.order-actions', [
+                    'order' => $order,
+                    'wzDocument' => $latestWzDocuments[$order->id] ?? null,
+                    'invoice' => $order->invoices
+                        ->reject(fn ($invoice): bool => $invoice->type === 'proforma')
+                        ->sortByDesc('id')
+                        ->first(),
+                    'proforma' => $order->invoices
+                        ->where('type', 'proforma')
+                        ->sortByDesc('id')
+                        ->first(),
+                    'activeReservations' => $activeReservations,
+                ])->render(),
+            ];
+        }));
+
+        return [
+            'title' => 'Zamówienia',
+            'subtitle' => 'Zamówienia importowane z WooCommerce tworzą rezerwacje, dokumenty WZ i faktury.',
+            'columns' => ['Kanał', 'Nr zewnętrzny', 'Status', 'Rezerwacje', 'Kwota brutto', 'Utworzone', 'Akcja'],
+            'rows' => $orders,
+            'html_last_column' => true,
+        ];
+    }
+
+    private function orderListPerPage(Request $request): int
+    {
+        return max(25, min(100, (int) $request->integer('per_page', self::ORDER_LIST_PER_PAGE)));
+    }
+
+    /**
+     * @param Collection<int, ExternalOrder> $orders
+     * @return array<string, float>
+     */
+    private function activeReservationSumsForOrders(Collection $orders): array
+    {
+        $externalIds = $orders
+            ->pluck('external_id')
+            ->filter()
+            ->map(fn ($value): string => (string) $value)
+            ->unique()
+            ->values();
+        $salesChannelIds = $orders
+            ->pluck('sales_channel_id')
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ($externalIds->isEmpty() || $salesChannelIds->isEmpty()) {
+            return [];
+        }
+
+        return StockReservation::query()
+            ->select([
+                'sales_channel_id',
+                'external_order_id',
+                DB::raw('sum(quantity) as reserved_quantity'),
+            ])
+            ->where('status', 'active')
+            ->whereIn('sales_channel_id', $salesChannelIds)
+            ->whereIn('external_order_id', $externalIds)
+            ->groupBy('sales_channel_id', 'external_order_id')
+            ->get()
+            ->mapWithKeys(fn (StockReservation $reservation): array => [
+                $this->reservationLookupKey($reservation->sales_channel_id, $reservation->external_order_id) => (float) $reservation->reserved_quantity,
+            ])
+            ->all();
+    }
+
+    /**
+     * @param Collection<int, ExternalOrder> $orders
+     * @return array<int, WarehouseDocument>
+     */
+    private function latestWzDocumentsForOrders(Collection $orders): array
+    {
+        if ($orders->isEmpty()) {
+            return [];
+        }
+
+        $documents = WarehouseDocument::query()
+            ->select(['id', 'number', 'type', 'status', 'external_reference', 'metadata', 'created_at', 'updated_at'])
+            ->where('type', 'WZ')
+            ->where(function (Builder $query) use ($orders): void {
+                foreach ($orders as $order) {
+                    $query->orWhere(function (Builder $candidate) use ($order): void {
+                        $candidate
+                            ->where(function (Builder $identity) use ($order): void {
+                                $identity->whereRaw('1 = 0');
+
+                                if (filled($order->external_id)) {
+                                    $identity->orWhere('metadata->external_order_id', (string) $order->external_id);
+                                }
+
+                                if (filled($order->external_number)) {
+                                    $identity
+                                        ->orWhere('metadata->external_order_number', (string) $order->external_number)
+                                        ->orWhere('external_reference', (string) $order->external_number);
+                                }
+                            })
+                            ->where(function (Builder $channel) use ($order): void {
+                                $channel
+                                    ->where('metadata->sales_channel_id', $order->sales_channel_id)
+                                    ->orWhereNull('metadata->sales_channel_id');
+                            });
+                    });
+                }
+            })
+            ->orderByRaw("case when status = 'posted' then 0 else 1 end")
+            ->latest()
+            ->get();
+
+        return $orders
+            ->mapWithKeys(fn (ExternalOrder $order): array => [
+                $order->id => $documents->first(fn (WarehouseDocument $document): bool => $this->wzDocumentMatchesOrder($document, $order)),
+            ])
+            ->filter()
+            ->all();
+    }
+
+    private function wzDocumentMatchesOrder(WarehouseDocument $document, ExternalOrder $order): bool
+    {
+        $metadata = (array) $document->metadata;
+        $documentSalesChannelId = data_get($metadata, 'sales_channel_id');
+
+        if ($documentSalesChannelId !== null && (int) $documentSalesChannelId !== (int) $order->sales_channel_id) {
+            return false;
+        }
+
+        $externalId = (string) $order->external_id;
+        $externalNumber = (string) $order->external_number;
+
+        return (filled($externalId) && (string) data_get($metadata, 'external_order_id') === $externalId)
+            || (filled($externalNumber) && (string) data_get($metadata, 'external_order_number') === $externalNumber)
+            || (filled($externalNumber) && (string) $document->external_reference === $externalNumber);
+    }
+
+    private function reservationLookupKey(int|string|null $salesChannelId, string|int|null $externalOrderId): string
+    {
+        return ((string) $salesChannelId) . '|' . ((string) $externalOrderId);
     }
 
     /**
