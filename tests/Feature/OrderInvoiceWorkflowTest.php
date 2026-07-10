@@ -351,6 +351,62 @@ class OrderInvoiceWorkflowTest extends TestCase
         $this->assertSame('19.00', (string) $invoice->lines->first()->vat_rate);
     }
 
+    public function test_company_order_uses_b2b_invoice_numbering_series(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice' => Http::response([
+                'order_id' => 501,
+                'invoice_number' => 'FV/FIRMA/'.now()->format('Y').'/000001',
+                'file_url' => 'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice/download?token=b2b-token',
+                'stored_file' => true,
+                'note_id' => 7301,
+            ]),
+        ]);
+
+        [$order] = $this->createFulfilledOrder();
+        $order->update([
+            'billing_data' => array_merge($order->billing_data ?? [], [
+                'company' => 'Firma testowa sp. z o.o.',
+                'nip' => '5261040828',
+            ]),
+        ]);
+
+        app(InvoiceSettingsService::class)->updateSellerData([
+            'name' => 'Sempre Love sp. z o.o.',
+            'tax_id' => '5261040828',
+            'address_1' => 'Testowa 1',
+            'postcode' => '00-001',
+            'city' => 'Warszawa',
+            'country' => 'PL',
+            'email' => 'biuro@example.test',
+            'phone' => '+48123123123',
+            'bank_account' => 'PL00111122223333444455556666',
+        ]);
+        app(InvoiceSettingsService::class)->updateNumberingData([
+            'b2c_sales_prefix' => 'FV/DET',
+            'b2b_sales_prefix' => 'FV/FIRMA',
+            'correction_prefix' => 'FK/ERP',
+            'proforma_prefix' => 'PRO/ERP',
+            'oss_sales_prefix' => 'FV/OSS',
+            'oss_correction_prefix' => 'FVK/OSS',
+            'oss_pattern' => '{PREFIX}/{SEQ}/{MM}/{YYYY}',
+            'oss_padding' => 1,
+            'pattern' => '{PREFIX}/{YYYY}/{SEQ}',
+            'padding' => 6,
+            'payment_due_days' => 7,
+        ]);
+
+        $this->post(route('orders.invoice.create', $order), [
+            'document_type' => 'vat',
+        ])->assertRedirect()
+            ->assertSessionHas('status');
+
+        $invoice = Invoice::query()->firstOrFail();
+
+        $this->assertSame('FV/FIRMA/'.now()->format('Y').'/000001', $invoice->number);
+        $this->assertSame('FV_B2B', data_get($invoice->metadata, 'numbering_series'));
+    }
+
     public function test_operator_can_open_order_details_with_lines_reservations_wz_and_woocommerce_notes(): void
     {
         [$order, $document] = $this->createFulfilledOrder();

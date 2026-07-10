@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Invoice;
 use App\Models\InvoiceFile;
+use App\Services\Invoices\InvoiceEppExportService;
 use App\Services\Audit\AuditLogService;
 use App\Services\Invoices\InvoiceSettingsService;
 use App\Services\Invoices\InvoiceTemplateService;
@@ -16,6 +17,7 @@ use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Validation\ValidationException;
@@ -138,7 +140,9 @@ class InvoiceController extends Controller
     public function updateSettings(Request $request, InvoiceSettingsService $settings): RedirectResponse
     {
         $validated = $request->validate([
-            'sales_prefix' => ['required', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
+            'b2c_sales_prefix' => ['nullable', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
+            'b2b_sales_prefix' => ['nullable', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
+            'sales_prefix' => ['nullable', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
             'correction_prefix' => ['required', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
             'proforma_prefix' => ['required', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
             'oss_sales_prefix' => ['required', 'string', 'max:32', 'regex:/^[A-Za-z0-9_\/-]+$/'],
@@ -155,6 +159,22 @@ class InvoiceController extends Controller
         $settings->updateKsefData($validated);
 
         return back()->with('status', 'Ustawienia numeracji, płatności i KSeF faktur zostały zapisane.');
+    }
+
+    public function exportEpp(Request $request, InvoiceEppExportService $exporter): Response
+    {
+        $validated = $request->validate([
+            'month' => ['nullable', 'date_format:Y-m'],
+        ]);
+
+        $month = Carbon::createFromFormat('Y-m', $validated['month'] ?? now()->format('Y-m'))->startOfMonth();
+        $content = $exporter->exportMonth($month);
+        $filename = 'faktury-epp-'.$month->format('Y-m').'.epp';
+
+        return response($content, 200, [
+            'Content-Type' => 'application/octet-stream',
+            'Content-Disposition' => 'attachment; filename="'.$filename.'"',
+        ]);
     }
 
     public function edit(

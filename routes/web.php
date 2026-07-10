@@ -155,6 +155,7 @@ Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
 
     Route::middleware(EnsureErpRole::class.':invoices')->group(function (): void {
         Route::get('/invoices', [InvoiceController::class, 'index'])->name('invoices.index');
+        Route::get('/invoices/epp/export', [InvoiceController::class, 'exportEpp'])->name('invoices.epp.export');
         Route::put('/invoices/template', [InvoiceController::class, 'updateTemplate'])->name('invoices.template.update');
         Route::put('/invoices/seller', [InvoiceController::class, 'updateSeller'])->name('invoices.seller.update');
         Route::put('/invoices/settings', [InvoiceController::class, 'updateSettings'])->name('invoices.settings.update');

@@ -57,6 +57,10 @@
     <section class="page-toolbar">
         <div class="toolbar-note">Szablon domyślny: {{ $template->name }} | renderer: {{ $template->renderer }}</div>
         <div class="inline-actions">
+            <form class="inline-actions" method="GET" action="{{ route('invoices.epp.export') }}">
+                <input style="max-width: 150px;" name="month" type="month" value="{{ request('month', now()->format('Y-m')) }}" aria-label="Miesiąc eksportu EPP">
+                <button class="button secondary" type="submit">Pobierz EPP</button>
+            </form>
             <label class="button secondary" for="invoice-settings-drawer">Ustawienia faktur</label>
             <label class="button secondary" for="invoice-seller-drawer">Dane sprzedawcy</label>
             <label class="button" for="invoice-template-drawer">Edytuj szablon faktury</label>
@@ -77,8 +81,11 @@
             <form class="form-grid" method="POST" action="{{ route('invoices.settings.update') }}">
                 @csrf
                 @method('PUT')
-                <label>Seria faktur sprzedaży
-                    <input name="sales_prefix" value="{{ old('sales_prefix', $numbering['sales_prefix']) }}" required>
+                <label>Seria faktur dla osób prywatnych
+                    <input name="b2c_sales_prefix" value="{{ old('b2c_sales_prefix', $numbering['b2c_sales_prefix']) }}" required>
+                </label>
+                <label>Seria faktur dla firm
+                    <input name="b2b_sales_prefix" value="{{ old('b2b_sales_prefix', $numbering['b2b_sales_prefix']) }}" required>
                 </label>
                 <label>Seria korekt
                     <input name="correction_prefix" value="{{ old('correction_prefix', $numbering['correction_prefix']) }}" required>
@@ -117,7 +124,7 @@
                         <option value="skip" @selected($selectedDefaultKsefPolicy === 'skip')>Domyślnie nie wysyłaj do KSeF</option>
                     </select>
                 </label>
-                <p class="muted">Tokeny: {PREFIX}, {YYYY}, {YY}, {MM}, {SEQ}. Przykład: {{ strtr($numbering['pattern'], ['{PREFIX}' => trim($numbering['sales_prefix'], '/'), '{YYYY}' => now()->format('Y'), '{YY}' => now()->format('y'), '{MM}' => now()->format('m'), '{SEQ}' => str_pad('1', (int) $numbering['padding'], '0', STR_PAD_LEFT)]) }}. OSS: {{ strtr($numbering['oss_pattern'], ['{PREFIX}' => trim($numbering['oss_sales_prefix'], '/'), '{YYYY}' => now()->format('Y'), '{YY}' => now()->format('y'), '{MM}' => now()->format('m'), '{SEQ}' => str_pad('1', (int) $numbering['oss_padding'], '0', STR_PAD_LEFT)]) }}</p>
+                <p class="muted">Tokeny: {PREFIX}, {YYYY}, {YY}, {MM}, {SEQ}. Osoba prywatna: {{ strtr($numbering['pattern'], ['{PREFIX}' => trim($numbering['b2c_sales_prefix'], '/'), '{YYYY}' => now()->format('Y'), '{YY}' => now()->format('y'), '{MM}' => now()->format('m'), '{SEQ}' => str_pad('1', (int) $numbering['padding'], '0', STR_PAD_LEFT)]) }}. Firma: {{ strtr($numbering['pattern'], ['{PREFIX}' => trim($numbering['b2b_sales_prefix'], '/'), '{YYYY}' => now()->format('Y'), '{YY}' => now()->format('y'), '{MM}' => now()->format('m'), '{SEQ}' => str_pad('1', (int) $numbering['padding'], '0', STR_PAD_LEFT)]) }}. OSS: {{ strtr($numbering['oss_pattern'], ['{PREFIX}' => trim($numbering['oss_sales_prefix'], '/'), '{YYYY}' => now()->format('Y'), '{YY}' => now()->format('y'), '{MM}' => now()->format('m'), '{SEQ}' => str_pad('1', (int) $numbering['oss_padding'], '0', STR_PAD_LEFT)]) }}</p>
                 <p class="muted">To ustawienie działa jako domyślne dla nowych i istniejących faktur bez ręcznej decyzji KSeF. Ustawienie na konkretnej fakturze ma pierwszeństwo.</p>
                 <button class="button" type="submit">Zapisz ustawienia</button>
             </form>

@@ -110,7 +110,7 @@ final class OrderInvoiceService
             }
 
             $invoice = Invoice::query()->create([
-                'number' => $this->numbers->next($this->numberType($type, $ossMetadata !== null)),
+                'number' => $this->numbers->next($this->numberType($type, $order, $ossMetadata !== null)),
                 'type' => $type,
                 'status' => 'issued',
                 'external_order_id' => $order->id,
@@ -126,7 +126,9 @@ final class OrderInvoiceService
                 'gross_total' => $grossTotal,
                 'payment_method' => $this->paymentMethod($order),
                 'issued_at' => now(),
-                'metadata' => $metadata,
+                'metadata' => array_merge($metadata, [
+                    'numbering_series' => $this->numberType($type, $order, $ossMetadata !== null),
+                ]),
             ]);
 
             foreach ($linePayloads as $payload) {
@@ -146,13 +148,25 @@ final class OrderInvoiceService
         return $invoice->refresh()->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']);
     }
 
-    private function numberType(string $type, bool $isOss): string
+    private function numberType(string $type, ExternalOrder $order, bool $isOss): string
     {
         if ($type === 'proforma') {
             return 'PROFORMA';
         }
 
-        return $isOss ? 'OSS' : 'FV';
+        if ($isOss) {
+            return 'OSS';
+        }
+
+        return $this->isCompanyInvoice($order) ? 'FV_B2B' : 'FV_B2C';
+    }
+
+    private function isCompanyInvoice(ExternalOrder $order): bool
+    {
+        $billing = $order->billing_data ?? [];
+
+        return trim((string) ($billing['company'] ?? '')) !== ''
+            || $this->buyerTaxId($order) !== '';
     }
 
     private function postedWz(ExternalOrder $order): ?WarehouseDocument
