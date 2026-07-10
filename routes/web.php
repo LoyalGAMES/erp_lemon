@@ -1,6 +1,7 @@
 <?php
 
 use App\Http\Controllers\AuditLogController;
+use App\Http\Controllers\AuthController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExternalOrderController;
 use App\Http\Controllers\ExternalOrderFulfillmentController;
@@ -22,10 +23,16 @@ use App\Http\Controllers\WarehouseController;
 use App\Http\Controllers\WarehouseDocumentController;
 use App\Http\Controllers\WarehouseDocumentCreateController;
 use App\Http\Middleware\EnsureErpRole;
-use App\Http\Middleware\RequireErpBasicAuth;
+use App\Http\Middleware\RequireErpSessionAuth;
 use Illuminate\Support\Facades\Route;
 
-Route::middleware(RequireErpBasicAuth::class)->group(function (): void {
+Route::get('/login', [AuthController::class, 'showLogin'])->name('login');
+Route::post('/login', [AuthController::class, 'login'])->name('login.attempt');
+Route::post('/login/setup', [AuthController::class, 'setupFirstAdmin'])->name('login.setup');
+
+Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
+    Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
+
     Route::get('/', DashboardController::class)->name('dashboard');
     Route::middleware(EnsureErpRole::class.':settings')->group(function (): void {
         Route::get('/settings', SettingsController::class)->name('settings.index');

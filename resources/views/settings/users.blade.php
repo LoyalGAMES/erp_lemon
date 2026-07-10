@@ -50,7 +50,7 @@
         </div>
         @if ($users->isEmpty())
             <div class="empty-users">
-                Brak kont w bazie. Aplikacja nadal może działać na awaryjnym Basic Auth z ENV, ale docelowo utwórz tu konto administratora.
+                Brak kont w bazie. Pierwszy administrator może zostać utworzony z ekranu logowania.
             </div>
         @else
             <div class="user-list">
