@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Lemon ERP for WooCommerce
  * Description: Adds Lemon ERP checkout fields and invoice metadata endpoints for WooCommerce orders.
- * Version: 0.1.1
+ * Version: 0.1.4
  * Author: Lemon ERP
  * Requires PHP: 8.0
  * Requires Plugins: woocommerce
@@ -24,9 +24,13 @@ add_action('before_woocommerce_init', static function (): void {
 
 final class Lemon_Erp_WooCommerce
 {
+    private const VERSION = '0.1.4';
     private const CUSTOMER_TYPE_META = '_lemon_erp_customer_type';
     private const BILLING_NIP_META = '_lemon_erp_billing_nip';
     private const LEGACY_BILLING_NIP_META = '_billing_nip';
+    private const BLOCK_CUSTOMER_TYPE_FIELD = 'lemon-erp/customer-type';
+    private const BLOCK_COMPANY_FIELD = 'lemon-erp/company-name';
+    private const BLOCK_NIP_FIELD = 'lemon-erp/nip';
     private const INVOICE_PREFIX = '_sempre_erp_invoice_';
     private const CORRECTION_PREFIX = '_sempre_erp_correction_invoice_';
     private const MAX_PDF_BYTES = 15728640;
@@ -43,9 +47,14 @@ final class Lemon_Erp_WooCommerce
     private function __construct()
     {
         add_filter('woocommerce_checkout_fields', [$this, 'classicCheckoutFields']);
+        add_action('wp_enqueue_scripts', [$this, 'enqueueCheckoutUi']);
         add_action('woocommerce_after_checkout_validation', [$this, 'validateClassicCheckout'], 10, 2);
         add_action('woocommerce_checkout_create_order', [$this, 'saveClassicCheckoutFields'], 20, 2);
         add_action('woocommerce_init', [$this, 'registerBlockCheckoutFields']);
+        add_filter('woocommerce_get_default_value_for_'.self::BLOCK_CUSTOMER_TYPE_FIELD, [$this, 'defaultBlockCustomerType'], 10, 3);
+        add_filter('woocommerce_get_default_value_for_'.self::BLOCK_COMPANY_FIELD, [$this, 'defaultBlockCompanyName'], 10, 3);
+        add_filter('woocommerce_get_default_value_for_'.self::BLOCK_NIP_FIELD, [$this, 'defaultBlockNip'], 10, 3);
+        add_action('woocommerce_blocks_validate_location_address_fields', [$this, 'validateBlockAddressFields'], 10, 3);
         add_action('woocommerce_store_api_checkout_update_order_from_request', [$this, 'normalizeBlockCheckoutFields'], 20, 2);
         add_action('add_meta_boxes', [$this, 'addOrderMetaBox'], 20, 2);
         add_action('woocommerce_process_shop_order_meta', [$this, 'saveAdminOrderFields'], 20, 2);
@@ -61,12 +70,28 @@ final class Lemon_Erp_WooCommerce
      */
     public function classicCheckoutFields(array $fields): array
     {
+        $fields['billing']['billing_company'] = wp_parse_args(
+            $fields['billing']['billing_company'] ?? [],
+            [
+                'type' => 'text',
+                'label' => __('Nazwa firmy', 'lemon-erp-woocommerce'),
+                'required' => false,
+                'class' => ['form-row-wide'],
+                'autocomplete' => 'organization',
+            ],
+        );
+        $fields['billing']['billing_company']['label'] = __('Nazwa firmy', 'lemon-erp-woocommerce');
+        $fields['billing']['billing_company']['required'] = false;
+        $fields['billing']['billing_company']['class'] = ['form-row-wide'];
+        $fields['billing']['billing_company']['priority'] = 2;
+
         $fields['billing']['billing_lemon_customer_type'] = [
             'type' => 'select',
             'label' => __('Kupuję jako', 'lemon-erp-woocommerce'),
             'required' => true,
             'class' => ['form-row-wide'],
-            'priority' => 21,
+            'priority' => 1,
+            'default' => 'private',
             'options' => [
                 'private' => __('Osoba prywatna', 'lemon-erp-woocommerce'),
                 'company' => __('Firma', 'lemon-erp-woocommerce'),
@@ -78,11 +103,30 @@ final class Lemon_Erp_WooCommerce
             'label' => __('NIP', 'lemon-erp-woocommerce'),
             'required' => false,
             'class' => ['form-row-wide'],
-            'priority' => 31,
+            'priority' => 3,
             'placeholder' => __('NIP dla faktury firmowej', 'lemon-erp-woocommerce'),
         ];
 
         return $fields;
+    }
+
+    public function enqueueCheckoutUi(): void
+    {
+        if (
+            ! function_exists('is_checkout')
+            || ! is_checkout()
+            || (function_exists('is_order_received_page') && is_order_received_page())
+        ) {
+            return;
+        }
+
+        wp_register_script('lemon-erp-woocommerce-checkout', false, [], self::VERSION, true);
+        wp_enqueue_script('lemon-erp-woocommerce-checkout');
+        wp_add_inline_script('lemon-erp-woocommerce-checkout', $this->checkoutInlineScript());
+
+        wp_register_style('lemon-erp-woocommerce-checkout', false, [], self::VERSION);
+        wp_enqueue_style('lemon-erp-woocommerce-checkout');
+        wp_add_inline_style('lemon-erp-woocommerce-checkout', $this->checkoutInlineStyle());
     }
 
     /**
@@ -113,10 +157,16 @@ final class Lemon_Erp_WooCommerce
      */
     public function saveClassicCheckoutFields(WC_Order $order, array $data): void
     {
+        $customerType = $this->sanitizeCustomerType($data['billing_lemon_customer_type'] ?? 'private');
+
+        if ($customerType === 'private') {
+            $order->set_billing_company('');
+        }
+
         $this->saveBillingClassification(
             $order,
-            $this->sanitizeCustomerType($data['billing_lemon_customer_type'] ?? 'private'),
-            $this->sanitizeNip($data['billing_nip'] ?? ''),
+            $customerType,
+            $customerType === 'company' ? $this->sanitizeNip($data['billing_nip'] ?? '') : '',
         );
     }
 
@@ -127,9 +177,9 @@ final class Lemon_Erp_WooCommerce
         }
 
         woocommerce_register_additional_checkout_field([
-            'id' => 'lemon-erp/customer-type',
+            'id' => self::BLOCK_CUSTOMER_TYPE_FIELD,
             'label' => __('Kupuję jako', 'lemon-erp-woocommerce'),
-            'location' => 'order',
+            'location' => 'address',
             'type' => 'select',
             'required' => true,
             'options' => [
@@ -146,25 +196,118 @@ final class Lemon_Erp_WooCommerce
         ]);
 
         woocommerce_register_additional_checkout_field([
-            'id' => 'lemon-erp/nip',
-            'label' => __('NIP', 'lemon-erp-woocommerce'),
-            'location' => 'order',
+            'id' => self::BLOCK_COMPANY_FIELD,
+            'label' => __('Nazwa firmy', 'lemon-erp-woocommerce'),
+            'optionalLabel' => __('Nazwa firmy', 'lemon-erp-woocommerce'),
+            'location' => 'address',
             'type' => 'text',
-            'required' => false,
+            'required' => $this->companyBlockCondition(),
+            'hidden' => $this->privateBlockCondition(),
+            'sanitize_callback' => fn ($value): string => sanitize_text_field((string) $value),
+        ]);
+
+        woocommerce_register_additional_checkout_field([
+            'id' => self::BLOCK_NIP_FIELD,
+            'label' => __('NIP', 'lemon-erp-woocommerce'),
+            'optionalLabel' => __('NIP', 'lemon-erp-woocommerce'),
+            'location' => 'address',
+            'type' => 'text',
+            'required' => $this->companyBlockCondition(),
+            'hidden' => $this->privateBlockCondition(),
+            'attributes' => [
+                'autocomplete' => 'off',
+                'pattern' => '[0-9\\-\\sA-Za-z]{6,32}',
+                'title' => __('Podaj NIP do faktury firmowej.', 'lemon-erp-woocommerce'),
+            ],
             'sanitize_callback' => fn ($value): string => $this->sanitizeNip($value),
         ]);
     }
 
+    public function defaultBlockCustomerType(mixed $value, string $group, mixed $object): string
+    {
+        if (is_string($value) && $value !== '') {
+            return $this->sanitizeCustomerType($value);
+        }
+
+        return $object instanceof WC_Order ? $this->customerType($object) : 'private';
+    }
+
+    public function defaultBlockCompanyName(mixed $value, string $group, mixed $object): string
+    {
+        if (is_string($value) && trim($value) !== '') {
+            return sanitize_text_field($value);
+        }
+
+        if ($object instanceof WC_Order) {
+            return $group === 'shipping' ? $object->get_shipping_company() : $object->get_billing_company();
+        }
+
+        return '';
+    }
+
+    public function defaultBlockNip(mixed $value, string $group, mixed $object): string
+    {
+        if (is_string($value) && trim($value) !== '') {
+            return $this->sanitizeNip($value);
+        }
+
+        return $object instanceof WC_Order ? $this->billingNip($object) : '';
+    }
+
+    /**
+     * @param array<string, mixed> $fields
+     */
+    public function validateBlockAddressFields(WP_Error $errors, array $fields, string $group): void
+    {
+        if (! in_array($group, ['billing', 'shipping'], true)) {
+            return;
+        }
+
+        $customerType = $this->sanitizeCustomerType($fields[self::BLOCK_CUSTOMER_TYPE_FIELD] ?? 'private');
+        $companyName = trim((string) ($fields[self::BLOCK_COMPANY_FIELD] ?? ''));
+        $nip = $this->sanitizeNip($fields[self::BLOCK_NIP_FIELD] ?? '');
+
+        if ($customerType !== 'company') {
+            return;
+        }
+
+        if ($companyName === '') {
+            $errors->add('lemon_erp_company_required_'.$group, __('Podaj nazwę firmy do faktury.', 'lemon-erp-woocommerce'));
+        }
+
+        if ($nip === '') {
+            $errors->add('lemon_erp_nip_required_'.$group, __('Podaj NIP do faktury firmowej.', 'lemon-erp-woocommerce'));
+        } elseif (! preg_match('/^[0-9\-\sA-Za-z]{6,32}$/', $nip)) {
+            $errors->add('lemon_erp_nip_invalid_'.$group, __('NIP ma nieprawidłowy format.', 'lemon-erp-woocommerce'));
+        }
+    }
+
     public function normalizeBlockCheckoutFields(WC_Order $order, WP_REST_Request $request): void
     {
-        $customerType = $this->additionalCheckoutFieldValue($order, 'lemon-erp/customer-type');
-        $nip = $this->additionalCheckoutFieldValue($order, 'lemon-erp/nip');
+        $customerType = $this->addressCheckoutFieldValue($order, self::BLOCK_CUSTOMER_TYPE_FIELD);
+        $companyName = $this->addressCheckoutFieldValue($order, self::BLOCK_COMPANY_FIELD);
+        $nip = $this->addressCheckoutFieldValue($order, self::BLOCK_NIP_FIELD);
 
-        if ($customerType !== '' || $nip !== '') {
+        $customerType = $this->sanitizeCustomerType($customerType ?: 'private');
+
+        if ($customerType === 'company' && $companyName !== '') {
+            $order->set_billing_company($companyName);
+
+            if ($order->get_shipping_company() === '') {
+                $order->set_shipping_company($companyName);
+            }
+        }
+
+        if ($customerType === 'private') {
+            $order->set_billing_company('');
+            $nip = '';
+        }
+
+        if ($customerType !== '' || $nip !== '' || $companyName !== '') {
             $this->saveBillingClassification(
                 $order,
-                $this->sanitizeCustomerType($customerType ?: 'private'),
-                $this->sanitizeNip($nip),
+                $customerType,
+                $customerType === 'company' ? $this->sanitizeNip($nip) : '',
             );
         }
     }
@@ -244,7 +387,7 @@ final class Lemon_Erp_WooCommerce
 
         echo '<p><strong>'.esc_html__('Typ klienta', 'lemon-erp-woocommerce').':</strong> '.esc_html($this->customerTypeLabel($customerType)).'</p>';
 
-        if ($nip !== '') {
+        if ($customerType === 'company' && $nip !== '') {
             echo '<p><strong>'.esc_html__('NIP', 'lemon-erp-woocommerce').':</strong> '.esc_html($nip).'</p>';
         }
     }
@@ -620,6 +763,336 @@ final class Lemon_Erp_WooCommerce
     }
 
     /**
+     * JSON Schema condition for fields visible/required only for company checkout.
+     *
+     * @return array<string, mixed>
+     */
+    private function companyBlockCondition(): array
+    {
+        return $this->customerTypeBlockCondition('company');
+    }
+
+    /**
+     * JSON Schema condition for fields hidden for private checkout.
+     *
+     * @return array<string, mixed>
+     */
+    private function privateBlockCondition(): array
+    {
+        return $this->customerTypeBlockCondition('private');
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function customerTypeBlockCondition(string $customerType): array
+    {
+        return [
+            'type' => 'object',
+            'properties' => [
+                'customer' => [
+                    'type' => 'object',
+                    'properties' => [
+                        'address' => [
+                            'type' => 'object',
+                            'properties' => [
+                                self::BLOCK_CUSTOMER_TYPE_FIELD => [
+                                    'const' => $customerType,
+                                ],
+                            ],
+                            'required' => [self::BLOCK_CUSTOMER_TYPE_FIELD],
+                        ],
+                    ],
+                ],
+            ],
+        ];
+    }
+
+    private function checkoutInlineStyle(): string
+    {
+        return <<<'CSS'
+.lemon-erp-checkout-field-hidden {
+    display: none !important;
+}
+
+.lemon-erp-checkout-field {
+    min-width: 0;
+}
+
+.lemon-erp-checkout-field--customer-type,
+.lemon-erp-checkout-field--company {
+    margin-bottom: 0;
+}
+
+.lemon-erp-checkout-field--nip {
+    margin-bottom: clamp(14px, 1.2vw, 20px);
+}
+
+.wc-block-components-address-form > .lemon-erp-checkout-field--customer-type,
+.wc-block-components-address-form > .lemon-erp-checkout-field--company,
+.wc-block-components-address-form > .lemon-erp-checkout-field--nip {
+    align-self: stretch;
+}
+
+.wc-block-components-address-form > .lemon-erp-checkout-field--nip {
+    grid-column: 1 / -1;
+}
+
+.wc-block-components-address-form > *:has(select[id$="lemon-erp-customer-type"]),
+.wc-block-components-address-form > *:has(select[id$="lemon-erp/customer-type"]),
+.wc-block-components-address-form > *:has(select[name*="lemon-erp/customer-type"]),
+.wc-block-components-address-form > *:has(select[name*="lemon-erp_customer-type"]) {
+    order: -30;
+    grid-column: 1 / -1;
+}
+
+.wc-block-components-address-form > *:has(input[id$="lemon-erp-company-name"]),
+.wc-block-components-address-form > *:has(input[id$="lemon-erp/company-name"]),
+.wc-block-components-address-form > *:has(input[name*="lemon-erp/company-name"]),
+.wc-block-components-address-form > *:has(input[name*="lemon-erp_company-name"]) {
+    order: -29;
+    grid-column: 1 / -1;
+}
+
+.wc-block-components-address-form > *:has(input[id$="lemon-erp-nip"]),
+.wc-block-components-address-form > *:has(input[id$="lemon-erp/nip"]),
+.wc-block-components-address-form > *:has(input[name*="lemon-erp/nip"]),
+.wc-block-components-address-form > *:has(input[name*="lemon-erp_nip"]) {
+    order: -28;
+    grid-column: 1 / -1;
+}
+
+@media (max-width: 680px) {
+    .wc-block-components-address-form > .lemon-erp-checkout-field--customer-type,
+    .wc-block-components-address-form > .lemon-erp-checkout-field--company,
+    .wc-block-components-address-form > .lemon-erp-checkout-field--nip {
+        grid-column: 1 / -1;
+        margin-bottom: 12px;
+    }
+}
+CSS;
+    }
+
+    private function checkoutInlineScript(): string
+    {
+        return <<<'JS'
+(function () {
+    'use strict';
+
+    var selectors = {
+        customerType: [
+            '#billing_lemon_customer_type',
+            'select[name="billing_lemon_customer_type"]',
+            'select[id$="lemon-erp-customer-type"]',
+            'select[id$="lemon-erp/customer-type"]',
+            'select[name*="lemon-erp/customer-type"]',
+            'select[name*="lemon-erp_customer-type"]'
+        ].join(','),
+        company: [
+            '#billing_company',
+            'input[id$="lemon-erp-company-name"]',
+            'input[id$="lemon-erp/company-name"]',
+            'input[name*="lemon-erp/company-name"]',
+            'input[name*="lemon-erp_company-name"]'
+        ].join(','),
+        nip: [
+            '#billing_nip',
+            'input[id$="lemon-erp-nip"]',
+            'input[id$="lemon-erp/nip"]',
+            'input[name*="lemon-erp/nip"]',
+            'input[name*="lemon-erp_nip"]'
+        ].join(',')
+    };
+
+    function ready(callback) {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', callback);
+            return;
+        }
+
+        callback();
+    }
+
+    function fieldWrap(field) {
+        if (!field) {
+            return null;
+        }
+
+        return field.closest('.form-row, .wc-block-components-text-input, .wc-block-components-combobox, .wc-block-components-select, .components-base-control, .wc-block-components-address-form > *') || field.parentElement;
+    }
+
+    function addressContainer(field) {
+        if (!field) {
+            return null;
+        }
+
+        return field.closest('.woocommerce-billing-fields__field-wrapper, .woocommerce-shipping-fields__field-wrapper, .wc-block-components-address-form, .wp-block-woocommerce-checkout-shipping-address-block .wc-block-components-address-form, .wp-block-woocommerce-checkout-billing-address-block .wc-block-components-address-form');
+    }
+
+    function topLevelFieldWrap(field, container) {
+        var node = fieldWrap(field);
+
+        if (!node || !container) {
+            return node;
+        }
+
+        while (node.parentElement && node.parentElement !== container && container.contains(node.parentElement)) {
+            node = node.parentElement;
+        }
+
+        return node.parentElement === container ? node : fieldWrap(field);
+    }
+
+    function markField(field, className) {
+        var container = addressContainer(field);
+        var wrap = topLevelFieldWrap(field, container) || fieldWrap(field);
+
+        if (!wrap) {
+            return null;
+        }
+
+        wrap.classList.add('lemon-erp-checkout-field', className);
+
+        return wrap;
+    }
+
+    function markErpFields(select, fields) {
+        markField(select, 'lemon-erp-checkout-field--customer-type');
+        markField(fields.company, 'lemon-erp-checkout-field--company');
+        markField(fields.nip, 'lemon-erp-checkout-field--nip');
+    }
+
+    function groupName(field) {
+        var id = field && field.id ? field.id : '';
+        var name = field && field.name ? field.name : '';
+        var source = id || name;
+
+        if (source.indexOf('shipping') === 0 || source.indexOf('shipping-') !== -1 || source.indexOf('shipping_') !== -1) {
+            return 'shipping';
+        }
+
+        if (source.indexOf('billing') === 0 || source.indexOf('billing-') !== -1 || source.indexOf('billing_') !== -1) {
+            return 'billing';
+        }
+
+        return 'billing';
+    }
+
+    function fieldsForGroup(group) {
+        var allCompany = Array.prototype.slice.call(document.querySelectorAll(selectors.company));
+        var allNip = Array.prototype.slice.call(document.querySelectorAll(selectors.nip));
+
+        return {
+            company: allCompany.find(function (field) { return groupName(field) === group; }) || allCompany[0] || null,
+            nip: allNip.find(function (field) { return groupName(field) === group; }) || allNip[0] || null
+        };
+    }
+
+    function setFieldVisible(field, visible, required) {
+        var wrap = fieldWrap(field);
+
+        if (!field || !wrap) {
+            return;
+        }
+
+        if (wrap.classList.contains('lemon-erp-checkout-field-hidden') === visible) {
+            wrap.classList.toggle('lemon-erp-checkout-field-hidden', !visible);
+        }
+
+        if (field.disabled === visible) {
+            field.disabled = !visible;
+        }
+
+        if (field.required !== !!(visible && required)) {
+            field.required = !!(visible && required);
+        }
+
+        if (field.getAttribute('aria-hidden') !== (visible ? 'false' : 'true')) {
+            field.setAttribute('aria-hidden', visible ? 'false' : 'true');
+        }
+
+        if (!visible) {
+            field.value = '';
+        }
+    }
+
+    function moveFieldsToTop(select) {
+        var group = groupName(select);
+        var fields = fieldsForGroup(group);
+        var container = addressContainer(select);
+        var wrappers = [
+            topLevelFieldWrap(select, container),
+            topLevelFieldWrap(fields.company, container),
+            topLevelFieldWrap(fields.nip, container)
+        ].filter(Boolean);
+        var alreadyAtTop;
+
+        if (!container) {
+            return;
+        }
+
+        alreadyAtTop = wrappers.every(function (wrap, index) {
+            return container.children[index] === wrap;
+        });
+
+        if (alreadyAtTop) {
+            return;
+        }
+
+        wrappers.slice().reverse().forEach(function (wrap) {
+            if (wrap.parentElement === container) {
+                container.insertBefore(wrap, container.firstElementChild);
+            }
+        });
+    }
+
+    function syncOne(select) {
+        var fields = fieldsForGroup(groupName(select));
+
+        if (!select.value) {
+            select.value = 'private';
+        }
+
+        var isCompany = select.value === 'company';
+
+        markErpFields(select, fields);
+        setFieldVisible(fields.company, isCompany, true);
+        setFieldVisible(fields.nip, isCompany, true);
+        moveFieldsToTop(select);
+    }
+
+    function syncAll() {
+        document.querySelectorAll(selectors.customerType).forEach(syncOne);
+    }
+
+    function scheduleSync() {
+        window.setTimeout(syncAll, 80);
+        window.setTimeout(syncAll, 250);
+    }
+
+    ready(function () {
+        syncAll();
+        window.setTimeout(syncAll, 300);
+        window.setTimeout(syncAll, 1000);
+
+        document.body.addEventListener('change', function (event) {
+            if (event.target && event.target.matches(selectors.customerType)) {
+                syncOne(event.target);
+                scheduleSync();
+            }
+        });
+
+        document.body.addEventListener('click', function (event) {
+            if (event.target && event.target.closest(selectors.customerType)) {
+                scheduleSync();
+            }
+        });
+    });
+}());
+JS;
+    }
+
+    /**
      * @return list<array{title:string,number:string,label:string,url:string}>
      */
     private function invoiceLinks(WC_Order $order): array
@@ -697,10 +1170,43 @@ final class Lemon_Erp_WooCommerce
         return trim(sanitize_text_field((string) $value));
     }
 
-    private function additionalCheckoutFieldValue(WC_Order $order, string $fieldId): string
+    private function addressCheckoutFieldValue(WC_Order $order, string $fieldId): string
     {
+        $billing = $this->additionalCheckoutFieldValue($order, $fieldId, 'billing');
+
+        if ($billing !== '') {
+            return $billing;
+        }
+
+        return $this->additionalCheckoutFieldValue($order, $fieldId, 'shipping');
+    }
+
+    private function additionalCheckoutFieldValue(WC_Order $order, string $fieldId, string $group = 'other'): string
+    {
+        if (
+            class_exists(\Automattic\WooCommerce\Blocks\Package::class)
+            && class_exists(\Automattic\WooCommerce\Blocks\Domain\Services\CheckoutFields::class)
+        ) {
+            try {
+                $checkoutFields = \Automattic\WooCommerce\Blocks\Package::container()
+                    ->get(\Automattic\WooCommerce\Blocks\Domain\Services\CheckoutFields::class);
+                $value = $checkoutFields->get_field_from_object($fieldId, $order, $group);
+
+                if ($value !== '') {
+                    return (string) $value;
+                }
+            } catch (Throwable) {
+                return '';
+            }
+        }
+
+        $prefix = match ($group) {
+            'billing' => '_wc_billing/',
+            'shipping' => '_wc_shipping/',
+            default => '_wc_other/',
+        };
         $metaKeys = [
-            '_wc_other/'.$fieldId,
+            $prefix.$fieldId,
             $fieldId,
             str_replace('/', '_', $fieldId),
         ];
@@ -710,23 +1216,6 @@ final class Lemon_Erp_WooCommerce
 
             if ($value !== '') {
                 return (string) $value;
-            }
-        }
-
-        if (
-            class_exists(\Automattic\WooCommerce\Blocks\Package::class)
-            && class_exists(\Automattic\WooCommerce\Blocks\Domain\Services\CheckoutFields::class)
-        ) {
-            try {
-                $checkoutFields = \Automattic\WooCommerce\Blocks\Package::container()
-                    ->get(\Automattic\WooCommerce\Blocks\Domain\Services\CheckoutFields::class);
-                $value = $checkoutFields->get_field_from_object($fieldId, $order, 'other');
-
-                if ($value !== '') {
-                    return (string) $value;
-                }
-            } catch (Throwable) {
-                return '';
             }
         }
 
