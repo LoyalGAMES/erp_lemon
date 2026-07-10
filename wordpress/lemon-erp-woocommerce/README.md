@@ -2,7 +2,7 @@
 
 Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 
-- pola checkoutu: typ klienta oraz NIP,
+- pola checkoutu w sekcji adresu: typ klienta, nazwa firmy oraz NIP dla zamówień firmowych,
 - panel `Lemon ERP` na zamówieniu WooCommerce,
 - REST endpoint do zapisu danych faktury na zamówieniu,
 - opcjonalny zapis PDF poza WordPress Media Library.
@@ -33,6 +33,8 @@ Checkout zapisuje:
 - `_lemon_erp_customer_type` - `private` albo `company`,
 - `_lemon_erp_billing_nip` - NIP,
 - `_billing_nip` - kompatybilność z innymi integracjami.
+
+W Checkout Blocks pola są rejestrowane jako pola adresowe, żeby nie tworzyć osobnego kroku `Dodatkowe informacje o zamówieniu`. Nazwa firmy oraz NIP są wymagane i widoczne tylko po wyborze `Firma`.
 
 Faktury zapisują się pod prefiksem:
 

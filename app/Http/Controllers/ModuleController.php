@@ -214,13 +214,35 @@ class ModuleController extends Controller
                 'status',
                 'currency',
                 'total_gross',
+                'billing_data',
+                'shipping_data',
+                'raw_payload',
                 'external_created_at',
                 'created_at',
             ])
             ->with([
                 'salesChannel:id,code,name',
                 'invoices:id,external_order_id,number,type,status',
+                'lines' => fn ($query) => $query
+                    ->select(['id', 'external_order_id', 'product_id', 'sku', 'name', 'quantity', 'raw_payload'])
+                    ->orderBy('id'),
+                'lines.product:id,sku,name,attributes',
+                'shippingLabels' => fn ($query) => $query
+                    ->select([
+                        'id',
+                        'external_order_id',
+                        'courier_account_id',
+                        'provider',
+                        'status',
+                        'label_number',
+                        'tracking_number',
+                        'generated_at',
+                    ])
+                    ->latest('generated_at')
+                    ->latest('id'),
+                'shippingLabels.courierAccount:id,provider,name',
             ])
+            ->tap(fn (Builder $query) => $this->applyOrderListFilters($query, $request))
             ->orderByDesc('external_created_at')
             ->orderByDesc('id')
             ->simplePaginate($this->orderListPerPage($request))
@@ -230,7 +252,7 @@ class ModuleController extends Controller
         $activeReservationSums = $this->activeReservationSumsForOrders($pageOrders);
         $latestWzDocuments = $this->latestWzDocumentsForOrders($pageOrders);
 
-        $orders->setCollection($pageOrders->map(function (ExternalOrder $order) use ($activeReservationSums, $latestWzDocuments): array {
+        $orderRows = $pageOrders->map(function (ExternalOrder $order) use ($activeReservationSums, $latestWzDocuments): array {
             $activeReservations = (float) ($activeReservationSums[$this->reservationLookupKey($order->sales_channel_id, $order->external_id)] ?? 0);
 
             return [
@@ -254,15 +276,74 @@ class ModuleController extends Controller
                     'activeReservations' => $activeReservations,
                 ])->render(),
             ];
-        }));
+        });
 
         return [
             'title' => 'Zamówienia',
             'subtitle' => 'Zamówienia importowane z WooCommerce tworzą rezerwacje, dokumenty WZ i faktury.',
             'columns' => ['Kanał', 'Nr zewnętrzny', 'Status', 'Rezerwacje', 'Kwota brutto', 'Utworzone', 'Akcja'],
-            'rows' => $orders,
+            'rows' => $orderRows,
+            'orders' => $orders,
+            'activeReservationSums' => $activeReservationSums,
+            'latestWzDocuments' => $latestWzDocuments,
+            'orderFilters' => [
+                'q' => trim((string) $request->query('q', '')),
+                'status' => trim((string) $request->query('status', '')),
+                'per_page' => $this->orderListPerPage($request),
+            ],
+            'orderStatusOptions' => ExternalOrder::query()
+                ->select('status')
+                ->whereNotNull('status')
+                ->distinct()
+                ->orderBy('status')
+                ->pluck('status')
+                ->filter()
+                ->values(),
             'html_last_column' => true,
         ];
+    }
+
+    private function applyOrderListFilters(Builder $query, Request $request): void
+    {
+        $status = trim((string) $request->query('status', ''));
+        $term = trim((string) $request->query('q', ''));
+
+        if ($status !== '') {
+            $query->where('status', $status);
+        }
+
+        if ($term === '') {
+            return;
+        }
+
+        $needle = mb_strtolower($term);
+        $phoneNeedle = preg_replace('/\D+/', '', $term) ?? '';
+
+        $query->where(function (Builder $search) use ($needle, $phoneNeedle): void {
+            $search
+                ->whereRaw("CAST(id AS CHAR) LIKE ?", ["%{$needle}%"])
+                ->orWhereRaw("LOWER(COALESCE(external_number, '')) LIKE ?", ["%{$needle}%"])
+                ->orWhereRaw("LOWER(COALESCE(external_id, '')) LIKE ?", ["%{$needle}%"])
+                ->orWhereRaw("LOWER(COALESCE(status, '')) LIKE ?", ["%{$needle}%"])
+                ->orWhereRaw("LOWER(COALESCE(CAST(billing_data AS CHAR), '')) LIKE ?", ["%{$needle}%"])
+                ->orWhereRaw("LOWER(COALESCE(CAST(shipping_data AS CHAR), '')) LIKE ?", ["%{$needle}%"])
+                ->orWhereHas('lines', function (Builder $lineQuery) use ($needle): void {
+                    $lineQuery
+                        ->whereRaw("LOWER(COALESCE(sku, '')) LIKE ?", ["%{$needle}%"])
+                        ->orWhereRaw("LOWER(COALESCE(name, '')) LIKE ?", ["%{$needle}%"]);
+                });
+
+            if (strlen($phoneNeedle) >= 3) {
+                $search
+                    ->orWhereRaw($this->normalizedJsonTextSql('billing_data').' LIKE ?', ["%{$phoneNeedle}%"])
+                    ->orWhereRaw($this->normalizedJsonTextSql('shipping_data').' LIKE ?', ["%{$phoneNeedle}%"]);
+            }
+        });
+    }
+
+    private function normalizedJsonTextSql(string $column): string
+    {
+        return "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(CAST({$column} AS CHAR), ''), ' ', ''), '+', ''), '-', ''), '(', ''), ')', '')";
     }
 
     private function orderListPerPage(Request $request): int

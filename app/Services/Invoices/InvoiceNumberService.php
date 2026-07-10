@@ -59,7 +59,6 @@ final class InvoiceNumberService
     }
 
     /**
-     * @param array{sales_prefix: string, correction_prefix: string, proforma_prefix: string, oss_sales_prefix: string, oss_correction_prefix: string, oss_pattern: string, oss_padding: int, pattern: string, padding: int, payment_due_days: int} $numbering
      * @return array{prefix:string,pattern:string,padding:int}
      */
     private function seriesForType(string $type, array $numbering): array
@@ -67,7 +66,8 @@ final class InvoiceNumberService
         $normalized = strtoupper($type);
 
         $prefix = match ($normalized) {
-            'FV', 'VAT', 'SALES' => $numbering['sales_prefix'],
+            'FV', 'VAT', 'SALES', 'FV_B2C', 'VAT_B2C', 'SALES_B2C', 'B2C', 'CONSUMER' => $numbering['b2c_sales_prefix'],
+            'FV_B2B', 'VAT_B2B', 'SALES_B2B', 'B2B', 'COMPANY' => $numbering['b2b_sales_prefix'],
             'FK', 'CORRECTION' => $numbering['correction_prefix'],
             'PRO', 'PROFORMA' => $numbering['proforma_prefix'],
             'OSS', 'VAT_OSS', 'SALES_OSS', 'FV_OSS' => $numbering['oss_sales_prefix'],

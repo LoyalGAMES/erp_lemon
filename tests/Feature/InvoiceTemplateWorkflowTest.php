@@ -208,7 +208,8 @@ BLADE,
     public function test_operator_can_configure_invoice_numbering_series(): void
     {
         $this->put(route('invoices.settings.update'), [
-            'sales_prefix' => 'FV/ERP',
+            'b2c_sales_prefix' => 'FV/DET',
+            'b2b_sales_prefix' => 'FV/FIRMA',
             'correction_prefix' => 'FK/ERP',
             'proforma_prefix' => 'PRO/ERP',
             'oss_sales_prefix' => 'FV/OSS',
@@ -225,7 +226,8 @@ BLADE,
 
         $this->get(route('invoices.index'))
             ->assertOk()
-            ->assertSee('FV/ERP')
+            ->assertSee('FV/DET')
+            ->assertSee('FV/FIRMA')
             ->assertSee('FK/ERP')
             ->assertSee('PRO/ERP')
             ->assertSee('FV/OSS')
@@ -236,11 +238,12 @@ BLADE,
             ->assertSee('Domyślnie nie wysyłaj do KSeF');
 
         $invoice = $this->createInvoice();
-        $invoice->update(['number' => 'FV/ERP/'.now()->format('Y').'/0009']);
+        $invoice->update(['number' => 'FV/DET/'.now()->format('Y').'/0009']);
 
         $numbers = app(InvoiceNumberService::class);
 
-        $this->assertSame('FV/ERP/'.now()->format('Y').'/0010', $numbers->next());
+        $this->assertSame('FV/DET/'.now()->format('Y').'/0010', $numbers->next());
+        $this->assertSame('FV/FIRMA/'.now()->format('Y').'/0001', $numbers->next('B2B'));
         $this->assertSame('FK/ERP/'.now()->format('Y').'/0001', $numbers->next('FK'));
         $this->assertSame('FV/OSS/1/'.now()->format('m/Y'), $numbers->next('OSS'));
         $this->assertSame('FVK/OSS/1/'.now()->format('m/Y'), $numbers->next('CORRECTION_OSS'));
@@ -260,6 +263,84 @@ BLADE,
         ])->assertRedirect()->assertSessionHas('status');
 
         $this->assertSame('FV/ERP/'.now()->format('m/Y').'/001', $numbers->next());
+    }
+
+    public function test_operator_can_export_monthly_invoices_to_epp_file(): void
+    {
+        $invoice = $this->createInvoice('FV/FIRMA/2026/000010');
+        $invoice->update([
+            'issue_date' => '2026-06-15',
+            'sale_date' => '2026-06-14',
+            'payment_due_date' => '2026-06-22',
+            'payment_method' => 'Przelew',
+        ]);
+
+        $outsideMonth = $this->createInvoice('FV/FIRMA/2026/000011');
+        $outsideMonth->update(['issue_date' => '2026-07-01']);
+
+        $proforma = $this->createInvoice('PRO/2026/000001');
+        $proforma->update(['type' => 'proforma', 'issue_date' => '2026-06-20']);
+
+        $response = $this->get(route('invoices.epp.export', ['month' => '2026-06']));
+
+        $response
+            ->assertOk()
+            ->assertHeader('Content-Type', 'application/octet-stream');
+
+        $content = iconv('WINDOWS-1250', 'UTF-8//IGNORE', (string) $response->getContent());
+
+        $this->assertIsString($content);
+
+        $this->assertStringContainsString('[INFO]', $content);
+        $this->assertStringContainsString('[NAGLOWEK]', $content);
+        $this->assertStringContainsString('[ZAWARTOSC]', $content);
+        $this->assertStringContainsString('"FS FV/FIRMA/2026/000010"', $content);
+        $this->assertStringContainsString('"KONTRAHENCI"', $content);
+        $this->assertStringContainsString('"DATYZAKONCZENIA"', $content);
+        $this->assertStringContainsString('"DOKUMENTYZNACZNIKIJPKVAT"', $content);
+        $this->assertStringContainsString('"Klient testowy"', $content);
+        $this->assertStringContainsString('"SPRZEDAZ_FIRMY"', $content);
+        $this->assertStringNotContainsString('FV/FIRMA/2026/000011', $content);
+        $this->assertStringNotContainsString('PRO/2026/000001', $content);
+    }
+
+    public function test_epp_export_contains_oss_country_and_foreign_vat_rate(): void
+    {
+        $invoice = $this->createInvoice('FV/OSS/1/06/2026');
+        $invoice->update([
+            'buyer_data' => [
+                'name' => 'Max Mustermann',
+                'address_1' => 'Hauptstrasse 1',
+                'postcode' => '10115',
+                'city' => 'Berlin',
+                'country' => 'DE',
+            ],
+            'metadata' => [
+                'oss' => [
+                    'buyer_country' => 'DE',
+                    'vat_rate' => 19.0,
+                ],
+            ],
+            'net_total' => 100,
+            'vat_total' => 19,
+            'gross_total' => 119,
+        ]);
+        $invoice->lines()->firstOrFail()->update([
+            'vat_rate' => 19,
+            'vat_total' => 19,
+            'gross_total' => 119,
+        ]);
+
+        $response = $this->get(route('invoices.epp.export', ['month' => '2026-06']));
+        $content = iconv('WINDOWS-1250', 'UTF-8//IGNORE', (string) $response->getContent());
+
+        $this->assertIsString($content);
+        $this->assertStringContainsString('"SPRZEDAZ_OSS_DE"', $content);
+        $this->assertStringContainsString('"INFORMACJEWSTO"', $content);
+        $this->assertStringContainsString('"STAWKIVATZAGRANICZNE"', $content);
+        $this->assertStringContainsString('"Niemcy"', $content);
+        $this->assertStringContainsString('"DE"', $content);
+        $this->assertStringContainsString('"19%"', $content);
     }
 
     public function test_generated_invoice_pdf_uses_unicode_renderer_for_polish_text(): void

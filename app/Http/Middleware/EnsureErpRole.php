@@ -20,11 +20,11 @@ class EnsureErpRole
 
         $user = $request->attributes->get('erp_user') ?: Auth::user();
 
-        if (app()->runningUnitTests() && ! $user instanceof User) {
+        if (! $user instanceof User) {
             return $next($request);
         }
 
-        if (! $user instanceof User || ! $user->canAccessArea($area)) {
+        if (! $user->canAccessArea($area)) {
             abort(403, 'Brak dostępu do tego modułu.');
         }
 

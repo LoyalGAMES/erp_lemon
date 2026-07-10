@@ -97,19 +97,23 @@ final class InvoiceSettingsService
         ];
     }
 
-    /**
-     * @return array{sales_prefix: string, correction_prefix: string, proforma_prefix: string, oss_sales_prefix: string, oss_correction_prefix: string, oss_pattern: string, oss_padding: int, pattern: string, padding: int, payment_due_days: int}
-     */
     public function numberingData(): array
     {
         $stored = AppSetting::query()
             ->where('key', self::NUMBERING_KEY)
             ->value('value');
 
-        $data = array_merge($this->defaultNumberingData(), is_array($stored) ? $stored : []);
+        $storedData = is_array($stored) ? $stored : [];
+        $defaults = $this->defaultNumberingData();
+        $data = array_merge($defaults, $storedData);
+        $legacySalesPrefix = (string) ($storedData['sales_prefix'] ?? $defaults['sales_prefix']);
+        $b2cSalesPrefix = (string) ($storedData['b2c_sales_prefix'] ?? $storedData['consumer_sales_prefix'] ?? $legacySalesPrefix);
+        $b2bSalesPrefix = (string) ($storedData['b2b_sales_prefix'] ?? $storedData['company_sales_prefix'] ?? ($storedData === [] ? $defaults['b2b_sales_prefix'] : $legacySalesPrefix));
 
         return [
-            'sales_prefix' => $this->cleanPrefix((string) $data['sales_prefix'], 'FV'),
+            'sales_prefix' => $this->cleanPrefix($b2cSalesPrefix, 'FV'),
+            'b2c_sales_prefix' => $this->cleanPrefix($b2cSalesPrefix, 'FV'),
+            'b2b_sales_prefix' => $this->cleanPrefix($b2bSalesPrefix, 'FV/FIRMA'),
             'correction_prefix' => $this->cleanPrefix((string) $data['correction_prefix'], 'FK'),
             'proforma_prefix' => $this->cleanPrefix((string) ($data['proforma_prefix'] ?? 'PRO'), 'PRO'),
             'oss_sales_prefix' => $this->cleanPrefix((string) ($data['oss_sales_prefix'] ?? 'FV/OSS'), 'FV/OSS'),
@@ -124,12 +128,17 @@ final class InvoiceSettingsService
 
     /**
      * @param  array<string, mixed>  $data
-     * @return array{sales_prefix: string, correction_prefix: string, proforma_prefix: string, oss_sales_prefix: string, oss_correction_prefix: string, oss_pattern: string, oss_padding: int, pattern: string, padding: int, payment_due_days: int}
      */
     public function updateNumberingData(array $data): array
     {
+        $legacySalesPrefix = (string) ($data['sales_prefix'] ?? 'FV');
+        $b2cSalesPrefix = (string) ($data['b2c_sales_prefix'] ?? $data['consumer_sales_prefix'] ?? $legacySalesPrefix);
+        $b2bSalesPrefix = (string) ($data['b2b_sales_prefix'] ?? $data['company_sales_prefix'] ?? $legacySalesPrefix);
+
         $payload = [
-            'sales_prefix' => $this->cleanPrefix((string) ($data['sales_prefix'] ?? 'FV'), 'FV'),
+            'sales_prefix' => $this->cleanPrefix($b2cSalesPrefix, 'FV'),
+            'b2c_sales_prefix' => $this->cleanPrefix($b2cSalesPrefix, 'FV'),
+            'b2b_sales_prefix' => $this->cleanPrefix($b2bSalesPrefix, 'FV/FIRMA'),
             'correction_prefix' => $this->cleanPrefix((string) ($data['correction_prefix'] ?? 'FK'), 'FK'),
             'proforma_prefix' => $this->cleanPrefix((string) ($data['proforma_prefix'] ?? 'PRO'), 'PRO'),
             'oss_sales_prefix' => $this->cleanPrefix((string) ($data['oss_sales_prefix'] ?? 'FV/OSS'), 'FV/OSS'),
@@ -207,13 +216,12 @@ final class InvoiceSettingsService
         ];
     }
 
-    /**
-     * @return array{sales_prefix: string, correction_prefix: string, proforma_prefix: string, oss_sales_prefix: string, oss_correction_prefix: string, oss_pattern: string, oss_padding: int, pattern: string, padding: int, payment_due_days: int}
-     */
     private function defaultNumberingData(): array
     {
         return [
             'sales_prefix' => env('INVOICE_SALES_PREFIX', 'FV'),
+            'b2c_sales_prefix' => env('INVOICE_B2C_SALES_PREFIX', env('INVOICE_SALES_PREFIX', 'FV')),
+            'b2b_sales_prefix' => env('INVOICE_B2B_SALES_PREFIX', 'FV/FIRMA'),
             'correction_prefix' => env('INVOICE_CORRECTION_PREFIX', 'FK'),
             'proforma_prefix' => env('INVOICE_PROFORMA_PREFIX', 'PRO'),
             'oss_sales_prefix' => env('INVOICE_OSS_SALES_PREFIX', 'FV/OSS'),

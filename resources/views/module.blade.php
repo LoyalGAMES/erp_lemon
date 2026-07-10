@@ -2,14 +2,15 @@
 
 @section('content')
     @php
-        $rowsCount = count($rows);
-        $hasPagination = is_object($rows) && method_exists($rows, 'hasPages');
+        $recordSource = (($module ?? null) === 'orders' && isset($orders)) ? $orders : $rows;
+        $rowsCount = count($recordSource);
+        $hasPagination = is_object($recordSource) && method_exists($recordSource, 'hasPages');
         $recordLabel = $rowsCount.' rekordów';
 
-        if (is_object($rows) && method_exists($rows, 'total')) {
-            $recordLabel = number_format((int) $rows->total(), 0, ',', ' ').' rekordów';
-        } elseif (is_object($rows) && method_exists($rows, 'firstItem') && $rows->firstItem() !== null) {
-            $recordLabel = $rows->firstItem().' - '.$rows->lastItem();
+        if (is_object($recordSource) && method_exists($recordSource, 'total')) {
+            $recordLabel = number_format((int) $recordSource->total(), 0, ',', ' ').' rekordów';
+        } elseif (is_object($recordSource) && method_exists($recordSource, 'firstItem') && $recordSource->firstItem() !== null) {
+            $recordLabel = $recordSource->firstItem().' - '.$recordSource->lastItem();
         }
     @endphp
 
@@ -48,6 +49,16 @@
         </article>
     @endif
 
+    @if (($module ?? null) === 'orders' && isset($orders))
+        @include('modules.orders-list', [
+            'orders' => $orders,
+            'recordLabel' => $recordLabel,
+            'activeReservationSums' => $activeReservationSums ?? [],
+            'latestWzDocuments' => $latestWzDocuments ?? [],
+            'orderFilters' => $orderFilters ?? [],
+            'orderStatusOptions' => $orderStatusOptions ?? collect(),
+        ])
+    @else
     <article class="card">
         <div class="panel-header">
             <span>{{ $title }}</span>
@@ -108,6 +119,7 @@
             </div>
         @endif
     </article>
+    @endif
 @endsection
 
 @push('styles')
@@ -128,6 +140,144 @@
         .module-pagination .disabled {
             cursor: default;
             opacity: .55;
+        }
+        .orders-list-card {
+            overflow: hidden;
+        }
+        .orders-filter {
+            display: grid;
+            grid-template-columns: minmax(260px, 1fr) minmax(180px, 240px) minmax(120px, 150px) auto;
+            gap: 12px;
+            align-items: end;
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--border);
+            background: rgba(255, 255, 255, .52);
+        }
+        .orders-filter-search input {
+            min-width: 0;
+        }
+        .orders-filter-actions {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 42px;
+        }
+        .orders-table-scroll table {
+            min-width: 1320px;
+        }
+        .orders-table th,
+        .orders-table td {
+            white-space: normal;
+            vertical-align: top;
+        }
+        .orders-table th.numeric,
+        .orders-table td.numeric {
+            text-align: right;
+        }
+        .order-main-cell > *,
+        .order-customer-cell > *,
+        .order-delivery-cell > *,
+        .order-date-cell > * {
+            display: block;
+        }
+        .order-main-cell > * + *,
+        .order-customer-cell > * + *,
+        .order-delivery-cell > * + *,
+        .order-date-cell > * + * {
+            margin-top: 3px;
+        }
+        .order-number-link {
+            color: var(--text);
+            text-decoration: none;
+            font-weight: 850;
+            font-size: 15px;
+        }
+        .order-number-link:hover {
+            color: var(--green-dark);
+            text-decoration: underline;
+        }
+        .order-meta,
+        .order-customer-cell span,
+        .order-delivery-cell span,
+        .order-date-cell span {
+            color: var(--muted);
+            font-size: 12px;
+        }
+        .order-items-cell {
+            min-width: 330px;
+            max-width: 430px;
+        }
+        .order-items-stack {
+            display: grid;
+            gap: 8px;
+        }
+        .order-item-row {
+            display: grid;
+            grid-template-columns: 54px minmax(0, 1fr);
+            gap: 10px;
+            align-items: center;
+            min-width: 0;
+        }
+        .order-item-thumb {
+            width: 54px;
+            height: 68px;
+            border: 1px solid var(--border);
+            border-radius: 7px;
+            overflow: hidden;
+            background: var(--surface-soft);
+            display: grid;
+            place-items: center;
+            color: var(--muted);
+            font-weight: 850;
+        }
+        .order-item-thumb img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+        }
+        .order-item-copy {
+            min-width: 0;
+            display: grid;
+            gap: 2px;
+        }
+        .order-item-copy strong {
+            font-size: 13px;
+            line-height: 1.25;
+            overflow-wrap: anywhere;
+        }
+        .order-item-copy span,
+        .order-more-lines {
+            color: var(--muted);
+            font-size: 12px;
+        }
+        .order-total-cell {
+            font-weight: 850;
+            font-variant-numeric: tabular-nums;
+        }
+        .order-actions-cell {
+            min-width: 250px;
+        }
+        .order-actions-cell .inline-actions {
+            align-items: flex-start;
+        }
+        @media (max-width: 980px) {
+            .orders-filter {
+                grid-template-columns: 1fr 1fr;
+            }
+            .orders-filter-search,
+            .orders-filter-actions {
+                grid-column: 1 / -1;
+            }
+        }
+        @media (max-width: 620px) {
+            .orders-filter {
+                grid-template-columns: 1fr;
+            }
+            .orders-filter-search,
+            .orders-filter-actions {
+                grid-column: auto;
+            }
         }
     </style>
 @endpush

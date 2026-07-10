@@ -61,6 +61,9 @@
         .user-menu-panel { margin-top: 8px; border: 1px solid var(--border); border-radius: 8px; padding: 8px; display: grid; gap: 2px; background: var(--surface); box-shadow: var(--shadow); }
         .user-menu-panel a { color: var(--text); text-decoration: none; border-radius: 7px; padding: 9px 10px; font-weight: 680; }
         .user-menu-panel a:hover, .user-menu-panel a.active { background: var(--green-soft); color: var(--green-dark); }
+        .user-menu-panel form { margin: 0; }
+        .user-menu-panel button { width: 100%; border: 0; background: transparent; color: var(--text); text-align: left; border-radius: 7px; padding: 9px 10px; font: inherit; font-weight: 680; cursor: pointer; }
+        .user-menu-panel button:hover { background: #fff0f0; color: var(--red); }
         .avatar { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; background: var(--green); color: #fff; font-weight: 800; font-size: 13px; }
         .main { min-width: 0; padding: 0 26px 26px; transition: margin-left .18s ease; }
         .topbar { min-height: 73px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--border); margin: 0 -26px 22px; padding: 16px 26px; background: rgba(255, 255, 255, .88); backdrop-filter: blur(12px); }
@@ -307,6 +310,12 @@
                     @foreach ($settingsNav as [$key, $url, $label])
                         <a href="{{ $url }}" @class(['active' => $active === $key])>{{ $label }}</a>
                     @endforeach
+                    @if (auth()->check())
+                        <form method="POST" action="{{ route('logout') }}">
+                            @csrf
+                            <button type="submit">Wyloguj</button>
+                        </form>
+                    @endif
                 </div>
             </details>
         </aside>
