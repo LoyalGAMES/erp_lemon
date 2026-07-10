@@ -28,14 +28,18 @@ class AuthController extends Controller
     public function login(Request $request): RedirectResponse
     {
         $credentials = $request->validate([
-            'email' => ['required', 'email'],
+            'email' => ['required', 'string', 'max:255'],
             'password' => ['required', 'string'],
         ]);
 
-        $email = mb_strtolower(trim((string) $credentials['email']));
+        $identifier = mb_strtolower(trim((string) $credentials['email']));
         $remember = $request->boolean('remember');
         $user = User::query()
-            ->whereRaw('LOWER(email) = ?', [$email])
+            ->where(function ($query) use ($identifier): void {
+                $query
+                    ->whereRaw('LOWER(email) = ?', [$identifier])
+                    ->orWhereRaw('LOWER(name) = ?', [$identifier]);
+            })
             ->first();
 
         if (! $user instanceof User || ! $user->is_active || ! Hash::check((string) $credentials['password'], (string) $user->password)) {
@@ -63,7 +67,7 @@ class AuthController extends Controller
 
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'email', 'max:255', 'unique:users,email'],
+            'email' => ['required', 'string', 'max:255', 'unique:users,email'],
             'password' => ['required', 'string', 'min:10', 'confirmed'],
         ]);
 

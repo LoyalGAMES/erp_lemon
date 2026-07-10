@@ -159,8 +159,8 @@
             @if ($hasUsers)
                 <form method="POST" action="{{ route('login.attempt') }}">
                     @csrf
-                    <label>Email / login
-                        <input name="email" type="email" value="{{ old('email') }}" required autofocus autocomplete="username">
+                    <label>Login lub e-mail
+                        <input name="email" value="{{ old('email') }}" required autofocus autocomplete="username">
                         @error('email')
                             <span class="field-error">{{ $message }}</span>
                         @enderror
@@ -189,8 +189,8 @@
                             <span class="field-error">{{ $message }}</span>
                         @enderror
                     </label>
-                    <label>Email / login
-                        <input name="email" type="email" value="{{ old('email') }}" required autocomplete="username">
+                    <label>Login lub e-mail
+                        <input name="email" value="{{ old('email') }}" required autocomplete="username">
                         @error('email')
                             <span class="field-error">{{ $message }}</span>
                         @enderror

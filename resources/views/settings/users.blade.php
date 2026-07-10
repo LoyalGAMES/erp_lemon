@@ -16,8 +16,8 @@
             <label>Imię lub nazwa użytkownika
                 <input name="name" value="{{ old('name') }}" required autocomplete="name">
             </label>
-            <label>Email / login
-                <input name="email" type="email" value="{{ old('email') }}" required autocomplete="username">
+            <label>Login lub e-mail
+                <input name="email" value="{{ old('email') }}" required autocomplete="username">
             </label>
             <label>Rola
                 <select name="role" required>
@@ -73,8 +73,8 @@
                             <label>Nazwa
                                 <input name="name" value="{{ old('users.' . $user->id . '.name', $user->name) }}" required>
                             </label>
-                            <label>Email / login
-                                <input name="email" type="email" value="{{ old('users.' . $user->id . '.email', $user->email) }}" required autocomplete="username">
+                            <label>Login lub e-mail
+                                <input name="email" value="{{ old('users.' . $user->id . '.email', $user->email) }}" required autocomplete="username">
                             </label>
                             <label>Rola
                                 <select name="role" required>
