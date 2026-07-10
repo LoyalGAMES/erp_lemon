@@ -11,6 +11,7 @@ use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 class OrderListPerformanceTest extends TestCase
@@ -160,5 +161,52 @@ class OrderListPerformanceTest extends TestCase
             ->assertOk()
             ->assertSee('9711')
             ->assertDontSee('9710');
+    }
+
+    public function test_orders_module_handles_legacy_non_array_json_payloads(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '9801',
+            'external_number' => '9801',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 129.99,
+            'billing_data' => 'legacy-billing',
+            'shipping_data' => 'legacy-shipping',
+            'raw_payload' => 'legacy-payload',
+            'external_created_at' => now(),
+        ]);
+        $line = $order->lines()->create([
+            'external_line_id' => '1',
+            'sku' => 'LEGACY-SKU',
+            'name' => 'Produkt z importu legacy',
+            'quantity' => 1,
+            'raw_payload' => 'legacy-line-payload',
+        ]);
+
+        DB::table('external_orders')
+            ->whereKey($order->id)
+            ->update([
+                'billing_data' => json_encode('legacy-billing'),
+                'shipping_data' => json_encode('legacy-shipping'),
+                'raw_payload' => json_encode('legacy-payload'),
+            ]);
+        DB::table('external_order_lines')
+            ->whereKey($line->id)
+            ->update(['raw_payload' => json_encode('legacy-line-payload')]);
+
+        $this->get(route('modules.show', 'orders'))
+            ->assertOk()
+            ->assertSee('Klient bez nazwy')
+            ->assertSee('brak e-maila')
+            ->assertSee('Produkt z importu legacy');
     }
 }

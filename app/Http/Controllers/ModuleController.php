@@ -252,37 +252,11 @@ class ModuleController extends Controller
         $activeReservationSums = $this->activeReservationSumsForOrders($pageOrders);
         $latestWzDocuments = $this->latestWzDocumentsForOrders($pageOrders);
 
-        $orderRows = $pageOrders->map(function (ExternalOrder $order) use ($activeReservationSums, $latestWzDocuments): array {
-            $activeReservations = (float) ($activeReservationSums[$this->reservationLookupKey($order->sales_channel_id, $order->external_id)] ?? 0);
-
-            return [
-                $order->salesChannel?->code ?? '-',
-                $order->external_number,
-                $order->status,
-                number_format($activeReservations, 0, ',', ' '),
-                number_format((float) $order->total_gross, 2, ',', ' ') . ' ' . $order->currency,
-                $order->external_created_at?->format('Y-m-d H:i') ?? $order->created_at?->format('Y-m-d H:i') ?? '-',
-                view('partials.order-actions', [
-                    'order' => $order,
-                    'wzDocument' => $latestWzDocuments[$order->id] ?? null,
-                    'invoice' => $order->invoices
-                        ->reject(fn ($invoice): bool => $invoice->type === 'proforma')
-                        ->sortByDesc('id')
-                        ->first(),
-                    'proforma' => $order->invoices
-                        ->where('type', 'proforma')
-                        ->sortByDesc('id')
-                        ->first(),
-                    'activeReservations' => $activeReservations,
-                ])->render(),
-            ];
-        });
-
         return [
             'title' => 'Zamówienia',
             'subtitle' => 'Zamówienia importowane z WooCommerce tworzą rezerwacje, dokumenty WZ i faktury.',
             'columns' => ['Kanał', 'Nr zewnętrzny', 'Status', 'Rezerwacje', 'Kwota brutto', 'Utworzone', 'Akcja'],
-            'rows' => $orderRows,
+            'rows' => collect(),
             'orders' => $orders,
             'activeReservationSums' => $activeReservationSums,
             'latestWzDocuments' => $latestWzDocuments,

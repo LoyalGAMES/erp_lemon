@@ -6,6 +6,7 @@
     $thumbnailService = app(\App\Services\Products\ProductImageThumbnailService::class);
     $money = fn ($amount, $currency): string => number_format((float) $amount, 2, ',', ' ').' '.$currency;
     $qty = fn ($amount): string => rtrim(rtrim(number_format((float) $amount, 4, ',', ' '), '0'), ',');
+    $asArray = fn ($value): array => is_array($value) ? $value : [];
     $statusTone = function (?string $status): string {
         $status = mb_strtolower(trim((string) $status));
 
@@ -16,19 +17,20 @@
             default => '',
         };
     };
-    $lineImage = function ($line) use ($thumbnailService): ?string {
+    $lineImage = function ($line) use ($thumbnailService, $asArray): ?string {
+        $rawPayload = $asArray($line->raw_payload);
         $source = $line->product?->imageUrl()
-            ?: data_get($line->raw_payload, 'image.src')
-            ?: data_get($line->raw_payload, 'image.url')
-            ?: data_get($line->raw_payload, 'images.0.src')
-            ?: data_get($line->raw_payload, 'images.0.url')
-            ?: data_get($line->raw_payload, 'parent_image.src')
-            ?: data_get($line->raw_payload, 'parent_image.url');
+            ?: data_get($rawPayload, 'image.src')
+            ?: data_get($rawPayload, 'image.url')
+            ?: data_get($rawPayload, 'images.0.src')
+            ?: data_get($rawPayload, 'images.0.url')
+            ?: data_get($rawPayload, 'parent_image.src')
+            ?: data_get($rawPayload, 'parent_image.url');
 
         return $line->product?->thumbnailUrl(54, 68) ?: $thumbnailService->thumbnailUrl(is_string($source) ? $source : null, 54, 68);
     };
-    $customerName = function ($order): string {
-        $billing = $order->billing_data ?? [];
+    $customerName = function ($order) use ($asArray): string {
+        $billing = $asArray($order->billing_data);
         $name = trim(implode(' ', array_filter([
             $billing['first_name'] ?? null,
             $billing['last_name'] ?? null,
@@ -36,7 +38,7 @@
 
         return $name !== '' ? $name : trim((string) ($billing['company'] ?? ''));
     };
-    $deliveryName = function ($order, $label): string {
+    $deliveryName = function ($order, $label) use ($asArray): string {
         if ($label?->courierAccount) {
             return trim(($label->courierAccount->provider === 'blpaczka' ? 'BLPaczka' : 'InPost').': '.$label->courierAccount->name);
         }
@@ -46,8 +48,8 @@
         }
 
         return (string) (
-            data_get($order->raw_payload, 'shipping_lines.0.method_title')
-            ?: data_get($order->raw_payload, 'shipping_lines.0.method_id')
+            data_get($asArray($order->raw_payload), 'shipping_lines.0.method_title')
+            ?: data_get($asArray($order->raw_payload), 'shipping_lines.0.method_id')
             ?: 'Brak danych'
         );
     };
@@ -108,10 +110,11 @@
             <tbody>
                 @forelse ($orders as $order)
                     @php
-                        $billing = $order->billing_data ?? [];
+                        $billing = $asArray($order->billing_data);
+                        $shipping = $asArray($order->shipping_data);
                         $customer = $customerName($order) ?: 'Klient bez nazwy';
-                        $email = (string) ($billing['email'] ?? data_get($order->shipping_data, 'email', ''));
-                        $phone = (string) ($billing['phone'] ?? data_get($order->shipping_data, 'phone', ''));
+                        $email = (string) ($billing['email'] ?? data_get($shipping, 'email', ''));
+                        $phone = (string) ($billing['phone'] ?? data_get($shipping, 'phone', ''));
                         $label = $order->shippingLabels->first();
                         $activeReservations = (float) ($activeReservationSums[$order->sales_channel_id.'|'.$order->external_id] ?? 0);
                         $invoice = $order->invoices
