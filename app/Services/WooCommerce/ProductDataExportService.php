@@ -475,9 +475,6 @@ final class ProductDataExportService
     }
 
     /**
-     * Do not send a known duplicate WooCommerce SKU back to the API. WooCommerce
-     * keeps the existing remote SKU while the ERP can still synchronise all other data.
-     *
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
@@ -490,19 +487,31 @@ final class ProductDataExportService
 
         if (
             $product->isSyntheticWooSku()
-            || $this->hasPolylangTranslationWithSameSku($product, $mapping)
             || ($remoteSku !== ''
                 && $remoteSku === $product->sku
-                && ProductChannelMapping::query()
-                    ->where('sales_channel_id', $mapping->sales_channel_id)
-                    ->where('external_sku', $remoteSku)
-                    ->whereKeyNot($mapping->id)
-                    ->exists())
+                && $this->hasDuplicateSkuOutsideWooFamily($product, $mapping, $remoteSku))
         ) {
             unset($payload['sku']);
         }
 
         return $payload;
+    }
+
+    private function hasDuplicateSkuOutsideWooFamily(
+        Product $product,
+        ProductChannelMapping $mapping,
+        string $remoteSku,
+    ): bool {
+        if ($this->hasPolylangTranslationWithSameSku($product, $mapping)) {
+            return false;
+        }
+
+        return ProductChannelMapping::query()
+            ->where('sales_channel_id', $mapping->sales_channel_id)
+            ->where('external_sku', $remoteSku)
+            ->whereKeyNot($mapping->id)
+            ->where('external_product_id', '!=', $mapping->external_product_id)
+            ->exists();
     }
 
     private function hasPolylangTranslationWithSameSku(Product $product, ProductChannelMapping $mapping): bool

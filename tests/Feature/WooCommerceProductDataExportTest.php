@@ -291,7 +291,7 @@ class WooCommerceProductDataExportTest extends TestCase
         ));
     }
 
-    public function test_export_preserves_sku_shared_with_polylang_translation(): void
+    public function test_export_sends_sku_shared_with_polylang_translation(): void
     {
         Http::fake([
             'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
@@ -343,7 +343,69 @@ class WooCommerceProductDataExportTest extends TestCase
         app(ProductDataExportService::class)->export($product);
 
         [$request] = Http::recorded()->first();
-        $this->assertFalse(isset($request['sku']));
+        $this->assertSame('POLYLANG-SKU', $request['sku']);
+    }
+
+    public function test_export_sends_sku_shared_with_variation_of_same_woocommerce_parent(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
+                'id' => 123,
+                'sku' => 'FAMILY-SKU',
+                'name' => 'Produkt główny',
+            ]),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'FAMILY-SKU',
+            'name' => 'Produkt główny',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp']],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'VARIANT-ERP-SKU',
+            'name' => 'Wariant',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'FAMILY-SKU',
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+            'external_sku' => 'FAMILY-SKU',
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($parent);
+
+        [$request] = Http::recorded()->first();
+        $this->assertSame('FAMILY-SKU', $request['sku']);
     }
 
     public function test_product_publication_date_exports_to_woocommerce_and_polylang_translations(): void
