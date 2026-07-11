@@ -8,12 +8,16 @@ use App\Models\IntegrationSyncLog;
 use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
 use App\Models\WordpressIntegration;
 use Illuminate\Support\Collection;
 use RuntimeException;
 
 final class ProductDataExportService
 {
+    /** @var Collection<int, ProductParameterDefinition>|null */
+    private ?Collection $parameterDefinitions = null;
+
     public function __construct(
         private readonly WooCommerceClient $client,
     ) {}
@@ -309,7 +313,7 @@ final class ProductDataExportService
             }
 
             $payload = $this->payload($product, false, $salesChannelId, $language);
-            $payload = $this->prepareVariablePayload($product, $variants, $payload);
+            $payload = $this->prepareVariablePayload($product, $variants, $payload, $language);
             $desiredSku = $payload['sku'] ?? null;
             unset($payload['sku']);
             $payload['translations'] = ['pl' => (int) $primaryExternalId];
@@ -647,7 +651,7 @@ final class ProductDataExportService
             }
 
             $payload['type'] = (string) (data_get($master, 'product_type') ?: 'simple');
-            $payload['attributes'] = $this->attributes($master);
+            $payload['attributes'] = $this->attributes($master, $language);
             $payload['categories'] = $this->categories($master, $salesChannelId, $language);
             $payload['catalog_visibility'] = (string) (data_get($master, 'catalog_visibility') ?: 'visible');
             $payload['upsell_ids'] = $this->relatedProductIds((array) data_get($master, 'related_products.upsell_skus', []), $salesChannelId);
@@ -684,14 +688,14 @@ final class ProductDataExportService
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
-    private function prepareVariablePayload(Product $product, Collection $variants, array $payload): array
+    private function prepareVariablePayload(Product $product, Collection $variants, array $payload, string $language = 'pl'): array
     {
         if ($variants->isEmpty()) {
             return $payload;
         }
 
         $payload['type'] = 'variable';
-        $payload['attributes'] = $this->variableAttributes($product, $variants);
+        $payload['attributes'] = $this->variableAttributes($product, $variants, $language);
         unset(
             $payload['regular_price'],
             $payload['sale_price'],
@@ -733,7 +737,7 @@ final class ProductDataExportService
             $payload['date_on_sale_to'] = $this->dateString($parentSaleEndsAt) ?? '';
         }
 
-        $payload['attributes'] = $this->variationAttributes($parent, $variant);
+        $payload['attributes'] = $this->variationAttributes($parent, $variant, $language);
 
         return $payload;
     }
@@ -884,13 +888,13 @@ final class ProductDataExportService
      * @param  array<string, mixed>  $master
      * @return list<array{name:string,visible:bool,variation:bool,options:list<string>}>
      */
-    private function attributes(array $master): array
+    private function attributes(array $master, string $language = 'pl'): array
     {
         return collect(data_get($master, 'parameters', []))
             ->filter(fn ($row): bool => is_array($row))
-            ->map(function (array $row): ?array {
-                $name = trim((string) ($row['name'] ?? ''));
-                $value = trim((string) ($row['value'] ?? ''));
+            ->map(function (array $row) use ($language): ?array {
+                $name = $this->translatedParameterName($row, $language);
+                $value = $this->translatedParameterValue($row, $language);
 
                 if ($name === '' || $value === '') {
                     return null;
@@ -912,18 +916,24 @@ final class ProductDataExportService
      * @param  Collection<int, Product>  $variants
      * @return list<array{name:string,visible:bool,variation:bool,options:list<string>}>
      */
-    private function variableAttributes(Product $product, Collection $variants): array
+    private function variableAttributes(Product $product, Collection $variants, string $language = 'pl'): array
     {
         $master = $product->masterData();
-        $variantAttribute = $this->variantAttributeName($product, $variants);
+        $sourceVariantAttribute = $this->variantAttributeName($product, $variants);
+        $translationSource = $this->parameterRowForName($product, $sourceVariantAttribute)
+            ?? $variants
+                ->map(fn (Product $variant): ?array => $this->parameterRowForName($variant, $sourceVariantAttribute))
+                ->first(fn (?array $parameter): bool => $parameter !== null)
+            ?? ['name' => $sourceVariantAttribute];
+        $variantAttribute = $this->translatedParameterName($translationSource, $language);
         $variantOptions = $variants
-            ->map(fn (Product $variant): string => $this->variationOption($variant, $variantAttribute))
+            ->map(fn (Product $variant): string => $this->variationOption($variant, $sourceVariantAttribute, $language))
             ->filter(fn (string $option): bool => $option !== '')
             ->unique()
             ->values()
             ->all();
 
-        return collect($this->attributes($master))
+        return collect($this->attributes($master, $language))
             ->reject(fn (array $attribute): bool => mb_strtolower($attribute['name']) === mb_strtolower($variantAttribute))
             ->push([
                 'name' => $variantAttribute,
@@ -938,13 +948,17 @@ final class ProductDataExportService
     /**
      * @return list<array{name:string,option:string}>
      */
-    private function variationAttributes(Product $parent, Product $variant): array
+    private function variationAttributes(Product $parent, Product $variant, string $language = 'pl'): array
     {
-        $variantAttribute = $this->variantAttributeName($parent, collect([$variant]));
+        $sourceVariantAttribute = $this->variantAttributeName($parent, collect([$variant]));
+        $translationSource = $this->parameterRowForName($parent, $sourceVariantAttribute)
+            ?? $this->parameterRowForName($variant, $sourceVariantAttribute)
+            ?? ['name' => $sourceVariantAttribute];
+        $variantAttribute = $this->translatedParameterName($translationSource, $language);
 
         return [[
             'name' => $variantAttribute,
-            'option' => $this->variationOption($variant, $variantAttribute),
+            'option' => $this->variationOption($variant, $sourceVariantAttribute, $language),
         ]];
     }
 
@@ -976,7 +990,7 @@ final class ProductDataExportService
         return 'Rozmiar';
     }
 
-    private function variationOption(Product $variant, string $variantAttribute): string
+    private function variationOption(Product $variant, string $variantAttribute, string $language = 'pl'): string
     {
         foreach ((array) data_get($variant->masterData(), 'parameters', []) as $parameter) {
             if (! is_array($parameter)) {
@@ -987,13 +1001,13 @@ final class ProductDataExportService
             $value = trim((string) ($parameter['value'] ?? ''));
 
             if ($value !== '' && mb_strtolower($name) === mb_strtolower($variantAttribute)) {
-                return $value;
+                return $this->translatedParameterValue($parameter, $language);
             }
         }
 
         foreach ((array) data_get($variant->masterData(), 'parameters', []) as $parameter) {
             if (is_array($parameter) && ($parameter['variation'] ?? false) && trim((string) ($parameter['value'] ?? '')) !== '') {
-                return trim((string) $parameter['value']);
+                return $this->translatedParameterValue($parameter, $language);
             }
         }
 
@@ -1001,11 +1015,134 @@ final class ProductDataExportService
             $option = trim((string) ($attribute['option'] ?? ''));
 
             if ($option !== '') {
-                return $option;
+                return $this->translatedParameterValue([
+                    'name' => $variantAttribute,
+                    'value' => $option,
+                ], $language);
             }
         }
 
         return trim($variant->name);
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function parameterRowForName(Product $product, string $name): ?array
+    {
+        $normalizedName = mb_strtolower(trim($name));
+
+        foreach ((array) data_get($product->masterData(), 'parameters', []) as $parameter) {
+            if (! is_array($parameter)) {
+                continue;
+            }
+
+            if (mb_strtolower(trim((string) ($parameter['name'] ?? ''))) === $normalizedName) {
+                return $parameter;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $parameter
+     */
+    private function translatedParameterName(array $parameter, string $language): string
+    {
+        $sourceName = trim((string) ($parameter['name'] ?? ''));
+
+        if ($language === '' || $language === 'pl') {
+            return $sourceName;
+        }
+
+        $inlineName = trim((string) (
+            $parameter["name_{$language}"]
+            ?? data_get($parameter, "translations.{$language}.name")
+            ?? ''
+        ));
+
+        if ($inlineName !== '') {
+            return $inlineName;
+        }
+
+        $definition = $this->parameterDefinition($parameter);
+        $translatedName = trim((string) (
+            $definition?->getAttribute("name_{$language}")
+            ?? data_get($definition?->metadata, "translations.{$language}.name")
+            ?? ''
+        ));
+
+        return $translatedName !== '' ? $translatedName : $sourceName;
+    }
+
+    /**
+     * @param  array<string, mixed>  $parameter
+     */
+    private function translatedParameterValue(array $parameter, string $language): string
+    {
+        $sourceValue = trim((string) ($parameter['value'] ?? ''));
+
+        if ($language === '' || $language === 'pl') {
+            return $sourceValue;
+        }
+
+        $inlineValue = trim((string) (
+            $parameter["value_{$language}"]
+            ?? data_get($parameter, "translations.{$language}.value")
+            ?? ''
+        ));
+
+        if ($inlineValue !== '') {
+            return $inlineValue;
+        }
+
+        $definition = $this->parameterDefinition($parameter);
+
+        if (! $definition instanceof ProductParameterDefinition) {
+            return $sourceValue;
+        }
+
+        $sourceValues = collect((array) $definition->values)->values();
+        $translatedValues = collect((array) (
+            $definition->getAttribute("values_{$language}")
+            ?? data_get($definition->metadata, "translations.{$language}.values")
+            ?? []
+        ))->values();
+        $sourceIndex = $sourceValues->search(
+            fn (mixed $candidate): bool => mb_strtolower(trim((string) $candidate)) === mb_strtolower($sourceValue),
+        );
+
+        if ($sourceIndex === false) {
+            return $sourceValue;
+        }
+
+        $translatedValue = trim((string) $translatedValues->get((int) $sourceIndex, ''));
+
+        return $translatedValue !== '' ? $translatedValue : $sourceValue;
+    }
+
+    /**
+     * @param  array<string, mixed>  $parameter
+     */
+    private function parameterDefinition(array $parameter): ?ProductParameterDefinition
+    {
+        $name = mb_strtolower(trim((string) ($parameter['name'] ?? '')));
+        $slug = mb_strtolower(trim((string) ($parameter['slug'] ?? '')));
+
+        if ($name === '' && $slug === '') {
+            return null;
+        }
+
+        $definitions = $this->parameterDefinitions ??= ProductParameterDefinition::query()->get();
+
+        return $definitions->first(function (ProductParameterDefinition $definition) use ($name, $slug): bool {
+            if ($slug !== '' && mb_strtolower(trim((string) $definition->slug)) === $slug) {
+                return true;
+            }
+
+            return $name !== '' && mb_strtolower(trim((string) $definition->name)) === $name;
+        });
     }
 
     /**
@@ -1079,7 +1216,18 @@ final class ProductDataExportService
             $languages = collect(['pl']);
         }
 
-        foreach (ProductCategory::query()->whereIn('id', $categoryIds)->get() as $category) {
+        $languages = $languages
+            ->sortBy(fn (string $language): int => $language === 'pl' ? 0 : 1)
+            ->values();
+        $availableCategories = ProductCategory::query()
+            ->where(fn ($query) => $query
+                ->where('sales_channel_id', $salesChannelId)
+                ->orWhereNull('sales_channel_id'))
+            ->get();
+        $selectedCategories = $availableCategories->whereIn('id', $categoryIds);
+        $categories = $this->categoriesWithAncestors($selectedCategories, $availableCategories, $salesChannelId);
+
+        foreach ($categories as $category) {
             $metadata = (array) $category->metadata;
 
             if (ctype_digit((string) $category->external_id) && blank(data_get($metadata, 'woocommerce_ids.pl'))) {
@@ -1092,11 +1240,21 @@ final class ProductDataExportService
                 }
 
                 $translation = (array) data_get($metadata, "translations.{$language}", []);
+                $parent = $this->categoryParent($category, $availableCategories, $salesChannelId);
+                $parentExternalId = $parent instanceof ProductCategory
+                    ? data_get($parent->metadata, "woocommerce_ids.{$language}")
+                    : null;
+                $primaryExternalId = data_get($metadata, 'woocommerce_ids.pl');
+                $translations = $language !== 'pl' && ctype_digit((string) $primaryExternalId)
+                    ? ['pl' => (int) $primaryExternalId]
+                    : [];
 
                 $response = $this->client->createProductCategory($integration, array_filter([
                     'name' => $translation['name'] ?? $category->name,
                     'slug' => $translation['slug'] ?? $category->slug ?: null,
                     'description' => $translation['description'] ?? $category->description ?: '',
+                    'parent' => ctype_digit((string) $parentExternalId) ? (int) $parentExternalId : null,
+                    'translations' => $translations !== [] ? $translations : null,
                 ], fn (mixed $value): bool => $value !== null), $language);
                 $externalId = trim((string) ($response['id'] ?? ''));
 
@@ -1105,6 +1263,30 @@ final class ProductDataExportService
                 }
 
                 data_set($metadata, "woocommerce_ids.{$language}", $externalId);
+
+                // Persist every allocated remote ID immediately. A failed link retry must
+                // never create another category for the same ERP record.
+                $category->forceFill([
+                    'sales_channel_id' => $salesChannelId,
+                    'metadata' => $metadata,
+                ])->save();
+            }
+
+            $translationIds = $languages
+                ->mapWithKeys(function (string $language) use ($metadata): array {
+                    $externalId = trim((string) data_get($metadata, "woocommerce_ids.{$language}", ''));
+
+                    return ctype_digit($externalId) ? [$language => (int) $externalId] : [];
+                })
+                ->all();
+            $translationSignature = $this->categoryTranslationSignature($translationIds);
+
+            if (count($translationIds) > 1
+                && data_get($metadata, 'polylang.translation_signature') !== $translationSignature
+            ) {
+                $linkResponse = $this->client->linkProductCategoryTranslations($integration, $translationIds);
+                data_set($metadata, 'polylang.translation_signature', $translationSignature);
+                data_set($metadata, 'polylang.translation_group', $linkResponse['translation_group'] ?? null);
             }
 
             $category->forceFill([
@@ -1112,6 +1294,88 @@ final class ProductDataExportService
                 'metadata' => $metadata,
             ])->save();
         }
+    }
+
+    /**
+     * @param  Collection<int, ProductCategory>  $selectedCategories
+     * @param  Collection<int, ProductCategory>  $availableCategories
+     * @return Collection<int, ProductCategory>
+     */
+    private function categoriesWithAncestors(
+        Collection $selectedCategories,
+        Collection $availableCategories,
+        int $salesChannelId,
+    ): Collection {
+        $ordered = collect();
+        $visited = [];
+
+        $visit = function (ProductCategory $category) use (&$visit, &$visited, $ordered, $availableCategories, $salesChannelId): void {
+            if (isset($visited[$category->id])) {
+                return;
+            }
+
+            $visited[$category->id] = true;
+            $parent = $this->categoryParent($category, $availableCategories, $salesChannelId);
+
+            if ($parent instanceof ProductCategory) {
+                $visit($parent);
+            }
+
+            $ordered->push($category);
+        };
+
+        foreach ($selectedCategories as $category) {
+            $visit($category);
+        }
+
+        return $ordered->values();
+    }
+
+    /**
+     * @param  Collection<int, ProductCategory>  $availableCategories
+     */
+    private function categoryParent(
+        ProductCategory $category,
+        Collection $availableCategories,
+        int $salesChannelId,
+    ): ?ProductCategory {
+        $parentExternalId = trim((string) $category->parent_external_id);
+
+        if ($parentExternalId === '') {
+            return null;
+        }
+
+        return $availableCategories
+            ->filter(function (ProductCategory $candidate) use ($category, $parentExternalId): bool {
+                if ($candidate->is($category)) {
+                    return false;
+                }
+
+                if ((string) $candidate->external_id === $parentExternalId) {
+                    return true;
+                }
+
+                return collect((array) data_get($candidate->metadata, 'woocommerce_ids', []))
+                    ->contains(fn (mixed $id): bool => (string) $id === $parentExternalId);
+            })
+            ->sortBy(function (ProductCategory $candidate) use ($category, $salesChannelId): int {
+                if ((int) $candidate->sales_channel_id === (int) $category->sales_channel_id) {
+                    return 0;
+                }
+
+                return (int) $candidate->sales_channel_id === $salesChannelId ? 1 : 2;
+            })
+            ->first();
+    }
+
+    /**
+     * @param  array<string, int>  $translations
+     */
+    private function categoryTranslationSignature(array $translations): string
+    {
+        ksort($translations);
+
+        return sha1(json_encode($translations, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '');
     }
 
     /**
@@ -1268,7 +1532,7 @@ final class ProductDataExportService
             $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $product, $mapping);
 
             if (! $isVariation) {
-                $payload = $this->prepareVariablePayload($product, $variants, $payload);
+                $payload = $this->prepareVariablePayload($product, $variants, $payload, $language);
             }
 
             $response = $this->client->updateProductDataByIds(

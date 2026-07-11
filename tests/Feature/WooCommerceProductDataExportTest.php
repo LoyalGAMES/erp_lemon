@@ -9,10 +9,12 @@ use App\Models\IntegrationSyncLog;
 use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\ProductDataExportService;
+use App\Services\WooCommerce\WooCommerceClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -1122,9 +1124,24 @@ class WooCommerceProductDataExportTest extends TestCase
     {
         Http::fake(function ($request) {
             if ($request->method() === 'POST' && str_contains($request->url(), '/products/categories')) {
-                parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+                $ids = [
+                    'Odzież' => 40,
+                    'Clothing' => 41,
+                    'Koszule' => 50,
+                    'Shirts' => 60,
+                ];
 
-                return Http::response(['id' => ($query['lang'] ?? 'pl') === 'en' ? 60 : 50]);
+                return Http::response(['id' => $ids[$request['name']] ?? 0]);
+            }
+
+            if ($request->method() === 'POST' && str_contains($request->url(), '/lemon-erp/v1/catalog/categories/translations')) {
+                $translations = $request['translations'];
+
+                return Http::response([
+                    'linked' => true,
+                    'translations' => $translations,
+                    'translation_group' => 'category:'.implode('|', array_values($translations)),
+                ]);
             }
 
             if ($request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123') {
@@ -1145,13 +1162,32 @@ class WooCommerceProductDataExportTest extends TestCase
             'base_url' => 'https://shop.test',
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'wp_api_username' => 'erp-user',
+            'wp_api_password_encrypted' => Crypt::encryptString('application-password'),
             'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+        $parentCategory = ProductCategory::query()->create([
+            'external_id' => 'ERP-ODZIEZ',
+            'name' => 'Odzież',
+            'slug' => 'odziez',
+            'path' => 'Odzież',
+            'metadata' => [
+                'translations' => [
+                    'en' => ['name' => 'Clothing', 'slug' => 'clothing'],
+                ],
+            ],
         ]);
         $category = ProductCategory::query()->create([
             'external_id' => 'ERP-KOSZULE',
+            'parent_external_id' => $parentCategory->external_id,
             'name' => 'Koszule',
             'slug' => 'koszule',
             'path' => 'Odzież > Koszule',
+            'metadata' => [
+                'translations' => [
+                    'en' => ['name' => 'Shirts', 'slug' => 'shirts'],
+                ],
+            ],
         ]);
         $product = Product::query()->create([
             'sku' => 'SKU-CATEGORY',
@@ -1178,10 +1214,25 @@ class WooCommerceProductDataExportTest extends TestCase
 
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && str_contains($request->url(), '/products/categories?lang=pl')
-            && $request['name'] === 'Koszule');
+            && $request['name'] === 'Odzież'
+            && ! isset($request['parent']));
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && str_contains($request->url(), '/products/categories?lang=en')
-            && $request['name'] === 'Koszule');
+            && $request['name'] === 'Clothing'
+            && $request['translations'] === ['pl' => 40]
+            && ! isset($request['parent']));
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/categories?lang=pl')
+            && $request['name'] === 'Koszule'
+            && $request['parent'] === 40);
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/categories?lang=en')
+            && $request['name'] === 'Shirts'
+            && $request['parent'] === 41
+            && $request['translations'] === ['pl' => 50]);
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/lemon-erp/v1/catalog/categories/translations'
+            && $request['translations'] === ['pl' => 50, 'en' => 60]);
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
             && $request['categories'] === [['id' => 50]]);
@@ -1190,6 +1241,181 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame((string) $channel->id, (string) $category->sales_channel_id);
         $this->assertSame('50', data_get($category->metadata, 'woocommerce_ids.pl'));
         $this->assertSame('60', data_get($category->metadata, 'woocommerce_ids.en'));
+        $this->assertSame('category:50|60', data_get($category->metadata, 'polylang.translation_group'));
+        $this->assertSame('40', data_get($parentCategory->fresh()->metadata, 'woocommerce_ids.pl'));
+        $this->assertSame('41', data_get($parentCategory->fresh()->metadata, 'woocommerce_ids.en'));
+    }
+
+    public function test_export_uses_inline_then_dictionary_parameter_translations_for_english_product(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => Http::response(['id' => 123, 'sku' => 'SKU-I18N']),
+            'https://shop.test/wp-json/wc/v3/products/124' => Http::response(['id' => 124, 'sku' => 'SKU-I18N']),
+        ]);
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S', 'M'],
+            'values_en' => ['Small', 'Medium'],
+            'is_variant' => true,
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Kolor',
+            'name_en' => 'Colour',
+            'slug' => 'kolor',
+            'input_type' => 'select',
+            'values' => ['Czerwony', 'Niebieski'],
+            'values_en' => ['Red', 'Blue'],
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-I18N',
+            'name' => 'Koszula',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'content' => [
+                        'pl' => ['name' => 'Koszula'],
+                        'en' => ['name' => 'Shirt'],
+                    ],
+                    'parameters' => [
+                        [
+                            'name' => 'Rozmiar',
+                            'value' => 'S',
+                            'name_en' => 'Sizing',
+                            'value_en' => 'Petite',
+                        ],
+                        ['name' => 'Kolor', 'value' => 'Czerwony'],
+                    ],
+                ],
+                'woocommerce_translations' => [
+                    'en' => ['product_id' => '124', 'variation_id' => null, 'sku' => 'SKU-I18N'],
+                ],
+            ],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'SKU-I18N',
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($product);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
+            && $request['attributes'] === [
+                ['name' => 'Rozmiar', 'visible' => true, 'variation' => false, 'options' => ['S']],
+                ['name' => 'Kolor', 'visible' => true, 'variation' => false, 'options' => ['Czerwony']],
+            ]);
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
+            && $request['attributes'] === [
+                ['name' => 'Sizing', 'visible' => true, 'variation' => false, 'options' => ['Petite']],
+                ['name' => 'Colour', 'visible' => true, 'variation' => false, 'options' => ['Red']],
+            ]);
+    }
+
+    public function test_category_translation_link_requires_wordpress_application_credentials(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Brak loginu i hasła aplikacji WordPress REST wymaganych do powiązania tłumaczeń kategorii Polylang.');
+
+        app(WooCommerceClient::class)->linkProductCategoryTranslations($integration, ['pl' => 50, 'en' => 60]);
+    }
+
+    public function test_category_translation_link_reports_outdated_wordpress_plugin(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/lemon-erp/v1/catalog/categories/translations' => Http::response([
+                'code' => 'rest_no_route',
+                'message' => 'No route was found.',
+            ], 404),
+        ]);
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'wp_api_username' => 'erp-user',
+            'wp_api_password_encrypted' => Crypt::encryptString('application-password'),
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('wtyczki Lemon ERP co najmniej 0.3.0');
+
+        app(WooCommerceClient::class)->linkProductCategoryTranslations($integration, ['pl' => 50, 'en' => 60]);
+    }
+
+    public function test_category_translation_link_reports_a_missing_remote_category_instead_of_an_outdated_plugin(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/lemon-erp/v1/catalog/categories/translations' => Http::response([
+                'code' => 'lemon_erp_category_not_found',
+                'message' => 'Nie znaleziono kategorii WooCommerce ID 60.',
+            ], 404),
+        ]);
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'wp_api_username' => 'erp-user',
+            'wp_api_password_encrypted' => Crypt::encryptString('application-password'),
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Nie znaleziono kategorii WooCommerce ID 60.');
+
+        app(WooCommerceClient::class)->linkProductCategoryTranslations($integration, ['pl' => 50, 'en' => 60]);
     }
 
     public function test_export_updates_complete_polish_and_english_product_data_including_theme_label(): void
@@ -1318,6 +1544,15 @@ class WooCommerceProductDataExportTest extends TestCase
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
         ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S'],
+            'values_en' => ['Small'],
+            'is_variant' => true,
+        ]);
         $parent = Product::query()->create([
             'sku' => 'SET-NEW',
             'name' => 'Nowy komplet',
@@ -1351,7 +1586,13 @@ class WooCommerceProductDataExportTest extends TestCase
             'attributes' => ['master' => [
                 'source' => 'erp',
                 'product_type' => 'variation',
-                'parameters' => [['name' => 'Rozmiar', 'value' => 'S', 'variation' => true]],
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'value' => 'S',
+                    'name_en' => 'Sizing',
+                    'value_en' => 'Petite',
+                    'variation' => true,
+                ]],
             ]],
         ]);
         ProductRelation::query()->create([
@@ -1377,7 +1618,8 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations'
             && $request['sku'] === 'SEM-NEW-S'
-            && $request['attributes'][0]['option'] === 'S');
+            && $request['attributes'][0]['name'] === 'Sizing'
+            && $request['attributes'][0]['option'] === 'Petite');
         $this->assertDatabaseHas('product_channel_mappings', [
             'product_id' => $variant->id,
             'external_product_id' => '123',

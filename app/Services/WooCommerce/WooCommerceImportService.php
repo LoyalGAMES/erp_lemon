@@ -7,9 +7,9 @@ namespace App\Services\WooCommerce;
 use App\Models\ExternalOrder;
 use App\Models\Product;
 use App\Models\ProductCategory;
+use App\Models\ProductCategoryChannelAlias;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
-use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\StockBalance;
 use App\Models\Warehouse;
@@ -20,6 +20,8 @@ use App\Services\Inventory\SalesChannelWarehouseResolver;
 use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderStatusPolicyService;
 use App\Services\Orders\OrderWzDocumentService;
+use App\Services\Products\ProductCategoryTranslationMergeService;
+use App\Services\Products\ProductParameterTranslationService;
 use App\Services\Products\ProductTranslationMergeService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Arr;
@@ -38,6 +40,8 @@ final class WooCommerceImportService
         private readonly CustomerCommunicationService $communication,
         private readonly OrderStatusPolicyService $statusPolicy,
         private readonly ProductTranslationMergeService $translationMerge,
+        private readonly ProductCategoryTranslationMergeService $categoryTranslationMerge,
+        private readonly ProductParameterTranslationService $parameterTranslations,
     ) {}
 
     /**
@@ -60,6 +64,8 @@ final class WooCommerceImportService
             'translation_products_reclassified' => 0,
             'translation_aliases_mapped' => 0,
             'translation_products_merged' => 0,
+            'parameter_definitions_localized' => 0,
+            'parameter_definitions_merged' => 0,
             'mapping_overwrites' => 0,
             'created' => 0,
             'updated' => 0,
@@ -69,10 +75,18 @@ final class WooCommerceImportService
             'skipped_missing_identifier' => 0,
             'products_total_before' => Product::query()->count(),
             'products_primary_before' => Product::query()->where('is_translation', false)->count(),
+            'categories_total_before' => ProductCategory::query()
+                ->where('sales_channel_id', $integration->sales_channel_id)
+                ->count(),
+            'category_aliases_total_before' => ProductCategoryChannelAlias::query()
+                ->where('sales_channel_id', $integration->sales_channel_id)
+                ->count(),
             'products_total_after' => 0,
             'products_primary_after' => 0,
             'products_historical_aliases_after' => 0,
             'channel_mappings_total_after' => 0,
+            'categories_total_after' => 0,
+            'category_aliases_total_after' => 0,
         ];
         $seenSourceSkus = [];
 
@@ -118,7 +132,9 @@ final class WooCommerceImportService
             DB::transaction(function () use ($integration, $item, $sku, &$stats): void {
                 $this->syncItemCategories($integration, (array) ($item['categories'] ?? []), $this->normalizeLanguage($item['erp_import_language'] ?? 'pl'));
                 $this->syncTranslationCategories($integration, $item);
-                $this->syncParameterDefinitions($item);
+                $parameterSync = $this->parameterTranslations->syncFromWooItem($item);
+                $stats['parameter_definitions_localized'] += $parameterSync['localized'];
+                $stats['parameter_definitions_merged'] += $parameterSync['merged'];
                 [$product, $resolvedDuplicateSku] = $this->productForWooItem($integration, $item, $sku);
                 $isNew = ! $product->exists;
 
@@ -233,20 +249,26 @@ final class WooCommerceImportService
         $stats['channel_mappings_total_after'] = ProductChannelMapping::query()
             ->where('sales_channel_id', $integration->sales_channel_id)
             ->count();
+        $stats['categories_total_after'] = ProductCategory::query()
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->count();
+        $stats['category_aliases_total_after'] = ProductCategoryChannelAlias::query()
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->count();
 
         return $stats;
     }
 
     private function syncProductCategories(WordpressIntegration $integration): void
     {
-        try {
-            $primaryLanguage = $this->normalizeLanguage($integration->productImportLanguages()[0] ?? 'pl');
+        $primaryLanguage = $this->normalizeLanguage($integration->productImportLanguages()[0] ?? 'pl');
 
-            foreach ($this->client->productCategories($integration) as $category) {
-                $this->upsertCategory($integration, $category, $primaryLanguage);
-            }
-        } catch (Throwable) {
-            // Product import remains useful even when a store blocks category reads.
+        foreach ($this->client->productCategories($integration) as $category) {
+            $this->upsertCategory(
+                $integration,
+                $category,
+                $this->normalizeLanguage($category['erp_import_language'] ?? $primaryLanguage),
+            );
         }
     }
 
@@ -265,51 +287,177 @@ final class WooCommerceImportService
     /**
      * @param  array<string, mixed>  $category
      */
-    private function upsertCategory(WordpressIntegration $integration, array $category, string $language = 'pl'): void
-    {
+    private function upsertCategory(
+        WordpressIntegration $integration,
+        array $category,
+        string $language = 'pl',
+    ): ?ProductCategory {
         $externalId = trim((string) ($category['id'] ?? ''));
         $name = $this->nullableString($category['name'] ?? null);
 
         if ($externalId === '' || $name === null) {
-            return;
+            return null;
         }
 
-        $existing = ProductCategory::query()
-            ->where('sales_channel_id', $integration->sales_channel_id)
-            ->where(function ($query) use ($externalId, $name): void {
-                $query->where('external_id', $externalId)->orWhere('name', $name);
-            })
-            ->first();
-        $metadata = array_merge((array) $existing?->metadata, [
-            'source' => 'woocommerce',
-            'raw' => $category,
-            'synced_at' => now()->toISOString(),
-        ]);
-        data_set($metadata, "woocommerce_ids.{$language}", $externalId);
+        $language = $this->normalizeLanguage($category['erp_import_language'] ?? $language);
+        $translationIds = $this->verifiedCategoryTranslationIds($category);
+        $canonicalExternalId = $translationIds['pl'] ?? ($translationIds[$language] ?? $externalId);
+        $familyExternalIds = collect([$externalId, ...array_values($translationIds)])
+            ->map(fn (mixed $id): string => trim((string) $id))
+            ->filter()
+            ->unique()
+            ->values();
 
-        if ($language !== 'pl') {
-            data_set($metadata, "translations.{$language}", $this->categoryTranslation($category));
-        }
+        return DB::transaction(function () use (
+            $integration,
+            $category,
+            $externalId,
+            $name,
+            $language,
+            $translationIds,
+            $canonicalExternalId,
+            $familyExternalIds,
+        ): ProductCategory {
+            $aliases = ProductCategoryChannelAlias::query()
+                ->where('sales_channel_id', $integration->sales_channel_id)
+                ->whereIn('external_id', $familyExternalIds)
+                ->get();
+            $candidateIds = $aliases->pluck('product_category_id');
+            $candidates = ProductCategory::query()
+                ->where('sales_channel_id', $integration->sales_channel_id)
+                ->where(function ($query) use ($familyExternalIds, $candidateIds): void {
+                    $query->whereIn('external_id', $familyExternalIds);
 
-        ProductCategory::query()->updateOrCreate(
-            [
-                'id' => $existing?->id,
-            ],
-            [
+                    if ($candidateIds->isNotEmpty()) {
+                        $query->orWhereIn('id', $candidateIds);
+                    }
+                })
+                ->lockForUpdate()
+                ->get();
+            $canonicalAliasCategoryId = $aliases
+                ->firstWhere('external_id', $canonicalExternalId)
+                ?->product_category_id;
+            $currentAliasCategoryId = $aliases
+                ->firstWhere('external_id', $externalId)
+                ?->product_category_id;
+            $canonical = $candidates->first(
+                fn (ProductCategory $candidate): bool => (string) $candidate->external_id === $canonicalExternalId,
+            )
+                ?? $candidates->firstWhere('id', $canonicalAliasCategoryId)
+                ?? $candidates->first(
+                    fn (ProductCategory $candidate): bool => (string) $candidate->external_id === $externalId,
+                )
+                ?? $candidates->firstWhere('id', $currentAliasCategoryId)
+                ?? $candidates->first();
+
+            if (! $canonical instanceof ProductCategory) {
+                $canonical = new ProductCategory;
+            }
+
+            if ($canonical->exists
+                && $translationIds !== []
+                && $language === 'pl'
+                && (string) $canonical->external_id !== $canonicalExternalId
+                && ! ProductCategory::query()
+                    ->where('sales_channel_id', $integration->sales_channel_id)
+                    ->where('external_id', $canonicalExternalId)
+                    ->whereKeyNot($canonical->id)
+                    ->exists()
+            ) {
+                $canonical->external_id = $canonicalExternalId;
+            }
+
+            $metadata = array_merge((array) $canonical->metadata, [
+                'source' => 'woocommerce',
+                'raw' => $category,
+                'synced_at' => now()->toISOString(),
+            ]);
+            data_set($metadata, "raw_by_language.{$language}", $category);
+            data_set($metadata, "woocommerce_ids.{$language}", $externalId);
+
+            foreach ($translationIds as $translationLanguage => $translationExternalId) {
+                data_set($metadata, "woocommerce_ids.{$translationLanguage}", $translationExternalId);
+            }
+
+            foreach ((array) ($category['erp_translations'] ?? []) as $translationLanguage => $translatedCategory) {
+                if (! is_array($translatedCategory)) {
+                    continue;
+                }
+
+                $translationLanguage = $this->normalizeLanguage($translationLanguage);
+                data_set($metadata, "translations.{$translationLanguage}", $this->categoryTranslation($translatedCategory));
+                data_set($metadata, "raw_by_language.{$translationLanguage}", $translatedCategory);
+            }
+
+            if ($language !== 'pl') {
+                data_set($metadata, "translations.{$language}", $this->categoryTranslation($category));
+            }
+
+            $translationGroup = $this->verifiedCategoryTranslationGroup($category);
+
+            if ($translationGroup !== null) {
+                data_set($metadata, 'translation_group', $translationGroup);
+                data_set($metadata, 'catalog_contract', 1);
+            }
+
+            $canonical->fill([
                 'sales_channel_id' => $integration->sales_channel_id,
-                'external_id' => $existing?->external_id ?? $externalId,
-                'parent_external_id' => isset($category['parent']) && (string) $category['parent'] !== '0'
-                    ? (string) $category['parent']
-                    : null,
-                'name' => $name,
-                'slug' => $this->nullableString($category['slug'] ?? null),
-                'path' => $this->nullableString($category['path'] ?? null) ?? $name,
-                'description' => $this->nullableString($category['description'] ?? null),
-                'count' => (int) ($category['count'] ?? 0),
-                'sort_order' => (int) ($category['menu_order'] ?? 100),
+                'external_id' => $canonical->external_id ?: $canonicalExternalId,
                 'metadata' => $metadata,
-            ],
-        );
+            ]);
+
+            if (! $canonical->exists || $language === 'pl') {
+                $canonical->fill([
+                    'parent_external_id' => isset($category['parent']) && (string) $category['parent'] !== '0'
+                        ? (string) $category['parent']
+                        : null,
+                    'name' => $name,
+                    'slug' => $this->nullableString($category['slug'] ?? null),
+                    'path' => $this->nullableString($category['path'] ?? null) ?? $name,
+                    'description' => $this->nullableString($category['description'] ?? null),
+                    'count' => (int) ($category['count'] ?? 0),
+                    'sort_order' => (int) ($category['menu_order'] ?? 100),
+                ]);
+            }
+
+            $canonical->save();
+
+            if ($translationIds !== []) {
+                foreach ($candidates->where('id', '!=', $canonical->id) as $duplicate) {
+                    $canonical = $this->categoryTranslationMerge->merge($canonical, $duplicate);
+                }
+            }
+
+            $aliasLanguages = $translationIds;
+            $aliasLanguages[$language] = $externalId;
+
+            foreach ($aliasLanguages as $aliasLanguage => $aliasExternalId) {
+                $existingAlias = ProductCategoryChannelAlias::query()
+                    ->where('sales_channel_id', $integration->sales_channel_id)
+                    ->where('external_id', $aliasExternalId)
+                    ->first();
+
+                ProductCategoryChannelAlias::query()->updateOrCreate(
+                    [
+                        'sales_channel_id' => $integration->sales_channel_id,
+                        'external_id' => $aliasExternalId,
+                    ],
+                    [
+                        'product_category_id' => $canonical->id,
+                        'language' => $this->normalizeLanguage($aliasLanguage),
+                        'translation_group' => $translationGroup ?? $existingAlias?->translation_group,
+                        'metadata' => array_replace_recursive((array) $existingAlias?->metadata, [
+                            'source' => 'woocommerce_import',
+                            'catalog_contract' => $translationGroup !== null
+                                ? 1
+                                : data_get($existingAlias?->metadata, 'catalog_contract'),
+                        ]),
+                    ],
+                );
+            }
+
+            return $canonical->refresh();
+        });
     }
 
     /**
@@ -317,8 +465,6 @@ final class WooCommerceImportService
      */
     private function syncTranslationCategories(WordpressIntegration $integration, array $item): void
     {
-        $primaryCategories = array_values(array_filter((array) ($item['categories'] ?? []), 'is_array'));
-
         foreach ((array) ($item['erp_translations'] ?? []) as $language => $translatedItem) {
             if (! is_array($translatedItem)) {
                 continue;
@@ -326,23 +472,95 @@ final class WooCommerceImportService
 
             $translatedCategories = array_values(array_filter((array) ($translatedItem['categories'] ?? []), 'is_array'));
 
-            foreach ($translatedCategories as $index => $category) {
-                $primary = $primaryCategories[$index] ?? null;
-                $local = is_array($primary) && isset($primary['id'])
-                    ? ProductCategory::query()->where('sales_channel_id', $integration->sales_channel_id)->where('external_id', (string) $primary['id'])->first()
-                    : null;
+            foreach ($translatedCategories as $category) {
+                $externalId = trim((string) ($category['id'] ?? ''));
+                $local = $this->categoryForExternalId($integration, $externalId);
 
-                if ($local instanceof ProductCategory && isset($category['id'])) {
-                    $metadata = (array) $local->metadata;
-                    $language = $this->normalizeLanguage($language);
-                    data_set($metadata, 'woocommerce_ids.'.$language, (string) $category['id']);
-                    data_set($metadata, 'translations.'.$language, $this->categoryTranslation($category));
-                    $local->update(['metadata' => $metadata]);
-                } else {
-                    $this->upsertCategory($integration, $category, $this->normalizeLanguage($language));
+                if (! $local instanceof ProductCategory || $externalId === '') {
+                    continue;
                 }
+
+                $language = $this->normalizeLanguage($language);
+                $metadata = (array) $local->metadata;
+                data_set($metadata, 'woocommerce_ids.'.$language, $externalId);
+                data_set($metadata, 'translations.'.$language, $this->categoryTranslation($category));
+                data_set($metadata, 'raw_by_language.'.$language, $category);
+                $local->update(['metadata' => $metadata]);
+
+                ProductCategoryChannelAlias::query()->updateOrCreate(
+                    [
+                        'sales_channel_id' => $integration->sales_channel_id,
+                        'external_id' => $externalId,
+                    ],
+                    [
+                        'product_category_id' => $local->id,
+                        'language' => $language,
+                        'translation_group' => data_get($metadata, 'translation_group'),
+                        'metadata' => ['source' => 'woocommerce_product_translation'],
+                    ],
+                );
             }
         }
+    }
+
+    private function categoryForExternalId(
+        WordpressIntegration $integration,
+        string $externalId,
+    ): ?ProductCategory {
+        if ($externalId === '') {
+            return null;
+        }
+
+        $alias = ProductCategoryChannelAlias::query()
+            ->forExternalId((int) $integration->sales_channel_id, $externalId)
+            ->first();
+
+        if ($alias instanceof ProductCategoryChannelAlias) {
+            return $alias->productCategory()->first();
+        }
+
+        return ProductCategory::query()
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->where('external_id', $externalId)
+            ->first();
+    }
+
+    /**
+     * @param  array<string, mixed>  $category
+     * @return array<string, string>
+     */
+    private function verifiedCategoryTranslationIds(array $category): array
+    {
+        if ($this->verifiedCategoryTranslationGroup($category) === null) {
+            return [];
+        }
+
+        $ids = collect((array) ($category['lemon_erp_translations'] ?? []))
+            ->mapWithKeys(function (mixed $id, mixed $language): array {
+                $id = trim((string) $id);
+                $language = $this->normalizeLanguage($language);
+
+                return $id !== '' ? [$language => $id] : [];
+            })
+            ->all();
+        $currentId = trim((string) ($category['id'] ?? ''));
+
+        return $currentId !== '' && in_array($currentId, $ids, true) ? $ids : [];
+    }
+
+    /**
+     * @param  array<string, mixed>  $category
+     */
+    private function verifiedCategoryTranslationGroup(array $category): ?string
+    {
+        if ((int) ($category['lemon_erp_catalog_contract'] ?? 0) !== 1) {
+            return null;
+        }
+
+        $group = trim((string) ($category['lemon_erp_translation_group'] ?? ''));
+        $translations = (array) ($category['lemon_erp_translations'] ?? []);
+
+        return $group !== '' && $translations !== [] ? $group : null;
     }
 
     /**
@@ -1161,11 +1379,11 @@ final class WooCommerceImportService
             ->values();
         $categoryIds = $categoryExternalIds->isEmpty()
             ? []
-            : ProductCategory::query()
-                ->where('sales_channel_id', $integration->sales_channel_id)
-                ->whereIn('external_id', $categoryExternalIds)
-                ->pluck('id')
+            : $categoryExternalIds
+                ->map(fn (string $externalId): ?int => $this->categoryForExternalId($integration, $externalId)?->id)
+                ->filter()
                 ->map(fn (mixed $id): int => (int) $id)
+                ->unique()
                 ->values()
                 ->all();
         $images = $this->imageList($item['images'] ?? []);
@@ -1325,41 +1543,6 @@ final class WooCommerceImportService
             ->filter()
             ->values()
             ->all();
-    }
-
-    /**
-     * @param  array<string, mixed>  $item
-     */
-    private function syncParameterDefinitions(array $item): void
-    {
-        foreach ($this->parameterList($item) as $parameter) {
-            $name = trim($parameter['name']);
-
-            if ($name === '') {
-                continue;
-            }
-
-            $definition = ProductParameterDefinition::query()->firstOrNew(['name' => $name]);
-            $values = collect((array) $definition->values)
-                ->merge(collect(explode(',', $parameter['value']))->map(fn (string $value): string => trim($value)))
-                ->filter()
-                ->unique(fn (string $value): string => mb_strtolower($value))
-                ->values()
-                ->all();
-
-            $definition->fill([
-                'slug' => $definition->slug ?: Str::slug($name),
-                'input_type' => 'select',
-                'values' => $values,
-                'is_variant' => $definition->is_variant || $parameter['variation'],
-                'is_required' => $definition->is_required ?? false,
-                'sort_order' => $definition->sort_order ?: 100,
-                'metadata' => array_merge((array) $definition->metadata, [
-                    'source' => 'woocommerce_import',
-                    'synced_at' => now()->toISOString(),
-                ]),
-            ])->save();
-        }
     }
 
     private function syncImportedRelatedProductSkus(WordpressIntegration $integration): void

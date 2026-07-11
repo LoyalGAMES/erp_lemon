@@ -16,6 +16,8 @@
         'translation_products_reclassified' => 'Istniejące tłumaczenia oznaczone poza katalogiem głównym',
         'translation_aliases_mapped' => 'Aliasów Polylang przypisanych do produktu',
         'translation_products_merged' => 'Duplikatów tłumaczeń scalonych z produktem głównym',
+        'parameter_definitions_localized' => 'Parametrów uzupełnionych o tłumaczenie EN',
+        'parameter_definitions_merged' => 'Osobnych parametrów PL/EN scalonych w jeden',
         'mapping_overwrites' => 'Nadpisane mapowania kanału',
         'created' => 'Utworzone w ERP',
         'updated' => 'Zaktualizowane w ERP',
@@ -25,10 +27,14 @@
         'skipped_missing_identifier' => 'Pominięte bez identyfikatora',
         'products_total_before' => 'Wszystkie rekordy ERP przed importem',
         'products_primary_before' => 'Produkty główne ERP przed importem',
+        'categories_total_before' => 'Kategorie ERP przed importem',
+        'category_aliases_total_before' => 'Mapowania językowe kategorii przed importem',
         'products_total_after' => 'Wszystkie rekordy ERP po imporcie',
         'products_primary_after' => 'Produkty główne ERP po imporcie',
         'products_historical_aliases_after' => 'Scalone aliasy historyczne',
         'channel_mappings_total_after' => 'Mapowania kanału po imporcie',
+        'categories_total_after' => 'Kategorie ERP po scaleniu PL/EN',
+        'category_aliases_total_after' => 'Mapowania językowe kategorii po imporcie',
         'lines' => 'Pozycje zamówień',
         'reserved' => 'Zarezerwowane',
         'released' => 'Zwolnione rezerwacje',
@@ -128,7 +134,7 @@
                     <p class="muted">
                         Pobierz paczkę ZIP, wgraj ją w WordPress przez Wtyczki -> Dodaj nową -> Wyślij wtyczkę, a potem aktywuj plugin.
                         Wtyczka dodaje pola NIP/typ klienta, endpoint faktur oraz pewną identyfikację grup tłumaczeń Polylang.
-                        Wersja 0.2.0 lub nowsza jest wymagana do bezpiecznego importu produktów PL/EN bez duplikatów.
+                        Wersja 0.3.0 lub nowsza obsługuje produkty i kategorie PL/EN jako wspólne rekordy oraz wymaga skonfigurowanego loginu i hasła aplikacji WordPress REST.
                     </p>
                     <div class="inline-actions">
                         <a class="button" href="{{ route('integrations.woocommerce-plugin.download') }}">Pobierz plugin ZIP</a>

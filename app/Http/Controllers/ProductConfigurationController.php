@@ -15,6 +15,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 
 class ProductConfigurationController extends Controller
@@ -271,6 +272,12 @@ class ProductConfigurationController extends Controller
                 'max:255',
                 Rule::unique('product_parameter_definitions', 'name')->ignore($parameter?->id),
             ],
+            'name_en' => [
+                'nullable',
+                'string',
+                'max:255',
+                Rule::unique('product_parameter_definitions', 'name_en')->ignore($parameter?->id),
+            ],
             'slug' => [
                 'nullable',
                 'string',
@@ -279,24 +286,34 @@ class ProductConfigurationController extends Controller
             ],
             'input_type' => ['required', 'string', 'in:text,number,select,multiselect,boolean'],
             'values_text' => ['nullable', 'string', 'max:8000'],
+            'values_text_en' => ['nullable', 'string', 'max:8000'],
             'sort_order' => ['nullable', 'integer', 'min:0', 'max:65000'],
         ]);
 
         $name = trim((string) $validated['name']);
+        $nameEn = $this->nullableString($validated['name_en'] ?? null);
+        $this->validateLocalizedParameterNames($name, $nameEn, $parameter);
+
         $slug = trim((string) ($validated['slug'] ?? '')) ?: Str::slug($name);
         $slug = $this->uniqueParameterSlug($slug ?: Str::random(8), $parameter);
+        [$values, $valuesEn] = $this->parameterValueLists(
+            $validated['values_text'] ?? '',
+            $validated['values_text_en'] ?? '',
+        );
 
         return [
             'name' => $name,
+            'name_en' => $nameEn,
             'slug' => $slug,
             'input_type' => $validated['input_type'],
-            'values' => $this->valueList($validated['values_text'] ?? ''),
+            'values' => $values,
+            'values_en' => $valuesEn,
             'is_variant' => $request->boolean('is_variant'),
             'is_required' => $request->boolean('is_required'),
             'sort_order' => (int) ($validated['sort_order'] ?? 100),
-            'metadata' => [
+            'metadata' => array_merge((array) $parameter?->metadata, [
                 'managed_in_erp' => true,
-            ],
+            ]),
         ];
     }
 
@@ -344,16 +361,95 @@ class ProductConfigurationController extends Controller
     }
 
     /**
+     * @return array{0:list<string>,1:list<string>|null}
+     */
+    private function parameterValueLists(mixed $polishInput, mixed $englishInput): array
+    {
+        $polishRows = $this->parameterValueRows($polishInput);
+        $englishRows = $this->parameterValueRows($englishInput);
+        $values = [];
+        $valuesEn = [];
+        $seen = [];
+        $hasEnglishValueWithoutPolishCounterpart = false;
+
+        foreach ($polishRows as $index => $polishValue) {
+            if ($polishValue === '') {
+                if (trim((string) ($englishRows[$index] ?? '')) !== '') {
+                    $hasEnglishValueWithoutPolishCounterpart = true;
+                }
+
+                continue;
+            }
+
+            $normalized = mb_strtolower($polishValue);
+
+            if (isset($seen[$normalized])) {
+                continue;
+            }
+
+            $seen[$normalized] = true;
+            $values[] = $polishValue;
+            $valuesEn[] = trim((string) ($englishRows[$index] ?? ''));
+        }
+
+        $additionalEnglishValues = array_slice($englishRows, count($polishRows));
+
+        if ($hasEnglishValueWithoutPolishCounterpart
+            || collect($additionalEnglishValues)->contains(fn (string $value): bool => $value !== '')
+        ) {
+            throw ValidationException::withMessages([
+                'values_text_en' => 'Każda wartość EN musi odpowiadać pozycji na liście PL. Usuń dodatkowe wartości EN albo dodaj ich odpowiedniki PL.',
+            ]);
+        }
+
+        if (! collect($valuesEn)->contains(fn (string $value): bool => $value !== '')) {
+            return [$values, null];
+        }
+
+        return [$values, $valuesEn];
+    }
+
+    /**
+     * Keep empty rows because their indexes connect PL and EN values.
+     * Commas and semicolons remain supported for backwards compatibility.
+     *
      * @return list<string>
      */
-    private function valueList(mixed $value): array
+    private function parameterValueRows(mixed $value): array
     {
-        return collect(preg_split('/[\r\n,;]+/', (string) ($value ?? '')) ?: [])
+        $rows = preg_split('/\r\n|\r|\n|,|;/', (string) ($value ?? ''));
+
+        return collect($rows === false ? [] : $rows)
             ->map(fn (string $item): string => trim($item))
-            ->filter()
-            ->unique(fn (string $item): string => mb_strtolower($item))
             ->values()
             ->all();
+    }
+
+    private function validateLocalizedParameterNames(string $name, ?string $nameEn, ?ProductParameterDefinition $parameter): void
+    {
+        $definitions = ProductParameterDefinition::query()
+            ->when($parameter !== null, fn ($query) => $query->whereKeyNot($parameter->id))
+            ->get(['name', 'name_en']);
+        $normalizedName = mb_strtolower($name);
+        $normalizedNameEn = $nameEn !== null ? mb_strtolower($nameEn) : null;
+
+        foreach ($definitions as $definition) {
+            $existingNames = collect([$definition->name, $definition->name_en])
+                ->filter(fn (mixed $value): bool => filled($value))
+                ->map(fn (mixed $value): string => mb_strtolower(trim((string) $value)));
+
+            if ($existingNames->contains($normalizedName)) {
+                throw ValidationException::withMessages([
+                    'name' => 'Ta nazwa jest już używana jako polska lub angielska nazwa innego parametru.',
+                ]);
+            }
+
+            if ($normalizedNameEn !== null && $existingNames->contains($normalizedNameEn)) {
+                throw ValidationException::withMessages([
+                    'name_en' => 'Ta nazwa jest już używana jako polska lub angielska nazwa innego parametru.',
+                ]);
+            }
+        }
     }
 
     private function categoryPath(mixed $salesChannelId, string $name, ?string $parentExternalId, ?ProductCategory $category = null): string

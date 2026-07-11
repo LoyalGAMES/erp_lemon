@@ -5,6 +5,7 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 - pola checkoutu w sekcji adresu: typ klienta, nazwa firmy oraz NIP dla zamówień firmowych,
 - panel `Lemon ERP` na zamówieniu WooCommerce,
 - jednoznaczny kontrakt tożsamości produktów, wariantów i kategorii dla sklepów z Polylang,
+- idempotentne wiązanie polskich i angielskich kategorii utworzonych przez ERP,
 - REST endpoint do zapisu danych faktury na zamówieniu,
 - opcjonalny zapis PDF poza WordPress Media Library.
 
@@ -17,7 +18,7 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 5. Upewnij się, że użytkownik WordPress używany w Lemon ERP ma uprawnienia do edycji zamówień WooCommerce.
 6. W Lemon ERP w integracji WooCommerce ustaw tryb faktur na `Wtyczka Lemon ERP bez Media Library`.
 
-Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Kontrakt katalogu wymaga wersji wtyczki co najmniej `0.2.0`.
+Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, a eksport powiązanych kategorii wersji co najmniej `0.3.0`.
 
 ## Kontrakt katalogu
 
@@ -57,6 +58,14 @@ GET /wp-json/lemon-erp/v1/catalog/capabilities
 ```
 
 Odpowiedź zawiera `catalog_contract`, `plugin_version`, `polylang_active`, aktywne języki i nazwy pól kontraktu. Dostęp wymaga uprawnienia `manage_woocommerce` albo `edit_products`.
+
+ERP wiąże utworzone osobno termy językowe przez uwierzytelniony endpoint:
+
+```text
+POST /wp-json/lemon-erp/v1/catalog/categories/translations
+```
+
+Payload `translations` jest mapą kodu języka na ID kategorii, np. `{"pl": 81, "en": 144}`. Wtyczka przypisuje języki i zapisuje jedną rodzinę tłumaczeń Polylang; ponowienie tego samego żądania jest bezpieczne.
 
 ## Endpoint ERP
 

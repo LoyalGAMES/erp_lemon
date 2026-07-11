@@ -7,6 +7,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class ProductCategory extends Model
 {
@@ -36,5 +37,10 @@ class ProductCategory extends Model
     public function salesChannel(): BelongsTo
     {
         return $this->belongsTo(SalesChannel::class);
+    }
+
+    public function channelAliases(): HasMany
+    {
+        return $this->hasMany(ProductCategoryChannelAlias::class);
     }
 }

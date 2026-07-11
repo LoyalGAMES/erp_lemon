@@ -203,7 +203,73 @@ final class WooCommerceClient
      */
     public function productCategories(WordpressIntegration $integration): iterable
     {
-        $primaryLanguage = $integration->productImportLanguages()[0] ?? null;
+        $configuredLanguages = $integration->productImportLanguages();
+
+        if ($configuredLanguages === []) {
+            $configuredLanguages = [null];
+        }
+
+        $primaryLanguage = $configuredLanguages[0] ?? null;
+        $categoriesByLanguage = [];
+
+        foreach ($configuredLanguages as $language) {
+            $categoriesByLanguage[$this->languageBucketKey($language)] = $this->productCategoriesForLanguage(
+                $integration,
+                $language,
+            );
+        }
+
+        $this->assertSafeMultilingualCategories($configuredLanguages, $categoriesByLanguage);
+
+        $primaryCategories = $categoriesByLanguage[$this->languageBucketKey($primaryLanguage)] ?? [];
+        $translations = [];
+
+        foreach ($categoriesByLanguage as $language => $categories) {
+            if ($language === $this->languageBucketKey($primaryLanguage)) {
+                continue;
+            }
+
+            foreach ($categories as $category) {
+                $translationKey = $this->verifiedLemonTranslationKey($category);
+
+                if ($translationKey === null) {
+                    continue;
+                }
+
+                $actualLanguage = $this->catalogItemLanguage($category) ?? $language;
+                $translations[$translationKey][$actualLanguage] = $category;
+            }
+        }
+
+        foreach ($primaryCategories as $category) {
+            $category['erp_import_language'] = $this->catalogItemLanguage($category)
+                ?? $primaryLanguage
+                ?? 'default';
+            $category['erp_translations'] = [];
+            $translationKey = $this->verifiedLemonTranslationKey($category);
+
+            if ($translationKey !== null) {
+                foreach ($translations[$translationKey] ?? [] as $language => $translatedCategory) {
+                    if ((string) ($translatedCategory['id'] ?? '') === (string) ($category['id'] ?? '')) {
+                        continue;
+                    }
+
+                    $category['erp_translations'][$language] = $translatedCategory;
+                }
+            }
+
+            yield $category;
+        }
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function productCategoriesForLanguage(
+        WordpressIntegration $integration,
+        ?string $language,
+    ): array {
+        $items = [];
 
         for ($page = 1; $page <= 10; $page++) {
             $query = [
@@ -214,8 +280,8 @@ final class WooCommerceClient
                 'order' => 'asc',
             ];
 
-            if ($primaryLanguage !== null) {
-                $query['lang'] = $primaryLanguage;
+            if ($language !== null) {
+                $query['lang'] = $language;
             }
 
             $response = $this->request($integration)
@@ -232,11 +298,14 @@ final class WooCommerceClient
             }
 
             foreach ($categories as $category) {
-                if (is_array($category) && $this->matchesRequestedLanguage($category, $primaryLanguage)) {
-                    yield $category;
+                if (is_array($category) && $this->matchesRequestedLanguage($category, $language)) {
+                    $category['erp_import_language'] = $language ?? 'default';
+                    $items[] = $category;
                 }
             }
         }
+
+        return $items;
     }
 
     /**
@@ -440,6 +509,56 @@ final class WooCommerceClient
         $json = $response->json();
 
         return is_array($json) ? $json : [];
+    }
+
+    /**
+     * @param  array<string, int>  $translations
+     * @return array<string, mixed>
+     */
+    public function linkProductCategoryTranslations(WordpressIntegration $integration, array $translations): array
+    {
+        if (! $integration->hasWordpressMediaCredentials()) {
+            throw new RuntimeException('Brak loginu i hasła aplikacji WordPress REST wymaganych do powiązania tłumaczeń kategorii Polylang.');
+        }
+
+        try {
+            $response = $this->wordpressRequest($integration)->post(
+                $this->wordpressRestEndpoint($integration, '/lemon-erp/v1/catalog/categories/translations'),
+                ['translations' => $translations],
+            );
+        } catch (RequestException $exception) {
+            $this->throwCategoryTranslationLinkHttpException($exception->response);
+        }
+
+        if (! $response->successful()) {
+            $this->throwCategoryTranslationLinkHttpException($response);
+        }
+
+        $json = $response->json();
+
+        return is_array($json) ? $json : [];
+    }
+
+    private function throwCategoryTranslationLinkHttpException(?Response $response): never
+    {
+        $status = $response?->status() ?? 0;
+        $payload = $response?->json();
+        $code = trim((string) data_get($payload, 'code', ''));
+        $message = trim((string) data_get($payload, 'message', ''));
+
+        if ($status === 404 && ($code === '' || $code === 'rest_no_route')) {
+            throw new RuntimeException('Powiązanie tłumaczeń kategorii w WooCommerce wymaga aktywnej wtyczki Lemon ERP co najmniej 0.3.0.');
+        }
+
+        if (in_array($status, [401, 403], true)) {
+            throw new RuntimeException('WordPress odrzucił powiązanie tłumaczeń kategorii. Sprawdź login, hasło aplikacji oraz uprawnienia użytkownika WordPress REST.');
+        }
+
+        if ($message !== '') {
+            throw new RuntimeException("WordPress nie powiązał tłumaczeń kategorii: {$message}");
+        }
+
+        throw new RuntimeException("Powiązanie tłumaczeń kategorii w WooCommerce zwróciło HTTP {$status}.");
     }
 
     /**
@@ -927,6 +1046,69 @@ final class WooCommerceClient
             .'albo zostało zwróconych dla więcej niż jednego języka. Zaktualizuj i aktywuj wtyczkę Lemon ERP for WooCommerce '
             .'do wersji '.self::CATALOG_PLUGIN_MINIMUM_VERSION.' lub nowszej, a następnie ponów import.'
         );
+    }
+
+    /**
+     * Categories must have the Lemon contract in a multilingual import. Unlike
+     * products, category names and slugs cannot safely serve as a legacy join
+     * key because translated terms routinely have completely different text.
+     *
+     * @param  list<string|null>  $configuredLanguages
+     * @param  array<string, list<array<string, mixed>>>  $categoriesByLanguage
+     */
+    private function assertSafeMultilingualCategories(
+        array $configuredLanguages,
+        array $categoriesByLanguage,
+    ): void {
+        $requestedLanguages = collect($configuredLanguages)
+            ->filter(fn (?string $language): bool => $language !== null && trim($language) !== '')
+            ->map(fn (string $language): string => mb_strtolower(trim($language)))
+            ->unique()
+            ->values();
+
+        if ($requestedLanguages->count() < 2) {
+            return;
+        }
+
+        $invalid = collect($categoriesByLanguage)
+            ->flatten(1)
+            ->filter(fn (mixed $category): bool => is_array($category))
+            ->filter(fn (array $category): bool => $this->verifiedLemonTranslationKey($category) === null)
+            ->count();
+
+        if ($invalid === 0) {
+            return;
+        }
+
+        throw new RuntimeException(
+            'Import kategorii wielojęzycznych został zatrzymany przed zapisem: '
+            .$invalid.' kategorii WooCommerce nie ma zweryfikowanego kontraktu Polylang '
+            .'(lemon_erp_translation_group oraz lemon_erp_translations). Zaktualizuj i aktywuj wtyczkę '
+            .'Lemon ERP for WooCommerce do wersji '.self::CATALOG_PLUGIN_MINIMUM_VERSION
+            .' lub nowszej, a następnie ponów import.'
+        );
+    }
+
+    /**
+     * Return a family key only when both independent parts of the Lemon
+     * contract agree: the stable group and the complete set of external IDs.
+     *
+     * @param  array<string, mixed>  $item
+     */
+    private function verifiedLemonTranslationKey(array $item): ?string
+    {
+        if (! $this->hasCatalogContract($item) || ! $this->hasVerifiedCatalogIdentity($item)) {
+            return null;
+        }
+
+        $group = trim((string) ($item['lemon_erp_translation_group'] ?? ''));
+        $translationIds = $this->translationIds($item['lemon_erp_translations'] ?? []);
+
+        if ($group === '' || $translationIds === []) {
+            return null;
+        }
+
+        return 'lemon-category:'.$group.'|ids:'.implode('|', $translationIds);
     }
 
     /**

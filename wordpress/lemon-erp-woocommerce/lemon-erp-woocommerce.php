@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Lemon ERP for WooCommerce
  * Description: Adds Lemon ERP checkout fields, catalog identity and invoice metadata endpoints for WooCommerce.
- * Version: 0.2.0
+ * Version: 0.3.0
  * Author: Lemon ERP
  * Requires PHP: 8.0
  * Requires Plugins: woocommerce
@@ -11,29 +11,42 @@
  */
 
 declare(strict_types=1);
+use Automattic\WooCommerce\Blocks\Domain\Services\CheckoutFields;
+use Automattic\WooCommerce\Blocks\Package;
+use Automattic\WooCommerce\Utilities\FeaturesUtil;
 
 if (! defined('ABSPATH')) {
     exit;
 }
 
 add_action('before_woocommerce_init', static function (): void {
-    if (class_exists(\Automattic\WooCommerce\Utilities\FeaturesUtil::class)) {
-        \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
+    if (class_exists(FeaturesUtil::class)) {
+        FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
     }
 });
 
 final class Lemon_Erp_WooCommerce
 {
-    private const VERSION = '0.2.0';
+    private const VERSION = '0.3.0';
+
     private const CATALOG_CONTRACT = 1;
+
     private const CUSTOMER_TYPE_META = '_lemon_erp_customer_type';
+
     private const BILLING_NIP_META = '_lemon_erp_billing_nip';
+
     private const LEGACY_BILLING_NIP_META = '_billing_nip';
+
     private const BLOCK_CUSTOMER_TYPE_FIELD = 'lemon-erp/customer-type';
+
     private const BLOCK_COMPANY_FIELD = 'lemon-erp/company-name';
+
     private const BLOCK_NIP_FIELD = 'lemon-erp/nip';
+
     private const INVOICE_PREFIX = '_sempre_erp_invoice_';
+
     private const CORRECTION_PREFIX = '_sempre_erp_correction_invoice_';
+
     private const MAX_PDF_BYTES = 15728640;
 
     private static ?self $instance = null;
@@ -50,7 +63,7 @@ final class Lemon_Erp_WooCommerce
     public static function boot(): void
     {
         if (self::$instance === null) {
-            self::$instance = new self();
+            self::$instance = new self;
         }
     }
 
@@ -78,7 +91,7 @@ final class Lemon_Erp_WooCommerce
     }
 
     /**
-     * @param array<string, mixed> $fields
+     * @param  array<string, mixed>  $fields
      * @return array<string, mixed>
      */
     public function classicCheckoutFields(array $fields): array
@@ -143,7 +156,7 @@ final class Lemon_Erp_WooCommerce
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     public function validateClassicCheckout(array $data, WP_Error $errors): void
     {
@@ -166,7 +179,7 @@ final class Lemon_Erp_WooCommerce
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      */
     public function saveClassicCheckoutFields(WC_Order $order, array $data): void
     {
@@ -268,7 +281,7 @@ final class Lemon_Erp_WooCommerce
     }
 
     /**
-     * @param array<string, mixed> $fields
+     * @param  array<string, mixed>  $fields
      */
     public function validateBlockAddressFields(WP_Error $errors, array $fields, string $group): void
     {
@@ -459,6 +472,18 @@ final class Lemon_Erp_WooCommerce
             'permission_callback' => [$this, 'canReadCatalogCapabilities'],
         ]);
 
+        register_rest_route('lemon-erp/v1', '/catalog/categories/translations', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [$this, 'restLinkCategoryTranslations'],
+            'permission_callback' => [$this, 'canManageCatalogTranslations'],
+            'args' => [
+                'translations' => [
+                    'required' => true,
+                    'type' => 'object',
+                ],
+            ],
+        ]);
+
         register_rest_route('lemon-erp/v1', '/orders/(?P<order_id>\d+)/invoice', [
             'methods' => WP_REST_Server::CREATABLE,
             'callback' => [$this, 'restUpsertInvoice'],
@@ -489,6 +514,79 @@ final class Lemon_Erp_WooCommerce
         return current_user_can('manage_woocommerce') || current_user_can('edit_products');
     }
 
+    public function canManageCatalogTranslations(WP_REST_Request $request): bool
+    {
+        return current_user_can('manage_woocommerce') || current_user_can('manage_product_terms');
+    }
+
+    public function restLinkCategoryTranslations(WP_REST_Request $request): WP_REST_Response|WP_Error
+    {
+        if (! $this->polylangCatalogAvailable()
+            || ! function_exists('pll_set_term_language')
+            || ! function_exists('pll_save_term_translations')
+        ) {
+            return new WP_Error(
+                'lemon_erp_polylang_required',
+                __('Powiązanie tłumaczeń kategorii wymaga aktywnego Polylang.', 'lemon-erp-woocommerce'),
+                ['status' => 409],
+            );
+        }
+
+        $translations = $this->translationMap((array) $request->get_param('translations'));
+
+        if (count($translations) < 2) {
+            return new WP_Error(
+                'lemon_erp_category_translations_incomplete',
+                __('Podaj co najmniej dwa języki kategorii.', 'lemon-erp-woocommerce'),
+                ['status' => 422],
+            );
+        }
+
+        $activeLanguages = function_exists('pll_languages_list')
+            ? array_values(array_filter(array_map(
+                fn (mixed $language): ?string => $this->languageSlug($language),
+                (array) pll_languages_list(['fields' => 'slug']),
+            )))
+            : [];
+
+        foreach ($translations as $language => $termId) {
+            $term = get_term($termId, 'product_cat');
+
+            if (! $term instanceof WP_Term) {
+                return new WP_Error(
+                    'lemon_erp_category_not_found',
+                    sprintf(__('Nie znaleziono kategorii WooCommerce ID %d.', 'lemon-erp-woocommerce'), $termId),
+                    ['status' => 404],
+                );
+            }
+
+            if ($activeLanguages !== [] && ! in_array($language, $activeLanguages, true)) {
+                return new WP_Error(
+                    'lemon_erp_category_language_invalid',
+                    sprintf(__('Język %s nie jest aktywny w Polylang.', 'lemon-erp-woocommerce'), $language),
+                    ['status' => 422],
+                );
+            }
+        }
+
+        // Mutate only after the whole request has passed validation. A bad
+        // second term must not leave the first one assigned to a new language.
+        foreach ($translations as $language => $termId) {
+            pll_set_term_language($termId, $language);
+        }
+
+        pll_save_term_translations($translations);
+        $this->termCatalogIdentityCache = [];
+        $firstTermId = (int) reset($translations);
+        $identity = $this->termCatalogIdentity($firstTermId);
+
+        return new WP_REST_Response([
+            'linked' => true,
+            'translations' => $identity['translations'],
+            'translation_group' => $identity['translation_group'],
+        ], 200);
+    }
+
     public function restCatalogCapabilities(WP_REST_Request $request): WP_REST_Response
     {
         $polylangActive = $this->polylangCatalogAvailable();
@@ -513,6 +611,7 @@ final class Lemon_Erp_WooCommerce
             'default_language' => $defaultLanguage,
             'languages' => $languages,
             'resources' => ['product', 'variation', 'category'],
+            'category_translation_link_endpoint' => '/wp-json/lemon-erp/v1/catalog/categories/translations',
             'fields' => [
                 'contract' => 'lemon_erp_catalog_contract',
                 'language' => 'lemon_erp_language',
@@ -582,7 +681,7 @@ final class Lemon_Erp_WooCommerce
     }
 
     /**
-     * @param array{language:?string,translations:array<string, int>,translation_group:string} $identity
+     * @param  array{language:?string,translations:array<string, int>,translation_group:string}  $identity
      */
     private function appendCatalogIdentity(WP_REST_Response $response, array $identity): WP_REST_Response
     {
@@ -717,14 +816,13 @@ final class Lemon_Erp_WooCommerce
     }
 
     /**
-     * @param array<string, int> $parentTranslations
+     * @param  array<string, int>  $parentTranslations
      * @return array<string, int>
      */
     private function variationTranslationsFromParents(
         WC_Product_Variation $source,
         array $parentTranslations,
-    ): array
-    {
+    ): array {
         $translations = [];
         $sourceParentId = $source->get_parent_id();
 
@@ -750,8 +848,7 @@ final class Lemon_Erp_WooCommerce
     private function matchingVariationId(
         WC_Product_Variation $source,
         int $translatedParentId,
-    ): ?int
-    {
+    ): ?int {
         $translatedParent = wc_get_product($translatedParentId);
 
         if (! $translatedParent instanceof WC_Product_Variable) {
@@ -828,7 +925,7 @@ final class Lemon_Erp_WooCommerce
     }
 
     /**
-     * @param array<mixed> $translations
+     * @param  array<mixed>  $translations
      * @return array<string, int>
      */
     private function translationMap(array $translations): array
@@ -850,7 +947,7 @@ final class Lemon_Erp_WooCommerce
     }
 
     /**
-     * @param array<string, int> $translations
+     * @param  array<string, int>  $translations
      */
     private function translationGroup(string $resource, int $currentId, array $translations): string
     {
@@ -1598,12 +1695,12 @@ JS;
     private function additionalCheckoutFieldValue(WC_Order $order, string $fieldId, string $group = 'other'): string
     {
         if (
-            class_exists(\Automattic\WooCommerce\Blocks\Package::class)
-            && class_exists(\Automattic\WooCommerce\Blocks\Domain\Services\CheckoutFields::class)
+            class_exists(Package::class)
+            && class_exists(CheckoutFields::class)
         ) {
             try {
-                $checkoutFields = \Automattic\WooCommerce\Blocks\Package::container()
-                    ->get(\Automattic\WooCommerce\Blocks\Domain\Services\CheckoutFields::class);
+                $checkoutFields = Package::container()
+                    ->get(CheckoutFields::class);
                 $value = $checkoutFields->get_field_from_object($fieldId, $order, $group);
 
                 if ($value !== '') {

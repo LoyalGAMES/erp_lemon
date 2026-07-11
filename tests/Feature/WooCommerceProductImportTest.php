@@ -8,6 +8,7 @@ use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
 use App\Models\Warehouse;
@@ -235,8 +236,22 @@ class WooCommerceProductImportTest extends TestCase
             if (str_contains($url, '/products/categories')) {
                 return (int) ($query['page'] ?? 1) === 1
                     ? Http::response([
-                        ['id' => 10, 'name' => 'Koszule', 'lang' => 'pl', 'translations' => ['pl' => 10, 'en' => 11]],
-                        ['id' => 11, 'name' => 'Shirts', 'lang' => 'en', 'translations' => ['pl' => 10, 'en' => 11]],
+                        [
+                            'id' => 10,
+                            'name' => 'Koszule',
+                            'lemon_erp_catalog_contract' => 1,
+                            'lemon_erp_language' => 'pl',
+                            'lemon_erp_translations' => ['pl' => 10, 'en' => 11],
+                            'lemon_erp_translation_group' => 'category:10|11',
+                        ],
+                        [
+                            'id' => 11,
+                            'name' => 'Shirts',
+                            'lemon_erp_catalog_contract' => 1,
+                            'lemon_erp_language' => 'en',
+                            'lemon_erp_translations' => ['pl' => 10, 'en' => 11],
+                            'lemon_erp_translation_group' => 'category:10|11',
+                        ],
                     ])
                     : Http::response([]);
             }
@@ -723,8 +738,18 @@ class WooCommerceProductImportTest extends TestCase
                             ['id' => 11, 'name' => 'Nowość'],
                         ],
                         'attributes' => [
-                            ['name' => 'Rozmiar', 'options' => ['One size'], 'variation' => true],
-                            ['name' => 'Skład', 'options' => ['Bawełna'], 'variation' => false],
+                            [
+                                'id' => 7,
+                                'name' => $language === 'en' ? 'Size' : 'Rozmiar',
+                                'options' => [$language === 'en' ? 'One size' : 'Uniwersalny'],
+                                'variation' => true,
+                            ],
+                            [
+                                'id' => 8,
+                                'name' => $language === 'en' ? 'Composition' : 'Skład',
+                                'options' => [$language === 'en' ? 'Cotton' : 'Bawełna'],
+                                'variation' => false,
+                            ],
                         ],
                         'meta_data' => [
                             ['key' => '_warehouse_location', 'value' => 'A-01-02'],
@@ -760,7 +785,7 @@ class WooCommerceProductImportTest extends TestCase
             'stock_export_enabled' => true,
         ]);
 
-        app(WooCommerceImportService::class)->importProducts($integration);
+        $stats = app(WooCommerceImportService::class)->importProducts($integration);
 
         $product = Product::query()->where('sku', 'FULL-WOO-1')->firstOrFail();
 
@@ -790,8 +815,26 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('<p>Polski opis</p>', data_get($product->attributes, 'woocommerce_description'));
         $this->assertSame('901', data_get($product->attributes, 'woocommerce_translations.en.product_id'));
         $this->assertSame('FULL-WOO-1', data_get($product->attributes, 'woocommerce_translations.en.sku'));
-        $this->assertDatabaseHas('product_parameter_definitions', ['name' => 'Rozmiar', 'is_variant' => true]);
-        $this->assertDatabaseHas('product_parameter_definitions', ['name' => 'Skład', 'is_variant' => false]);
+        $this->assertSame(2, $stats['parameter_definitions_localized']);
+        $this->assertSame(0, $stats['parameter_definitions_merged']);
+        $this->assertDatabaseHas('product_parameter_definitions', [
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'is_variant' => true,
+        ]);
+        $this->assertDatabaseHas('product_parameter_definitions', [
+            'name' => 'Skład',
+            'name_en' => 'Composition',
+            'is_variant' => false,
+        ]);
+        $this->assertSame(
+            ['One size'],
+            ProductParameterDefinition::query()->where('name', 'Rozmiar')->firstOrFail()->values_en,
+        );
+        $this->assertSame(
+            ['Cotton'],
+            ProductParameterDefinition::query()->where('name', 'Skład')->firstOrFail()->values_en,
+        );
     }
 
     public function test_import_marks_a_duplicate_ean_for_manual_review_without_stopping_sync(): void
