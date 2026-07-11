@@ -9,7 +9,6 @@
             'ean' => $variant->ean,
             'regular_price' => data_get($variant->masterData(), 'prices.retail_price_pln'),
             'sale_price' => data_get($variant->masterData(), 'prices.sale_price_pln'),
-            'stock' => (float) $variant->stockBalances->sum('quantity_available'),
             'existing' => true,
         ])->values()->all()
         : [];
@@ -28,7 +27,6 @@
                     'ean' => $lookup['ean'] ?? null,
                     'regular_price' => null,
                     'sale_price' => null,
-                    'stock' => null,
                     'existing' => $sku !== '',
                 ];
             })
@@ -40,7 +38,7 @@
     $emptyVariantRows = max(3, 6 - count($variantRows));
 
     for ($index = 0; $index < $emptyVariantRows; $index++) {
-        $variantRows[] = ['id' => null, 'sku' => '', 'label' => '', 'name' => '', 'ean' => null, 'regular_price' => null, 'sale_price' => null, 'stock' => null, 'existing' => false];
+        $variantRows[] = ['id' => null, 'sku' => '', 'label' => '', 'name' => '', 'ean' => null, 'regular_price' => null, 'sale_price' => null, 'existing' => false];
     }
 @endphp
 
@@ -74,7 +72,7 @@
     <div class="variant-editor-head">
         <div>
             <strong>Warianty produktu</strong>
-            <div class="toolbar-note">Wyszukaj istniejące SKU i zapisz produkt. Odłączenie wariantu usuwa tylko powiązanie wariantowe, nie usuwa produktu z ERP.</div>
+            <div class="toolbar-note">Atrybut oznaczony jako wariant, np. Rozmiar, określa opcje WooCommerce. Każda opcja jest osobnym SKU. Tutaj możesz dodać istniejący wariant; podczas kopiowania produktu jego warianty kopiują się automatycznie.</div>
         </div>
     </div>
 
@@ -98,7 +96,6 @@
                         @if ($row['existing'])
                             <span>Cena: <strong>{{ $row['regular_price'] !== null ? number_format((float) $row['regular_price'], 2, ',', ' ').' zł' : '-' }}</strong></span>
                             <span>Promocja: <strong>{{ $row['sale_price'] !== null ? number_format((float) $row['sale_price'], 2, ',', ' ').' zł' : '-' }}</strong></span>
-                            <span>Stan: <strong>{{ number_format((float) $row['stock'], 0, ',', ' ') }}</strong></span>
                         @endif
                         @if ($row['name'] !== '')
                             <span>{{ $row['name'] }}</span>
@@ -109,7 +106,7 @@
                     <input type="hidden" name="variant_remove[{{ $index }}]" value="0">
                     @if ($row['sku'] !== '')
                         @if ($row['id'])
-                            <a class="button secondary" href="{{ route('products.edit', $row['id']) }}">Edytuj cenę, EAN, SKU i stan</a>
+                            <a class="button secondary" href="{{ route('products.edit', $row['id']) }}">Edytuj dane wariantu</a>
                         @endif
                         <label class="toggle-row">
                             <input name="variant_remove[{{ $index }}]" type="checkbox" value="1">

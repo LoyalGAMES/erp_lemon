@@ -823,6 +823,8 @@ class ProductCatalogWorkflowTest extends TestCase
                 'woocommerce_status' => 'publish',
                 'master' => [
                     'source' => 'erp',
+                    'product_type' => 'variable',
+                    'variant_attribute' => 'Rozmiar',
                     'content' => [
                         'pl' => [
                             'name' => 'Koszula do kopiowania',
@@ -851,17 +853,59 @@ class ProductCatalogWorkflowTest extends TestCase
             'quantity_reserved' => 0,
             'quantity_available' => 3,
         ]);
+        $sourceVariant = Product::query()->create([
+            'sku' => 'SKU-COPY-M',
+            'ean' => '5901234567890',
+            'name' => 'Koszula do kopiowania M',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'woocommerce_variation_id' => '101',
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variation',
+                    'content' => [
+                        'pl' => [
+                            'name' => 'Koszula do kopiowania M',
+                            'description' => '<p>Opis wariantu</p>',
+                        ],
+                    ],
+                    'parameters' => [
+                        ['name' => 'Rozmiar', 'value' => 'M', 'variation' => true],
+                    ],
+                    'media' => [
+                        ['src' => '/uploads/products/2/m.jpg', 'alt' => 'M', 'name' => 'm.jpg'],
+                    ],
+                ],
+            ],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $product->id,
+            'child_product_id' => $sourceVariant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+            'metadata' => ['variant_attribute' => 'Rozmiar'],
+        ]);
 
         $this->post(route('products.duplicate', $product))
             ->assertRedirect();
 
-        $copy = Product::query()->where('sku', 'SKU-COPY-COPY')->firstOrFail();
+        $copy = Product::query()->get()->first(
+            fn (Product $candidate): bool => (int) data_get($candidate->attributes, 'master.copy.created_from_product_id') === $product->id
+        );
+
+        $this->assertInstanceOf(Product::class, $copy);
 
         $this->assertSame('Koszula do kopiowania (kopia)', $copy->name);
+        $this->assertSame('SEM-'.str_pad((string) $copy->id, 8, '0', STR_PAD_LEFT), $copy->sku);
+        $this->assertStringNotContainsString('COPY', $copy->sku);
         $this->assertFalse($copy->is_active);
         $this->assertSame('Koszula do kopiowania (kopia)', data_get($copy->attributes, 'master.content.pl.name'));
+        $this->assertSame('<p>Opis</p>', data_get($copy->attributes, 'master.content.pl.description'));
         $this->assertSame($product->id, data_get($copy->attributes, 'master.copy.created_from_product_id'));
-        $this->assertSame('/uploads/products/1/a.jpg', data_get($copy->attributes, 'master.media.0.src'));
+        $this->assertSame([], data_get($copy->attributes, 'master.media'));
         $this->assertNull(data_get($copy->attributes, 'woocommerce_product_id'));
         $this->assertNull(data_get($copy->attributes, 'woocommerce_permalink'));
         $this->assertNull($copy->externalDisplayId());
@@ -870,11 +914,31 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame(0, StockBalance::query()->where('product_id', $copy->id)->count());
         $this->assertSame(1, AuditLog::query()->where('action', 'product.duplicated')->count());
 
+        $variantCopy = $copy->variantChildren()->firstOrFail();
+        $this->assertSame('SEM-'.str_pad((string) $variantCopy->id, 8, '0', STR_PAD_LEFT), $variantCopy->sku);
+        $this->assertStringNotContainsString('COPY', $variantCopy->sku);
+        $this->assertNull($variantCopy->ean);
+        $this->assertFalse($variantCopy->is_active);
+        $this->assertSame('M', data_get($variantCopy->attributes, 'master.parameters.0.value'));
+        $this->assertSame('<p>Opis wariantu</p>', data_get($variantCopy->attributes, 'master.content.pl.description'));
+        $this->assertSame([], data_get($variantCopy->attributes, 'master.media'));
+        $this->assertNull(data_get($variantCopy->attributes, 'woocommerce_variation_id'));
+        $this->assertSame(0, ProductChannelMapping::query()->where('product_id', $variantCopy->id)->count());
+        $this->assertSame(0, StockBalance::query()->where('product_id', $variantCopy->id)->count());
+
         $this->get(route('products.show', $copy))
             ->assertOk()
             ->assertSee('Ten produkt istnieje tylko w ERP')
             ->assertSee('Wyślij do sklepu')
             ->assertDontSee('Otwórz w sklepie');
+
+        $this->get(route('products.edit', $copy))
+            ->assertOk()
+            ->assertSee('Stany magazynowe wariantów')
+            ->assertSee($variantCopy->sku)
+            ->assertSee('Wszystkie stany produktu edytujesz w tej sekcji.')
+            ->assertSee('Edytuj dane wariantu')
+            ->assertDontSee('Edytuj cenę, EAN, SKU i stan');
     }
 
     public function test_operator_can_attach_and_remove_variant_relation(): void

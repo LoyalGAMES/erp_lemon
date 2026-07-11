@@ -280,24 +280,83 @@ class ProductController extends Controller
             : $redirect;
     }
 
-    public function duplicate(Product $product, AuditLogService $audit): RedirectResponse
-    {
+    public function duplicate(
+        Product $product,
+        AuditLogService $audit,
+        ProductIdentifierService $identifiers,
+    ): RedirectResponse {
+        $product->load([
+            'childRelations' => fn ($query) => $query
+                ->where('relation_type', 'variant')
+                ->with('childProduct'),
+        ]);
         $copy = $product->replicate(['sku', 'created_at', 'updated_at']);
         $copy->name = $this->copyName($product->name);
-        $copy->sku = $this->copySku($product->sku);
+        $copy->sku = $identifiers->temporarySku();
+        $copy->ean = null;
         $copy->attributes = $this->copyAttributes((array) $product->attributes, $copy->name, $product->id);
         $copy->is_active = false;
         $copy->save();
+        $identifiers->ensureSku($copy, true);
+
+        $copiedVariants = [];
+
+        foreach ($product->childRelations as $sourceRelation) {
+            $sourceVariant = $sourceRelation->childProduct;
+
+            if (! $sourceVariant instanceof Product) {
+                continue;
+            }
+
+            $variantCopy = $sourceVariant->replicate(['sku', 'created_at', 'updated_at']);
+            $variantCopy->name = $this->copyName($sourceVariant->name);
+            $variantCopy->sku = $identifiers->temporarySku();
+            $variantCopy->ean = null;
+            $variantCopy->attributes = $this->copyAttributes(
+                (array) $sourceVariant->attributes,
+                $variantCopy->name,
+                $sourceVariant->id,
+            );
+            $variantCopy->is_active = false;
+            $variantCopy->save();
+
+            ProductRelation::query()->create([
+                'parent_product_id' => $copy->id,
+                'child_product_id' => $variantCopy->id,
+                'relation_type' => 'variant',
+                'sort_order' => $sourceRelation->sort_order,
+                'metadata' => array_merge((array) $sourceRelation->metadata, [
+                    'copied_from_relation_id' => $sourceRelation->id,
+                    'copied_at' => now()->toISOString(),
+                ]),
+            ]);
+
+            $identifiers->ensureSku($variantCopy, true);
+            $copiedVariants[] = $variantCopy;
+        }
+
+        $identifierResults = collect([$copy, ...$copiedVariants])
+            ->map(fn (Product $copiedProduct): array => $identifiers->ensureEan($copiedProduct));
 
         $audit->record('product.duplicated', $copy, null, [
             'source_product_id' => $product->id,
             'source_sku' => $product->sku,
             'copy_sku' => $copy->sku,
+            'copied_variants' => collect($copiedVariants)->map(fn (Product $variant): array => [
+                'product_id' => $variant->id,
+                'sku' => $variant->sku,
+            ])->values()->all(),
         ]);
 
-        return redirect()
+        $redirect = redirect()
             ->route('products.edit', $copy)
-            ->with('status', "Utworzono kopię produktu {$product->sku}. Popraw dane i wyślij produkt do WooCommerce jako nowy rekord.");
+            ->with('status', count($copiedVariants) > 0
+                ? "Utworzono kopię produktu {$product->sku} razem z ".count($copiedVariants).' wariantami. Nadano nowe SKU i usunięto zdjęcia oraz stare identyfikatory WooCommerce.'
+                : "Utworzono kopię produktu {$product->sku}. Nadano nowe SKU i usunięto zdjęcia oraz stare identyfikatory WooCommerce.");
+
+        $eanError = $identifierResults->pluck('error')->filter()->first();
+
+        return is_string($eanError) ? $redirect->with('warning', $eanError) : $redirect;
     }
 
     public function storeRelation(Product $product, Request $request, AuditLogService $audit): RedirectResponse
@@ -1508,20 +1567,6 @@ class ProductController extends Controller
         return str_ends_with($name, $suffix) ? $name : $name.$suffix;
     }
 
-    private function copySku(string $sku): string
-    {
-        $base = mb_substr($sku, 0, 230);
-        $candidate = $base.'-COPY';
-        $index = 2;
-
-        while (Product::query()->where('sku', $candidate)->exists()) {
-            $candidate = $base.'-COPY-'.$index;
-            $index++;
-        }
-
-        return $candidate;
-    }
-
     private function productSubtitle(Product $product): string
     {
         $displaySku = $product->displaySku();
@@ -1551,6 +1596,7 @@ class ProductController extends Controller
         data_set($attributes, 'master.source', 'erp');
         data_set($attributes, 'master.copy.created_from_product_id', $sourceProductId);
         data_set($attributes, 'master.copy.created_at', now()->toISOString());
+        data_set($attributes, 'master.media', []);
 
         return $attributes;
     }

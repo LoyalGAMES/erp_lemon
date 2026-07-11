@@ -277,7 +277,7 @@
                         <span class="toggle-row"><input name="sold_individually" type="checkbox" value="1" @checked(old('sold_individually', data_get($master, 'inventory.sold_individually', false)))> Maks. 1 szt. w zamówieniu</span>
                     </label>
                 </div>
-                @include('products._stock_readonly_panel', ['stockProduct' => $product])
+                @include('products._stock_management_panels', ['stockOwner' => $product])
             </div>
         </section>
 
