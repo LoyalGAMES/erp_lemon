@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Jobs\ExportWooCommerceProductDataJob;
+use App\Models\AppSetting;
 use App\Models\AuditLog;
 use App\Models\Product;
 use App\Models\ProductCategory;
@@ -918,7 +919,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame('SEM-'.str_pad((string) $variantCopy->id, 8, '0', STR_PAD_LEFT), $variantCopy->sku);
         $this->assertStringNotContainsString('COPY', $variantCopy->sku);
         $this->assertNull($variantCopy->ean);
-        $this->assertFalse($variantCopy->is_active);
+        $this->assertTrue($variantCopy->is_active);
         $this->assertSame('M', data_get($variantCopy->attributes, 'master.parameters.0.value'));
         $this->assertSame('<p>Opis wariantu</p>', data_get($variantCopy->attributes, 'master.content.pl.description'));
         $this->assertSame([], data_get($variantCopy->attributes, 'master.media'));
@@ -939,6 +940,101 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('Wszystkie stany produktu edytujesz w tej sekcji.')
             ->assertSee('Edytuj dane wariantu')
             ->assertDontSee('Edytuj cenę, EAN, SKU i stan');
+    }
+
+    public function test_new_variable_product_generates_variants_with_unique_sku_and_inherited_gs1_ean(): void
+    {
+        AppSetting::query()->create([
+            'key' => 'gs1_configuration',
+            'value' => [
+                'company_prefix' => '5901234',
+                'next_item_reference' => 1,
+                'register_products' => false,
+            ],
+        ]);
+        $category = ProductCategory::query()->create([
+            'external_id' => 'ERP-KOMPLETY',
+            'name' => 'Komplety',
+            'path' => 'Odzież > Komplety',
+            'gs1_gpc_code' => '10001352',
+            'gs1_gpc_label' => 'Komplety odzieżowe',
+        ]);
+
+        $this->post(route('products.store'), [
+            'name' => 'Komplet tworzony od zera',
+            'name_en' => 'New set',
+            'sku' => '',
+            'ean' => '',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => 1,
+            'product_type' => 'variable',
+            'variant_attribute' => 'Rozmiar',
+            'new_variant_values' => ['S', 'M'],
+            'category_ids' => [$category->id],
+            'retail_price_pln' => 399.99,
+            'description_pl' => '<p>Opis kompletu</p>',
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $parent = Product::query()->where('name', 'Komplet tworzony od zera')->firstOrFail();
+        $parent->load('variantChildren');
+        $this->assertSame('variable', data_get($parent->masterData(), 'product_type'));
+        $this->assertSame('SEM-'.str_pad((string) $parent->id, 8, '0', STR_PAD_LEFT), $parent->sku);
+        $this->assertNotNull($parent->ean);
+        $this->assertCount(2, $parent->variantChildren);
+
+        $variantEans = [];
+
+        foreach ($parent->variantChildren as $variant) {
+            $option = data_get($variant->masterData(), 'parameters.0.value');
+            $this->assertContains($option, ['S', 'M']);
+            $this->assertSame('Rozmiar', data_get($variant->masterData(), 'parameters.0.name'));
+            $this->assertTrue(data_get($variant->masterData(), 'parameters.0.variation'));
+            $this->assertSame('variation', data_get($variant->masterData(), 'product_type'));
+            $this->assertSame('SEM-'.str_pad((string) $variant->id, 8, '0', STR_PAD_LEFT), $variant->sku);
+            $this->assertNotNull($variant->ean);
+            $this->assertSame('10001352', data_get($variant->masterData(), 'gs1.gpc_code'));
+            $this->assertEquals(399.99, data_get($variant->masterData(), 'prices.retail_price_pln'));
+            $this->assertSame('<p>Opis kompletu</p>', data_get($variant->masterData(), 'content.pl.description'));
+            $this->assertSame([], data_get($variant->masterData(), 'media'));
+            $this->assertSame(0, StockBalance::query()->where('product_id', $variant->id)->count());
+            $variantEans[] = $variant->ean;
+        }
+
+        $this->assertCount(3, array_unique([$parent->ean, ...$variantEans]));
+        $this->assertDatabaseHas('product_parameter_definitions', [
+            'name' => 'Rozmiar',
+            'is_variant' => true,
+        ]);
+
+        $this->put(route('products.update', $parent), [
+            'name' => $parent->name,
+            'name_en' => 'New set',
+            'sku' => $parent->sku,
+            'ean' => $parent->ean,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => 1,
+            'product_type' => 'variable',
+            'variant_attribute' => 'Rozmiar',
+            'new_variant_values' => ['S', 'M', 'L'],
+            'category_ids' => [$category->id],
+            'retail_price_pln' => 399.99,
+            'description_pl' => '<p>Opis kompletu</p>',
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $parent->refresh()->load('variantChildren');
+        $this->assertCount(3, $parent->variantChildren);
+        $this->assertSame(
+            ['L', 'M', 'S'],
+            $parent->variantChildren
+                ->map(fn (Product $variant): string => (string) data_get($variant->masterData(), 'parameters.0.value'))
+                ->sort()
+                ->values()
+                ->all(),
+        );
+        $this->assertSame(3, $parent->variantChildren->pluck('sku')->unique()->count());
+        $this->assertSame(3, $parent->variantChildren->pluck('ean')->filter()->unique()->count());
     }
 
     public function test_operator_can_attach_and_remove_variant_relation(): void

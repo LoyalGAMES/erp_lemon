@@ -390,6 +390,13 @@ final class ProductDataExportService
             }
 
             $this->updateMappingAfterExport($mapping, $variant, $payload, $response);
+            $translationResults = $this->syncVariantTranslations(
+                $product,
+                $variant,
+                $integration,
+                $salesChannelId,
+                $mapping,
+            );
 
             IntegrationSyncLog::query()->create([
                 'sales_channel_id' => $salesChannelId,
@@ -404,6 +411,7 @@ final class ProductDataExportService
                     'id' => $response['id'] ?? null,
                     'sku' => $response['sku'] ?? null,
                     'regular_price' => $response['regular_price'] ?? null,
+                    'translations' => $translationResults,
                 ],
                 'attempts' => 1,
                 'started_at' => now(),
@@ -414,6 +422,75 @@ final class ProductDataExportService
                 'sku' => $variant->sku,
                 'external_id' => $mapping->external_variation_id ?? $mapping->external_product_id,
                 'response' => $response,
+                'translations' => $translationResults,
+            ];
+        }
+
+        return $results;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function syncVariantTranslations(
+        Product $parent,
+        Product $variant,
+        WordpressIntegration $integration,
+        int $salesChannelId,
+        ProductChannelMapping $primaryMapping,
+    ): array {
+        $results = [];
+
+        foreach ((array) data_get($parent->attributes, 'woocommerce_translations', []) as $language => $parentReference) {
+            if (! is_array($parentReference)) {
+                continue;
+            }
+
+            $translatedParentId = trim((string) ($parentReference['product_id'] ?? ''));
+
+            if ($translatedParentId === '' || $translatedParentId === (string) $primaryMapping->external_product_id) {
+                continue;
+            }
+
+            $language = trim((string) $language) ?: 'en';
+            $payload = $this->variationPayload($parent, $variant, $salesChannelId, $language);
+            $variantReference = data_get($variant->attributes, "woocommerce_translations.{$language}");
+            $translatedVariationId = is_array($variantReference)
+                ? trim((string) ($variantReference['variation_id'] ?? ''))
+                : '';
+
+            if ($translatedVariationId !== '') {
+                $response = $this->client->updateProductDataByIds(
+                    $integration,
+                    $translatedParentId,
+                    $translatedVariationId,
+                    $payload,
+                );
+                $operation = 'updated';
+            } else {
+                $response = $this->client->createProductVariation($integration, $translatedParentId, $payload);
+                $translatedVariationId = trim((string) ($response['id'] ?? ''));
+                $operation = 'created';
+
+                if ($translatedVariationId === '') {
+                    throw new RuntimeException("WooCommerce nie zwrócił ID wariantu {$variant->sku} dla tłumaczenia {$language}.");
+                }
+
+                $this->saveTranslationReference(
+                    $variant,
+                    $language,
+                    $translatedParentId,
+                    $translatedVariationId,
+                    $variant->sku,
+                );
+            }
+
+            $results[] = [
+                'language' => $language,
+                'product_id' => $translatedParentId,
+                'variation_id' => $translatedVariationId,
+                'operation' => $operation,
+                'response_id' => $response['id'] ?? null,
             ];
         }
 

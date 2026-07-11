@@ -1119,6 +1119,100 @@ class WooCommerceProductDataExportTest extends TestCase
         });
     }
 
+    public function test_export_creates_new_variant_for_polish_and_english_polylang_parents(): void
+    {
+        Http::fake(function ($request) {
+            return match ([$request->method(), $request->url()]) {
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/123'] => Http::response(['id' => 123, 'sku' => 'SET-NEW']),
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/124'] => Http::response(['id' => 124, 'sku' => 'SET-NEW']),
+                ['POST', 'https://shop.test/wp-json/wc/v3/products/123/variations'] => Http::response(['id' => 456, 'sku' => 'SEM-NEW-S'], 201),
+                ['POST', 'https://shop.test/wp-json/wc/v3/products/124/variations'] => Http::response(['id' => 457, 'sku' => 'SEM-NEW-S'], 201),
+                default => Http::response([], 404),
+            };
+        });
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'SET-NEW',
+            'name' => 'Nowy komplet',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variable',
+                    'variant_attribute' => 'Rozmiar',
+                    'content' => [
+                        'pl' => ['name' => 'Nowy komplet'],
+                        'en' => ['name' => 'New set'],
+                    ],
+                ],
+                'woocommerce_translations' => [
+                    'en' => ['product_id' => '124', 'variation_id' => null, 'sku' => 'SET-NEW'],
+                ],
+            ],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'SEM-NEW-S',
+            'ean' => '5901234567890',
+            'name' => 'Nowy komplet - S',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variation',
+                'parameters' => [['name' => 'Rozmiar', 'value' => 'S', 'variation' => true]],
+            ]],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'SET-NEW',
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($parent);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations'
+            && $request['sku'] === 'SEM-NEW-S'
+            && $request['global_unique_id'] === '5901234567890');
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations'
+            && $request['sku'] === 'SEM-NEW-S'
+            && $request['attributes'][0]['option'] === 'S');
+        $this->assertDatabaseHas('product_channel_mappings', [
+            'product_id' => $variant->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+        ]);
+        $this->assertSame('124', data_get($variant->fresh()->attributes, 'woocommerce_translations.en.product_id'));
+        $this->assertSame('457', data_get($variant->fresh()->attributes, 'woocommerce_translations.en.variation_id'));
+    }
+
     private function createVariantProduct(string $sku, string $size, float $price): Product
     {
         return Product::query()->create([

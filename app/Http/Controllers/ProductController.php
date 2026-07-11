@@ -214,13 +214,23 @@ class ProductController extends Controller
         $identifiers->ensureSku($product, $requestedSku === null);
         $eanResult = $identifiers->ensureEan($product);
         $this->syncVariantRelations($product, (array) $request->input('variant_skus', []), [], $validated['variant_attribute'] ?? null);
+        $generatedVariants = $this->createGeneratedVariants(
+            $product,
+            $request,
+            $validated['variant_attribute'] ?? null,
+            $identifiers,
+        );
 
         $redirect = redirect()
             ->route('products.show', $product)
-            ->with('status', 'Produkt został dodany jako dane główne ERP.');
+            ->with('status', $generatedVariants['created'] > 0
+                ? "Produkt został dodany razem z {$generatedVariants['created']} wariantami. Każdy wariant otrzymał własne SKU i EAN."
+                : 'Produkt został dodany jako dane główne ERP.');
 
-        return $eanResult['error'] !== null
-            ? $redirect->with('warning', $eanResult['error'])
+        $identifierError = $eanResult['error'] ?? $generatedVariants['error'];
+
+        return $identifierError !== null
+            ? $redirect->with('warning', $identifierError)
             : $redirect;
     }
 
@@ -264,6 +274,12 @@ class ProductController extends Controller
             (array) $request->input('variant_remove', []),
             $validated['variant_attribute'] ?? null,
         );
+        $generatedVariants = $this->createGeneratedVariants(
+            $product,
+            $request,
+            $validated['variant_attribute'] ?? null,
+            $identifiers,
+        );
 
         $audit->record('product.master_data_updated', $product, $before, [
             'product' => $product->only(['sku', 'name', 'ean', 'unit', 'vat_rate', 'weight_kg', 'is_active']),
@@ -273,10 +289,14 @@ class ProductController extends Controller
 
         $redirect = redirect()
             ->route('products.show', $product)
-            ->with('status', 'Dane produktu zostały zapisane jako dane główne ERP. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle.');
+            ->with('status', $generatedVariants['created'] > 0
+                ? "Dane produktu zostały zapisane i utworzono {$generatedVariants['created']} brakujących wariantów. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle."
+                : 'Dane produktu zostały zapisane jako dane główne ERP. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle.');
 
-        return $eanResult['error'] !== null
-            ? $redirect->with('warning', $eanResult['error'])
+        $identifierError = $eanResult['error'] ?? $generatedVariants['error'];
+
+        return $identifierError !== null
+            ? $redirect->with('warning', $identifierError)
             : $redirect;
     }
 
@@ -317,7 +337,7 @@ class ProductController extends Controller
                 $variantCopy->name,
                 $sourceVariant->id,
             );
-            $variantCopy->is_active = false;
+            $variantCopy->is_active = $sourceVariant->is_active;
             $variantCopy->save();
 
             ProductRelation::query()->create([
@@ -364,7 +384,10 @@ class ProductController extends Controller
         $validated = $request->validate([
             'relation_type' => ['required', 'string', 'in:variant'],
             'child_sku' => ['required', 'string', 'exists:products,sku'],
-            'variant_attribute' => ['nullable', 'string', 'max:255'],
+            'variant_attribute' => ['nullable', 'string', 'max:255', 'required_with:new_variant_values,new_variant_values_custom'],
+            'new_variant_values' => ['nullable', 'array', 'max:100'],
+            'new_variant_values.*' => ['nullable', 'string', 'max:120'],
+            'new_variant_values_custom' => ['nullable', 'string', 'max:4000'],
         ]);
         $child = Product::query()->where('sku', $validated['child_sku'])->firstOrFail();
 
@@ -921,6 +944,184 @@ class ProductController extends Controller
         $master['product_type'] = 'variation';
         data_set($attributes, 'master', $master);
         $product->forceFill(['attributes' => $attributes])->save();
+    }
+
+    /**
+     * @return array{created:int,error:?string}
+     */
+    private function createGeneratedVariants(
+        Product $parent,
+        Request $request,
+        mixed $variantAttribute,
+        ProductIdentifierService $identifiers,
+    ): array {
+        $options = collect((array) $request->input('new_variant_values', []))
+            ->merge(preg_split('/[\r\n,;]+/', (string) $request->input('new_variant_values_custom', '')) ?: [])
+            ->map(fn (mixed $option): string => mb_substr(trim((string) $option), 0, 120))
+            ->filter()
+            ->unique(fn (string $option): string => mb_strtolower($option))
+            ->take(100)
+            ->values();
+
+        if ($options->isEmpty()) {
+            return ['created' => 0, 'error' => null];
+        }
+
+        $variantAttribute = $this->nullableString($variantAttribute)
+            ?? $this->nullableString(data_get($parent->masterData(), 'variant_attribute'));
+
+        if ($variantAttribute === null) {
+            return ['created' => 0, 'error' => 'Nie utworzono wariantów: wybierz atrybut wariantowy.'];
+        }
+
+        $parent->loadMissing('variantChildren');
+        $existingOptions = $parent->variantChildren
+            ->map(fn (Product $variant): ?string => $this->variantOptionValue($variant, $variantAttribute))
+            ->filter()
+            ->map(fn (string $option): string => mb_strtolower($option))
+            ->flip();
+        $nextSortOrder = (int) (ProductRelation::query()
+            ->where('parent_product_id', $parent->id)
+            ->where('relation_type', 'variant')
+            ->max('sort_order') ?? 0);
+        $created = 0;
+        $eanErrors = [];
+
+        foreach ($options as $option) {
+            if ($existingOptions->has(mb_strtolower($option))) {
+                continue;
+            }
+
+            $variantName = mb_substr($parent->name.' - '.$option, 0, 255);
+            $variant = Product::query()->create([
+                'sku' => $identifiers->temporarySku(),
+                'name' => $variantName,
+                'ean' => null,
+                'unit' => $parent->unit,
+                'vat_rate' => $parent->vat_rate,
+                'weight_kg' => $parent->weight_kg,
+                'quantity_precision' => $parent->quantity_precision,
+                'is_active' => true,
+                'attributes' => [
+                    'master' => $this->generatedVariantMasterData($parent, $variantAttribute, $option),
+                ],
+            ]);
+            $nextSortOrder += 10;
+
+            ProductRelation::query()->create([
+                'parent_product_id' => $parent->id,
+                'child_product_id' => $variant->id,
+                'relation_type' => 'variant',
+                'sort_order' => $nextSortOrder,
+                'metadata' => [
+                    'created_from' => 'attribute_value_generator',
+                    'variant_attribute' => $variantAttribute,
+                    'variant_option' => $option,
+                ],
+            ]);
+
+            $identifiers->ensureSku($variant, true);
+            $eanResult = $identifiers->ensureEan($variant);
+
+            if ($eanResult['error'] !== null) {
+                $eanErrors[] = $eanResult['error'];
+            }
+
+            $existingOptions->put(mb_strtolower($option), true);
+            $created++;
+        }
+
+        if ($created > 0) {
+            $this->markAsVariableParent($parent, $variantAttribute);
+            $this->syncVariantParameterDefinition($variantAttribute, $options->all());
+        }
+
+        return [
+            'created' => $created,
+            'error' => collect($eanErrors)->first(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function generatedVariantMasterData(Product $parent, string $variantAttribute, string $option): array
+    {
+        $master = $parent->masterData();
+        $master['source'] = 'erp';
+        $master['product_type'] = 'variation';
+        $master['variant_attribute'] = $variantAttribute;
+        $master['media'] = [];
+        unset($master['copy']);
+
+        foreach (['pl', 'en'] as $language) {
+            $parentName = $this->nullableString(data_get($master, "content.{$language}.name"));
+
+            if ($parentName !== null) {
+                data_set($master, "content.{$language}.name", mb_substr($parentName.' - '.$option, 0, 255));
+            }
+        }
+
+        $parameters = collect((array) data_get($master, 'parameters', []))
+            ->filter(fn (mixed $parameter): bool => is_array($parameter))
+            ->reject(fn (array $parameter): bool => mb_strtolower(trim((string) ($parameter['name'] ?? ''))) === mb_strtolower($variantAttribute))
+            ->values()
+            ->push([
+                'name' => $variantAttribute,
+                'value' => $option,
+                'variation' => true,
+            ])
+            ->all();
+        $master['parameters'] = $parameters;
+
+        return $master;
+    }
+
+    private function variantOptionValue(Product $variant, string $variantAttribute): ?string
+    {
+        foreach ((array) data_get($variant->masterData(), 'parameters', []) as $parameter) {
+            if (! is_array($parameter)) {
+                continue;
+            }
+
+            if (mb_strtolower(trim((string) ($parameter['name'] ?? ''))) === mb_strtolower($variantAttribute)) {
+                return $this->nullableString($parameter['value'] ?? null);
+            }
+        }
+
+        foreach ($variant->wooVariationAttributes() as $attribute) {
+            if (mb_strtolower(trim((string) ($attribute['name'] ?? ''))) === mb_strtolower($variantAttribute)) {
+                return $this->nullableString($attribute['option'] ?? null);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * @param  list<string>  $options
+     */
+    private function syncVariantParameterDefinition(string $variantAttribute, array $options): void
+    {
+        $definition = ProductParameterDefinition::query()->firstOrNew(['name' => $variantAttribute]);
+        $definition->fill([
+            'slug' => $definition->slug ?: Str::slug($variantAttribute),
+            'input_type' => 'select',
+            'values' => collect((array) $definition->values)
+                ->merge($options)
+                ->map(fn (mixed $value): string => trim((string) $value))
+                ->filter()
+                ->unique(fn (string $value): string => mb_strtolower($value))
+                ->values()
+                ->all(),
+            'is_variant' => true,
+            'is_required' => $definition->is_required ?? false,
+            'sort_order' => $definition->sort_order ?: 100,
+            'metadata' => array_merge((array) $definition->metadata, [
+                'source' => $definition->exists ? data_get($definition->metadata, 'source', 'erp') : 'erp_variant_generator',
+                'updated_from_product_at' => now()->toISOString(),
+            ]),
+        ])->save();
     }
 
     /**

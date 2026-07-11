@@ -356,6 +356,10 @@
         <section class="card product-edit-card product-edit-step" data-product-step="warianty" hidden>
             <div class="panel-header">Warianty i relacje</div>
             <div class="product-edit-body">
+                @include('products._new_variant_values_fields', [
+                    'variantProduct' => $product,
+                    'selectedVariantAttribute' => data_get($master, 'variant_attribute'),
+                ])
                 @include('products._variant_relation_editor', [
                     'product' => $product,
                     'productLookupOptions' => $productLookupOptions,

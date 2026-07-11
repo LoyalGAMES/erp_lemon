@@ -320,6 +320,12 @@
                             'value' => old('variant_attribute'),
                         ])
                     </label>
+                    <div class="wide">
+                        @include('products._new_variant_values_fields', [
+                            'variantProduct' => null,
+                            'selectedVariantAttribute' => old('variant_attribute'),
+                        ])
+                    </div>
                     <label>Gotowe do publikacji
                         <input type="hidden" name="developed" value="0">
                         <span class="toggle-row"><input name="developed" type="checkbox" value="1" @checked(old('developed'))> Dane PIM kompletne</span>

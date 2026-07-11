@@ -12,7 +12,7 @@
         ->values();
 @endphp
 
-<select name="{{ $fieldName }}">
+<select name="{{ $fieldName }}" data-variant-attribute-select>
     <option value="">Wybierz ze słownika parametrów</option>
     @foreach ($variantAttributeOptions as $option)
         <option value="{{ $option }}" @selected($selectedValue === $option)>{{ $option }}</option>

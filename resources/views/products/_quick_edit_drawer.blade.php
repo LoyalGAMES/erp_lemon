@@ -313,6 +313,10 @@
 
         <section class="product-quick-edit-step" data-product-quick-edit-step="warianty" hidden>
             <div class="product-quick-edit-body">
+                @include('products._new_variant_values_fields', [
+                    'variantProduct' => $product,
+                    'selectedVariantAttribute' => data_get($quickMaster, 'variant_attribute'),
+                ])
                 @include('products._variant_relation_editor', [
                     'product' => $product,
                     'productLookupOptions' => $productLookupOptions,
