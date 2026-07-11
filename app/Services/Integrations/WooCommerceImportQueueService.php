@@ -116,6 +116,54 @@ final class WooCommerceImportQueueService
         return $log;
     }
 
+    public function queueOrderImportContinuation(
+        WordpressIntegration $integration,
+        IntegrationSyncLog $parentLog,
+        ?string $modifiedAfter,
+        int $page,
+        bool $backfill,
+    ): IntegrationSyncLog {
+        $activeLog = IntegrationSyncLog::query()
+            ->where('wordpress_integration_id', $integration->id)
+            ->where('operation', 'import_orders')
+            ->whereIn('status', ['queued', 'running'])
+            ->whereKeyNot($parentLog->id)
+            ->latest()
+            ->first();
+
+        if ($activeLog instanceof IntegrationSyncLog) {
+            return $activeLog;
+        }
+
+        $log = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'queued',
+            'request_payload' => [
+                'source' => 'continuation',
+                'parent_log_id' => $parentLog->id,
+                'mode' => $backfill ? 'backfill' : 'incremental',
+                'modified_after' => $modifiedAfter,
+                'page' => max(1, $page),
+                'queued_at' => now()->toDateTimeString(),
+            ],
+            'attempts' => 1,
+            'started_at' => now(),
+        ]);
+
+        ImportWooCommerceOrdersJob::dispatch(
+            $integration->id,
+            $log->id,
+            $modifiedAfter,
+            max(1, $page),
+            $backfill,
+        );
+
+        return $log;
+    }
+
     /**
      * @return array{released:int,minutes:int}
      */

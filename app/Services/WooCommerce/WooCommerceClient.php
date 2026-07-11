@@ -195,28 +195,9 @@ final class WooCommerceClient
         $pageLimit = max(1, min(500, (int) $settings['page_limit']));
 
         for ($page = 1; $page <= $pageLimit; $page++) {
-            $query = [
-                'per_page' => 100,
-                'page' => $page,
-                'status' => 'any',
-                'orderby' => 'date',
-                'order' => 'desc',
-            ];
+            $orders = $this->ordersPage($integration, $page, $modifiedAfter);
 
-            if ($modifiedAfter instanceof CarbonInterface) {
-                $query['modified_after'] = $modifiedAfter->toIso8601String();
-            }
-
-            $response = $this->request($integration)
-                ->get($this->endpoint($integration, '/orders'), $query);
-
-            if (! $response->successful()) {
-                throw new RuntimeException("Import zamówień zwrócił HTTP {$response->status()}.");
-            }
-
-            $orders = $response->json();
-
-            if (! is_array($orders) || $orders === []) {
+            if ($orders === []) {
                 break;
             }
 
@@ -227,11 +208,45 @@ final class WooCommerceClient
     }
 
     /**
+     * @return list<array<string, mixed>>
+     */
+    public function ordersPage(
+        WordpressIntegration $integration,
+        int $page,
+        ?CarbonInterface $modifiedAfter = null,
+    ): array {
+        $query = [
+            'per_page' => 100,
+            'page' => max(1, $page),
+            'status' => 'any',
+            'orderby' => 'date',
+            'order' => 'desc',
+        ];
+
+        if ($modifiedAfter instanceof CarbonInterface) {
+            $query['modified_after'] = $modifiedAfter->toIso8601String();
+        }
+
+        $response = $this->request($integration)
+            ->get($this->endpoint($integration, '/orders'), $query);
+
+        if (! $response->successful()) {
+            throw new RuntimeException("Import zamówień zwrócił HTTP {$response->status()}.");
+        }
+
+        $orders = $response->json();
+
+        return is_array($orders)
+            ? array_values(array_filter($orders, fn (mixed $order): bool => is_array($order)))
+            : [];
+    }
+
+    /**
      * @return array<int, array<string, mixed>>
      */
     public function orderNotes(WordpressIntegration $integration, string $orderId): array
     {
-        $response = $this->request($integration)
+        $response = $this->orderNotesRequest($integration)
             ->get($this->endpoint($integration, "/orders/{$orderId}/notes"), [
                 'type' => 'any',
                 'per_page' => 50,
@@ -677,6 +692,16 @@ final class WooCommerceClient
     {
         return Http::timeout(30)
             ->retry(2, 300)
+            ->acceptJson()
+            ->withBasicAuth(
+                Crypt::decryptString($integration->consumer_key_encrypted),
+                Crypt::decryptString($integration->consumer_secret_encrypted),
+            );
+    }
+
+    private function orderNotesRequest(WordpressIntegration $integration): PendingRequest
+    {
+        return Http::timeout(3)
             ->acceptJson()
             ->withBasicAuth(
                 Crypt::decryptString($integration->consumer_key_encrypted),

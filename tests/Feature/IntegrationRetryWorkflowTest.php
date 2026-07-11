@@ -9,11 +9,14 @@ use App\Jobs\ImportWooCommerceProductsJob;
 use App\Models\IntegrationSyncLog;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
+use App\Services\Integrations\WooCommerceImportQueueService;
+use App\Services\WooCommerce\WooCommerceImportService;
 use App\Services\Wordpress\LemonErpWooCommercePluginPackageService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 use ZipArchive;
@@ -125,6 +128,110 @@ class IntegrationRetryWorkflowTest extends TestCase
             ->assertSessionHas('status', 'Import został ponownie dodany do kolejki.');
 
         Queue::assertPushed(ImportWooCommerceOrdersJob::class);
+    }
+
+    public function test_order_import_job_splits_full_backfill_into_continuation_jobs(): void
+    {
+        Queue::fake();
+
+        [$integration] = $this->createIntegration();
+        $log = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'queued',
+            'attempts' => 1,
+            'started_at' => now(),
+        ]);
+        $orders = collect(range(1, 100))
+            ->map(fn (int $id): array => [
+                'id' => $id,
+                'number' => (string) $id,
+                'status' => 'pending',
+                'currency' => 'PLN',
+                'total' => '0.00',
+                'line_items' => [],
+            ])
+            ->all();
+
+        Http::fake([
+            '*' => function ($request) use ($orders) {
+                if (str_contains($request->url(), '/notes')) {
+                    return Http::response([]);
+                }
+
+                return Http::response($orders);
+            },
+        ]);
+
+        (new ImportWooCommerceOrdersJob($integration->id, $log->id))->handle(
+            app(WooCommerceImportService::class),
+            app(WooCommerceImportQueueService::class),
+        );
+
+        $log->refresh();
+        $this->assertSame('success', $log->status);
+        $this->assertSame(1, $log->response_payload['pages']);
+        $this->assertTrue($log->response_payload['has_more']);
+        $this->assertSame('backfill', $log->response_payload['mode']);
+
+        $continuation = IntegrationSyncLog::query()
+            ->where('wordpress_integration_id', $integration->id)
+            ->where('operation', 'import_orders')
+            ->where('status', 'queued')
+            ->firstOrFail();
+
+        $this->assertSame('continuation', $continuation->request_payload['source']);
+        $this->assertSame('backfill', $continuation->request_payload['mode']);
+        $this->assertSame(2, $continuation->request_payload['page']);
+        $this->assertSame(2, data_get($integration->fresh()->settings, 'order_import.continuation.next_page'));
+
+        Queue::assertPushed(ImportWooCommerceOrdersJob::class, 1);
+    }
+
+    public function test_order_import_job_uses_last_successful_order_import_as_incremental_cutoff(): void
+    {
+        Queue::fake();
+
+        [$integration] = $this->createIntegration();
+        $finishedAt = CarbonImmutable::parse('2026-07-10 12:00:00', 'Europe/Warsaw');
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'success',
+            'attempts' => 1,
+            'started_at' => $finishedAt->subMinute(),
+            'finished_at' => $finishedAt,
+        ]);
+        $log = IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'queued',
+            'attempts' => 1,
+            'started_at' => now(),
+        ]);
+
+        Http::fake(['*' => Http::response([])]);
+
+        (new ImportWooCommerceOrdersJob($integration->id, $log->id))->handle(
+            app(WooCommerceImportService::class),
+            app(WooCommerceImportQueueService::class),
+        );
+
+        Http::assertSent(function ($request) use ($finishedAt): bool {
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            return $query['modified_after'] === $finishedAt->subMinutes(30)->toIso8601String();
+        });
+
+        $this->assertSame('incremental', $log->refresh()->response_payload['mode']);
+        $this->assertFalse($log->response_payload['has_more']);
+        Queue::assertNotPushed(ImportWooCommerceOrdersJob::class);
     }
 
     public function test_import_buttons_do_not_duplicate_active_jobs(): void

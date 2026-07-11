@@ -16,8 +16,8 @@ use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Inventory\SalesChannelWarehouseResolver;
 use App\Services\Inventory\StockReservationService;
-use App\Services\Orders\OrderWzDocumentService;
 use App\Services\Orders\OrderStatusPolicyService;
+use App\Services\Orders\OrderWzDocumentService;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -33,8 +33,7 @@ final class WooCommerceImportService
         private readonly OrderWzDocumentService $wzDocuments,
         private readonly CustomerCommunicationService $communication,
         private readonly OrderStatusPolicyService $statusPolicy,
-    ) {
-    }
+    ) {}
 
     /**
      * @return array<string, int>
@@ -84,6 +83,7 @@ final class WooCommerceImportService
             if ($sku === null) {
                 $stats['skipped']++;
                 $stats['skipped_missing_identifier']++;
+
                 continue;
             }
 
@@ -193,7 +193,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param list<array<string, mixed>> $categories
+     * @param  list<array<string, mixed>>  $categories
      */
     private function syncItemCategories(WordpressIntegration $integration, array $categories): void
     {
@@ -205,7 +205,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $category
+     * @param  array<string, mixed>  $category
      */
     private function upsertCategory(WordpressIntegration $integration, array $category): void
     {
@@ -241,116 +241,177 @@ final class WooCommerceImportService
     }
 
     /**
-     * @return array{created:int,updated:int,lines:int,reserved:int,released:int,reservation_skipped:int}
+     * @return array{created:int,updated:int,lines:int,reserved:int,released:int,reservation_skipped:int,pages:int,has_more:bool,next_page:?int}
      */
-    public function importOrders(WordpressIntegration $integration): array
-    {
+    public function importOrders(
+        WordpressIntegration $integration,
+        ?CarbonImmutable $modifiedAfter = null,
+        int $firstPage = 1,
+    ): array {
         $created = 0;
         $updated = 0;
         $lines = 0;
         $reserved = 0;
         $released = 0;
         $reservationSkipped = 0;
+        $pages = 0;
+        $pageLimit = $integration->orderImportSettings()['page_limit'];
+        $startPage = max(1, $firstPage);
+        $lastPage = $startPage + $pageLimit - 1;
+        $nextPage = $startPage;
 
-        foreach ($this->client->orders($integration) as $item) {
-            $item['erp_imported_order_notes'] = $this->safeOrderNotes($integration, (string) $item['id']);
-            $wasCreated = false;
-            $previousStatus = null;
+        for ($page = $startPage; $page <= $lastPage; $page++) {
+            $items = $this->client->ordersPage($integration, $page, $modifiedAfter);
 
-            $order = DB::transaction(function () use ($integration, $item, &$created, &$updated, &$lines, &$reserved, &$released, &$reservationSkipped, &$wasCreated, &$previousStatus): ExternalOrder {
-                $order = ExternalOrder::query()->firstOrNew([
-                    'sales_channel_id' => $integration->sales_channel_id,
-                    'external_id' => (string) $item['id'],
-                ]);
-                $isNew = ! $order->exists;
-                $wasCreated = $isNew;
-                $previousStatus = $order->exists ? (string) $order->status : null;
-                $existingRawPayload = (array) $order->raw_payload;
-                $splitAllocations = $order->exists ? $this->splitAllocationsForOrder($order) : [];
-                $importLines = $this->importableOrderLines($item, $splitAllocations);
-                $rawPayload = $this->rawPayloadForImportedOrder($item, $existingRawPayload, $splitAllocations);
+            if ($items === []) {
+                return $this->orderImportStats(
+                    $created,
+                    $updated,
+                    $lines,
+                    $reserved,
+                    $released,
+                    $reservationSkipped,
+                    $pages,
+                );
+            }
 
-                $order->fill([
-                    'external_number' => (string) ($item['number'] ?? $item['id']),
-                    'status' => (string) ($item['status'] ?? 'unknown'),
-                    'currency' => (string) ($item['currency'] ?? 'PLN'),
-                    'total_gross' => $splitAllocations === []
-                        ? (float) ($item['total'] ?? 0)
-                        : $this->grossTotalFromImportLines($importLines),
-                    'billing_data' => $item['billing'] ?? null,
-                    'shipping_data' => $item['shipping'] ?? null,
-                    'raw_payload' => $rawPayload,
-                    'external_created_at' => $this->wooCommerceDateTime($item, 'date_created'),
-                    'external_updated_at' => $this->wooCommerceDateTime($item, 'date_modified'),
-                ]);
-                $order->save();
+            $pages++;
 
-                $order->lines()->delete();
+            foreach ($items as $item) {
+                $existingOrder = ExternalOrder::query()
+                    ->where('sales_channel_id', $integration->sales_channel_id)
+                    ->where('external_id', (string) ($item['id'] ?? ''))
+                    ->first(['id', 'external_updated_at', 'raw_payload']);
+                $item['erp_imported_order_notes'] = $this->orderNotesForImport($integration, $item, $existingOrder);
+                $wasCreated = false;
+                $previousStatus = null;
 
-                foreach ($importLines as $line) {
-                    $sku = trim((string) ($line['sku'] ?? ''));
-                    $product = $sku !== '' ? Product::query()->where('sku', $sku)->first() : null;
-                    $quantity = (float) ($line['quantity'] ?? 0);
-                    $sourceQuantity = (float) ($line['sempre_erp_source_quantity'] ?? $quantity);
-
-                    $order->lines()->create([
-                        'product_id' => $product?->id,
-                        'external_line_id' => isset($line['id']) ? (string) $line['id'] : null,
-                        'sku' => $sku !== '' ? $sku : null,
-                        'name' => (string) ($line['name'] ?? 'Pozycja zamówienia'),
-                        'quantity' => $quantity,
-                        'unit_net_price' => isset($line['subtotal']) && $sourceQuantity > 0
-                            ? (float) $line['subtotal'] / $sourceQuantity
-                            : null,
-                        'unit_gross_price' => isset($line['total']) && $sourceQuantity > 0
-                            ? (float) $line['total'] / $sourceQuantity
-                            : null,
-                        'vat_rate' => null,
-                        'raw_payload' => $line,
+                $order = DB::transaction(function () use ($integration, $item, &$created, &$updated, &$lines, &$reserved, &$released, &$reservationSkipped, &$wasCreated, &$previousStatus): ExternalOrder {
+                    $order = ExternalOrder::query()->firstOrNew([
+                        'sales_channel_id' => $integration->sales_channel_id,
+                        'external_id' => (string) $item['id'],
                     ]);
-                    $lines++;
+                    $isNew = ! $order->exists;
+                    $wasCreated = $isNew;
+                    $previousStatus = $order->exists ? (string) $order->status : null;
+                    $existingRawPayload = (array) $order->raw_payload;
+                    $splitAllocations = $order->exists ? $this->splitAllocationsForOrder($order) : [];
+                    $importLines = $this->importableOrderLines($item, $splitAllocations);
+                    $rawPayload = $this->rawPayloadForImportedOrder($item, $existingRawPayload, $splitAllocations);
+
+                    $order->fill([
+                        'external_number' => (string) ($item['number'] ?? $item['id']),
+                        'status' => (string) ($item['status'] ?? 'unknown'),
+                        'currency' => (string) ($item['currency'] ?? 'PLN'),
+                        'total_gross' => $splitAllocations === []
+                            ? (float) ($item['total'] ?? 0)
+                            : $this->grossTotalFromImportLines($importLines),
+                        'billing_data' => $item['billing'] ?? null,
+                        'shipping_data' => $item['shipping'] ?? null,
+                        'raw_payload' => $rawPayload,
+                        'external_created_at' => $this->wooCommerceDateTime($item, 'date_created'),
+                        'external_updated_at' => $this->wooCommerceDateTime($item, 'date_modified'),
+                    ]);
+                    $order->save();
+
+                    $order->lines()->delete();
+
+                    foreach ($importLines as $line) {
+                        $sku = trim((string) ($line['sku'] ?? ''));
+                        $product = $sku !== '' ? Product::query()->where('sku', $sku)->first() : null;
+                        $quantity = (float) ($line['quantity'] ?? 0);
+                        $sourceQuantity = (float) ($line['sempre_erp_source_quantity'] ?? $quantity);
+
+                        $order->lines()->create([
+                            'product_id' => $product?->id,
+                            'external_line_id' => isset($line['id']) ? (string) $line['id'] : null,
+                            'sku' => $sku !== '' ? $sku : null,
+                            'name' => (string) ($line['name'] ?? 'Pozycja zamówienia'),
+                            'quantity' => $quantity,
+                            'unit_net_price' => isset($line['subtotal']) && $sourceQuantity > 0
+                                ? (float) $line['subtotal'] / $sourceQuantity
+                                : null,
+                            'unit_gross_price' => isset($line['total']) && $sourceQuantity > 0
+                                ? (float) $line['total'] / $sourceQuantity
+                                : null,
+                            'vat_rate' => null,
+                            'raw_payload' => $line,
+                        ]);
+                        $lines++;
+                    }
+
+                    $reservationStats = $this->reservationService->syncForOrder($order);
+                    $reserved += $reservationStats['reserved'];
+                    $released += $reservationStats['released'];
+                    $reservationSkipped += $reservationStats['skipped'];
+
+                    $isNew ? $created++ : $updated++;
+
+                    return $order->fresh();
+                });
+
+                $isFulfillmentStatus = $this->statusPolicy->isFulfillmentStatus((string) $order->status);
+
+                if (
+                    $isFulfillmentStatus
+                    && $this->automationSettings->actionEnabled('order.imported', 'order.wz.create')
+                ) {
+                    try {
+                        $this->wzDocuments->ensureDrafts(
+                            $order,
+                            'order_import',
+                            'Automatyczne WZ po imporcie zamówienia WooCommerce '.$order->external_number,
+                        );
+                    } catch (Throwable) {
+                        // Import zamówienia i rezerwacji jest ważniejszy niż automatyczny szkic WZ.
+                    }
                 }
 
-                $reservationStats = $this->reservationService->syncForOrder($order);
-                $reserved += $reservationStats['reserved'];
-                $released += $reservationStats['released'];
-                $reservationSkipped += $reservationStats['skipped'];
-
-                $isNew ? $created++ : $updated++;
-
-                return $order->fresh();
-            });
-
-            $isFulfillmentStatus = $this->statusPolicy->isFulfillmentStatus((string) $order->status);
-
-            if (
-                $isFulfillmentStatus
-                && $this->automationSettings->actionEnabled('order.imported', 'order.wz.create')
-            ) {
-                try {
-                    $this->wzDocuments->ensureDrafts(
-                        $order,
-                        'order_import',
-                        'Automatyczne WZ po imporcie zamówienia WooCommerce ' . $order->external_number,
-                    );
-                } catch (Throwable) {
-                    // Import zamówienia i rezerwacji jest ważniejszy niż automatyczny szkic WZ.
+                if ($wasCreated && $isFulfillmentStatus) {
+                    $this->communication->sendOrderStatus($order, 'order_received');
+                } elseif ($wasCreated && $this->shouldNotifyOrderCreated((string) $order->status)) {
+                    $this->communication->sendOrderStatus($order, 'order_created');
+                } elseif (
+                    ! $wasCreated
+                    && ! $this->statusPolicy->isFulfillmentStatus($previousStatus)
+                    && $isFulfillmentStatus
+                ) {
+                    $this->communication->sendOrderStatus($order, 'order_received');
                 }
             }
 
-            if ($wasCreated && $isFulfillmentStatus) {
-                $this->communication->sendOrderStatus($order, 'order_received');
-            } elseif ($wasCreated && $this->shouldNotifyOrderCreated((string) $order->status)) {
-                $this->communication->sendOrderStatus($order, 'order_created');
-            } elseif (
-                ! $wasCreated
-                && ! $this->statusPolicy->isFulfillmentStatus($previousStatus)
-                && $isFulfillmentStatus
-            ) {
-                $this->communication->sendOrderStatus($order, 'order_received');
-            }
+            $nextPage = $page + 1;
         }
 
+        $hasMore = $this->client->ordersPage($integration, $nextPage, $modifiedAfter) !== [];
+
+        return $this->orderImportStats(
+            $created,
+            $updated,
+            $lines,
+            $reserved,
+            $released,
+            $reservationSkipped,
+            $pages,
+            $hasMore,
+            $hasMore ? $nextPage : null,
+        );
+    }
+
+    /**
+     * @return array{created:int,updated:int,lines:int,reserved:int,released:int,reservation_skipped:int,pages:int,has_more:bool,next_page:?int}
+     */
+    private function orderImportStats(
+        int $created,
+        int $updated,
+        int $lines,
+        int $reserved,
+        int $released,
+        int $reservationSkipped,
+        int $pages,
+        bool $hasMore = false,
+        ?int $nextPage = null,
+    ): array {
         return [
             'created' => $created,
             'updated' => $updated,
@@ -358,6 +419,9 @@ final class WooCommerceImportService
             'reserved' => $reserved,
             'released' => $released,
             'reservation_skipped' => $reservationSkipped,
+            'pages' => $pages,
+            'has_more' => $hasMore,
+            'next_page' => $nextPage,
         ];
     }
 
@@ -367,8 +431,8 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
-     * @param list<array<string, mixed>> $splitAllocations
+     * @param  array<string, mixed>  $item
+     * @param  list<array<string, mixed>>  $splitAllocations
      * @return list<array<string, mixed>>
      */
     private function importableOrderLines(array $item, array $splitAllocations): array
@@ -395,8 +459,8 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $line
-     * @param list<array<string, mixed>> $splitAllocations
+     * @param  array<string, mixed>  $line
+     * @param  list<array<string, mixed>>  $splitAllocations
      */
     private function splitQuantityForLine(array $line, array $splitAllocations): float
     {
@@ -417,9 +481,9 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
-     * @param array<string, mixed> $existingRawPayload
-     * @param list<array<string, mixed>> $splitAllocations
+     * @param  array<string, mixed>  $item
+     * @param  array<string, mixed>  $existingRawPayload
+     * @param  list<array<string, mixed>>  $splitAllocations
      * @return array<string, mixed>
      */
     private function rawPayloadForImportedOrder(array $item, array $existingRawPayload, array $splitAllocations): array
@@ -439,7 +503,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param list<array<string, mixed>> $importLines
+     * @param  list<array<string, mixed>>  $importLines
      */
     private function grossTotalFromImportLines(array $importLines): float
     {
@@ -463,7 +527,7 @@ final class WooCommerceImportService
         $childOrders = ExternalOrder::query()
             ->with('lines')
             ->where('sales_channel_id', $order->sales_channel_id)
-            ->where('external_id', 'like', $order->external_id . '-SPLIT-%')
+            ->where('external_id', 'like', $order->external_id.'-SPLIT-%')
             ->get();
 
         if ($childOrders->isNotEmpty()) {
@@ -519,7 +583,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      */
     private function syncVariationRelation(WordpressIntegration $integration, Product $product, array $item): void
     {
@@ -557,7 +621,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      */
     private function variationSortOrder(array $item): int
     {
@@ -569,7 +633,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      */
     private function skuForImport(WordpressIntegration $integration, array $item): ?string
     {
@@ -592,7 +656,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      * @return array<string, mixed>
      */
     private function woocommerceAttributes(array $item): array
@@ -637,7 +701,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      * @return array<string, mixed>
      */
     private function importedMasterData(array $item): array
@@ -687,7 +751,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      * @return array<string, array{name:string,description:?string,additional_description:?string}>
      */
     private function translatedContent(array $item): array
@@ -713,7 +777,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      * @return array{name:string,description:?string,additional_description:?string}
      */
     private function contentForItem(array $item): array
@@ -736,7 +800,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      * @return list<array{name:string,value:string,variation:bool}>
      */
     private function parameterList(array $item): array
@@ -780,7 +844,27 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
+     * @return array<int, array<string, mixed>>
+     */
+    private function orderNotesForImport(
+        WordpressIntegration $integration,
+        array $item,
+        ?ExternalOrder $existingOrder,
+    ): array {
+        $existingNotes = (array) data_get($existingOrder?->raw_payload, 'erp_imported_order_notes', []);
+        $incomingUpdatedAt = $this->wooCommerceDateTime($item, 'date_modified');
+        $storedUpdatedAt = $existingOrder?->external_updated_at?->utc()->format('Y-m-d H:i:s');
+
+        if ($incomingUpdatedAt !== null && $incomingUpdatedAt === $storedUpdatedAt) {
+            return $existingNotes;
+        }
+
+        return $this->safeOrderNotes($integration, (string) ($item['id'] ?? ''));
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
      * @return array<string, mixed>|null
      */
     private function primaryImage(array $item): ?array
@@ -792,7 +876,6 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param mixed $images
      * @return list<array<string, mixed>>
      */
     private function imageList(mixed $images): array
@@ -809,7 +892,6 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param mixed $image
      * @return array<string, mixed>|null
      */
     private function cleanImage(mixed $image): ?array
@@ -833,7 +915,6 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param mixed $items
      * @return list<string>
      */
     private function nameList(mixed $items): array
@@ -866,8 +947,8 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
-     * @param list<string> $keys
+     * @param  array<string, mixed>  $item
+     * @param  list<string>  $keys
      */
     private function metaValue(array $item, array $keys): mixed
     {
@@ -883,7 +964,6 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param mixed $metaData
      * @return array<string, mixed>
      */
     private function metaKeyValue(mixed $metaData): array
@@ -906,7 +986,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      * @return array<string, mixed>
      */
     private function compactRawPayload(array $item): array
@@ -949,7 +1029,7 @@ final class WooCommerceImportService
     }
 
     /**
-     * @param array<string, mixed> $item
+     * @param  array<string, mixed>  $item
      */
     private function wooCommerceDateTime(array $item, string $localKey): ?string
     {

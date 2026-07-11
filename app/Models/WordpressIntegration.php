@@ -113,14 +113,67 @@ class WordpressIntegration extends Model
     public function orderImportSettings(): array
     {
         $settings = array_merge([
-            'page_limit' => 200,
+            'page_limit' => 1,
             'overlap_minutes' => 30,
         ], (array) data_get($this->settings, 'order_import', []));
 
         return [
-            'page_limit' => max(1, min(1000, (int) $settings['page_limit'])),
+            'page_limit' => max(1, min(2, (int) $settings['page_limit'])),
             'overlap_minutes' => max(0, min(1440, (int) $settings['overlap_minutes'])),
         ];
+    }
+
+    /**
+     * @return array{mode:'backfill'|'incremental',modified_after:?string,next_page:int}|null
+     */
+    public function orderImportContinuation(): ?array
+    {
+        $continuation = (array) data_get($this->settings, 'order_import.continuation', []);
+        $mode = (string) ($continuation['mode'] ?? '');
+        $nextPage = (int) ($continuation['next_page'] ?? 0);
+
+        if (! in_array($mode, ['backfill', 'incremental'], true) || $nextPage < 1) {
+            return null;
+        }
+
+        return [
+            'mode' => $mode,
+            'modified_after' => filled($continuation['modified_after'] ?? null)
+                ? (string) $continuation['modified_after']
+                : null,
+            'next_page' => $nextPage,
+        ];
+    }
+
+    public function saveOrderImportContinuation(bool $backfill, ?string $modifiedAfter, int $nextPage): void
+    {
+        $settings = (array) $this->settings;
+        $orderImport = (array) data_get($settings, 'order_import', []);
+        $orderImport['continuation'] = [
+            'mode' => $backfill ? 'backfill' : 'incremental',
+            'modified_after' => $modifiedAfter,
+            'next_page' => max(1, $nextPage),
+            'updated_at' => now()->toIso8601String(),
+        ];
+        $settings['order_import'] = $orderImport;
+
+        $this->update(['settings' => $settings]);
+    }
+
+    public function clearOrderImportContinuation(): void
+    {
+        $settings = (array) $this->settings;
+        $orderImport = (array) data_get($settings, 'order_import', []);
+
+        unset($orderImport['continuation']);
+
+        if ($orderImport === []) {
+            unset($settings['order_import']);
+        } else {
+            $settings['order_import'] = $orderImport;
+        }
+
+        $this->update(['settings' => $settings]);
     }
 
     /**
