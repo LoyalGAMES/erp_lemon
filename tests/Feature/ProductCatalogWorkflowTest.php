@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Jobs\ExportWooCommerceProductDataJob;
+use App\Models\AuditLog;
 use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductChannelMapping;
@@ -13,12 +15,12 @@ use App\Models\StockBalance;
 use App\Models\StockLedgerEntry;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
-use App\Models\AuditLog;
 use App\Models\WordpressIntegration;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class ProductCatalogWorkflowTest extends TestCase
@@ -151,7 +153,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('data-product-quick-edit-open="media"', false)
             ->assertSee('data-product-quick-edit-tab="warianty"', false)
             ->assertSee('Szybka edycja produktu')
-            ->assertSee('/products/' . $product->id . '/edit', false)
+            ->assertSee('/products/'.$product->id.'/edit', false)
             ->assertSee('Produkt')
             ->assertSee('Sprzedaż i magazyn')
             ->assertSee('Informacje')
@@ -465,7 +467,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame('Nowa koszula ERP', data_get($product->attributes, 'master.media.0.alt'));
 
         $mediaSrc = (string) data_get($product->attributes, 'master.media.0.src');
-        $this->assertStringStartsWith('/uploads/testing-products/' . $product->id . '/', $mediaSrc);
+        $this->assertStringStartsWith('/uploads/testing-products/'.$product->id.'/', $mediaSrc);
         $this->assertFileExists(public_path(ltrim($mediaSrc, '/')));
 
         $thumbnailUrl = $product->thumbnailUrl(116, 144);
@@ -714,7 +716,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertTrue(data_get($product->attributes, 'master.parameters.0.variation'));
         $this->assertSame('<p>Short description</p>', data_get($product->attributes, 'master.content.en.additional_description'));
         $mediaSrc = (string) data_get($product->attributes, 'master.media.0.src');
-        $this->assertStringStartsWith('/uploads/testing-products/' . $product->id . '/', $mediaSrc);
+        $this->assertStringStartsWith('/uploads/testing-products/'.$product->id.'/', $mediaSrc);
         $this->assertSame('Koszula AURA', data_get($product->attributes, 'master.media.0.alt'));
         $this->assertFileExists(public_path(ltrim($mediaSrc, '/')));
         $this->assertSame('Dostawca A', data_get($product->attributes, 'master.suppliers.0.name'));
@@ -740,6 +742,45 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee($mediaSrc);
 
         @unlink(public_path(ltrim($mediaSrc, '/')));
+    }
+
+    public function test_editing_mapped_erp_product_queues_woocommerce_data_export(): void
+    {
+        Queue::fake();
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-AUTO-EXPORT',
+            'name' => 'Przed zmianą',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'SKU-AUTO-EXPORT',
+            'stock_sync_enabled' => true,
+        ]);
+
+        $this->put(route('products.update', $product), [
+            'sku' => 'SKU-AUTO-EXPORT',
+            'name' => 'Po zmianie w ERP',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => '1',
+        ])
+            ->assertRedirect(route('products.show', $product))
+            ->assertSessionHas('status', 'Dane produktu zostały zapisane jako dane główne ERP. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle.');
+
+        Queue::assertPushed(ExportWooCommerceProductDataJob::class, 1);
     }
 
     public function test_operator_can_duplicate_product_without_stock_or_channel_mappings(): void

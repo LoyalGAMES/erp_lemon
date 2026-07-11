@@ -12,6 +12,7 @@ use App\Models\ProductChannelMapping;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
+use App\Services\WooCommerce\ProductDataExportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -222,6 +223,72 @@ class WooCommerceProductDataExportTest extends TestCase
             ->assertSessionHas('error', 'Produkt nie ma mapowania do żadnego kanału WooCommerce.');
 
         $this->assertSame(1, AuditLog::query()->where('action', 'product.woocommerce_export_failed')->count());
+    }
+
+    public function test_export_preserves_remote_sku_when_it_is_known_to_be_duplicate(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
+                'id' => 123,
+                'sku' => 'DUP-SKU',
+                'name' => 'Produkt główny',
+            ]),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'WC-B2C-PARENT-123',
+            'name' => 'Produkt główny',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp']],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'DUP-SKU',
+            'name' => 'Wariant',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'DUP-SKU',
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+            'external_sku' => 'DUP-SKU',
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($parent);
+
+        [$request] = Http::recorded()->first();
+        $this->assertArrayNotHasKey('sku', $request->data());
+        $this->assertSame('preserved_remote_duplicate', data_get(
+            ProductChannelMapping::query()->where('product_id', $parent->id)->firstOrFail()->metadata,
+            'last_product_export_sku_status',
+        ));
     }
 
     public function test_product_publication_date_exports_to_woocommerce_and_polylang_translations(): void
@@ -701,7 +768,7 @@ class WooCommerceProductDataExportTest extends TestCase
     {
         return Product::query()->create([
             'sku' => $sku,
-            'name' => 'Komplet AMORA ' . $size,
+            'name' => 'Komplet AMORA '.$size,
             'unit' => 'szt',
             'vat_rate' => 23,
             'quantity_precision' => 0,
@@ -712,7 +779,7 @@ class WooCommerceProductDataExportTest extends TestCase
                     'product_type' => 'variation',
                     'prices' => ['retail_price_pln' => $price],
                     'content' => [
-                        'pl' => ['name' => 'Komplet AMORA ' . $size],
+                        'pl' => ['name' => 'Komplet AMORA '.$size],
                     ],
                     'parameters' => [
                         ['name' => 'Rozmiar', 'value' => $size, 'variation' => true],

@@ -4,16 +4,16 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Jobs\ExportStockToWooCommerceJob;
+use App\Models\IntegrationSyncLog;
 use App\Models\Product;
 use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
-use App\Models\IntegrationSyncLog;
 use App\Models\StockBalance;
 use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
 use App\Models\WarehouseChannelRoute;
 use App\Models\WordpressIntegration;
-use App\Jobs\ExportStockToWooCommerceJob;
 use App\Services\WooCommerce\StockSyncExportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
@@ -97,6 +97,69 @@ class StockSyncExportTest extends TestCase
             && $request['manage_stock'] === true
             && $request['stock_quantity'] === 8
             && $request['stock_status'] === 'instock');
+    }
+
+    public function test_stock_queue_item_is_exported_to_woocommerce_variation(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123/variations/456' => Http::response([
+                'id' => 456,
+                'sku' => 'SKU-VARIANT-M',
+                'stock_quantity' => 3,
+                'stock_status' => 'instock',
+            ]),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'stock_export_enabled' => true,
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Main',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'SKU-VARIANT-M',
+            'name' => 'Wariant M',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+            'external_sku' => 'SKU-VARIANT-M',
+            'stock_sync_enabled' => true,
+        ]);
+        $queueItem = StockSyncQueueItem::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'status' => 'pending',
+            'quantity_to_push' => 3,
+            'available_at' => now(),
+        ]);
+
+        app(StockSyncExportService::class)->export($queueItem);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/456'
+            && $request['stock_quantity'] === 3);
     }
 
     public function test_failed_stock_export_can_be_retried_from_sync_module(): void
@@ -259,7 +322,7 @@ class StockSyncExportTest extends TestCase
             WordpressIntegration::query()->create([
                 'sales_channel_id' => $channel->id,
                 'name' => $channel->name,
-                'base_url' => 'https://' . strtolower($channel->code) . '.test',
+                'base_url' => 'https://'.strtolower($channel->code).'.test',
                 'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
                 'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
                 'stock_export_enabled' => $stockExportEnabled,

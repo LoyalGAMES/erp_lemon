@@ -49,6 +49,7 @@ final class WooCommerceImportService
             'unique_skus_seen' => 0,
             'synthetic_sku_items' => 0,
             'duplicate_sku_items' => 0,
+            'duplicate_sku_resolved' => 0,
             'mapping_overwrites' => 0,
             'created' => 0,
             'updated' => 0,
@@ -60,7 +61,7 @@ final class WooCommerceImportService
             'products_total_after' => 0,
             'channel_mappings_total_after' => 0,
         ];
-        $seenSkus = [];
+        $seenSourceSkus = [];
 
         $this->syncProductCategories($integration);
 
@@ -78,6 +79,7 @@ final class WooCommerceImportService
                 }
             }
 
+            $sourceSku = trim((string) ($item['sku'] ?? ''));
             $sku = $this->skuForImport($integration, $item);
 
             if ($sku === null) {
@@ -87,19 +89,26 @@ final class WooCommerceImportService
                 continue;
             }
 
-            if (trim((string) ($item['sku'] ?? '')) === '') {
+            if ($sourceSku === '') {
                 $stats['synthetic_sku_items']++;
             }
 
-            if (isset($seenSkus[$sku])) {
+            $seenSku = $sourceSku !== '' ? $sourceSku : $sku;
+
+            if (isset($seenSourceSkus[$seenSku])) {
                 $stats['duplicate_sku_items']++;
             } else {
-                $seenSkus[$sku] = true;
+                $seenSourceSkus[$seenSku] = true;
             }
 
             DB::transaction(function () use ($integration, $item, $sku, &$stats): void {
-                $product = Product::query()->firstOrNew(['sku' => $sku]);
+                [$product, $resolvedDuplicateSku] = $this->productForWooItem($integration, $item, $sku);
                 $isNew = ! $product->exists;
+
+                if ($resolvedDuplicateSku) {
+                    $stats['duplicate_sku_resolved']++;
+                }
+
                 $attributes = array_replace_recursive(
                     (array) $product->attributes,
                     $this->woocommerceAttributes($item),
@@ -130,10 +139,11 @@ final class WooCommerceImportService
 
                 $incomingExternalProductId = (string) $item['id'];
                 $incomingExternalVariationId = isset($item['variation_id']) ? (string) $item['variation_id'] : null;
-                $currentMapping = ProductChannelMapping::query()
-                    ->where('product_id', $product->id)
-                    ->where('sales_channel_id', $integration->sales_channel_id)
-                    ->first();
+                $currentMapping = $this->mappingForWooItem($integration, $item)
+                    ?? ProductChannelMapping::query()
+                        ->where('product_id', $product->id)
+                        ->where('sales_channel_id', $integration->sales_channel_id)
+                        ->first();
 
                 if ($currentMapping instanceof ProductChannelMapping
                     && (
@@ -154,7 +164,9 @@ final class WooCommerceImportService
                         'external_variation_id' => $incomingExternalVariationId,
                         'external_sku' => trim((string) ($item['sku'] ?? '')) ?: $sku,
                         'stock_sync_enabled' => true,
-                        'metadata' => ['source' => 'woocommerce_import'],
+                        'metadata' => array_merge($currentMapping?->metadata ?? [], [
+                            'source' => 'woocommerce_import',
+                        ]),
                     ],
                 );
 
@@ -172,7 +184,7 @@ final class WooCommerceImportService
             });
         }
 
-        $stats['unique_skus_seen'] = count($seenSkus);
+        $stats['unique_skus_seen'] = count($seenSourceSkus);
         $stats['products_total_after'] = Product::query()->count();
         $stats['channel_mappings_total_after'] = ProductChannelMapping::query()
             ->where('sales_channel_id', $integration->sales_channel_id)
@@ -584,6 +596,76 @@ final class WooCommerceImportService
 
     /**
      * @param  array<string, mixed>  $item
+     * @return array{0:Product,1:bool}
+     */
+    private function productForWooItem(WordpressIntegration $integration, array $item, string $sku): array
+    {
+        $externalMapping = $this->mappingForWooItem($integration, $item);
+
+        if ($externalMapping?->product instanceof Product) {
+            return [$externalMapping->product, false];
+        }
+
+        $product = Product::query()->where('sku', $sku)->first();
+
+        if (! $product instanceof Product || ! $this->hasDifferentWooMapping($product, $integration, $item)) {
+            return [
+                $product ?? Product::query()->firstOrNew(['sku' => $sku]),
+                false,
+            ];
+        }
+
+        $syntheticSku = $this->syntheticSkuForWooItem($integration, $item) ?? $sku.'-WC-DUPLICATE';
+
+        return [Product::query()->firstOrNew(['sku' => $syntheticSku]), true];
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function hasDifferentWooMapping(Product $product, WordpressIntegration $integration, array $item): bool
+    {
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $product->id)
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->first();
+
+        if (! $mapping instanceof ProductChannelMapping) {
+            return false;
+        }
+
+        $externalProductId = (string) ($item['id'] ?? '');
+        $externalVariationId = isset($item['variation_id']) ? (string) $item['variation_id'] : null;
+
+        return (string) $mapping->external_product_id !== $externalProductId
+            || ($mapping->external_variation_id !== null ? (string) $mapping->external_variation_id : null) !== $externalVariationId;
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function mappingForWooItem(WordpressIntegration $integration, array $item): ?ProductChannelMapping
+    {
+        $externalProductId = trim((string) ($item['id'] ?? ''));
+
+        if ($externalProductId === '') {
+            return null;
+        }
+
+        return ProductChannelMapping::query()
+            ->with('product')
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->where('external_product_id', $externalProductId)
+            ->when(
+                isset($item['variation_id']),
+                fn ($query) => $query->where('external_variation_id', (string) $item['variation_id']),
+                fn ($query) => $query->whereNull('external_variation_id'),
+            )
+            ->first();
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
      */
     private function syncVariationRelation(WordpressIntegration $integration, Product $product, array $item): void
     {
@@ -643,6 +725,14 @@ final class WooCommerceImportService
             return $sku;
         }
 
+        return $this->syntheticSkuForWooItem($integration, $item);
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function syntheticSkuForWooItem(WordpressIntegration $integration, array $item): ?string
+    {
         $externalId = trim((string) ($item['variation_id'] ?? $item['id'] ?? ''));
 
         if ($externalId === '') {

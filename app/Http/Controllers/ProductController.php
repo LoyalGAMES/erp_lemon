@@ -4,19 +4,21 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Jobs\ExportWooCommerceProductDataJob;
 use App\Models\Product;
 use App\Models\ProductCategory;
+use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
-use App\Models\StockLedgerEntry;
 use App\Models\StockBalance;
+use App\Models\StockLedgerEntry;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\Audit\AuditLogService;
-use App\Services\Gs1\Gs1SettingsService;
 use App\Services\Gs1\Gs1GtinService;
+use App\Services\Gs1\Gs1SettingsService;
 use App\Services\Inventory\WarehouseDocumentNumberService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\WooCommerce\ProductDataExportService;
@@ -118,7 +120,7 @@ class ProductController extends Controller
         $relatedVariants = $product->variantChildren
             ->concat($externalVariants)
             ->unique('id')
-            ->sortBy(fn (Product $variant): string => mb_strtolower($variant->name . ' ' . $variant->sku))
+            ->sortBy(fn (Product $variant): string => mb_strtolower($variant->name.' '.$variant->sku))
             ->values();
         $variantRelationByChildId = $product->childRelations
             ->where('relation_type', 'variant')
@@ -171,7 +173,7 @@ class ProductController extends Controller
             'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'module' => 'products',
             'title' => 'Edycja produktu',
-            'subtitle' => $product->name . ' | ' . $this->productSubtitle($product),
+            'subtitle' => $product->name.' | '.$this->productSubtitle($product),
         ]);
     }
 
@@ -257,10 +259,11 @@ class ProductController extends Controller
             'product' => $product->only(['sku', 'name', 'ean', 'unit', 'vat_rate', 'weight_kg', 'is_active']),
             'attributes' => $product->attributes,
         ]);
+        $this->queueWooCommerceDataExport($product);
 
         return redirect()
             ->route('products.show', $product)
-            ->with('status', 'Dane produktu zostały zapisane jako dane główne ERP.');
+            ->with('status', 'Dane produktu zostały zapisane jako dane główne ERP. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle.');
     }
 
     public function duplicate(Product $product, AuditLogService $audit): RedirectResponse
@@ -324,6 +327,7 @@ class ProductController extends Controller
             'child_sku' => $child->sku,
             'relation_id' => $relation->id,
         ]);
+        $this->queueWooCommerceDataExport($product);
 
         return back()->with('status', "Dodano {$child->sku} jako wariant produktu {$product->sku}.");
     }
@@ -341,6 +345,7 @@ class ProductController extends Controller
             'child_product_id' => $relation->child_product_id,
             'child_sku' => $childSku,
         ]);
+        $this->queueWooCommerceDataExport($product);
 
         return back()->with('status', 'Wariant został odłączony od produktu.');
     }
@@ -453,6 +458,15 @@ class ProductController extends Controller
         }
 
         return redirect()->route('products.show', $product);
+    }
+
+    private function queueWooCommerceDataExport(Product $product): void
+    {
+        if (! ProductChannelMapping::query()->where('product_id', $product->id)->exists()) {
+            return;
+        }
+
+        ExportWooCommerceProductDataJob::dispatch($product->id)->afterCommit();
     }
 
     private function safeStockAdjustmentRedirectUrl(Request $request): ?string
@@ -678,8 +692,8 @@ class ProductController extends Controller
     }
 
     /**
-     * @param array<string, mixed> $validated
-     * @param list<array{src:string,alt:?string,name:?string}> $media
+     * @param  array<string, mixed>  $validated
+     * @param  list<array{src:string,alt:?string,name:?string}>  $media
      * @return array<string, mixed>
      */
     private function masterDataFromRequest(array $validated, Request $request, array $media, array $existingMaster = []): array
@@ -731,7 +745,7 @@ class ProductController extends Controller
     }
 
     /**
-     * @param array<string, mixed> $validated
+     * @param  array<string, mixed>  $validated
      * @return array<string, float|null>
      */
     private function priceData(array $validated): array
@@ -791,8 +805,8 @@ class ProductController extends Controller
     }
 
     /**
-     * @param array<int|string, mixed> $submittedSkus
-     * @param array<int|string, mixed> $removeFlags
+     * @param  array<int|string, mixed>  $submittedSkus
+     * @param  array<int|string, mixed>  $removeFlags
      */
     private function syncVariantRelations(Product $product, array $submittedSkus, array $removeFlags, mixed $variantAttribute): void
     {
@@ -822,6 +836,7 @@ class ProductController extends Controller
 
             if (filter_var($removeFlags[$index] ?? false, FILTER_VALIDATE_BOOLEAN)) {
                 $currentRelationBySku->get(mb_strtolower($sku))?->delete();
+
                 continue;
             }
 
@@ -1250,7 +1265,7 @@ class ProductController extends Controller
     }
 
     /**
-     * @param array<string, mixed> $input
+     * @param  array<string, mixed>  $input
      * @return list<array{name:string,value:string}>
      */
     private function normalizeParameters(array $input): array
@@ -1279,9 +1294,9 @@ class ProductController extends Controller
     }
 
     /**
-     * @return \Illuminate\Support\Collection<int, array{name:string,path:string,sales_channel:?string}>
+     * @return Collection<int, array{name:string,path:string,sales_channel:?string}>
      */
-    private function categoryOptions(): \Illuminate\Support\Collection
+    private function categoryOptions(): Collection
     {
         $storedCategories = ProductCategory::query()
             ->with('salesChannel')
@@ -1403,10 +1418,10 @@ class ProductController extends Controller
             ->get(['id', 'sku', 'name', 'ean', 'attributes'])
             ->map(function (Product $product): array {
                 $category = $this->nullableString(data_get((array) $product->attributes, 'master.category'));
-                $label = $product->sku . ' | ' . $product->name;
+                $label = $product->sku.' | '.$product->name;
 
                 if ($category !== null) {
-                    $label .= ' | ' . $category;
+                    $label .= ' | '.$category;
                 }
 
                 return [
@@ -1424,17 +1439,17 @@ class ProductController extends Controller
     {
         $suffix = ' (kopia)';
 
-        return str_ends_with($name, $suffix) ? $name : $name . $suffix;
+        return str_ends_with($name, $suffix) ? $name : $name.$suffix;
     }
 
     private function copySku(string $sku): string
     {
         $base = mb_substr($sku, 0, 230);
-        $candidate = $base . '-COPY';
+        $candidate = $base.'-COPY';
         $index = 2;
 
         while (Product::query()->where('sku', $candidate)->exists()) {
-            $candidate = $base . '-COPY-' . $index;
+            $candidate = $base.'-COPY-'.$index;
             $index++;
         }
 
@@ -1446,16 +1461,16 @@ class ProductController extends Controller
         $displaySku = $product->displaySku();
 
         if ($displaySku !== null) {
-            return 'SKU: ' . $displaySku;
+            return 'SKU: '.$displaySku;
         }
 
         $externalId = $product->externalDisplayId();
 
-        return $externalId !== null ? 'ID Woo: ' . $externalId : 'SKU wewnętrzne: ' . $product->sku;
+        return $externalId !== null ? 'ID Woo: '.$externalId : 'SKU wewnętrzne: '.$product->sku;
     }
 
     /**
-     * @param array<string, mixed> $attributes
+     * @param  array<string, mixed>  $attributes
      * @return array<string, mixed>
      */
     private function copyAttributes(array $attributes, string $copyName, int $sourceProductId): array
@@ -1475,7 +1490,7 @@ class ProductController extends Controller
     }
 
     /**
-     * @param array<int|string, mixed> $rows
+     * @param  array<int|string, mixed>  $rows
      * @return list<array{src:string,alt:?string,name:?string}>
      */
     private function normalizeExistingMedia(array $rows): array
@@ -1526,12 +1541,12 @@ class ProductController extends Controller
             $originalName = $file->getClientOriginalName();
             $baseName = Str::slug(pathinfo($originalName, PATHINFO_FILENAME)) ?: 'produkt';
             $extension = strtolower($file->extension() ?: $file->getClientOriginalExtension() ?: 'jpg');
-            $filename = now()->format('YmdHis') . '-' . Str::random(8) . '-' . $baseName . '.' . $extension;
+            $filename = now()->format('YmdHis').'-'.Str::random(8).'-'.$baseName.'.'.$extension;
 
             $file->move($absoluteDirectory, $filename);
 
             $rows[] = [
-                'src' => '/' . trim($relativeDirectory . '/' . $filename, '/'),
+                'src' => '/'.trim($relativeDirectory.'/'.$filename, '/'),
                 'alt' => $alt,
                 'name' => $originalName,
             ];
@@ -1544,11 +1559,11 @@ class ProductController extends Controller
     {
         $base = app()->environment('testing') ? 'uploads/testing-products' : 'uploads/products';
 
-        return $base . '/' . $product->id;
+        return $base.'/'.$product->id;
     }
 
     /**
-     * @param array<string, mixed> $input
+     * @param  array<string, mixed>  $input
      * @return list<array{name:string,product_code:?string,purchase_price_pln:?float}>
      */
     private function normalizeSuppliers(array $input): array

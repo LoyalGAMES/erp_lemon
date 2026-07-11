@@ -16,8 +16,7 @@ final class ProductDataExportService
 {
     public function __construct(
         private readonly WooCommerceClient $client,
-    ) {
-    }
+    ) {}
 
     /**
      * @return array{exported:int,results:list<array<string,mixed>>}
@@ -47,6 +46,7 @@ final class ProductDataExportService
             $isVariation = filled($mapping->external_variation_id);
             $variants = $this->variantChildren($product);
             $payload = $this->payload($product, $isVariation, (int) $mapping->sales_channel_id);
+            $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $product, $mapping);
 
             if (! $isVariation) {
                 $payload = $this->prepareVariablePayload($product, $variants, $payload);
@@ -261,6 +261,7 @@ final class ProductDataExportService
             $operation = 'export_product_variation_data';
 
             if ($mapping instanceof ProductChannelMapping && filled($mapping->external_variation_id)) {
+                $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $variant, $mapping);
                 $response = $this->client->updateProductData($integration, $mapping, $payload);
             } else {
                 $response = $this->client->createProductVariation($integration, $externalProductId, $payload);
@@ -388,8 +389,8 @@ final class ProductDataExportService
     }
 
     /**
-     * @param Collection<int, Product> $variants
-     * @param array<string, mixed> $payload
+     * @param  Collection<int, Product>  $variants
+     * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
     private function prepareVariablePayload(Product $product, Collection $variants, array $payload): array
@@ -444,8 +445,8 @@ final class ProductDataExportService
     }
 
     /**
-     * @param array<string, mixed> $payload
-     * @param array<string, mixed> $response
+     * @param  array<string, mixed>  $payload
+     * @param  array<string, mixed>  $response
      */
     private function updateMappingAfterExport(
         ProductChannelMapping $mapping,
@@ -459,17 +460,52 @@ final class ProductDataExportService
             'woocommerce_permalink' => $response['permalink'] ?? data_get($currentMetadata, 'woocommerce_permalink'),
             'last_product_export_at' => now()->toDateTimeString(),
             'last_product_export_status' => 'success',
+            'last_product_export_sku_status' => array_key_exists('sku', $payload) ? 'updated' : 'preserved_remote_duplicate',
             'last_product_export_payload_hash' => $this->payloadHash($payload),
         ]);
+        $responseSku = trim((string) ($response['sku'] ?? ''));
+        $externalSku = $responseSku !== ''
+            ? $responseSku
+            : (array_key_exists('sku', $payload) ? $product->sku : $mapping->external_sku);
 
         $mapping->update([
-            'external_sku' => $product->sku,
+            'external_sku' => $externalSku,
             'metadata' => $metadata,
         ]);
     }
 
     /**
-     * @param array<string, mixed> $payload
+     * Do not send a known duplicate WooCommerce SKU back to the API. WooCommerce
+     * keeps the existing remote SKU while the ERP can still synchronise all other data.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function preserveRemoteSkuWhenDuplicated(
+        array $payload,
+        Product $product,
+        ProductChannelMapping $mapping,
+    ): array {
+        $remoteSku = trim((string) ($mapping->external_sku ?? ''));
+
+        if (
+            $product->isSyntheticWooSku()
+            || ($remoteSku !== ''
+                && $remoteSku === $product->sku
+                && ProductChannelMapping::query()
+                    ->where('sales_channel_id', $mapping->sales_channel_id)
+                    ->where('external_sku', $remoteSku)
+                    ->whereKeyNot($mapping->id)
+                    ->exists())
+        ) {
+            unset($payload['sku']);
+        }
+
+        return $payload;
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
      */
     private function payloadHash(array $payload): string
     {
@@ -477,7 +513,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @param array<string, mixed> $master
+     * @param  array<string, mixed>  $master
      * @return list<array{key:string,value:mixed}>
      */
     private function metaData(Product $product, array $master): array
@@ -512,7 +548,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @param array<string, mixed> $master
+     * @param  array<string, mixed>  $master
      * @return list<array{name:string,visible:bool,variation:bool,options:list<string>}>
      */
     private function attributes(array $master): array
@@ -540,7 +576,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @param Collection<int, Product> $variants
+     * @param  Collection<int, Product>  $variants
      * @return list<array{name:string,visible:bool,variation:bool,options:list<string>}>
      */
     private function variableAttributes(Product $product, Collection $variants): array
@@ -580,7 +616,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @param Collection<int, Product> $variants
+     * @param  Collection<int, Product>  $variants
      */
     private function variantAttributeName(Product $product, Collection $variants): string
     {
@@ -652,7 +688,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @param array<string, mixed> $master
+     * @param  array<string, mixed>  $master
      * @return list<array{id:int}>
      */
     private function categories(array $master, ?int $salesChannelId): array
@@ -679,7 +715,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @param list<string> $skus
+     * @param  list<string>  $skus
      * @return list<int>
      */
     private function relatedProductIds(array $skus, ?int $salesChannelId): array
@@ -746,7 +782,7 @@ final class ProductDataExportService
             return $src;
         }
 
-        return url('/' . ltrim($src, '/'));
+        return url('/'.ltrim($src, '/'));
     }
 
     private function decimal(mixed $value, int $precision): ?string
@@ -811,7 +847,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
     private function removeEmptyDimensions(array $payload): array

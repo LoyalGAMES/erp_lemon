@@ -146,6 +146,81 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('4.0000', (string) $balance->quantity_available);
     }
 
+    public function test_import_keeps_duplicate_parent_and_variation_skus_as_separate_mappings(): void
+    {
+        Http::fake(function ($request) {
+            $url = $request->url();
+
+            if (str_contains($url, '/products/categories')) {
+                return Http::response([]);
+            }
+
+            if (str_contains($url, '/products/777/variations')) {
+                parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+                return (int) ($query['page'] ?? 1) === 1
+                    ? Http::response([[
+                        'id' => 888,
+                        'sku' => 'DUP-SKU',
+                        'name' => 'M',
+                        'attributes' => [['name' => 'Rozmiar', 'option' => 'M']],
+                    ]])
+                    : Http::response([]);
+            }
+
+            if (str_contains($url, '/products')) {
+                parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+                return (int) ($query['page'] ?? 1) === 1
+                    ? Http::response([[
+                        'id' => 777,
+                        'sku' => 'DUP-SKU',
+                        'name' => 'Produkt główny',
+                        'type' => 'variable',
+                        'status' => 'publish',
+                    ]])
+                    : Http::response([]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+
+        $stats = app(WooCommerceImportService::class)->importProducts($integration);
+
+        $parent = Product::query()->where('sku', 'DUP-SKU')->firstOrFail();
+        $variant = Product::query()->where('sku', 'WC-B2C-VARIANT-888')->firstOrFail();
+
+        $this->assertSame(1, $stats['duplicate_sku_items']);
+        $this->assertSame(1, $stats['duplicate_sku_resolved']);
+        $this->assertDatabaseHas('product_channel_mappings', [
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '777',
+            'external_variation_id' => null,
+        ]);
+        $this->assertDatabaseHas('product_channel_mappings', [
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '777',
+            'external_variation_id' => '888',
+        ]);
+        $this->assertTrue($parent->variantChildren()->whereKey($variant->id)->exists());
+    }
+
     public function test_import_reads_all_product_pages(): void
     {
         Http::fake(function ($request) {
@@ -163,8 +238,8 @@ class WooCommerceProductImportTest extends TestCase
                     return Http::response([
                         [
                             'id' => 1000 + $page,
-                            'sku' => 'SKU-PAGE-' . $page,
-                            'name' => 'Produkt strona ' . $page,
+                            'sku' => 'SKU-PAGE-'.$page,
+                            'name' => 'Produkt strona '.$page,
                             'type' => 'simple',
                             'status' => 'publish',
                         ],

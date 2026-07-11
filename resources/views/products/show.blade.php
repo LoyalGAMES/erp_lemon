@@ -485,6 +485,7 @@
                         <th class="numeric">Stan</th>
                         <th class="numeric">Dostępne</th>
                         <th>Relacja</th>
+                        <th>Korekta stanu</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -521,10 +522,13 @@
                                     <span class="muted">WooCommerce</span>
                                 @endif
                             </td>
+                            <td>
+                                <a class="button secondary" href="{{ route('products.show', $variant) }}#sprzedaz">Ustaw stan wariantu</a>
+                            </td>
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="7">Brak powiązanych wariantów. Dodaj wariant po SKU albo zaimportuj warianty z WooCommerce.</td>
+                            <td colspan="8">Brak powiązanych wariantów. Dodaj wariant po SKU albo zaimportuj warianty z WooCommerce.</td>
                         </tr>
                     @endforelse
                 </tbody>
@@ -693,7 +697,11 @@
         productViewTabs.forEach((tab) => {
             tab.addEventListener('click', () => showProductViewPanel(tab.dataset.productViewTab));
         });
-        showProductViewPanel(productViewTabs[0]?.dataset.productViewTab);
+        const productViewFromHash = window.location.hash.replace('#', '');
+        const initialProductView = productViewTabs.some((tab) => tab.dataset.productViewTab === productViewFromHash)
+            ? productViewFromHash
+            : productViewTabs[0]?.dataset.productViewTab;
+        showProductViewPanel(initialProductView);
 
         const productQuickEditToggle = document.querySelector('[data-product-quick-edit-toggle]');
         const productQuickEditTabs = Array.from(document.querySelectorAll('[data-product-quick-edit-tab]'));

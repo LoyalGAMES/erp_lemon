@@ -10,6 +10,7 @@
         'unique_skus_seen' => 'Unikalne SKU w imporcie',
         'synthetic_sku_items' => 'Pozycje z nadanym SKU ERP',
         'duplicate_sku_items' => 'Duplikaty SKU w WooCommerce',
+        'duplicate_sku_resolved' => 'Duplikaty SKU rozdzielone na osobne mapowania',
         'mapping_overwrites' => 'Nadpisane mapowania kanału',
         'created' => 'Utworzone w ERP',
         'updated' => 'Zaktualizowane w ERP',
@@ -481,6 +482,7 @@
                                         @php
                                             $payload = $log->response_payload;
                                             $duplicateSkuItems = (int) ($payload['duplicate_sku_items'] ?? 0);
+                                            $duplicateSkuResolved = (int) ($payload['duplicate_sku_resolved'] ?? 0);
                                             $mappingOverwrites = (int) ($payload['mapping_overwrites'] ?? 0);
                                         @endphp
                                         @if ($log->operation === 'import_products' && ($duplicateSkuItems > 0 || $mappingOverwrites > 0))
@@ -488,6 +490,9 @@
                                                 Import produktów wymaga sprawdzenia:
                                                 @if ($duplicateSkuItems > 0)
                                                     {{ $duplicateSkuItems }} pozycji ma SKU użyte więcej niż raz.
+                                                    @if ($duplicateSkuResolved > 0)
+                                                        {{ $duplicateSkuResolved }} z nich otrzymało automatycznie osobne mapowanie ERP.
+                                                    @endif
                                                 @endif
                                                 @if ($mappingOverwrites > 0)
                                                     {{ $mappingOverwrites }} mapowań zostało nadpisanych innym ID WooCommerce.
