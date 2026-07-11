@@ -311,6 +311,24 @@ final class WooCommerceClient
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
+    public function createProductForLanguage(WordpressIntegration $integration, array $payload, string $language): array
+    {
+        $url = $this->endpoint($integration, '/products').'?lang='.rawurlencode($language);
+        $response = $this->request($integration)->post($url, $payload);
+
+        if (! $response->successful()) {
+            throw new RuntimeException("Utworzenie produktu {$language} w WooCommerce zwróciło HTTP {$response->status()}.");
+        }
+
+        $json = $response->json();
+
+        return is_array($json) ? $json : [];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
     public function createProductVariation(WordpressIntegration $integration, string $externalProductId, array $payload): array
     {
         $response = $this->request($integration)
@@ -318,6 +336,29 @@ final class WooCommerceClient
 
         if (! $response->successful()) {
             throw new RuntimeException("Utworzenie wariantu WooCommerce zwróciło HTTP {$response->status()}.");
+        }
+
+        $json = $response->json();
+
+        return is_array($json) ? $json : [];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    public function createProductCategory(WordpressIntegration $integration, array $payload, ?string $language = null): array
+    {
+        $url = $this->endpoint($integration, '/products/categories');
+
+        if (filled($language)) {
+            $url .= '?lang='.rawurlencode((string) $language);
+        }
+
+        $response = $this->request($integration)->post($url, $payload);
+
+        if (! $response->successful()) {
+            throw new RuntimeException("Utworzenie kategorii produktu w WooCommerce zwróciło HTTP {$response->status()}.");
         }
 
         $json = $response->json();
@@ -340,6 +381,32 @@ final class WooCommerceClient
 
         if (! $response->successful()) {
             throw new RuntimeException("Eksport danych produktu do WooCommerce zwrócił HTTP {$response->status()}.");
+        }
+
+        $json = $response->json();
+
+        return is_array($json) ? $json : [];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    public function updateProductDataByIds(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        ?string $externalVariationId,
+        array $payload,
+    ): array {
+        $endpoint = filled($externalVariationId)
+            ? "/products/{$externalProductId}/variations/{$externalVariationId}"
+            : "/products/{$externalProductId}";
+
+        $response = $this->request($integration)
+            ->put($this->endpoint($integration, $endpoint), $payload);
+
+        if (! $response->successful()) {
+            throw new RuntimeException("Eksport tłumaczenia produktu do WooCommerce zwrócił HTTP {$response->status()}.");
         }
 
         $json = $response->json();

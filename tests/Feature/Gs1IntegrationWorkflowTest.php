@@ -7,6 +7,8 @@ namespace Tests\Feature;
 use App\Models\AppSetting;
 use App\Models\AuditLog;
 use App\Models\Product;
+use App\Models\ProductCategory;
+use App\Services\Gs1\Gs1SettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -84,7 +86,7 @@ class Gs1IntegrationWorkflowTest extends TestCase
             ],
         ]);
 
-        $configuration = app(\App\Services\Gs1\Gs1SettingsService::class)->publicConfiguration();
+        $configuration = app(Gs1SettingsService::class)->publicConfiguration();
         $options = collect($configuration['gpc_options']);
 
         $this->assertSame('https://mojegs1.pl/api/v2', $configuration['base_url']);
@@ -181,7 +183,7 @@ class Gs1IntegrationWorkflowTest extends TestCase
 
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://mojegs1.pl/api/v2/products/5901234000017'
-            && $request->hasHeader('Authorization', 'Basic ' . base64_encode('gs1-api-user:gs1-secret-password'))
+            && $request->hasHeader('Authorization', 'Basic '.base64_encode('gs1-api-user:gs1-secret-password'))
             && $request['data']['id'] === '5901234000017'
             && $request['data']['attributes']['brandName'] === 'SEMPRE'
             && $request['data']['attributes']['internalSymbol'] === 'SKU-GS1'
@@ -241,6 +243,41 @@ class Gs1IntegrationWorkflowTest extends TestCase
         $this->assertSame(1, AuditLog::query()->where('action', 'product.gs1_ean_failed')->count());
     }
 
+    public function test_product_save_generates_sku_and_ean_from_category_gs1_mapping(): void
+    {
+        AppSetting::query()->create([
+            'key' => 'gs1_configuration',
+            'value' => [
+                'company_prefix' => '5901234',
+                'next_item_reference' => 1,
+                'register_products' => false,
+            ],
+        ]);
+        $category = ProductCategory::query()->create([
+            'external_id' => 'ERP-KOSZULE',
+            'name' => 'Koszule',
+            'path' => 'Odzież > Koszule',
+            'gs1_gpc_code' => '10001352',
+            'gs1_gpc_label' => 'Koszule/bluzki/koszulki polo/T-shirt',
+        ]);
+
+        $this->post(route('products.store'), [
+            'name' => 'Produkt bez identyfikatorów',
+            'sku' => '',
+            'ean' => '',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => 1,
+            'category_ids' => [$category->id],
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $product = Product::query()->where('name', 'Produkt bez identyfikatorów')->firstOrFail();
+        $this->assertSame('SEM-'.str_pad((string) $product->id, 8, '0', STR_PAD_LEFT), $product->sku);
+        $this->assertSame('5901234000017', $product->ean);
+        $this->assertSame([$category->id], data_get($product->masterData(), 'category_ids'));
+        $this->assertSame('10001352', data_get($product->masterData(), 'gs1.gpc_code'));
+    }
+
     public function test_operator_can_test_gs1_connection_from_integrations(): void
     {
         AppSetting::query()->create([
@@ -271,7 +308,7 @@ class Gs1IntegrationWorkflowTest extends TestCase
 
         Http::assertSent(fn ($request): bool => $request->method() === 'GET'
             && str_starts_with($request->url(), 'https://mojegs1.pl/api/v2/localizations')
-            && $request->hasHeader('Authorization', 'Basic ' . base64_encode('gs1-api-user:gs1-secret-password')));
+            && $request->hasHeader('Authorization', 'Basic '.base64_encode('gs1-api-user:gs1-secret-password')));
 
         $this->assertSame(1, AuditLog::query()->where('action', 'gs1.connection_succeeded')->count());
     }

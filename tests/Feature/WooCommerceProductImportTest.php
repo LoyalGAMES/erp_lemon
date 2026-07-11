@@ -398,6 +398,10 @@ class WooCommerceProductImportTest extends TestCase
                         'sale_price' => '299.00',
                         'stock_quantity' => 5,
                         'stock_status' => 'instock',
+                        'manage_stock' => true,
+                        'backorders' => 'notify',
+                        'low_stock_amount' => 2,
+                        'sold_individually' => true,
                         'global_unique_id' => '5901234123457',
                         'weight' => '0.3',
                         'dimensions' => [
@@ -419,6 +423,9 @@ class WooCommerceProductImportTest extends TestCase
                         ],
                         'meta_data' => [
                             ['key' => '_warehouse_location', 'value' => 'A-01-02'],
+                            ['key' => '_lemon_product_label_text', 'value' => $language === 'en' ? 'New' : 'Nowość'],
+                            ['key' => '_lemon_product_label_bg_color', 'value' => '#112233'],
+                            ['key' => '_lemon_product_label_text_color', 'value' => '#ffffff'],
                         ],
                         'upsell_ids' => [111],
                         'cross_sell_ids' => [222],
@@ -459,7 +466,15 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('<p>English description</p>', data_get($product->attributes, 'master.content.en.description'));
         $this->assertSame('<p>Krótki PL</p>', data_get($product->attributes, 'master.content.pl.additional_description'));
         $this->assertSame('Koszule', data_get($product->attributes, 'master.category'));
+        $this->assertSame(['Koszule'], data_get($product->attributes, 'master.categories'));
+        $this->assertNotEmpty(data_get($product->attributes, 'master.category_ids'));
         $this->assertSame('A-01-02', data_get($product->attributes, 'master.stock.location'));
+        $this->assertTrue(data_get($product->attributes, 'master.inventory.manage_stock'));
+        $this->assertSame('notify', data_get($product->attributes, 'master.inventory.backorders'));
+        $this->assertEquals(2.0, data_get($product->attributes, 'master.inventory.low_stock_amount'));
+        $this->assertTrue(data_get($product->attributes, 'master.inventory.sold_individually'));
+        $this->assertSame('Nowość', data_get($product->attributes, 'master.custom_label.pl'));
+        $this->assertSame('New', data_get($product->attributes, 'master.custom_label.en'));
         $this->assertNull(data_get($product->attributes, 'master.stock.quantity'));
         $this->assertEquals(299.0, data_get($product->attributes, 'master.prices.sale_price_pln'));
         $this->assertSame('Rozmiar', data_get($product->attributes, 'master.parameters.0.name'));
@@ -470,5 +485,7 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('<p>Polski opis</p>', data_get($product->attributes, 'woocommerce_description'));
         $this->assertSame('901', data_get($product->attributes, 'woocommerce_translations.en.product_id'));
         $this->assertSame('FULL-WOO-1', data_get($product->attributes, 'woocommerce_translations.en.sku'));
+        $this->assertDatabaseHas('product_parameter_definitions', ['name' => 'Rozmiar', 'is_variant' => true]);
+        $this->assertDatabaseHas('product_parameter_definitions', ['name' => 'Skład', 'is_variant' => false]);
     }
 }

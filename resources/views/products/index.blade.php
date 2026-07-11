@@ -245,8 +245,12 @@
                             @endforeach
                         </select>
                     </label>
-                    <label>Kategoria
-                        <input name="category" list="product-category-options" value="{{ old('category') }}" placeholder="Wyszukaj kategorię z WooCommerce">
+                    <label>Kategorie produktu
+                        <select name="category_ids[]" multiple size="5">
+                            @foreach ($categoryOptions as $category)
+                                <option value="{{ $category['id'] }}" @selected(in_array((int) $category['id'], collect(old('category_ids', []))->map(fn ($id) => (int) $id)->all(), true))>{{ $category['path'] }}{{ $category['gs1_gpc_code'] ? ' · GS1 '.$category['gs1_gpc_code'] : '' }}</option>
+                            @endforeach
+                        </select>
                     </label>
                     <label>Tagi
                         <input name="tags" value="{{ old('tags') }}" placeholder="tag 1, tag 2">
@@ -256,10 +260,10 @@
 
                 <div class="drawer-form-grid three">
                     <label>SKU
-                        <input name="sku" value="{{ old('sku') }}" required>
+                        <input name="sku" value="{{ old('sku') }}" placeholder="Automatycznie po zapisie">
                     </label>
                     <label>EAN
-                        <input name="ean" value="{{ old('ean') }}">
+                        <input name="ean" value="{{ old('ean') }}" placeholder="Automatycznie z GS1">
                     </label>
                     <label>ASIN
                         <input name="asin" value="{{ old('asin') }}">
@@ -353,6 +357,18 @@
                     <label>Cena zakupu (średnia)
                         <input name="purchase_price_pln" type="number" step="0.01" min="0" value="{{ old('purchase_price_pln') }}">
                     </label>
+                    <label>Zamówienia oczekujące
+                        <select name="backorders">
+                            @foreach (['no' => 'Nie zezwalaj', 'notify' => 'Zezwalaj i informuj', 'yes' => 'Zezwalaj'] as $value => $label)
+                                <option value="{{ $value }}" @selected(old('backorders', 'no') === $value)>{{ $label }}</option>
+                            @endforeach
+                        </select>
+                    </label>
+                    <label>Niski próg stanu
+                        <input name="low_stock_amount" type="number" step="1" min="0" value="{{ old('low_stock_amount') }}">
+                    </label>
+                    <label class="toggle-row"><input type="hidden" name="manage_stock" value="0"><input name="manage_stock" type="checkbox" value="1" @checked(old('manage_stock', true))> Zarządzaj stanem</label>
+                    <label class="toggle-row"><input name="sold_individually" type="checkbox" value="1" @checked(old('sold_individually'))> Sprzedawany pojedynczo</label>
                     <div class="toolbar-note">Stany magazynowe produktu powstaną z dokumentów magazynowych po zapisaniu produktu.</div>
                 </div>
             </section>
@@ -361,6 +377,18 @@
                 <div class="drawer-form-grid">
                     <label>Nazwa produktu (EN)
                         <input name="name_en" value="{{ old('name_en') }}">
+                    </label>
+                    <label>Custom label (PL)
+                        <input name="custom_label_pl" value="{{ old('custom_label_pl') }}">
+                    </label>
+                    <label>Custom label (EN)
+                        <input name="custom_label_en" value="{{ old('custom_label_en') }}">
+                    </label>
+                    <label>Tło etykiety
+                        <input name="custom_label_bg_color" type="color" value="{{ old('custom_label_bg_color', '#111111') }}">
+                    </label>
+                    <label>Tekst etykiety
+                        <input name="custom_label_text_color" type="color" value="{{ old('custom_label_text_color', '#ffffff') }}">
                     </label>
                 </div>
                 <div class="product-rich-field">

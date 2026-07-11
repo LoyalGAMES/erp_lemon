@@ -21,6 +21,7 @@ use App\Services\Gs1\Gs1GtinService;
 use App\Services\Gs1\Gs1SettingsService;
 use App\Services\Inventory\WarehouseDocumentNumberService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
+use App\Services\Products\ProductIdentifierService;
 use App\Services\WooCommerce\ProductDataExportService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
@@ -177,12 +178,13 @@ class ProductController extends Controller
         ]);
     }
 
-    public function store(Request $request): RedirectResponse
+    public function store(Request $request, ProductIdentifierService $identifiers): RedirectResponse
     {
         $validated = $request->validate($this->productValidationRules());
+        $requestedSku = $this->nullableString($validated['sku'] ?? null);
 
         $product = Product::query()->create([
-            'sku' => $validated['sku'],
+            'sku' => $requestedSku ?? $identifiers->temporarySku(),
             'name' => $validated['name'],
             'ean' => $this->nullableString($validated['ean'] ?? null),
             'unit' => $validated['unit'],
@@ -209,14 +211,20 @@ class ProductController extends Controller
             $this->storeUploadedMedia($product, $request),
         );
         $product->forceFill(['attributes' => $attributes])->save();
+        $identifiers->ensureSku($product, $requestedSku === null);
+        $eanResult = $identifiers->ensureEan($product);
         $this->syncVariantRelations($product, (array) $request->input('variant_skus', []), [], $validated['variant_attribute'] ?? null);
 
-        return redirect()
+        $redirect = redirect()
             ->route('products.show', $product)
             ->with('status', 'Produkt został dodany jako dane główne ERP.');
+
+        return $eanResult['error'] !== null
+            ? $redirect->with('warning', $eanResult['error'])
+            : $redirect;
     }
 
-    public function update(Product $product, Request $request, AuditLogService $audit): RedirectResponse
+    public function update(Product $product, Request $request, AuditLogService $audit, ProductIdentifierService $identifiers): RedirectResponse
     {
         $validated = $request->validate($this->productValidationRules($product));
 
@@ -237,7 +245,7 @@ class ProductController extends Controller
         $attributes['master'] = $this->masterDataFromRequest($validated, $request, $media, (array) $currentMaster);
 
         $product->fill([
-            'sku' => $validated['sku'],
+            'sku' => $this->nullableString($validated['sku'] ?? null) ?? $product->sku,
             'name' => $validated['name'],
             'ean' => $this->nullableString($validated['ean'] ?? null),
             'unit' => $validated['unit'],
@@ -248,6 +256,8 @@ class ProductController extends Controller
             'attributes' => $attributes,
         ]);
         $product->save();
+        $identifiers->ensureSku($product, $this->nullableString($validated['sku'] ?? null) === null);
+        $eanResult = $identifiers->ensureEan($product);
         $this->syncVariantRelations(
             $product,
             (array) $request->input('variant_skus', []),
@@ -261,9 +271,13 @@ class ProductController extends Controller
         ]);
         $this->queueWooCommerceDataExport($product);
 
-        return redirect()
+        $redirect = redirect()
             ->route('products.show', $product)
             ->with('status', 'Dane produktu zostały zapisane jako dane główne ERP. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle.');
+
+        return $eanResult['error'] !== null
+            ? $redirect->with('warning', $eanResult['error'])
+            : $redirect;
     }
 
     public function duplicate(Product $product, AuditLogService $audit): RedirectResponse
@@ -625,7 +639,7 @@ class ProductController extends Controller
         }
 
         return [
-            'sku' => ['required', 'string', 'max:255', $skuRule],
+            'sku' => ['nullable', 'string', 'max:255', $skuRule],
             'name' => ['required', 'string', 'max:255'],
             'ean' => ['nullable', 'string', 'max:255'],
             'unit' => ['required', 'string', 'max:16'],
@@ -633,6 +647,8 @@ class ProductController extends Controller
             'weight_kg' => ['nullable', 'numeric', 'min:0'],
             'catalog' => ['nullable', 'string', 'max:255'],
             'category' => ['nullable', 'string', 'max:255'],
+            'category_ids' => ['nullable', 'array'],
+            'category_ids.*' => ['integer', 'distinct', 'exists:product_categories,id'],
             'producer' => ['nullable', 'string', 'max:255'],
             'tags' => ['nullable', 'string', 'max:1000'],
             'asin' => ['nullable', 'string', 'max:255'],
@@ -655,6 +671,14 @@ class ProductController extends Controller
             'purchase_price_pln' => ['nullable', 'numeric', 'min:0'],
             'extra_cost_pln' => ['nullable', 'numeric', 'min:0'],
             'warehouse_location' => ['nullable', 'string', 'max:255'],
+            'manage_stock' => ['nullable', 'boolean'],
+            'backorders' => ['nullable', 'string', 'in:no,notify,yes'],
+            'low_stock_amount' => ['nullable', 'numeric', 'min:0'],
+            'sold_individually' => ['nullable', 'boolean'],
+            'custom_label_pl' => ['nullable', 'string', 'max:120'],
+            'custom_label_en' => ['nullable', 'string', 'max:120'],
+            'custom_label_bg_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
+            'custom_label_text_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
             'name_en' => ['nullable', 'string', 'max:255'],
             'description_pl' => ['nullable', 'string'],
             'description_en' => ['nullable', 'string'],
@@ -698,10 +722,27 @@ class ProductController extends Controller
      */
     private function masterDataFromRequest(array $validated, Request $request, array $media, array $existingMaster = []): array
     {
+        $categoryIds = collect((array) ($validated['category_ids'] ?? []))
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter()
+            ->unique()
+            ->values();
+        $selectedCategories = $categoryIds->isEmpty()
+            ? collect()
+            : ProductCategory::query()->whereIn('id', $categoryIds)->get()->sortBy(fn (ProductCategory $category): int => $categoryIds->search($category->id));
+        $categoryNames = $selectedCategories
+            ->map(fn (ProductCategory $category): string => $category->path ?: $category->name)
+            ->values()
+            ->all();
+        $legacyCategory = $this->nullableString($validated['category'] ?? null)
+            ?? ($categoryNames[0] ?? null);
+
         return [
             'source' => 'erp',
             'catalog' => $this->nullableString($validated['catalog'] ?? null) ?? 'Domyślny',
-            'category' => $this->nullableString($validated['category'] ?? null),
+            'category' => $legacyCategory,
+            'category_ids' => $categoryIds->all(),
+            'categories' => $categoryNames !== [] ? $categoryNames : array_values(array_filter((array) data_get($existingMaster, 'categories', []))),
             'producer' => $this->nullableString($validated['producer'] ?? null) ?? 'SEMPRE',
             'tags' => $this->tagList($validated['tags'] ?? ''),
             'asin' => $this->nullableString($validated['asin'] ?? null),
@@ -719,6 +760,25 @@ class ProductController extends Controller
             'prices' => $this->priceData($validated),
             'stock' => [
                 'location' => $this->nullableString($validated['warehouse_location'] ?? null),
+            ],
+            'inventory' => [
+                'manage_stock' => $request->has('manage_stock')
+                    ? $request->boolean('manage_stock')
+                    : (bool) data_get($existingMaster, 'inventory.manage_stock', true),
+                'backorders' => $this->nullableString($validated['backorders'] ?? null)
+                    ?? (string) data_get($existingMaster, 'inventory.backorders', 'no'),
+                'low_stock_amount' => array_key_exists('low_stock_amount', $validated)
+                    ? $this->nullableFloat($validated['low_stock_amount'])
+                    : data_get($existingMaster, 'inventory.low_stock_amount'),
+                'sold_individually' => $request->has('sold_individually')
+                    ? $request->boolean('sold_individually')
+                    : (bool) data_get($existingMaster, 'inventory.sold_individually', false),
+            ],
+            'custom_label' => [
+                'pl' => $this->nullableString($validated['custom_label_pl'] ?? data_get($existingMaster, 'custom_label.pl')),
+                'en' => $this->nullableString($validated['custom_label_en'] ?? data_get($existingMaster, 'custom_label.en')),
+                'bg_color' => $this->nullableString($validated['custom_label_bg_color'] ?? data_get($existingMaster, 'custom_label.bg_color')),
+                'text_color' => $this->nullableString($validated['custom_label_text_color'] ?? data_get($existingMaster, 'custom_label.text_color')),
             ],
             'content' => [
                 'pl' => [
@@ -1130,7 +1190,7 @@ class ProductController extends Controller
     }
 
     /**
-     * @return Collection<int, array{name:string,path:string,sales_channel:?string}>
+     * @return Collection<int, array{id:?int,name:string,path:string,sales_channel:?string,gs1_gpc_code:?string}>
      */
     private function productListCategoryOptions(): Collection
     {
@@ -1140,9 +1200,11 @@ class ProductController extends Controller
             ->orderBy('name')
             ->get()
             ->map(fn (ProductCategory $category): array => [
+                'id' => $category->id,
                 'name' => $category->name,
                 'path' => $category->path ?: $category->name,
                 'sales_channel' => $category->salesChannel?->code,
+                'gs1_gpc_code' => $category->gs1_gpc_code,
             ]);
     }
 
@@ -1303,9 +1365,11 @@ class ProductController extends Controller
             ->orderBy('name')
             ->get()
             ->map(fn (ProductCategory $category): array => [
+                'id' => $category->id,
                 'name' => $category->name,
                 'path' => $category->path ?: $category->name,
                 'sales_channel' => $category->salesChannel?->code,
+                'gs1_gpc_code' => $category->gs1_gpc_code,
             ]);
 
         $productCategories = Product::query()
@@ -1323,9 +1387,11 @@ class ProductController extends Controller
                 return collect($categories)
                     ->map(fn ($category): ?array => $this->nullableString($category) !== null
                         ? [
+                            'id' => null,
                             'name' => $this->nullableString($category),
                             'path' => $this->nullableString($category),
                             'sales_channel' => null,
+                            'gs1_gpc_code' => null,
                         ]
                         : null)
                     ->filter()

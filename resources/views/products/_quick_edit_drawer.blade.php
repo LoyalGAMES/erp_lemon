@@ -4,6 +4,7 @@
     $quickMasterField = fn (string $name, string $path, mixed $default = null): mixed => old($name, data_get($quickMaster, $path, $default)) ?? '';
     $quickTags = old('tags', implode(', ', (array) data_get($quickMaster, 'tags', [])));
     $quickInitialStep = old('quick_edit_step', 'produkt');
+    $quickSelectedCategoryIds = collect(old('category_ids', data_get($quickMaster, 'category_ids', [])))->map(fn ($id) => (int) $id)->all();
 
     $quickParameterRows = collect(data_get($quickMaster, 'parameters', []))
         ->map(fn ($row): array => [
@@ -99,8 +100,15 @@
                             @endforeach
                         </select>
                     </label>
-                    <label>Kategoria
-                        <input name="category" list="product-quick-category-options" value="{{ $quickMasterField('category', 'category') }}" placeholder="Wyszukaj kategorię z WooCommerce">
+                    <label>Kategorie produktu
+                        <select name="category_ids[]" multiple size="5">
+                            @foreach ($categoryOptions as $category)
+                                @if ($category['id'] ?? null)
+                                    <option value="{{ $category['id'] }}" @selected(in_array((int) $category['id'], $quickSelectedCategoryIds, true))>{{ $category['path'] }}{{ ($category['gs1_gpc_code'] ?? null) ? ' · GS1 '.$category['gs1_gpc_code'] : '' }}</option>
+                                @endif
+                            @endforeach
+                        </select>
+                        <small>Wyszukaj kategorię z WooCommerce i zaznacz jedną lub kilka pozycji.</small>
                     </label>
                     <label>Tagi
                         <input name="tags" value="{{ $quickTags }}" placeholder="tag 1, tag 2">
@@ -110,7 +118,7 @@
 
                 <div class="product-quick-form-grid">
                     <label>SKU
-                        <input name="sku" value="{{ $quickField('sku', $product->sku) }}" required>
+                        <input name="sku" value="{{ $quickField('sku', $product->displaySku()) }}" placeholder="Automatycznie po zapisie">
                     </label>
                     <label>EAN
                         <input name="ean" value="{{ $quickField('ean', $product->ean) }}">
@@ -209,6 +217,24 @@
                     <label>Cena zakupu (średnia)
                         <input name="purchase_price_pln" type="number" step="0.01" min="0" value="{{ $quickMasterField('purchase_price_pln', 'prices.purchase_price_pln') }}">
                     </label>
+                    <label>Zarządzanie stanem
+                        <input type="hidden" name="manage_stock" value="0">
+                        <span class="product-quick-toggle-row"><input name="manage_stock" type="checkbox" value="1" @checked(old('manage_stock', data_get($quickMaster, 'inventory.manage_stock', true)))> Włączone</span>
+                    </label>
+                    <label>Zamówienia oczekujące
+                        <select name="backorders">
+                            @foreach (['no' => 'Nie zezwalaj', 'notify' => 'Zezwalaj i informuj', 'yes' => 'Zezwalaj'] as $value => $label)
+                                <option value="{{ $value }}" @selected(old('backorders', data_get($quickMaster, 'inventory.backorders', 'no')) === $value)>{{ $label }}</option>
+                            @endforeach
+                        </select>
+                    </label>
+                    <label>Niski próg stanu
+                        <input name="low_stock_amount" type="number" step="1" min="0" value="{{ $quickMasterField('low_stock_amount', 'inventory.low_stock_amount') }}">
+                    </label>
+                    <label>Sprzedawany pojedynczo
+                        <input type="hidden" name="sold_individually" value="0">
+                        <span class="product-quick-toggle-row"><input name="sold_individually" type="checkbox" value="1" @checked(old('sold_individually', data_get($quickMaster, 'inventory.sold_individually', false)))> Maks. 1 szt.</span>
+                    </label>
                 </div>
                 @include('products._stock_readonly_panel', ['stockProduct' => $product])
             </div>
@@ -219,6 +245,18 @@
                 <div class="product-quick-form-grid two">
                     <label>Nazwa produktu (EN)
                         <input name="name_en" value="{{ $quickMasterField('name_en', 'content.en.name') }}">
+                    </label>
+                    <label>Custom label (PL)
+                        <input name="custom_label_pl" value="{{ $quickMasterField('custom_label_pl', 'custom_label.pl') }}">
+                    </label>
+                    <label>Custom label (EN)
+                        <input name="custom_label_en" value="{{ $quickMasterField('custom_label_en', 'custom_label.en') }}">
+                    </label>
+                    <label>Tło etykiety
+                        <input name="custom_label_bg_color" type="color" value="{{ $quickMasterField('custom_label_bg_color', 'custom_label.bg_color', '#111111') ?: '#111111' }}">
+                    </label>
+                    <label>Tekst etykiety
+                        <input name="custom_label_text_color" type="color" value="{{ $quickMasterField('custom_label_text_color', 'custom_label.text_color', '#ffffff') ?: '#ffffff' }}">
                     </label>
                 </div>
                 <div class="product-rich-field">
@@ -329,11 +367,6 @@
     </form>
 </aside>
 
-<datalist id="product-quick-category-options">
-    @foreach ($categoryOptions as $category)
-        <option value="{{ $category['path'] }}">{{ $category['sales_channel'] ? $category['sales_channel'] . ' · ' : '' }}{{ $category['name'] }}</option>
-    @endforeach
-</datalist>
 @include('products._parameter_datalists', ['parameterOptions' => $parameterOptions])
 @include('products._product_lookup_datalist', ['productLookupOptions' => $productLookupOptions])
 @include('products._rich_editor_assets')

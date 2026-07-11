@@ -45,7 +45,8 @@ final class ProductDataExportService
 
             $isVariation = filled($mapping->external_variation_id);
             $variants = $this->variantChildren($product);
-            $payload = $this->payload($product, $isVariation, (int) $mapping->sales_channel_id);
+            $this->ensureRemoteCategories($product, $integration, (int) $mapping->sales_channel_id);
+            $payload = $this->payload($product, $isVariation, (int) $mapping->sales_channel_id, 'pl');
             $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $product, $mapping);
 
             if (! $isVariation) {
@@ -55,7 +56,11 @@ final class ProductDataExportService
             $response = $this->client->updateProductData($integration, $mapping, $payload);
 
             $this->updateMappingAfterExport($mapping, $product, $payload, $response);
-            $translationPublicationResults = $this->syncPublicationDateTranslations($product, $integration, $mapping, $isVariation);
+            $translationResults = $this->syncTranslations($product, $integration, $mapping, $isVariation, $variants);
+
+            if ($translationResults === []) {
+                $translationResults = $this->syncDiscoveredTranslationPublicationDates($product, $integration, $mapping, $isVariation);
+            }
             $variantResults = $isVariation
                 ? []
                 : $this->exportOrCreateVariants(
@@ -80,7 +85,7 @@ final class ProductDataExportService
                     'sku' => $response['sku'] ?? null,
                     'name' => $response['name'] ?? null,
                     'regular_price' => $response['regular_price'] ?? null,
-                    'publication_date_translations' => $translationPublicationResults,
+                    'translations' => $translationResults,
                 ],
                 'attempts' => 1,
                 'started_at' => now(),
@@ -91,7 +96,7 @@ final class ProductDataExportService
                 'channel' => $mapping->salesChannel?->code,
                 'external_id' => $mapping->external_variation_id ?? $mapping->external_product_id,
                 'response' => $response,
-                'publication_date_translations' => $translationPublicationResults,
+                'translations' => $translationResults,
                 'variants' => $variantResults,
             ];
         }
@@ -103,7 +108,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @return array{mapping:ProductChannelMapping,response:array<string,mixed>,payload:array<string,mixed>,variant_mappings:list<ProductChannelMapping>,variant_responses:list<array<string,mixed>>}
+     * @return array{mapping:ProductChannelMapping,response:array<string,mixed>,payload:array<string,mixed>,variant_mappings:list<ProductChannelMapping>,variant_responses:list<array<string,mixed>>,translation_responses:list<array<string,mixed>>}
      */
     public function create(Product $product, WordpressIntegration $integration): array
     {
@@ -136,7 +141,8 @@ final class ProductDataExportService
             throw new RuntimeException("Wariant {$mappedVariant->sku} ma już mapowanie do kanału {$channelCode}.");
         }
 
-        $payload = $this->payload($product, false, (int) $integration->sales_channel_id);
+        $this->ensureRemoteCategories($product, $integration, (int) $integration->sales_channel_id);
+        $payload = $this->payload($product, false, (int) $integration->sales_channel_id, 'pl');
         $payload = $this->prepareVariablePayload($product, $variants, $payload);
         $response = $this->client->createProduct($integration, $payload);
         $externalId = $response['id'] ?? null;
@@ -237,13 +243,104 @@ final class ProductDataExportService
             $variantResponses[] = $variantResponse;
         }
 
+        $translationResponses = $this->createTranslations(
+            $product,
+            $variants,
+            $integration,
+            (int) $integration->sales_channel_id,
+            (string) $externalId,
+        );
+
         return [
             'mapping' => $mapping,
             'response' => $response,
             'payload' => $payload,
             'variant_mappings' => $variantMappings,
             'variant_responses' => $variantResponses,
+            'translation_responses' => $translationResponses,
         ];
+    }
+
+    /**
+     * @param  Collection<int, Product>  $variants
+     * @return list<array<string, mixed>>
+     */
+    private function createTranslations(
+        Product $product,
+        Collection $variants,
+        WordpressIntegration $integration,
+        int $salesChannelId,
+        string $primaryExternalId,
+    ): array {
+        $results = [];
+
+        foreach ($integration->productImportLanguages() as $language) {
+            $language = trim((string) $language);
+
+            if ($language === '' || $language === 'pl' || ! is_array(data_get($product->masterData(), "content.{$language}"))) {
+                continue;
+            }
+
+            $payload = $this->payload($product, false, $salesChannelId, $language);
+            $payload = $this->prepareVariablePayload($product, $variants, $payload);
+            $desiredSku = $payload['sku'] ?? null;
+            unset($payload['sku']);
+            $payload['translations'] = ['pl' => (int) $primaryExternalId];
+
+            $response = $this->client->createProductForLanguage($integration, $payload, $language);
+            $translatedProductId = trim((string) ($response['id'] ?? ''));
+
+            if ($translatedProductId === '') {
+                throw new RuntimeException("WooCommerce nie zwrócił ID utworzonego tłumaczenia produktu ({$language}).");
+            }
+
+            if (filled($desiredSku)) {
+                $response = $this->client->updateProductDataByIds($integration, $translatedProductId, null, [
+                    'sku' => $desiredSku,
+                ]);
+            }
+
+            $this->saveTranslationReference($product, $language, $translatedProductId, null, (string) $desiredSku);
+            $variantResponses = [];
+
+            foreach ($variants as $variant) {
+                $variantPayload = $this->variationPayload($product, $variant, $salesChannelId, $language);
+                $variantResponse = $this->client->createProductVariation($integration, $translatedProductId, $variantPayload);
+                $translatedVariationId = trim((string) ($variantResponse['id'] ?? ''));
+
+                if ($translatedVariationId === '') {
+                    throw new RuntimeException("WooCommerce nie zwrócił ID tłumaczenia wariantu {$variant->sku} ({$language}).");
+                }
+
+                $this->saveTranslationReference($variant, $language, $translatedProductId, $translatedVariationId, $variant->sku);
+                $variantResponses[] = $variantResponse;
+            }
+
+            $results[] = [
+                'language' => $language,
+                'product_id' => $translatedProductId,
+                'response' => $response,
+                'variants' => $variantResponses,
+            ];
+        }
+
+        return $results;
+    }
+
+    private function saveTranslationReference(
+        Product $product,
+        string $language,
+        string $externalProductId,
+        ?string $externalVariationId,
+        string $sku,
+    ): void {
+        $attributes = (array) $product->attributes;
+        data_set($attributes, "woocommerce_translations.{$language}", [
+            'product_id' => $externalProductId,
+            'variation_id' => $externalVariationId,
+            'sku' => $sku,
+        ]);
+        $product->forceFill(['attributes' => $attributes])->save();
     }
 
     /**
@@ -326,28 +423,41 @@ final class ProductDataExportService
     /**
      * @return array<string, mixed>
      */
-    private function payload(Product $product, bool $isVariation = false, ?int $salesChannelId = null): array
+    private function payload(Product $product, bool $isVariation = false, ?int $salesChannelId = null, string $language = 'pl'): array
     {
+        $product->loadMissing('stockBalances');
         $master = $product->masterData();
         $retailPrice = data_get($master, 'prices.retail_price_pln');
         $salePrice = data_get($master, 'prices.sale_price_pln');
         $salePriceStartsAt = data_get($master, 'prices.sale_price_starts_at');
         $salePriceEndsAt = data_get($master, 'prices.sale_price_ends_at');
         $publicationDate = $this->dateTimeString(data_get($master, 'publication_date'));
-        $description = data_get($master, 'content.pl.description');
-        $shortDescription = data_get($master, 'content.pl.additional_description');
+        $description = data_get($master, "content.{$language}.description")
+            ?? data_get($master, 'content.pl.description');
+        $shortDescription = data_get($master, "content.{$language}.additional_description")
+            ?? data_get($master, 'content.pl.additional_description');
+        $hasLanguageContent = $language === 'pl' || is_array(data_get($master, "content.{$language}"));
         $images = $this->images($product);
+        $manageStock = (bool) data_get($master, 'inventory.manage_stock', true);
+        $stockQuantity = (int) floor(max(0, (float) $product->stockBalances->sum('quantity_available')));
 
         $payload = [
             'sku' => $product->sku,
+            'global_unique_id' => $product->ean ?: '',
             'status' => $product->is_active ? (string) (data_get($master, 'publication_status') ?: 'publish') : 'draft',
-            'weight' => $product->weight_kg !== null ? $this->decimal($product->weight_kg, 4) : null,
+            'manage_stock' => $manageStock,
+            'stock_quantity' => $manageStock ? $stockQuantity : null,
+            'stock_status' => $manageStock ? ($stockQuantity > 0 ? 'instock' : 'outofstock') : null,
+            'backorders' => (string) data_get($master, 'inventory.backorders', 'no'),
+            'low_stock_amount' => data_get($master, 'inventory.low_stock_amount') ?? '',
+            'sold_individually' => (bool) data_get($master, 'inventory.sold_individually', false),
+            'weight' => $product->weight_kg !== null ? $this->decimal($product->weight_kg, 4) : '',
             'dimensions' => [
-                'height' => $this->decimal(data_get($master, 'dimensions.height_cm'), 2),
-                'width' => $this->decimal(data_get($master, 'dimensions.width_cm'), 2),
-                'length' => $this->decimal(data_get($master, 'dimensions.length_cm'), 2),
+                'height' => $this->decimal(data_get($master, 'dimensions.height_cm'), 2) ?? '',
+                'width' => $this->decimal(data_get($master, 'dimensions.width_cm'), 2) ?? '',
+                'length' => $this->decimal(data_get($master, 'dimensions.length_cm'), 2) ?? '',
             ],
-            'meta_data' => $this->metaData($product, $master),
+            'meta_data' => $this->metaData($product, $master, $language),
         ];
 
         if ($publicationDate !== null) {
@@ -355,24 +465,30 @@ final class ProductDataExportService
         }
 
         if (! $isVariation) {
-            $payload['name'] = (string) (data_get($master, 'content.pl.name') ?: $product->name);
-            $payload['description'] = $description ?: '';
-            $payload['short_description'] = $shortDescription ?: '';
+            if ($hasLanguageContent) {
+                $payload['name'] = (string) (data_get($master, "content.{$language}.name") ?: data_get($master, 'content.pl.name') ?: $product->name);
+                $payload['description'] = $description ?: '';
+                $payload['short_description'] = $shortDescription ?: '';
+            }
+
+            $payload['type'] = (string) (data_get($master, 'product_type') ?: 'simple');
             $payload['attributes'] = $this->attributes($master);
-            $payload['categories'] = $this->categories($master, $salesChannelId);
+            $payload['categories'] = $this->categories($master, $salesChannelId, $language);
             $payload['catalog_visibility'] = (string) (data_get($master, 'catalog_visibility') ?: 'visible');
             $payload['upsell_ids'] = $this->relatedProductIds((array) data_get($master, 'related_products.upsell_skus', []), $salesChannelId);
             $payload['cross_sell_ids'] = $this->relatedProductIds((array) data_get($master, 'related_products.cross_sell_skus', []), $salesChannelId);
 
-            if ($images !== []) {
-                $payload['images'] = $images;
-            }
-        } else {
+            $payload['images'] = $images;
+        } elseif ($hasLanguageContent) {
             $payload['description'] = $description ?: '';
 
             if ($images !== []) {
                 $payload['image'] = $images[0];
             }
+        }
+
+        if ($isVariation) {
+            unset($payload['sold_individually']);
         }
 
         if ($retailPrice !== null && $retailPrice !== '') {
@@ -406,6 +522,9 @@ final class ProductDataExportService
             $payload['sale_price'],
             $payload['date_on_sale_from'],
             $payload['date_on_sale_to'],
+            $payload['manage_stock'],
+            $payload['stock_quantity'],
+            $payload['stock_status'],
         );
 
         return $payload;
@@ -414,9 +533,9 @@ final class ProductDataExportService
     /**
      * @return array<string, mixed>
      */
-    private function variationPayload(Product $parent, Product $variant, int $salesChannelId): array
+    private function variationPayload(Product $parent, Product $variant, int $salesChannelId, string $language = 'pl'): array
     {
-        $payload = $this->payload($variant, true, $salesChannelId);
+        $payload = $this->payload($variant, true, $salesChannelId, $language);
         $parentMaster = $parent->masterData();
         $parentRegularPrice = data_get($parentMaster, 'prices.retail_price_pln');
         $parentSalePrice = data_get($parentMaster, 'prices.sale_price_pln');
@@ -548,9 +667,9 @@ final class ProductDataExportService
      * @param  array<string, mixed>  $master
      * @return list<array{key:string,value:mixed}>
      */
-    private function metaData(Product $product, array $master): array
+    private function metaData(Product $product, array $master, string $language = 'pl'): array
     {
-        return collect([
+        $meta = collect([
             '_sempre_erp_product_id' => $product->id,
             '_sempre_erp_source' => 'erp',
             '_sempre_erp_ean' => $product->ean,
@@ -577,6 +696,13 @@ final class ProductDataExportService
             ->map(fn ($value, string $key): array => ['key' => $key, 'value' => $value])
             ->values()
             ->all();
+
+        return array_merge($meta, [
+            ['key' => '_ean', 'value' => $product->ean ?: ''],
+            ['key' => '_lemon_product_label_text', 'value' => (string) data_get($master, "custom_label.{$language}", '')],
+            ['key' => '_lemon_product_label_bg_color', 'value' => (string) data_get($master, 'custom_label.bg_color', '')],
+            ['key' => '_lemon_product_label_text_color', 'value' => (string) data_get($master, 'custom_label.text_color', '')],
+        ]);
     }
 
     /**
@@ -723,27 +849,92 @@ final class ProductDataExportService
      * @param  array<string, mixed>  $master
      * @return list<array{id:int}>
      */
-    private function categories(array $master, ?int $salesChannelId): array
+    private function categories(array $master, ?int $salesChannelId, string $language = 'pl'): array
     {
-        $categoryName = trim((string) data_get($master, 'category', ''));
-
-        if ($categoryName === '' || $salesChannelId === null) {
+        if ($salesChannelId === null) {
             return [];
         }
 
-        $category = ProductCategory::query()
-            ->where('sales_channel_id', $salesChannelId)
-            ->where(function ($query) use ($categoryName): void {
-                $query->where('name', $categoryName)
-                    ->orWhere('path', $categoryName);
+        $categoryIds = collect((array) data_get($master, 'category_ids', []))->map(fn (mixed $id): int => (int) $id)->filter();
+        $query = ProductCategory::query()->where('sales_channel_id', $salesChannelId);
+
+        if ($categoryIds->isNotEmpty()) {
+            $categories = $query->whereIn('id', $categoryIds)->get();
+        } else {
+            $categoryNames = collect((array) data_get($master, 'categories', []))
+                ->push(data_get($master, 'category'))
+                ->map(fn (mixed $name): string => trim((string) $name))
+                ->filter()
+                ->unique();
+            $categories = $categoryNames->isEmpty()
+                ? collect()
+                : $query->where(fn ($builder) => $builder->whereIn('name', $categoryNames)->orWhereIn('path', $categoryNames))->get();
+        }
+
+        return $categories
+            ->map(function (ProductCategory $category) use ($language): ?array {
+                $externalId = data_get($category->metadata, "woocommerce_ids.{$language}")
+                    ?? $category->external_id;
+
+                return ctype_digit((string) $externalId) ? ['id' => (int) $externalId] : null;
             })
-            ->first();
+            ->filter()
+            ->unique('id')
+            ->values()
+            ->all();
+    }
 
-        if (! $category instanceof ProductCategory || ! ctype_digit((string) $category->external_id)) {
-            return [];
+    private function ensureRemoteCategories(Product $product, WordpressIntegration $integration, int $salesChannelId): void
+    {
+        $categoryIds = collect((array) data_get($product->masterData(), 'category_ids', []))
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter();
+
+        if ($categoryIds->isEmpty()) {
+            return;
         }
 
-        return [['id' => (int) $category->external_id]];
+        $languages = collect($integration->productImportLanguages())
+            ->map(fn (mixed $language): string => trim((string) $language))
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ($languages->isEmpty()) {
+            $languages = collect(['pl']);
+        }
+
+        foreach (ProductCategory::query()->whereIn('id', $categoryIds)->get() as $category) {
+            $metadata = (array) $category->metadata;
+
+            if (ctype_digit((string) $category->external_id) && blank(data_get($metadata, 'woocommerce_ids.pl'))) {
+                data_set($metadata, 'woocommerce_ids.pl', (string) $category->external_id);
+            }
+
+            foreach ($languages as $language) {
+                if (filled(data_get($metadata, "woocommerce_ids.{$language}"))) {
+                    continue;
+                }
+
+                $response = $this->client->createProductCategory($integration, array_filter([
+                    'name' => $category->name,
+                    'slug' => $category->slug ?: null,
+                    'description' => $category->description ?: '',
+                ], fn (mixed $value): bool => $value !== null), $language);
+                $externalId = trim((string) ($response['id'] ?? ''));
+
+                if ($externalId === '') {
+                    throw new RuntimeException("WooCommerce nie zwrócił ID utworzonej kategorii {$category->name} ({$language}).");
+                }
+
+                data_set($metadata, "woocommerce_ids.{$language}", $externalId);
+            }
+
+            $category->forceFill([
+                'sales_channel_id' => $salesChannelId,
+                'metadata' => $metadata,
+            ])->save();
+        }
     }
 
     /**
@@ -854,7 +1045,76 @@ final class ProductDataExportService
     /**
      * @return list<array<string, mixed>>
      */
-    private function syncPublicationDateTranslations(
+    private function syncTranslations(
+        Product $product,
+        WordpressIntegration $integration,
+        ProductChannelMapping $mapping,
+        bool $isVariation,
+        Collection $variants,
+    ): array {
+        $results = [];
+        $mainProductId = (string) $mapping->external_product_id;
+        $mainVariationId = filled($mapping->external_variation_id) ? (string) $mapping->external_variation_id : null;
+
+        foreach ((array) data_get($product->attributes, 'woocommerce_translations', []) as $language => $reference) {
+            if (! is_array($reference)) {
+                continue;
+            }
+
+            $externalProductId = trim((string) ($reference['product_id'] ?? ''));
+            $externalVariationId = filled($reference['variation_id'] ?? null) ? (string) $reference['variation_id'] : null;
+
+            if ($externalProductId === '' || ($externalProductId === $mainProductId && $externalVariationId === $mainVariationId)) {
+                continue;
+            }
+
+            $language = in_array((string) $language, ['pl', 'en'], true) ? (string) $language : 'en';
+
+            if (! $this->hasTranslationData($product, $language)) {
+                continue;
+            }
+
+            $payload = $this->payload($product, $isVariation, (int) $mapping->sales_channel_id, $language);
+            $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $product, $mapping);
+
+            if (! $isVariation) {
+                $payload = $this->prepareVariablePayload($product, $variants, $payload);
+            }
+
+            $response = $this->client->updateProductDataByIds(
+                $integration,
+                $externalProductId,
+                $externalVariationId,
+                $payload,
+            );
+            $results[] = [
+                'language' => $language,
+                'product_id' => $externalProductId,
+                'variation_id' => $externalVariationId,
+                'status' => 'updated',
+                'response_id' => $response['id'] ?? null,
+            ];
+        }
+
+        return $results;
+    }
+
+    private function hasTranslationData(Product $product, string $language): bool
+    {
+        $master = $product->masterData();
+
+        return is_array(data_get($master, "content.{$language}"))
+            || filled($product->ean)
+            || filled(data_get($master, 'prices.retail_price_pln'))
+            || filled(data_get($master, 'prices.sale_price_pln'))
+            || is_array(data_get($master, 'inventory'))
+            || filled(data_get($master, "custom_label.{$language}"));
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function syncDiscoveredTranslationPublicationDates(
         Product $product,
         WordpressIntegration $integration,
         ProductChannelMapping $mapping,
@@ -895,6 +1155,6 @@ final class ProductDataExportService
             }
         }
 
-        return array_filter($payload, fn ($value): bool => $value !== null && $value !== []);
+        return array_filter($payload, fn ($value): bool => $value !== null);
     }
 }

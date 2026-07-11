@@ -133,6 +133,15 @@
             <label class="full">Opis kategorii
                 <textarea name="description" placeholder="Opis kategorii do PIM i WooCommerce">{{ old('description') }}</textarea>
             </label>
+            <label>Kategoria GS1 (GPC)
+                <select name="gs1_gpc_code" data-gpc-select data-gpc-label-target="new-category-gpc-label">
+                    <option value="">Brak mapowania</option>
+                    @foreach ($gpcOptions as $option)
+                        <option value="{{ $option['code'] }}" data-label="{{ $option['label'] }}" @selected(old('gs1_gpc_code') === $option['code'])>{{ $option['code'] }} — {{ $option['label'] }}</option>
+                    @endforeach
+                </select>
+                <input id="new-category-gpc-label" type="hidden" name="gs1_gpc_label" value="{{ old('gs1_gpc_label') }}">
+            </label>
             <details class="category-technical-details full">
                 <summary>Ustawienia techniczne</summary>
                 <div class="category-technical-grid">
@@ -204,6 +213,15 @@
                             <label>Opis kategorii
                                 <textarea name="description" placeholder="Opis kategorii do PIM i WooCommerce">{{ $category->description }}</textarea>
                             </label>
+                            <label>Kategoria GS1 (GPC)
+                                <select name="gs1_gpc_code" data-gpc-select data-gpc-label-target="category-gpc-label-{{ $category->id }}">
+                                    <option value="">Brak mapowania</option>
+                                    @foreach ($gpcOptions as $option)
+                                        <option value="{{ $option['code'] }}" data-label="{{ $option['label'] }}" @selected($category->gs1_gpc_code === $option['code'])>{{ $option['code'] }} — {{ $option['label'] }}</option>
+                                    @endforeach
+                                </select>
+                                <input id="category-gpc-label-{{ $category->id }}" type="hidden" name="gs1_gpc_label" value="{{ $category->gs1_gpc_label }}">
+                            </label>
                             <div class="category-path-preview">
                                 <span>{{ $category->path ?: $category->name }}</span>
                                 <span>{{ $category->salesChannel?->code ?? 'ERP' }}</span>
@@ -264,6 +282,18 @@
             const csrfToken = @json(csrf_token());
             const categorySortUrl = @json(route('products.categories.sort'));
             const SortableTreeClass = window.SortableTree?.default || window.SortableTree;
+
+            document.querySelectorAll('[data-gpc-select]').forEach((select) => {
+                const syncLabel = () => {
+                    const target = document.getElementById(select.dataset.gpcLabelTarget || '');
+                    const option = select.options[select.selectedIndex];
+
+                    if (target) target.value = option?.dataset.label || '';
+                };
+
+                select.addEventListener('change', syncLabel);
+                syncLabel();
+            });
 
             function escapeHtml(value) {
                 return String(value ?? '')

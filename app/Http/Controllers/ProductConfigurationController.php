@@ -8,6 +8,7 @@ use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductParameterDefinition;
 use App\Models\SalesChannel;
+use App\Services\Gs1\Gs1SettingsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -18,7 +19,7 @@ use Illuminate\View\View;
 
 class ProductConfigurationController extends Controller
 {
-    public function categories(): View
+    public function categories(Gs1SettingsService $gs1Settings): View
     {
         return view('products.configuration.categories', [
             'categories' => ProductCategory::query()
@@ -34,6 +35,7 @@ class ProductConfigurationController extends Controller
                 ->orderBy('code')
                 ->get(),
             'categoryUsage' => $this->categoryUsage(),
+            'gpcOptions' => $gs1Settings->publicConfiguration()['gpc_options'],
             'module' => 'product-categories',
             'title' => 'Kategorie produktów',
             'subtitle' => 'Wspólny słownik kategorii PIM używany w formularzu produktu i eksporcie do WooCommerce.',
@@ -178,6 +180,8 @@ class ProductConfigurationController extends Controller
             'slug' => ['nullable', 'string', 'max:255'],
             'path' => ['nullable', 'string', 'max:255'],
             'description' => ['nullable', 'string', 'max:8000'],
+            'gs1_gpc_code' => ['nullable', 'string', 'regex:/^\d{8}$/'],
+            'gs1_gpc_label' => ['nullable', 'string', 'max:255'],
             'sort_order' => ['nullable', 'integer', 'min:0', 'max:65000'],
         ]);
 
@@ -214,11 +218,13 @@ class ProductConfigurationController extends Controller
             'slug' => $slug ?: null,
             'path' => $this->categoryPath($salesChannelId, $name, $parentExternalId, $category),
             'description' => $this->nullableString($validated['description'] ?? null),
+            'gs1_gpc_code' => $this->nullableString($validated['gs1_gpc_code'] ?? null),
+            'gs1_gpc_label' => $this->nullableString($validated['gs1_gpc_label'] ?? null),
             'sort_order' => (int) ($validated['sort_order'] ?? $category?->sort_order ?? 100),
-            'metadata' => [
+            'metadata' => array_merge((array) $category?->metadata, [
                 'source' => ctype_digit($externalId) ? 'woocommerce' : 'erp',
                 'managed_in_erp' => true,
-            ],
+            ]),
         ];
     }
 
@@ -332,12 +338,12 @@ class ProductConfigurationController extends Controller
             return $name;
         }
 
-        return trim(($parent->path ?: $parent->name) . ' > ' . $name);
+        return trim(($parent->path ?: $parent->name).' > '.$name);
     }
 
     private function refreshChildCategoryPaths(ProductCategory $category, array &$visited = []): void
     {
-        $key = ((string) ($category->sales_channel_id ?? 'global')) . ':' . (string) $category->external_id;
+        $key = ((string) ($category->sales_channel_id ?? 'global')).':'.(string) $category->external_id;
 
         if (isset($visited[$key])) {
             return;
@@ -352,7 +358,7 @@ class ProductConfigurationController extends Controller
             ->get();
 
         foreach ($children as $child) {
-            $childPath = trim(($category->path ?: $category->name) . ' > ' . $child->name);
+            $childPath = trim(($category->path ?: $category->name).' > '.$child->name);
 
             if ($child->path !== $childPath) {
                 $child->forceFill(['path' => $childPath])->save();
@@ -424,7 +430,7 @@ class ProductConfigurationController extends Controller
     private function uniqueErpCategoryExternalId(mixed $salesChannelId, string $slug, ?ProductCategory $category = null): string
     {
         $scope = $salesChannelId ?: 'global';
-        $base = 'erp:' . $scope . ':' . ($slug ?: Str::random(8));
+        $base = 'erp:'.$scope.':'.($slug ?: Str::random(8));
         $candidate = $base;
         $index = 2;
 
@@ -434,7 +440,7 @@ class ProductConfigurationController extends Controller
             ->when($category !== null, fn ($query) => $query->whereKeyNot($category->id))
             ->exists()
         ) {
-            $candidate = $base . '-' . $index;
+            $candidate = $base.'-'.$index;
             $index++;
         }
 
@@ -452,7 +458,7 @@ class ProductConfigurationController extends Controller
             ->when($parameter !== null, fn ($query) => $query->whereKeyNot($parameter->id))
             ->exists()
         ) {
-            $candidate = $base . '-' . $index;
+            $candidate = $base.'-'.$index;
             $index++;
         }
 

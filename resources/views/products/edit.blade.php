@@ -27,8 +27,13 @@
         .product-step-actions .inline-actions { justify-content: flex-end; }
         .button[disabled] { opacity: .55; cursor: not-allowed; }
         @media (max-width: 980px) {
+            .product-edit-nav { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 6px; scrollbar-width: thin; }
+            .product-edit-nav button { flex: 0 0 auto; min-height: 44px; }
             .product-form-grid, .product-form-grid.two, .product-form-grid.five { grid-template-columns: 1fr; }
-            .product-step-actions { align-items: stretch; flex-direction: column; }
+            .product-step-actions { position: sticky; z-index: 20; bottom: 0; margin: 14px -10px -10px; padding: 10px; background: rgba(255, 253, 251, .96); border-top: 1px solid var(--border); box-shadow: 0 -8px 22px rgba(32, 25, 20, .08); }
+            .product-step-actions .button { min-height: 46px; }
+            .product-edit-body { padding: 12px; }
+            .product-form-grid input, .product-form-grid select, .product-form-grid textarea { min-height: 44px; font-size: 16px; }
         }
     </style>
 @endpush
@@ -39,6 +44,7 @@
         $field = fn (string $name, mixed $default = null): mixed => old($name, $default) ?? '';
         $masterField = fn (string $name, string $path, mixed $default = null): mixed => old($name, data_get($master, $path, $default)) ?? '';
         $tags = old('tags', implode(', ', (array) data_get($master, 'tags', [])));
+        $selectedCategoryIds = collect(old('category_ids', data_get($master, 'category_ids', [])))->map(fn ($id) => (int) $id)->all();
 
         $parameterRows = collect(data_get($master, 'parameters', []))
             ->map(fn ($row): array => [
@@ -100,16 +106,9 @@
         <div class="inline-actions">
             <a class="button secondary" href="{{ route('products.show', $product) }}">Wróć do szczegółów</a>
             <a class="button secondary" href="{{ route('products.index') }}">Lista produktów</a>
-            @if (! $product->ean)
-                <button class="button secondary" type="button" data-gs1-open-modal data-gs1-target="gs1-gpc-modal-{{ $product->id }}">Wygeneruj EAN GS1</button>
-            @endif
         </div>
         <div class="toolbar-note">Po zapisie ERP przejmuje produkt jako źródło prawdy i import WooCommerce nie nadpisuje tych pól.</div>
     </div>
-
-    @if (! $product->ean)
-        @include('products._gs1_gpc_modal', ['product' => $product, 'gs1Settings' => $gs1Settings])
-    @endif
 
     <nav class="product-edit-nav" aria-label="Sekcje edycji produktu">
         <button class="active" type="button" data-product-tab="produkt" aria-selected="true">Produkt</button>
@@ -138,8 +137,15 @@
                             @endforeach
                         </select>
                     </label>
-                    <label>Kategoria
-                        <input name="category" list="product-category-options" value="{{ $masterField('category', 'category') }}" placeholder="Wyszukaj kategorię z WooCommerce">
+                    <label>Kategorie produktu
+                        <select name="category_ids[]" multiple size="6" aria-describedby="product-category-help">
+                            @foreach ($categoryOptions as $category)
+                                @if ($category['id'] ?? null)
+                                    <option value="{{ $category['id'] }}" @selected(in_array((int) $category['id'], $selectedCategoryIds, true))>{{ $category['path'] }}{{ ($category['gs1_gpc_code'] ?? null) ? ' · GS1 '.$category['gs1_gpc_code'] : '' }}</option>
+                                @endif
+                            @endforeach
+                        </select>
+                        <small id="product-category-help">Wyszukaj kategorię z WooCommerce; możesz zaznaczyć kilka. Pierwsza z mapowaniem GS1 posłuży do automatycznego EAN.</small>
                     </label>
                     <label>Tagi
                         <input name="tags" value="{{ $tags }}" placeholder="tag 1, tag 2">
@@ -149,10 +155,10 @@
 
                 <div class="product-form-grid">
                     <label>SKU
-                        <input name="sku" value="{{ $field('sku', $product->sku) }}" required>
+                        <input name="sku" value="{{ $field('sku', $product->displaySku()) }}" placeholder="Zostaw puste — ERP wygeneruje SKU">
                     </label>
                     <label>EAN
-                        <input name="ean" value="{{ $field('ean', $product->ean) }}">
+                        <input name="ean" value="{{ $field('ean', $product->ean) }}" placeholder="Zostaw puste — ERP pobierze EAN z GS1">
                     </label>
                     <label>ASIN
                         <input name="asin" value="{{ $masterField('asin', 'asin') }}">
@@ -252,6 +258,24 @@
                     <label>Cena zakupu (średnia)
                         <input name="purchase_price_pln" type="number" step="0.01" min="0" value="{{ $masterField('purchase_price_pln', 'prices.purchase_price_pln') }}">
                     </label>
+                    <label>Zarządzanie stanem
+                        <input type="hidden" name="manage_stock" value="0">
+                        <span class="toggle-row"><input name="manage_stock" type="checkbox" value="1" @checked(old('manage_stock', data_get($master, 'inventory.manage_stock', true)))> Włączone w WooCommerce</span>
+                    </label>
+                    <label>Zamówienia oczekujące
+                        <select name="backorders">
+                            @foreach (['no' => 'Nie zezwalaj', 'notify' => 'Zezwalaj i informuj', 'yes' => 'Zezwalaj'] as $value => $label)
+                                <option value="{{ $value }}" @selected(old('backorders', data_get($master, 'inventory.backorders', 'no')) === $value)>{{ $label }}</option>
+                            @endforeach
+                        </select>
+                    </label>
+                    <label>Niski próg stanu
+                        <input name="low_stock_amount" type="number" step="1" min="0" value="{{ $masterField('low_stock_amount', 'inventory.low_stock_amount') }}">
+                    </label>
+                    <label>Sprzedawany pojedynczo
+                        <input type="hidden" name="sold_individually" value="0">
+                        <span class="toggle-row"><input name="sold_individually" type="checkbox" value="1" @checked(old('sold_individually', data_get($master, 'inventory.sold_individually', false)))> Maks. 1 szt. w zamówieniu</span>
+                    </label>
                 </div>
                 @include('products._stock_readonly_panel', ['stockProduct' => $product])
             </div>
@@ -263,6 +287,18 @@
                 <div class="product-form-grid two">
                     <label>Nazwa produktu (EN)
                         <input name="name_en" value="{{ $masterField('name_en', 'content.en.name') }}">
+                    </label>
+                    <label>Custom label (PL)
+                        <input name="custom_label_pl" value="{{ $masterField('custom_label_pl', 'custom_label.pl') }}" placeholder="np. Bestseller">
+                    </label>
+                    <label>Custom label (EN)
+                        <input name="custom_label_en" value="{{ $masterField('custom_label_en', 'custom_label.en') }}" placeholder="np. Bestseller">
+                    </label>
+                    <label>Tło etykiety
+                        <input name="custom_label_bg_color" type="color" value="{{ $masterField('custom_label_bg_color', 'custom_label.bg_color', '#111111') ?: '#111111' }}">
+                    </label>
+                    <label>Kolor tekstu etykiety
+                        <input name="custom_label_text_color" type="color" value="{{ $masterField('custom_label_text_color', 'custom_label.text_color', '#ffffff') ?: '#ffffff' }}">
                     </label>
                 </div>
                 <div class="product-rich-field">
@@ -374,11 +410,6 @@
         </div>
     </form>
 
-    <datalist id="product-category-options">
-        @foreach ($categoryOptions as $category)
-            <option value="{{ $category['path'] }}">{{ $category['sales_channel'] ? $category['sales_channel'] . ' · ' : '' }}{{ $category['name'] }}</option>
-        @endforeach
-    </datalist>
     @include('products._parameter_datalists', ['parameterOptions' => $parameterOptions])
     @include('products._product_lookup_datalist', ['productLookupOptions' => $productLookupOptions])
     @include('products._rich_editor_assets')

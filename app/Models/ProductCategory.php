@@ -20,6 +20,8 @@ class ProductCategory extends Model
         'slug',
         'path',
         'description',
+        'gs1_gpc_code',
+        'gs1_gpc_label',
         'count',
         'sort_order',
         'metadata',

@@ -2,10 +2,14 @@
     $lookupBySku = collect($productLookupOptions ?? [])->keyBy('sku');
     $variantRows = $product->relationLoaded('variantChildren')
         ? $product->variantChildren->map(fn ($variant): array => [
+            'id' => $variant->id,
             'sku' => $variant->sku,
             'label' => $variant->sku . ' | ' . $variant->name,
             'name' => $variant->name,
             'ean' => $variant->ean,
+            'regular_price' => data_get($variant->masterData(), 'prices.retail_price_pln'),
+            'sale_price' => data_get($variant->masterData(), 'prices.sale_price_pln'),
+            'stock' => (float) $variant->stockBalances->sum('quantity_available'),
             'existing' => true,
         ])->values()->all()
         : [];
@@ -17,10 +21,14 @@
                 $lookup = $lookupBySku->get($sku);
 
                 return [
+                    'id' => null,
                     'sku' => $sku,
                     'label' => $lookup['label'] ?? $sku,
                     'name' => $lookup['name'] ?? '',
                     'ean' => $lookup['ean'] ?? null,
+                    'regular_price' => null,
+                    'sale_price' => null,
+                    'stock' => null,
                     'existing' => $sku !== '',
                 ];
             })
@@ -32,7 +40,7 @@
     $emptyVariantRows = max(3, 6 - count($variantRows));
 
     for ($index = 0; $index < $emptyVariantRows; $index++) {
-        $variantRows[] = ['sku' => '', 'label' => '', 'name' => '', 'ean' => null, 'existing' => false];
+        $variantRows[] = ['id' => null, 'sku' => '', 'label' => '', 'name' => '', 'ean' => null, 'regular_price' => null, 'sale_price' => null, 'stock' => null, 'existing' => false];
     }
 @endphp
 
@@ -87,6 +95,11 @@
                     <div class="variant-editor-meta">
                         <span>SKU: <strong>{{ $row['sku'] ?: 'wybierz produkt' }}</strong></span>
                         <span>EAN: <strong>{{ $row['ean'] ?: '-' }}</strong></span>
+                        @if ($row['existing'])
+                            <span>Cena: <strong>{{ $row['regular_price'] !== null ? number_format((float) $row['regular_price'], 2, ',', ' ').' zł' : '-' }}</strong></span>
+                            <span>Promocja: <strong>{{ $row['sale_price'] !== null ? number_format((float) $row['sale_price'], 2, ',', ' ').' zł' : '-' }}</strong></span>
+                            <span>Stan: <strong>{{ number_format((float) $row['stock'], 0, ',', ' ') }}</strong></span>
+                        @endif
                         @if ($row['name'] !== '')
                             <span>{{ $row['name'] }}</span>
                         @endif
@@ -95,6 +108,9 @@
                 <div class="variant-editor-actions">
                     <input type="hidden" name="variant_remove[{{ $index }}]" value="0">
                     @if ($row['sku'] !== '')
+                        @if ($row['id'])
+                            <a class="button secondary" href="{{ route('products.edit', $row['id']) }}">Edytuj cenę, EAN, SKU i stan</a>
+                        @endif
                         <label class="toggle-row">
                             <input name="variant_remove[{{ $index }}]" type="checkbox" value="1">
                             Odłącz wariant od produktu
