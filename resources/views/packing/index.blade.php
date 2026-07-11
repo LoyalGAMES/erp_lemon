@@ -1,13 +1,16 @@
 @extends('layouts.app', [
     'title' => match ($packingView ?? 'home') {
         'collect' => 'Kompletacja',
+        'waiting' => 'Oczekuje na kuriera',
+        'shipped' => 'Wysłane',
+        'problems' => 'Problemy',
         'history' => 'Historia pakowania',
         default => 'Pakowanie',
     },
     'module' => 'packing',
     'hideTopActions' => true,
-    'compactHeader' => in_array(($packingView ?? 'home'), ['collect', 'pack', 'history'], true),
-    'headerBackUrl' => in_array(($packingView ?? 'home'), ['collect', 'pack', 'history'], true) ? route('packing.index', ['view' => 'home']) : null,
+    'compactHeader' => in_array(($packingView ?? 'home'), ['collect', 'pack', 'waiting', 'shipped', 'problems', 'history'], true),
+    'headerBackUrl' => in_array(($packingView ?? 'home'), ['collect', 'pack', 'waiting', 'shipped', 'problems', 'history'], true) ? route('packing.index', ['view' => 'home']) : null,
 ])
 
 @push('styles')
@@ -28,7 +31,13 @@
         .packing-control-header .button { min-height: 38px; white-space: nowrap; }
         .packing-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
         .packing-stat { padding: 14px 16px; }
+        .packing-stat-link { color: var(--text); text-decoration: none; transition: transform .15s ease, border-color .15s ease; }
+        .packing-stat-link:hover { transform: translateY(-2px); border-color: rgba(134, 115, 100, .48); }
         .packing-stat strong { display: block; font-size: 25px; line-height: 1; margin-top: 3px; }
+        .packing-workflow-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+        .packing-workflow-tab { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--surface); color: var(--muted); text-decoration: none; font-weight: 760; }
+        .packing-workflow-tab.active { background: var(--green-soft); border-color: rgba(134, 115, 100, .42); color: var(--green-dark); }
+        .packing-workflow-tab-count { display: inline-flex; align-items: center; justify-content: center; min-width: 21px; min-height: 21px; border-radius: 999px; padding: 0 6px; background: rgba(134, 115, 100, .14); font-size: 12px; }
         .workflow-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
         .workflow-card { min-height: 148px; display: grid; align-content: center; gap: 7px; border: 1px solid var(--border); border-radius: 8px; padding: 22px; background: var(--surface); color: var(--text); text-decoration: none; box-shadow: var(--shadow); }
         .workflow-card span { color: var(--muted); font-weight: 780; text-transform: uppercase; letter-spacing: .04em; font-size: 12px; }
@@ -45,6 +54,8 @@
         .queue-list { display: grid; gap: 12px; }
         .pick-card, .order-card, .courier-card, .history-card { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); }
         .collect-card { padding: 14px; display: grid; gap: 11px; }
+        .collect-order-card { padding: 16px; }
+        .collect-order-customer { color: var(--muted); font-size: 13px; margin-top: 4px; }
         .collect-main { display: grid; grid-template-columns: 78px minmax(0, 1fr) auto; gap: 14px; align-items: center; }
         .product-thumb { width: 58px; height: 72px; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: #f4f1ef; display: grid; place-items: center; color: var(--muted); font-size: 11px; font-weight: 780; }
         .product-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -58,7 +69,8 @@
         .pick-badge { display: inline-flex; align-items: center; min-height: 26px; border-radius: 7px; padding: 2px 8px; background: rgba(134, 115, 100, .08); color: var(--muted); font-size: 12px; font-weight: 720; }
         .collect-note input { min-height: 48px; }
         .collect-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-        .collect-actions form { min-width: 0; }
+        .collect-actions form { min-width: 0; display: grid; gap: 8px; }
+        .collect-actions input { min-height: 42px; }
         .collect-actions .button { width: 100%; min-height: 64px; font-size: 19px; border-radius: 8px; }
         .button.danger { background: #ffecec; color: var(--red); border: 1px solid #f0c3c3; }
         .packing-empty { padding: 18px 16px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
@@ -206,6 +218,13 @@
         $activeStationLabel = $activeStation !== null
             ? $activeStation['name'] . ($activeStation['printer_name'] !== '' ? ' · ' . $activeStation['printer_name'] : '')
             : 'Bez stanowiska';
+        $workflowTabs = [
+            'collect' => ['label' => 'Kompletacja', 'count' => $collectOrdersCount],
+            'pack' => ['label' => 'Pakowanie', 'count' => $readyOrders->count()],
+            'waiting' => ['label' => 'Oczekuje na kuriera', 'count' => $waitingCourierOrders],
+            'shipped' => ['label' => 'Wysłane', 'count' => $shippedOrdersCount],
+            'problems' => ['label' => 'Problemy', 'count' => $problemTasks->count()],
+        ];
     @endphp
 
     @if ($packingView === 'home')
@@ -279,43 +298,39 @@
         </div>
 
         <section class="packing-stats" aria-label="Status wysyłki">
-            <article class="card packing-stat">
+            <a class="card packing-stat packing-stat-link" href="{{ route('packing.index', ['view' => 'collect']) }}">
                 <span class="muted">Do zebrania</span>
-                <strong>{{ $pickGroups->count() }}</strong>
-            </article>
-            <article class="card packing-stat">
+                <strong>{{ $collectOrdersCount }}</strong>
+            </a>
+            <a class="card packing-stat packing-stat-link" href="{{ route('packing.index', ['view' => 'pack']) }}">
                 <span class="muted">Do pakowania</span>
                 <strong>{{ $readyOrders->count() }}</strong>
-            </article>
-            <article class="card packing-stat">
+            </a>
+            <a class="card packing-stat packing-stat-link" href="{{ route('packing.index', ['view' => 'waiting']) }}">
                 <span class="muted">Oczekuje na kuriera</span>
                 <strong>{{ $waitingCourierOrders }}</strong>
-            </article>
-            <article class="card packing-stat">
-                <span class="muted">Spakowane dzisiaj</span>
-                <strong>{{ $packedToday }}</strong>
-            </article>
-            <article class="card packing-stat">
+            </a>
+            <a class="card packing-stat packing-stat-link" href="{{ route('packing.index', ['view' => 'shipped']) }}">
+                <span class="muted">Wysłane</span>
+                <strong>{{ $shippedOrdersCount }}</strong>
+            </a>
+            <a class="card packing-stat packing-stat-link" href="{{ route('packing.index', ['view' => 'problems']) }}">
                 <span class="muted">Problemy</span>
                 <strong>{{ $problemTasks->count() }}</strong>
-            </article>
+            </a>
         </section>
 
-        <section class="workflow-picker" aria-label="Wybierz etap wysyłki">
-            <a href="{{ route('packing.index', ['view' => 'collect']) }}" class="workflow-card">
-                <span>Etap 1</span>
-                <strong>Kompletacja</strong>
-                <small>{{ $pickGroups->count() }} grup produktów do zebrania</small>
-            </a>
-            <a href="{{ route('packing.index', ['view' => 'pack']) }}" class="workflow-card">
-                <span>Etap 2</span>
-                <strong>Pakowanie</strong>
-                <small>{{ $readyOrders->count() }} zamówień do spakowania, {{ $waitingCourierOrders }} czeka na kuriera</small>
-            </a>
-        </section>
-        <div class="packing-home-links">
-            <a class="button secondary" href="{{ route('packing.index', ['view' => 'history', 'date' => now()->toDateString()]) }}">Historia pakowania</a>
-        </div>
+    @endif
+
+    @if ($packingView !== 'home' && $packingView !== 'history')
+        <nav class="packing-workflow-tabs" aria-label="Etapy realizacji zamówień">
+            @foreach ($workflowTabs as $view => $tab)
+                <a @class(['packing-workflow-tab', 'active' => $packingView === $view]) href="{{ route('packing.index', ['view' => $view]) }}">
+                    {{ $tab['label'] }}
+                    <span class="packing-workflow-tab-count">{{ $tab['count'] }}</span>
+                </a>
+            @endforeach
+        </nav>
     @endif
 
     @if (in_array($packingView, ['collect', 'pack'], true))
@@ -337,48 +352,64 @@
     @if ($packingView === 'collect')
         <div class="collection-workspace">
             <div class="queue-list">
-                @forelse ($pickGroups as $group)
+                @forelse ($collectOrders as $collectOrder)
                     @php
-                        $problemFormId = 'problem-group-' . md5(implode('-', $group['task_ids']));
+                        $problemFormId = 'problem-order-' . md5(implode('-', $collectOrder['task_ids']));
                     @endphp
-                    <article class="pick-card collect-card">
-                        <div class="collect-main">
-                            <div class="product-thumb">
-                                @if ($group['image_url'])
-                                    <img src="{{ $group['image_url'] }}" alt="{{ $group['product_name'] }}" loading="lazy" referrerpolicy="no-referrer">
-                                @else
-                                    Brak zdjęcia
-                                @endif
-                            </div>
+                    <article class="order-card collect-order-card">
+                        <div class="order-card-header">
                             <div>
-                                <div class="pick-name">{{ $group['product_name'] }}</div>
-                                <div class="pick-sku">{{ $group['sku'] ?: 'brak SKU' }} · zam. {{ $group['order_numbers'] ?: '-' }}</div>
-                                <div class="collect-size">Rozmiar <strong>{{ $group['size_label'] ?: '-' }}</strong></div>
+                                <div class="order-title">Zamówienie {{ $collectOrder['order_number'] }}</div>
+                                <div class="collect-order-customer">Odbiorca: {{ $collectOrder['customer_name'] }}</div>
+                                <div class="order-meta">
+                                    {{ $collectOrder['courier'] }} · {{ $collectOrder['positions_count'] }} poz. · złożone {{ $collectOrder['order_date']?->format('Y-m-d H:i') ?? '-' }}
+                                </div>
                             </div>
-                            <div class="qty-pill">{{ $qty($group['quantity']) }} szt.</div>
+                            <div class="order-badges">
+                                @foreach ($collectOrder['segments'] as $segment)
+                                    <span class="pick-badge segment-{{ $segment }}">{{ $segmentLabels[$segment] ?? $segment }}</span>
+                                @endforeach
+                                <span class="qty-pill">{{ $qty($collectOrder['quantity']) }} szt.</span>
+                            </div>
                         </div>
-                        <div class="pick-badges">
-                            <span class="pick-badge segment-{{ $group['segment'] }}">{{ $segmentLabels[$group['segment']] ?? $group['segment'] }}</span>
-                            <span class="pick-badge">Lok. {{ $group['location'] ?: '-' }}</span>
-                            <span class="pick-badge">{{ $group['courier'] }}</span>
-                            <span class="pick-badge">{{ $group['orders_count'] }} zam.</span>
-                            <span class="pick-badge">Najstarsze: {{ $group['oldest_order_at']?->format('Y-m-d') ?? '-' }}</span>
+
+                        <div class="order-items">
+                            @foreach ($collectOrder['tasks'] as $task)
+                                @php
+                                    $taskLocation = data_get($task->metadata, 'warehouse_location')
+                                        ?: data_get($task->product?->attributes, 'master.stock.location')
+                                        ?: data_get($task->product?->attributes, 'warehouse_location')
+                                        ?: '-';
+                                @endphp
+                                <div class="order-item">
+                                    <div class="product-thumb">
+                                        @if ($task->product?->imageUrl())
+                                            <img src="{{ $task->product->imageUrl() }}" alt="{{ $task->product_name }}" loading="lazy" referrerpolicy="no-referrer">
+                                        @else
+                                            Foto
+                                        @endif
+                                    </div>
+                                    <div>
+                                        <div class="order-item-name">{{ $task->product_name }}</div>
+                                        <div class="order-item-meta">{{ $task->sku ?: 'brak SKU' }} · Rozmiar <strong>{{ $task->size_label ?: '-' }}</strong> · Lok. {{ $taskLocation }}</div>
+                                    </div>
+                                    <strong>{{ $qty($task->remainingQuantity()) }} szt.</strong>
+                                </div>
+                            @endforeach
                         </div>
-                        <label class="collect-note">
-                            Notatka problemu
-                            <input form="{{ $problemFormId }}" name="reason" placeholder="Np. brak na półce, uszkodzone, niezgodny rozmiar">
-                        </label>
+
                         <div class="collect-actions">
                             <form id="{{ $problemFormId }}" method="POST" action="{{ route('packing.groups.problem') }}">
                                 @csrf
-                                @foreach ($group['task_ids'] as $taskId)
+                                @foreach ($collectOrder['task_ids'] as $taskId)
                                     <input type="hidden" name="task_ids[]" value="{{ $taskId }}">
                                 @endforeach
+                                <input name="reason" placeholder="Notatka problemu">
                                 <button class="button danger" type="submit">Problem</button>
                             </form>
                             <form method="POST" action="{{ route('packing.groups.pick') }}">
                                 @csrf
-                                @foreach ($group['task_ids'] as $taskId)
+                                @foreach ($collectOrder['task_ids'] as $taskId)
                                     <input type="hidden" name="task_ids[]" value="{{ $taskId }}">
                                 @endforeach
                                 <button class="button" type="submit">Zebrane</button>
@@ -386,7 +417,7 @@
                         </div>
                     </article>
                 @empty
-                    <div class="packing-empty">Brak produktów do zebrania. Nowe opłacone zamówienia pojawią się tutaj automatycznie.</div>
+                    <div class="packing-empty">Brak produktów do zebrania. Nie ma też zamówień oczekujących na kompletację.</div>
                 @endforelse
             </div>
 
@@ -529,7 +560,11 @@
                     <div class="packing-empty">Brak zamówień gotowych do pakowania. Po kompletacji zamówienia pojawią się tutaj automatycznie.</div>
                 @endforelse
             </section>
+        </div>
+    @endif
 
+    @if ($packingView === 'waiting')
+        <div class="pack-workspace">
             <section class="card courier-panel">
                 <div class="panel-header">
                     <span>Oczekuje na kuriera</span>
@@ -586,15 +621,18 @@
                     @endforelse
                 </div>
             </section>
+        </div>
+    @endif
 
-            @if ($problemTasks->isNotEmpty())
+    @if ($packingView === 'problems')
+        <div class="pack-workspace">
                 <section class="card problem-panel">
                     <div class="panel-header">
                         <span>Do wyjaśnienia</span>
                         <span>{{ $problemTasks->count() }} pozycji</span>
                     </div>
                     <div class="problem-list">
-                        @foreach ($problemTasks as $task)
+                        @forelse ($problemTasks as $task)
                             @php
                                 $problemReason = data_get($task->metadata, 'packing_problem.reason', 'Do wyjaśnienia');
                                 $problemAt = data_get($task->metadata, 'packing_problem.reported_at');
@@ -618,10 +656,62 @@
                                     <button class="button secondary" type="submit">Przywróć do kolejki</button>
                                 </form>
                             </article>
-                        @endforeach
+                        @empty
+                            <div class="packing-empty">Nie ma pozycji wymagających wyjaśnienia.</div>
+                        @endforelse
                     </div>
                 </section>
-            @endif
+        </div>
+    @endif
+
+    @if ($packingView === 'shipped')
+        <div class="pack-workspace">
+            <section class="queue-list" aria-label="Lista wysłanych zamówień">
+                @forelse ($shippedOrders as $shippedOrder)
+                    <article class="order-card packing-history-order">
+                        <div class="order-card-header">
+                            <div>
+                                <div class="order-title">Zamówienie {{ $shippedOrder['order_number'] }}</div>
+                                <div class="history-order-meta">
+                                    {{ $shippedOrder['sales_channel'] }} · {{ $shippedOrder['customer_name'] }} · {{ $shippedOrder['courier'] }} · {{ $shippedOrder['tasks_count'] }} poz.
+                                </div>
+                            </div>
+                            <div class="order-badges">
+                                <span class="status green">Wysłane</span>
+                                <span class="status">{{ $shippedOrder['pickup_at']?->format('Y-m-d H:i') ?? '-' }}</span>
+                            </div>
+                        </div>
+
+                        <div class="history-order-meta">
+                            Spakowane: {{ $shippedOrder['packed_at']?->format('Y-m-d H:i') ?? '-' }}
+                            @if ($shippedOrder['pickup_at'])
+                                · odebrane przez kuriera: {{ $shippedOrder['pickup_at']->format('Y-m-d H:i') }}
+                            @endif
+                        </div>
+
+                        <div class="order-items">
+                            @foreach ($shippedOrder['items'] as $item)
+                                <div class="order-item">
+                                    <div class="product-thumb">
+                                        @if ($item['image_url'])
+                                            <img src="{{ $item['image_url'] }}" alt="{{ $item['name'] }}" loading="lazy" referrerpolicy="no-referrer">
+                                        @else
+                                            Foto
+                                        @endif
+                                    </div>
+                                    <div>
+                                        <div class="order-item-name">{{ $item['name'] }}</div>
+                                        <div class="order-item-meta">{{ $item['sku'] ?: 'brak SKU' }} · rozmiar {{ $item['size_label'] ?: '-' }}</div>
+                                    </div>
+                                    <strong>{{ $qty($item['quantity']) }} szt.</strong>
+                                </div>
+                            @endforeach
+                        </div>
+                    </article>
+                @empty
+                    <div class="packing-empty">Nie ma jeszcze wysłanych zamówień.</div>
+                @endforelse
+            </section>
         </div>
     @endif
 

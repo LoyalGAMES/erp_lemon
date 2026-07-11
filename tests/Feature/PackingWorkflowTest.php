@@ -370,8 +370,11 @@ class PackingWorkflowTest extends TestCase
             ->assertSee('data-packing-settings-open', false)
             ->assertSee('data-packing-settings-overlay', false)
             ->assertSee('Do zebrania')
-            ->assertSee('Kompletacja')
-            ->assertSee('Pakowanie')
+            ->assertSee(route('packing.index', ['view' => 'collect']), false)
+            ->assertSee(route('packing.index', ['view' => 'pack']), false)
+            ->assertSee(route('packing.index', ['view' => 'waiting']), false)
+            ->assertSee(route('packing.index', ['view' => 'shipped']), false)
+            ->assertSee(route('packing.index', ['view' => 'problems']), false)
             ->assertDontSee('Sukienka AURELIA Fango');
 
         $this->get(route('packing.index', ['view' => 'collect']))
@@ -395,6 +398,76 @@ class PackingWorkflowTest extends TestCase
             ->assertSee('Oczekuje na kuriera')
             ->assertDontSee('Spakowane dzisiaj')
             ->assertDontSee('Ustawienia sposobu pracy');
+    }
+
+    public function test_collect_view_keeps_all_open_products_from_one_order_together_with_customer_name(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $firstProduct = Product::query()->create([
+            'sku' => 'SKU-COLLECT-ONE',
+            'name' => 'Sukienka LENA',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $secondProduct = Product::query()->create([
+            'sku' => 'SKU-COLLECT-TWO',
+            'name' => 'Buty VIKI',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '613',
+            'external_number' => '613',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 419,
+            'shipping_data' => [
+                'first_name' => 'Anna',
+                'last_name' => 'Kowalska',
+            ],
+            'raw_payload' => [
+                'shipping_lines' => [['method_title' => 'InPost']],
+            ],
+            'external_created_at' => now(),
+        ]);
+        $order->lines()->createMany([
+            [
+                'product_id' => $firstProduct->id,
+                'external_line_id' => 'collect-1',
+                'sku' => $firstProduct->sku,
+                'name' => $firstProduct->name,
+                'quantity' => 1,
+            ],
+            [
+                'product_id' => $secondProduct->id,
+                'external_line_id' => 'collect-2',
+                'sku' => $secondProduct->sku,
+                'name' => $secondProduct->name,
+                'quantity' => 2,
+            ],
+        ]);
+
+        $response = $this->get(route('packing.index', ['view' => 'collect']));
+
+        $response
+            ->assertOk()
+            ->assertSee('Zamówienie 613')
+            ->assertSee('Odbiorca: Anna Kowalska')
+            ->assertSee('Sukienka LENA')
+            ->assertSee('Buty VIKI')
+            ->assertSee('3 szt.');
+
+        $this->assertSame(1, substr_count($response->getContent(), 'Zamówienie 613'));
     }
 
     public function test_packed_order_generates_label_wz_invoice_status_and_courier_queue(): void
@@ -598,7 +671,7 @@ class PackingWorkflowTest extends TestCase
         $this->assertSame('released', StockReservation::query()->firstOrFail()->status);
         $this->assertSame('2.0000', (string) StockBalance::query()->firstOrFail()->quantity_on_hand);
 
-        $this->get(route('packing.index', ['view' => 'pack']))
+        $this->get(route('packing.index', ['view' => 'waiting']))
             ->assertOk()
             ->assertSee('Oczekuje na kuriera')
             ->assertSee('DPD')
@@ -625,6 +698,12 @@ class PackingWorkflowTest extends TestCase
 
         $this->assertSame('shipped', $task->status);
         $this->assertSame('completed', $order->status);
+
+        $this->get(route('packing.index', ['view' => 'shipped']))
+            ->assertOk()
+            ->assertSee('Wysłane')
+            ->assertSee('Zamówienie 801')
+            ->assertDontSee('Odebrano');
 
         Http::assertSent(function ($request): bool {
             $data = $request->data();
@@ -725,7 +804,7 @@ class PackingWorkflowTest extends TestCase
             ],
         ]);
 
-        $this->get(route('packing.index', ['view' => 'pack']))
+        $this->get(route('packing.index', ['view' => 'waiting']))
             ->assertOk()
             ->assertSee('Oczekuje na kuriera')
             ->assertSee('Zamówienie 901')
@@ -905,7 +984,7 @@ class PackingWorkflowTest extends TestCase
         $this->assertSame('problem', $task->status);
         $this->assertSame('Brak produktu na półce', data_get($task->metadata, 'packing_problem.reason'));
 
-        $this->get(route('packing.index', ['view' => 'pack']))
+        $this->get(route('packing.index', ['view' => 'problems']))
             ->assertOk()
             ->assertSee('Do wyjaśnienia')
             ->assertSee('Brak produktu na półce')
@@ -979,7 +1058,7 @@ class PackingWorkflowTest extends TestCase
         $this->assertSame('problem', $task->status);
         $this->assertSame('Adres wymaga wyjaśnienia', data_get($task->metadata, 'packing_problem.reason'));
 
-        $this->get(route('packing.index', ['view' => 'pack']))
+        $this->get(route('packing.index', ['view' => 'problems']))
             ->assertOk()
             ->assertSee('Do wyjaśnienia')
             ->assertSee('Adres wymaga wyjaśnienia');

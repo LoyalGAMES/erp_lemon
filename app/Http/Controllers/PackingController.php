@@ -38,7 +38,7 @@ class PackingController extends Controller
         $packingSettings = $settings->data();
         $activeStation = $settings->station((string) session('packing_station', ''));
         $requestedView = (string) $request->query('view', 'home');
-        $availableViews = ['home', 'collect', 'pack', 'history'];
+        $availableViews = ['home', 'collect', 'pack', 'waiting', 'shipped', 'problems', 'history'];
 
         if (in_array($requestedView, $availableViews, true)) {
             session(['packing_view' => $requestedView]);
@@ -89,21 +89,35 @@ class PackingController extends Controller
             ? $requestedSegment
             : ($activeStation['segment'] ?? 'all');
 
-        $pickGroups = $this->pickGroups($tasks->where('status', 'open')->values(), $segments);
+        $openTasks = $tasks->where('status', 'open')->values();
+        $collectOrdersBySegment = [
+            'all' => $this->collectOrders($openTasks, $segments),
+            ProductSegmentService::SEGMENT_CLOTHING => $this->collectOrders(
+                $openTasks->filter(fn (PackingTask $task): bool => $segments->segmentForTask($task) === ProductSegmentService::SEGMENT_CLOTHING)->values(),
+                $segments,
+            ),
+            ProductSegmentService::SEGMENT_FOOTWEAR => $this->collectOrders(
+                $openTasks->filter(fn (PackingTask $task): bool => $segments->segmentForTask($task) === ProductSegmentService::SEGMENT_FOOTWEAR)->values(),
+                $segments,
+            ),
+        ];
         $readyOrders = $this->readyOrders($tasks, $segments);
+        $shippedOrdersCount = PackingTask::query()
+            ->where('status', 'shipped')
+            ->distinct()
+            ->count('external_order_id');
 
         return view('packing.index', [
             'sync' => $sync,
             'tasks' => $tasks,
-            'openTasks' => $tasks->where('status', 'open')->values(),
+            'openTasks' => $openTasks,
             'pickedTasks' => $tasks->where('status', 'picked')->values(),
-            'pickGroups' => $activeSegment === 'all'
-                ? $pickGroups
-                : $pickGroups->where('segment', $activeSegment)->values(),
+            'collectOrders' => $collectOrdersBySegment[$activeSegment] ?? collect(),
+            'collectOrdersCount' => ($collectOrdersBySegment[$activeSegment] ?? collect())->count(),
             'segmentCounts' => [
-                'all' => $pickGroups->count(),
-                ProductSegmentService::SEGMENT_CLOTHING => $pickGroups->where('segment', ProductSegmentService::SEGMENT_CLOTHING)->count(),
-                ProductSegmentService::SEGMENT_FOOTWEAR => $pickGroups->where('segment', ProductSegmentService::SEGMENT_FOOTWEAR)->count(),
+                'all' => $collectOrdersBySegment['all']->count(),
+                ProductSegmentService::SEGMENT_CLOTHING => $collectOrdersBySegment[ProductSegmentService::SEGMENT_CLOTHING]->count(),
+                ProductSegmentService::SEGMENT_FOOTWEAR => $collectOrdersBySegment[ProductSegmentService::SEGMENT_FOOTWEAR]->count(),
             ],
             'activeSegment' => $activeSegment,
             'packingStations' => $packingSettings['stations'],
@@ -122,16 +136,16 @@ class PackingController extends Controller
             'problemTasks' => $problemTasks,
             'recentPickedTasks' => $recentPickedTasks,
             'waitingCourierGroups' => $this->waitingCourierGroups($waitingCourierTasks),
+            'shippedOrders' => $packingView === 'shipped'
+                ? $this->shippedOrders()
+                : collect(),
+            'shippedOrdersCount' => $shippedOrdersCount,
             'packingHistoryDate' => $packingHistoryDate->toDateString(),
             'packingHistoryOrders' => $packingView === 'history'
                 ? $this->packingHistoryOrders($packingHistoryDate)
                 : collect(),
             'packingMode' => in_array($mode, ['manual', 'hybrid', 'scanner'], true) ? $mode : 'hybrid',
             'packingView' => $packingView,
-            'packedToday' => PackingTask::query()
-                ->whereIn('status', ['packed', 'shipped'])
-                ->whereDate('packed_at', now()->toDateString())
-                ->count(),
         ]);
     }
 
@@ -416,42 +430,42 @@ class PackingController extends Controller
      * @param  Collection<int, PackingTask>  $openTasks
      * @return Collection<int, array<string, mixed>>
      */
-    private function pickGroups(Collection $openTasks, ProductSegmentService $segments): Collection
+    private function collectOrders(Collection $openTasks, ProductSegmentService $segments): Collection
     {
         return $openTasks
-            ->groupBy(fn (PackingTask $task): string => implode('|', [
-                $task->courier ?: '-',
-                $task->size_label ?: '-',
-                $task->sku ?: 'no-sku',
-                (string) ($task->product_id ?: 0),
-                $task->product_name,
-            ]))
-            ->map(function (Collection $group) use ($segments): array {
+            ->groupBy('external_order_id')
+            ->map(function (Collection $tasks) use ($segments): array {
+                /** @var Collection<int, PackingTask> $tasks */
+                $tasks = $tasks
+                    ->sortBy(fn (PackingTask $task): string => implode('|', [
+                        $this->taskLocation($task) ?: 'ZZZ',
+                        $task->product_name,
+                        $task->size_label,
+                    ]))
+                    ->values();
                 /** @var PackingTask $first */
-                $first = $group->first();
-                $oldest = $group->sortBy('order_date')->first()?->order_date;
-                $location = $this->taskLocation($first);
+                $first = $tasks->first();
+                $order = $first->order;
+                $oldest = $tasks->sortBy('order_date')->first()?->order_date;
 
                 return [
-                    'segment' => $segments->segmentForTask($first),
-                    'product_name' => $first->product_name,
-                    'sku' => $first->sku,
+                    'order_id' => $first->external_order_id,
+                    'order_number' => $order?->external_number ?: $first->order_number ?: '-',
+                    'customer_name' => $first->customer_name ?: '-',
                     'courier' => $first->courier ?: 'Nieznany kurier',
-                    'size_label' => $first->size_label ?: '-',
-                    'location' => $location,
-                    'quantity' => $group->sum(fn (PackingTask $task): float => $task->remainingQuantity()),
-                    'orders_count' => $group->pluck('external_order_id')->unique()->count(),
-                    'order_numbers' => $group->pluck('order_number')->filter()->unique()->take(6)->implode(', '),
-                    'oldest_order_at' => $oldest,
-                    'image_url' => $first->product?->imageUrl(),
-                    'task_ids' => $group->pluck('id')->values()->all(),
+                    'order_date' => $oldest,
+                    'tasks' => $tasks,
+                    'task_ids' => $tasks->pluck('id')->values()->all(),
+                    'positions_count' => $tasks->count(),
+                    'quantity' => $tasks->sum(fn (PackingTask $task): float => $task->remainingQuantity()),
+                    'segments' => $tasks
+                        ->map(fn (PackingTask $task): string => $segments->segmentForTask($task))
+                        ->unique()
+                        ->values(),
                     'sort_key' => implode('|', [
-                        $location ?: 'ZZZ',
-                        $first->courier ?: '',
                         optional($oldest)->timestamp ?? 0,
-                        $first->size_label ?: '',
-                        $first->sku ?: '',
-                        $first->product_name,
+                        $first->courier ?: '',
+                        $first->order_number ?: '',
                     ]),
                 ];
             })
@@ -572,12 +586,37 @@ class PackingController extends Controller
      */
     private function packingHistoryOrders(Carbon $date): Collection
     {
-        return PackingTask::query()
+        $tasks = PackingTask::query()
             ->with(['salesChannel', 'order.shippingLabels', 'product'])
             ->whereIn('status', ['packed', 'shipped'])
             ->whereDate('packed_at', $date->toDateString())
             ->orderByDesc('packed_at')
-            ->get()
+            ->get();
+
+        return $this->completedOrders($tasks);
+    }
+
+    /**
+     * @return Collection<int, array<string, mixed>>
+     */
+    private function shippedOrders(): Collection
+    {
+        $tasks = PackingTask::query()
+            ->with(['salesChannel', 'order.shippingLabels', 'product'])
+            ->where('status', 'shipped')
+            ->orderByDesc('packed_at')
+            ->get();
+
+        return $this->completedOrders($tasks);
+    }
+
+    /**
+     * @param  Collection<int, PackingTask>  $tasks
+     * @return Collection<int, array<string, mixed>>
+     */
+    private function completedOrders(Collection $tasks): Collection
+    {
+        return $tasks
             ->groupBy('external_order_id')
             ->map(function (Collection $group): ?array {
                 /** @var PackingTask|null $first */
