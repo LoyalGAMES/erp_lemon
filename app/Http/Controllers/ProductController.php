@@ -8,6 +8,7 @@ use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
+use App\Models\SalesChannel;
 use App\Models\StockLedgerEntry;
 use App\Models\StockBalance;
 use App\Models\Warehouse;
@@ -20,6 +21,8 @@ use App\Services\Inventory\WarehouseDocumentNumberService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\WooCommerce\ProductDataExportService;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
@@ -33,28 +36,54 @@ use RuntimeException;
 
 class ProductController extends Controller
 {
+    private const PRODUCT_LIST_PER_PAGE = 30;
+
     public function index(Request $request): View
     {
-        $allProducts = Product::query()
-            ->with(['stockBalances.warehouse', 'channelMappings.salesChannel'])
-            ->latest('created_at')
-            ->latest('id')
-            ->get();
         $filters = $this->productFilters($request);
-        $productRows = $this->paginatedProductTreeRows($allProducts, $filters, (int) $request->query('page', 1));
 
         return view('products.index', [
-            'productRows' => $productRows,
-            'productsCount' => $allProducts->count(),
+            'productRows' => $this->productListRows($filters),
+            'productsCount' => Product::query()->count(),
             'filters' => $filters,
-            'channelOptions' => $this->productChannelOptions($allProducts),
+            'channelOptions' => $this->productListChannelOptions(),
             'warehouseOptions' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
-            'categoryOptions' => $this->categoryOptions(),
-            'catalogOptions' => $this->catalogOptions(),
-            'parameterOptions' => $this->parameterOptions(),
-            'productLookupOptions' => $this->productLookupOptions(),
+            'categoryOptions' => $this->productListCategoryOptions(),
+            'catalogOptions' => collect(['Domyślny']),
+            'parameterOptions' => $this->productListParameterOptions(),
+            'productLookupUrl' => route('products.lookup'),
             'module' => 'products',
         ]);
+    }
+
+    public function lookup(Request $request): JsonResponse
+    {
+        $query = $this->nullableString($request->query('q'));
+
+        if ($query === null || mb_strlen($query) < 2) {
+            return response()->json([]);
+        }
+
+        $like = '%'.$query.'%';
+
+        return response()->json(
+            Product::query()
+                ->select(['sku', 'name', 'ean'])
+                ->where(function (Builder $product) use ($like): void {
+                    $product
+                        ->where('sku', 'like', $like)
+                        ->orWhere('name', 'like', $like)
+                        ->orWhere('ean', 'like', $like);
+                })
+                ->orderBy('sku')
+                ->limit(20)
+                ->get()
+                ->map(fn (Product $product): array => [
+                    'sku' => $product->sku,
+                    'label' => $product->sku.' | '.$product->name,
+                ])
+                ->values(),
+        );
     }
 
     public function show(Product $product, Gs1SettingsService $gs1Settings): View
@@ -842,120 +871,282 @@ class ProductController extends Controller
     }
 
     /**
-     * @param Collection<int, Product> $products
-     * @param array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string} $filters
+     * Loads only the current page of product families. The old implementation
+     * hydrated every SKU, every balance and every channel mapping before slicing
+     * the collection in PHP.
+     *
+     * @param  array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string}  $filters
      * @return LengthAwarePaginator<int, array{product:Product,variants:Collection<int, Product>}>
      */
-    private function paginatedProductTreeRows(Collection $products, array $filters, int $page): LengthAwarePaginator
+    private function productListRows(array $filters): LengthAwarePaginator
     {
-        $variantGroups = $products
-            ->filter(fn (Product $product): bool => $this->isVariantProduct($product))
-            ->groupBy(fn (Product $product): string => $this->productParentExternalId($product) ?? 'orphan-' . $product->id);
+        $products = Product::query()
+            ->select($this->productListColumns())
+            ->whereDoesntHave('parentRelations', fn (Builder $relations) => $relations->where('relation_type', 'variant'))
+            ->with([
+                'stockBalances' => fn ($balances) => $balances->select([
+                    'id',
+                    'product_id',
+                    'warehouse_id',
+                    'quantity_on_hand',
+                    'quantity_reserved',
+                    'quantity_available',
+                ]),
+                'channelMappings' => fn ($mappings) => $mappings->select([
+                    'id',
+                    'product_id',
+                    'sales_channel_id',
+                    'external_product_id',
+                    'external_variation_id',
+                ]),
+                'channelMappings.salesChannel:id,code,name',
+                'variantChildren' => fn ($children) => $children->select($this->productListColumns(qualified: true)),
+                'variantChildren.stockBalances' => fn ($balances) => $balances->select([
+                    'id',
+                    'product_id',
+                    'warehouse_id',
+                    'quantity_on_hand',
+                    'quantity_reserved',
+                    'quantity_available',
+                ]),
+                'variantChildren.channelMappings' => fn ($mappings) => $mappings->select([
+                    'id',
+                    'product_id',
+                    'sales_channel_id',
+                    'external_product_id',
+                    'external_variation_id',
+                ]),
+                'variantChildren.channelMappings.salesChannel:id,code,name',
+            ]);
 
-        $parentProducts = $products
-            ->reject(fn (Product $product): bool => $this->isVariantProduct($product))
-            ->values();
+        $this->applyProductListFilters($products, $filters);
+        $this->applyProductListOrder($products);
 
-        $parentExternalIds = $parentProducts
-            ->flatMap(fn (Product $product): array => $this->productOwnExternalIds($product))
-            ->unique()
-            ->values();
+        $paginator = $products
+            ->paginate(self::PRODUCT_LIST_PER_PAGE)
+            ->withQueryString();
 
-        $rows = $parentProducts
-            ->map(function (Product $product) use ($variantGroups): array {
-                $variants = collect($this->productOwnExternalIds($product))
-                    ->flatMap(fn (string $externalId): Collection => $variantGroups->get($externalId, collect()))
-                    ->unique('id')
-                    ->sortBy(fn (Product $variant): string => mb_strtolower($variant->name . ' ' . $variant->sku))
-                    ->values();
-
-                return [
+        $paginator->setCollection(
+            $paginator->getCollection()
+                ->map(fn (Product $product): array => [
                     'product' => $product,
-                    'variants' => $variants,
-                ];
-            })
-            ->concat(
-                $variantGroups
-                    ->reject(fn (Collection $variants, $externalId): bool => $parentExternalIds->contains((string) $externalId))
-                    ->flatMap(fn (Collection $variants): Collection => $variants->map(fn (Product $variant): array => [
-                        'product' => $variant,
-                        'variants' => collect(),
-                    ]))
-                    ->values()
-            )
-            ->sort(fn (array $left, array $right): int => $this->compareProductTreeRowsByFreshness($left, $right))
-            ->values();
-
-        $rows = $this->filterProductTreeRows($rows, $filters);
-
-        $perPage = 30;
-        $page = max(1, $page);
-
-        return new LengthAwarePaginator(
-            $rows->slice(($page - 1) * $perPage, $perPage)->values(),
-            $rows->count(),
-            $perPage,
-            $page,
-            [
-                'path' => request()->url(),
-                'query' => request()->query(),
-            ],
+                    'variants' => $product->variantChildren->values(),
+                ]),
         );
+
+        return $paginator;
     }
 
     /**
-     * @param array{product:Product,variants:Collection<int, Product>} $left
-     * @param array{product:Product,variants:Collection<int, Product>} $right
+     * @return list<string>
      */
-    private function compareProductTreeRowsByFreshness(array $left, array $right): int
+    private function productListColumns(bool $qualified = false): array
     {
-        $dateCompare = $this->productTreeRowFreshnessTimestamp($right) <=> $this->productTreeRowFreshnessTimestamp($left);
+        $prefix = $qualified ? 'products.' : '';
 
-        if ($dateCompare !== 0) {
-            return $dateCompare;
-        }
-
-        $idCompare = (int) $right['product']->id <=> (int) $left['product']->id;
-
-        if ($idCompare !== 0) {
-            return $idCompare;
-        }
-
-        return strnatcasecmp(
-            $this->productSortLabel($left['product']),
-            $this->productSortLabel($right['product']),
-        );
+        return collect([
+            'id',
+            'sku',
+            'name',
+            'ean',
+            'unit',
+            'quantity_precision',
+            'vat_rate',
+            'attributes',
+            'is_active',
+            'created_at',
+        ])->map(fn (string $column): string => $prefix.$column)->all();
     }
 
     /**
-     * @param array{product:Product,variants:Collection<int, Product>} $row
+     * @param  array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string}  $filters
      */
-    private function productTreeRowFreshnessTimestamp(array $row): int
+    private function applyProductListFilters(Builder $products, array $filters): void
     {
-        return collect([$row['product']])
-            ->concat($row['variants'])
-            ->map(fn (Product $product): int => $this->productFreshnessTimestamp($product))
-            ->max() ?? 0;
-    }
-
-    private function productFreshnessTimestamp(Product $product): int
-    {
-        $publicationDate = $this->nullableString(data_get($product->masterData(), 'publication_date'));
-
-        if ($publicationDate !== null) {
-            try {
-                return CarbonImmutable::parse($publicationDate)->getTimestamp();
-            } catch (\Throwable) {
-                // Fall back to ERP creation time if imported metadata contains an unexpected date format.
-            }
+        if ($this->hasProductListModelFilters($filters)) {
+            $products->where(function (Builder $family) use ($filters): void {
+                $family
+                    ->where(fn (Builder $product) => $this->applyProductListModelFilters($product, $filters))
+                    ->orWhereHas('variantChildren', fn (Builder $variant) => $this->applyProductListModelFilters($variant, $filters));
+            });
         }
 
-        return $product->created_at?->getTimestamp() ?? 0;
+        $this->applyProductListStockFilter($products, $filters['stock']);
+
+        if ($filters['type'] === 'with_variants') {
+            $products->whereHas('variantChildren');
+        }
+
+        if ($filters['type'] === 'without_variants') {
+            $products->whereDoesntHave('variantChildren');
+        }
     }
 
-    private function productSortLabel(Product $product): string
+    /**
+     * @param  array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string}  $filters
+     */
+    private function hasProductListModelFilters(array $filters): bool
     {
-        return mb_strtolower($product->name . ' ' . $product->sku);
+        return $filters['q'] !== ''
+            || $filters['channel'] !== ''
+            || $filters['warehouse'] !== ''
+            || $filters['category'] !== ''
+            || $filters['status'] !== '';
+    }
+
+    /**
+     * @param  array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string}  $filters
+     */
+    private function applyProductListModelFilters(Builder $products, array $filters): void
+    {
+        if ($filters['q'] !== '') {
+            $like = '%'.$filters['q'].'%';
+
+            $products->where(function (Builder $search) use ($like): void {
+                $search
+                    ->where('sku', 'like', $like)
+                    ->orWhere('name', 'like', $like)
+                    ->orWhere('ean', 'like', $like)
+                    ->orWhere('attributes', 'like', $like);
+            });
+        }
+
+        if ($filters['channel'] !== '') {
+            $products->whereHas('channelMappings.salesChannel', fn (Builder $channel) => $channel->where('code', $filters['channel']));
+        }
+
+        if ($filters['warehouse'] !== '') {
+            $products->whereHas('stockBalances', function (Builder $balance) use ($filters): void {
+                $balance
+                    ->where('warehouse_id', (int) $filters['warehouse'])
+                    ->where(function (Builder $quantities): void {
+                        $quantities
+                            ->where('quantity_on_hand', '!=', 0)
+                            ->orWhere('quantity_reserved', '!=', 0)
+                            ->orWhere('quantity_available', '!=', 0);
+                    });
+            });
+        }
+
+        if ($filters['category'] !== '') {
+            $products->where('attributes', 'like', '%'.$filters['category'].'%');
+        }
+
+        if ($filters['status'] === 'active') {
+            $products->where('is_active', true);
+        }
+
+        if ($filters['status'] === 'inactive') {
+            $products->where('is_active', false);
+        }
+
+        if (in_array($filters['status'], ['publish', 'draft'], true)) {
+            $products->where(function (Builder $status) use ($filters): void {
+                $status
+                    ->where('attributes->woocommerce_status', $filters['status'])
+                    ->orWhere('attributes->master->publication_status', $filters['status']);
+            });
+        }
+    }
+
+    private function applyProductListStockFilter(Builder $products, string $stock): void
+    {
+        $hasBalance = function (Builder $query, string $column, string $operator, int|float $value): void {
+            $query->where(function (Builder $family) use ($column, $operator, $value): void {
+                $family
+                    ->whereHas('stockBalances', fn (Builder $balance) => $balance->where($column, $operator, $value))
+                    ->orWhereHas('variantChildren.stockBalances', fn (Builder $balance) => $balance->where($column, $operator, $value));
+            });
+        };
+
+        if ($stock === 'available') {
+            $hasBalance($products, 'quantity_available', '>', 0);
+        }
+
+        if ($stock === 'reserved') {
+            $hasBalance($products, 'quantity_reserved', '>', 0);
+        }
+
+        if ($stock === 'out_of_stock') {
+            $products
+                ->whereDoesntHave('stockBalances', fn (Builder $balance) => $balance->where('quantity_on_hand', '>', 0))
+                ->whereDoesntHave('variantChildren.stockBalances', fn (Builder $balance) => $balance->where('quantity_on_hand', '>', 0));
+        }
+
+        if ($stock === 'no_stock') {
+            $hasNonZeroBalance = function (Builder $balance): void {
+                $balance->where(function (Builder $quantities): void {
+                    $quantities
+                        ->where('quantity_on_hand', '!=', 0)
+                        ->orWhere('quantity_reserved', '!=', 0)
+                        ->orWhere('quantity_available', '!=', 0);
+                });
+            };
+
+            $products
+                ->whereDoesntHave('stockBalances', $hasNonZeroBalance)
+                ->whereDoesntHave('variantChildren.stockBalances', $hasNonZeroBalance);
+        }
+    }
+
+    private function applyProductListOrder(Builder $products): void
+    {
+        $freshnessColumn = match (DB::connection()->getDriverName()) {
+            'mysql', 'mariadb' => "coalesce(json_unquote(json_extract(`attributes`, '$.master.publication_date')), `created_at`)",
+            'sqlite' => "coalesce(json_extract(\"attributes\", '$.master.publication_date'), \"created_at\")",
+            'pgsql' => "coalesce(\"attributes\"->'master'->>'publication_date', \"created_at\"::text)",
+            default => 'created_at',
+        };
+
+        $products
+            ->orderByRaw($freshnessColumn.' desc')
+            ->orderByDesc('id');
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function productListChannelOptions(): Collection
+    {
+        return SalesChannel::query()
+            ->where('is_active', true)
+            ->orderBy('code')
+            ->pluck('code');
+    }
+
+    /**
+     * @return Collection<int, array{name:string,path:string,sales_channel:?string}>
+     */
+    private function productListCategoryOptions(): Collection
+    {
+        return ProductCategory::query()
+            ->with('salesChannel:id,code')
+            ->orderBy('path')
+            ->orderBy('name')
+            ->get()
+            ->map(fn (ProductCategory $category): array => [
+                'name' => $category->name,
+                'path' => $category->path ?: $category->name,
+                'sales_channel' => $category->salesChannel?->code,
+            ]);
+    }
+
+    /**
+     * @return Collection<int, array{name:string,values:list<string>,is_variant:bool,is_required:bool,input_type:string}>
+     */
+    private function productListParameterOptions(): Collection
+    {
+        return ProductParameterDefinition::query()
+            ->orderBy('sort_order')
+            ->orderBy('name')
+            ->get()
+            ->map(fn (ProductParameterDefinition $definition): array => [
+                'name' => $definition->name,
+                'values' => (array) $definition->values,
+                'is_variant' => (bool) $definition->is_variant,
+                'is_required' => (bool) $definition->is_required,
+                'input_type' => $definition->input_type,
+            ]);
     }
 
     /**
@@ -982,226 +1173,6 @@ class ProductController extends Controller
                 ? (string) $request->query('status')
                 : '',
         ];
-    }
-
-    /**
-     * @param Collection<int, array{product:Product,variants:Collection<int, Product>}> $rows
-     * @param array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string} $filters
-     * @return Collection<int, array{product:Product,variants:Collection<int, Product>}>
-     */
-    private function filterProductTreeRows(Collection $rows, array $filters): Collection
-    {
-        return $rows
-            ->filter(function (array $row) use ($filters): bool {
-                $family = collect([$row['product']])->merge($row['variants']);
-
-                if ($filters['q'] !== '' && ! $family->contains(fn (Product $product): bool => $this->productMatchesSearch($product, $filters['q']))) {
-                    return false;
-                }
-
-                if ($filters['channel'] !== '' && ! $this->familyChannels($family)->contains($filters['channel'])) {
-                    return false;
-                }
-
-                if ($filters['warehouse'] !== '' && ! $this->familyHasWarehouseStock($family, (int) $filters['warehouse'])) {
-                    return false;
-                }
-
-                if ($filters['category'] !== '' && ! $family->contains(fn (Product $product): bool => $this->productMatchesCategory($product, $filters['category']))) {
-                    return false;
-                }
-
-                if ($filters['status'] !== '' && ! $family->contains(fn (Product $product): bool => $this->productMatchesStatus($product, $filters['status']))) {
-                    return false;
-                }
-
-                if ($filters['type'] === 'with_variants' && $row['variants']->isEmpty()) {
-                    return false;
-                }
-
-                if ($filters['type'] === 'without_variants' && $row['variants']->isNotEmpty()) {
-                    return false;
-                }
-
-                if ($filters['stock'] !== '') {
-                    $stock = $this->familyStockTotals($family);
-
-                    return match ($filters['stock']) {
-                        'available' => $stock['available'] > 0,
-                        'reserved' => $stock['reserved'] > 0,
-                        'out_of_stock' => $stock['on_hand'] <= 0,
-                        'no_stock' => $stock['on_hand'] === 0.0 && $stock['reserved'] === 0.0,
-                        default => true,
-                    };
-                }
-
-                return true;
-            })
-            ->values();
-    }
-
-    private function productMatchesSearch(Product $product, string $query): bool
-    {
-        $needle = mb_strtolower(trim($query));
-
-        if ($needle === '') {
-            return true;
-        }
-
-        $master = $product->masterData();
-        $terms = collect([
-            $product->sku,
-            $product->name,
-            $product->ean,
-            $product->displaySku(),
-            $product->externalDisplayId(),
-            data_get($master, 'category'),
-            data_get($master, 'catalog'),
-            data_get($master, 'content.pl.name'),
-            data_get($master, 'content.en.name'),
-            data_get($master, 'content.pl.description'),
-            data_get($master, 'content.pl.additional_description'),
-        ])
-            ->merge((array) data_get($master, 'tags', []))
-            ->merge(collect((array) data_get($master, 'parameters', []))->flatMap(fn ($parameter): array => is_array($parameter)
-                ? [(string) ($parameter['name'] ?? ''), (string) ($parameter['value'] ?? '')]
-                : []))
-            ->filter(fn ($term): bool => $term !== null && trim((string) $term) !== '')
-            ->map(fn ($term): string => mb_strtolower(strip_tags((string) $term)));
-
-        return $terms->contains(fn (string $term): bool => str_contains($term, $needle));
-    }
-
-    private function productMatchesCategory(Product $product, string $category): bool
-    {
-        $needle = mb_strtolower(trim($category));
-
-        if ($needle === '') {
-            return true;
-        }
-
-        return collect($this->productCategoryTerms($product))
-            ->map(fn (string $term): string => mb_strtolower($term))
-            ->contains(fn (string $term): bool => $term === $needle || str_contains($term, $needle));
-    }
-
-    private function productMatchesStatus(Product $product, string $status): bool
-    {
-        return match ($status) {
-            'active' => $product->is_active,
-            'inactive' => ! $product->is_active,
-            'publish', 'draft' => (string) data_get((array) $product->attributes, 'woocommerce_status', data_get($product->masterData(), 'publication_status')) === $status,
-            default => true,
-        };
-    }
-
-    /**
-     * @param Collection<int, Product> $products
-     */
-    private function familyHasWarehouseStock(Collection $products, int $warehouseId): bool
-    {
-        return $products
-            ->flatMap(fn (Product $product) => $product->stockBalances)
-            ->contains(function ($balance) use ($warehouseId): bool {
-                if ((int) $balance->warehouse_id !== $warehouseId) {
-                    return false;
-                }
-
-                return (float) $balance->quantity_on_hand !== 0.0
-                    || (float) $balance->quantity_reserved !== 0.0
-                    || (float) $balance->quantity_available !== 0.0;
-            });
-    }
-
-    /**
-     * @param Collection<int, Product> $products
-     * @return Collection<int, string>
-     */
-    private function familyChannels(Collection $products): Collection
-    {
-        return $products
-            ->flatMap(fn (Product $product) => $product->channelMappings)
-            ->map(fn ($mapping): ?string => $mapping->salesChannel?->code)
-            ->filter()
-            ->unique()
-            ->values();
-    }
-
-    /**
-     * @param Collection<int, Product> $products
-     * @return array{on_hand:float,reserved:float,available:float}
-     */
-    private function familyStockTotals(Collection $products): array
-    {
-        $balances = $products->flatMap(fn (Product $product) => $product->stockBalances);
-
-        return [
-            'on_hand' => (float) $balances->sum(fn ($balance): float => (float) $balance->quantity_on_hand),
-            'reserved' => (float) $balances->sum(fn ($balance): float => (float) $balance->quantity_reserved),
-            'available' => (float) $balances->sum(fn ($balance): float => (float) $balance->quantity_available),
-        ];
-    }
-
-    /**
-     * @param Collection<int, Product> $products
-     * @return Collection<int, string>
-     */
-    private function productChannelOptions(Collection $products): Collection
-    {
-        return $this->familyChannels($products)->sort()->values();
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function productCategoryTerms(Product $product): array
-    {
-        $attributes = (array) $product->attributes;
-        $terms = (array) data_get($attributes, 'woocommerce_categories', []);
-        $masterCategory = $this->nullableString(data_get($attributes, 'master.category'));
-
-        if ($masterCategory !== null) {
-            $terms[] = $masterCategory;
-        }
-
-        return collect($terms)
-            ->map(fn ($term): ?string => $this->nullableString($term))
-            ->filter()
-            ->unique(fn (string $term): string => mb_strtolower($term))
-            ->values()
-            ->all();
-    }
-
-    private function isVariantProduct(Product $product): bool
-    {
-        if ((string) data_get((array) $product->attributes, 'woocommerce_type') === 'variation') {
-            return true;
-        }
-
-        return $product->channelMappings
-            ->contains(fn ($mapping): bool => filled($mapping->external_variation_id));
-    }
-
-    private function productParentExternalId(Product $product): ?string
-    {
-        $mapping = $product->channelMappings
-            ->first(fn ($mapping): bool => filled($mapping->external_product_id));
-
-        return $mapping !== null ? (string) $mapping->external_product_id : null;
-    }
-
-    /**
-     * @return list<string>
-     */
-    private function productOwnExternalIds(Product $product): array
-    {
-        return $product->channelMappings
-            ->filter(fn ($mapping): bool => blank($mapping->external_variation_id) && filled($mapping->external_product_id))
-            ->pluck('external_product_id')
-            ->map(fn ($id): string => (string) $id)
-            ->unique()
-            ->values()
-            ->all();
     }
 
     private function nullableString(mixed $value): ?string

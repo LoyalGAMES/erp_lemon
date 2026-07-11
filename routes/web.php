@@ -79,6 +79,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
 
     Route::middleware(EnsureErpRole::class.':products')->group(function (): void {
         Route::get('/products', [ProductController::class, 'index'])->name('products.index');
+        Route::get('/products/lookup', [ProductController::class, 'lookup'])->name('products.lookup');
         Route::get('/products/configuration/categories', [ProductConfigurationController::class, 'categories'])->name('products.categories.index');
         Route::post('/products/configuration/categories', [ProductConfigurationController::class, 'storeCategory'])->name('products.categories.store');
         Route::post('/products/configuration/categories/sort', [ProductConfigurationController::class, 'sortCategories'])->name('products.categories.sort');

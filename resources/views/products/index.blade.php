@@ -718,7 +718,7 @@
         @endforeach
     </datalist>
     @include('products._parameter_datalists', ['parameterOptions' => $parameterOptions])
-    @include('products._product_lookup_datalist', ['productLookupOptions' => $productLookupOptions])
+    <datalist id="product-lookup-options"></datalist>
     @include('products._rich_editor_assets')
 @endsection
 
@@ -742,6 +742,59 @@
         productSearchInput?.addEventListener('input', () => submitProductFiltersWithDelay(380));
         document.querySelectorAll('[data-product-filter-control]').forEach((control) => {
             control.addEventListener('change', () => submitProductFiltersWithDelay(0));
+        });
+
+        const productLookupUrl = @json($productLookupUrl);
+        const productLookupDatalist = document.getElementById('product-lookup-options');
+        let productLookupTimer = null;
+        let productLookupRequest = null;
+
+        function clearProductLookupOptions() {
+            if (productLookupDatalist) {
+                productLookupDatalist.replaceChildren();
+            }
+        }
+
+        function searchRelatedProducts(query) {
+            window.clearTimeout(productLookupTimer);
+
+            if (query.length < 2) {
+                productLookupRequest?.abort();
+                clearProductLookupOptions();
+                return;
+            }
+
+            productLookupTimer = window.setTimeout(async () => {
+                productLookupRequest?.abort();
+                productLookupRequest = new AbortController();
+
+                try {
+                    const response = await fetch(`${productLookupUrl}?q=${encodeURIComponent(query)}`, {
+                        headers: { Accept: 'application/json' },
+                        signal: productLookupRequest.signal,
+                    });
+
+                    if (!response.ok || !productLookupDatalist) {
+                        return;
+                    }
+
+                    const products = await response.json();
+                    productLookupDatalist.replaceChildren(...products.map((product) => {
+                        const option = document.createElement('option');
+                        option.value = product.label;
+                        option.textContent = product.sku;
+                        return option;
+                    }));
+                } catch (error) {
+                    if (error.name !== 'AbortError') {
+                        clearProductLookupOptions();
+                    }
+                }
+            }, 180);
+        }
+
+        document.querySelectorAll('[data-product-related-picker]').forEach((input) => {
+            input.addEventListener('input', () => searchRelatedProducts(input.value.trim()));
         });
 
         const createTabs = Array.from(document.querySelectorAll('[data-create-tab]'));
