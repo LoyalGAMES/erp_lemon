@@ -780,6 +780,7 @@ final class WooCommerceImportService
             'woocommerce_meta' => $this->metaKeyValue($item['meta_data'] ?? []),
             'woocommerce_upsell_ids' => $item['upsell_ids'] ?? null,
             'woocommerce_cross_sell_ids' => $item['cross_sell_ids'] ?? null,
+            'woocommerce_translations' => $this->translationReferences($item),
             'woocommerce_description' => $this->nullableString($item['description'] ?? null),
             'woocommerce_short_description' => $this->nullableString($item['short_description'] ?? null),
             'woocommerce_image' => $this->primaryImage($item),
@@ -788,6 +789,34 @@ final class WooCommerceImportService
             'woocommerce_parent_images' => $this->imageList($item['parent_images'] ?? []),
             'woocommerce_raw_payload' => $this->compactRawPayload($item),
         ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     * @return array<string, array{product_id:string,variation_id:?string,sku:?string}>
+     */
+    private function translationReferences(array $item): array
+    {
+        return collect((array) ($item['erp_translations'] ?? []))
+            ->map(function (mixed $translation): ?array {
+                if (! is_array($translation)) {
+                    return null;
+                }
+
+                $productId = trim((string) ($translation['id'] ?? ''));
+
+                if ($productId === '') {
+                    return null;
+                }
+
+                return [
+                    'product_id' => $productId,
+                    'variation_id' => isset($translation['variation_id']) ? (string) $translation['variation_id'] : null,
+                    'sku' => $this->nullableString($translation['sku'] ?? null),
+                ];
+            })
+            ->filter()
+            ->all();
     }
 
     /**

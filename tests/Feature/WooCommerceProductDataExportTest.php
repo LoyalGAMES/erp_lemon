@@ -291,6 +291,61 @@ class WooCommerceProductDataExportTest extends TestCase
         ));
     }
 
+    public function test_export_preserves_sku_shared_with_polylang_translation(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
+                'id' => 123,
+                'sku' => 'POLYLANG-SKU',
+                'name' => 'Polish product',
+            ]),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'POLYLANG-SKU',
+            'name' => 'Polski produkt',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => ['source' => 'erp'],
+                'woocommerce_translations' => [
+                    'en' => [
+                        'product_id' => '124',
+                        'variation_id' => null,
+                        'sku' => 'POLYLANG-SKU',
+                    ],
+                ],
+            ],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'POLYLANG-SKU',
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($product);
+
+        [$request] = Http::recorded()->first();
+        $this->assertFalse(isset($request['sku']));
+    }
+
     public function test_product_publication_date_exports_to_woocommerce_and_polylang_translations(): void
     {
         Http::fake(function ($request) {

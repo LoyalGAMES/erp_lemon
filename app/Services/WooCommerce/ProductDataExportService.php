@@ -490,6 +490,7 @@ final class ProductDataExportService
 
         if (
             $product->isSyntheticWooSku()
+            || $this->hasPolylangTranslationWithSameSku($product, $mapping)
             || ($remoteSku !== ''
                 && $remoteSku === $product->sku
                 && ProductChannelMapping::query()
@@ -502,6 +503,28 @@ final class ProductDataExportService
         }
 
         return $payload;
+    }
+
+    private function hasPolylangTranslationWithSameSku(Product $product, ProductChannelMapping $mapping): bool
+    {
+        $externalProductId = (string) $mapping->external_product_id;
+        $externalVariationId = $mapping->external_variation_id !== null
+            ? (string) $mapping->external_variation_id
+            : null;
+
+        return collect((array) data_get($product->attributes, 'woocommerce_translations', []))
+            ->filter(fn (mixed $translation): bool => is_array($translation))
+            ->contains(function (array $translation) use ($product, $externalProductId, $externalVariationId): bool {
+                $translationSku = trim((string) ($translation['sku'] ?? ''));
+                $translationProductId = trim((string) ($translation['product_id'] ?? ''));
+                $translationVariationId = isset($translation['variation_id'])
+                    ? (string) $translation['variation_id']
+                    : null;
+
+                return $translationSku !== ''
+                    && $translationSku === $product->sku
+                    && ($translationProductId !== $externalProductId || $translationVariationId !== $externalVariationId);
+            });
     }
 
     /**

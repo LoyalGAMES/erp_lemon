@@ -468,5 +468,7 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('https://shop.test/aura.jpg', $product->imageUrl());
         $this->assertSame('5901234123457', data_get($product->attributes, 'woocommerce_global_unique_id'));
         $this->assertSame('<p>Polski opis</p>', data_get($product->attributes, 'woocommerce_description'));
+        $this->assertSame('901', data_get($product->attributes, 'woocommerce_translations.en.product_id'));
+        $this->assertSame('FULL-WOO-1', data_get($product->attributes, 'woocommerce_translations.en.sku'));
     }
 }
