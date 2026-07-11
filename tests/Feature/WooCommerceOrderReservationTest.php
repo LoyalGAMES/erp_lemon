@@ -7,6 +7,7 @@ namespace Tests\Feature;
 use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
 use App\Models\Product;
+use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
@@ -286,6 +287,112 @@ class WooCommerceOrderReservationTest extends TestCase
         $this->assertSame(1, StockReservation::query()->where('status', 'active')->count());
         $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_created')->count());
         $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_received')->count());
+    }
+
+    public function test_order_line_from_polylang_alias_reserves_the_canonical_product_without_sku(): void
+    {
+        Mail::fake();
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Main',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $warehouse->routes()->create([
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 100,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'BLS6A4FE375DAA5D',
+            'name' => 'Koszula AVA Kremowo - różowa',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '700143',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelAlias::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '750099',
+            'external_sku' => null,
+            'language' => 'en',
+        ]);
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 2,
+            'quantity_reserved' => 0,
+            'quantity_available' => 2,
+        ]);
+
+        Http::fake([
+            '*' => function ($request) {
+                parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+                if ((int) ($query['page'] ?? 1) > 1) {
+                    return Http::response([]);
+                }
+
+                return Http::response([[
+                    'id' => 777,
+                    'number' => '777',
+                    'status' => 'processing',
+                    'currency' => 'PLN',
+                    'total' => '319.00',
+                    'billing' => ['email' => 'client@example.test'],
+                    'line_items' => [[
+                        'id' => 9901,
+                        'product_id' => 750099,
+                        'variation_id' => 0,
+                        'sku' => '',
+                        'name' => 'AVA Cream and Pink Shirt',
+                        'quantity' => 1,
+                        'subtotal' => '259.35',
+                        'total' => '319.00',
+                    ]],
+                ]]);
+            },
+        ]);
+
+        $stats = app(WooCommerceImportService::class)->importOrders($integration);
+
+        $this->assertSame(1, $stats['reserved']);
+        $this->assertDatabaseHas('external_order_lines', [
+            'product_id' => $product->id,
+            'external_line_id' => '9901',
+        ]);
+        $this->assertDatabaseHas('stock_reservations', [
+            'product_id' => $product->id,
+            'external_order_id' => '777',
+            'status' => 'active',
+        ]);
+        $this->assertSame('1.0000', (string) $product->stockBalances()->firstOrFail()->quantity_reserved);
     }
 
     public function test_order_import_prefers_gmt_dates_to_avoid_dst_gap_datetime_errors(): void

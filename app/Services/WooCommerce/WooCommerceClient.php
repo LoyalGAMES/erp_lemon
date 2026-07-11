@@ -18,6 +18,10 @@ use Throwable;
 
 final class WooCommerceClient
 {
+    private const CATALOG_CONTRACT_VERSION = 1;
+
+    private const CATALOG_PLUGIN_MINIMUM_VERSION = '0.2.0';
+
     public function test(WordpressIntegration $integration): array
     {
         $response = $this->request($integration)
@@ -70,7 +74,8 @@ final class WooCommerceClient
      */
     public function products(WordpressIntegration $integration): iterable
     {
-        $languages = $integration->productImportLanguages();
+        $configuredLanguages = $integration->productImportLanguages();
+        $languages = $configuredLanguages;
         $primaryLanguage = array_shift($languages);
         $primaryItems = $this->productsForLanguage($integration, $primaryLanguage);
 
@@ -79,22 +84,50 @@ final class WooCommerceClient
             $primaryItems = $this->productsForLanguage($integration, null);
         }
 
-        $translations = [];
+        $itemsByLanguage = [
+            $this->languageBucketKey($primaryLanguage) => $primaryItems,
+        ];
+        $translatedItemsByLanguage = [];
 
         foreach ($languages as $language) {
-            foreach ($this->productsForLanguage($integration, $language) as $translatedItem) {
+            $translatedItems = $this->productsForLanguage($integration, $language);
+            $itemsByLanguage[$this->languageBucketKey($language)] = $translatedItems;
+            $translatedItemsByLanguage[$this->languageBucketKey($language)] = [
+                'language' => $language,
+                'items' => $translatedItems,
+            ];
+        }
+
+        $this->assertSafeMultilingualCatalog($configuredLanguages, $itemsByLanguage);
+
+        $translations = [];
+
+        foreach ($translatedItemsByLanguage as $translatedBucket) {
+            $requestedLanguage = $translatedBucket['language'];
+
+            foreach ($translatedBucket['items'] as $translatedItem) {
+                $language = $this->catalogItemLanguage($translatedItem)
+                    ?? $requestedLanguage
+                    ?? 'default';
+
                 foreach ($this->translationKeys($translatedItem) as $key) {
-                    $translations[$key][$language ?? 'default'] = $translatedItem;
+                    $translations[$key][$language] = $translatedItem;
                 }
             }
         }
 
         foreach ($primaryItems as $item) {
-            $item['erp_import_language'] = $primaryLanguage ?? 'default';
+            $item['erp_import_language'] = $this->catalogItemLanguage($item)
+                ?? $primaryLanguage
+                ?? 'default';
             $item['erp_translations'] = [];
 
             foreach ($this->translationKeys($item) as $key) {
                 foreach ($translations[$key] ?? [] as $language => $translatedItem) {
+                    if ($this->wooItemIdentity($translatedItem) === $this->wooItemIdentity($item)) {
+                        continue;
+                    }
+
                     $item['erp_translations'][$language] = $translatedItem;
                 }
             }
@@ -761,6 +794,20 @@ final class WooCommerceClient
      */
     private function translationKeys(array $item): array
     {
+        if ($this->hasCatalogContract($item)) {
+            $translationGroup = trim((string) ($item['lemon_erp_translation_group'] ?? ''));
+
+            if ($translationGroup !== '') {
+                return ['lemon-erp-translation:'.$translationGroup];
+            }
+
+            $translationIds = $this->translationIds($item['lemon_erp_translations'] ?? []);
+
+            if (count($translationIds) > 1) {
+                return ['lemon-erp-translation-ids:'.implode('|', $translationIds)];
+            }
+        }
+
         $translationIds = collect((array) ($item['translations'] ?? []))
             ->map(fn (mixed $id): string => trim((string) $id))
             ->filter()
@@ -807,9 +854,190 @@ final class WooCommerceClient
             return true;
         }
 
+        if ($this->hasCatalogContract($item) && array_key_exists('lemon_erp_language', $item)) {
+            $actualLanguage = $this->normalizeCatalogLanguage($item['lemon_erp_language']);
+
+            // A null language is the explicit plugin representation of a
+            // catalogue that is not managed by a multilingual extension.
+            return $actualLanguage === null
+                || $actualLanguage === mb_strtolower($requestedLanguage);
+        }
+
         $actualLanguage = mb_strtolower(trim((string) ($item['lang'] ?? '')));
 
         return $actualLanguage === '' || $actualLanguage === mb_strtolower($requestedLanguage);
+    }
+
+    /**
+     * Refuse to import the same unverified WooCommerce objects once per
+     * configured language. Without a language/translation contract there is
+     * no deterministic way to distinguish Polylang twins from genuine SKU
+     * conflicts, so continuing would recreate duplicate ERP products.
+     *
+     * @param  list<string|null>  $configuredLanguages
+     * @param  array<string, list<array<string, mixed>>>  $itemsByLanguage
+     */
+    private function assertSafeMultilingualCatalog(array $configuredLanguages, array $itemsByLanguage): void
+    {
+        $requestedLanguages = collect($configuredLanguages)
+            ->filter(fn (?string $language): bool => $language !== null && trim($language) !== '')
+            ->map(fn (string $language): string => mb_strtolower(trim($language)))
+            ->unique()
+            ->values();
+
+        if ($requestedLanguages->count() < 2) {
+            return;
+        }
+
+        /** @var array<string, array<string, bool>> $identityVerification */
+        $identityVerification = [];
+        $invalidDeclaredContracts = 0;
+
+        foreach ($itemsByLanguage as $language => $items) {
+            foreach ($items as $item) {
+                $identity = $this->wooItemIdentity($item);
+
+                if ($identity === null) {
+                    continue;
+                }
+
+                $verified = $this->hasVerifiedCatalogIdentity($item);
+
+                if ($this->declaresCatalogContract($item) && ! $verified) {
+                    $invalidDeclaredContracts++;
+                }
+
+                $identityVerification[$identity][$language] = ($identityVerification[$identity][$language] ?? true)
+                    && $verified;
+            }
+        }
+
+        $unsafeIdentities = collect($identityVerification)
+            ->filter(fn (array $languages): bool => count($languages) > 1 && in_array(false, $languages, true));
+
+        if ($unsafeIdentities->isEmpty() && $invalidDeclaredContracts === 0) {
+            return;
+        }
+
+        $problemCount = max($unsafeIdentities->count(), $invalidDeclaredContracts);
+
+        throw new RuntimeException(
+            'Import produktów wielojęzycznych został zatrzymany przed przetworzeniem pozycji: '
+            .$problemCount.' obiektów WooCommerce nie ma zweryfikowanego kontraktu tłumaczeń '
+            .'albo zostało zwróconych dla więcej niż jednego języka. Zaktualizuj i aktywuj wtyczkę Lemon ERP for WooCommerce '
+            .'do wersji '.self::CATALOG_PLUGIN_MINIMUM_VERSION.' lub nowszej, a następnie ponów import.'
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function declaresCatalogContract(array $item): bool
+    {
+        return array_key_exists('lemon_erp_catalog_contract', $item)
+            || array_key_exists('lemon_erp_language', $item)
+            || array_key_exists('lemon_erp_translations', $item)
+            || array_key_exists('lemon_erp_translation_group', $item);
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function hasCatalogContract(array $item): bool
+    {
+        return (int) ($item['lemon_erp_catalog_contract'] ?? 0) === self::CATALOG_CONTRACT_VERSION;
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function hasVerifiedCatalogIdentity(array $item): bool
+    {
+        if ($this->hasCatalogContract($item)) {
+            $group = trim((string) ($item['lemon_erp_translation_group'] ?? ''));
+            $translations = (array) ($item['lemon_erp_translations'] ?? []);
+            $translationIds = $this->translationIds($translations);
+            $language = $this->catalogItemLanguage($item);
+            $currentId = isset($item['variation_id'])
+                ? trim((string) $item['variation_id'])
+                : trim((string) ($item['id'] ?? ''));
+
+            return $group !== ''
+                && $translationIds !== []
+                && $currentId !== ''
+                && in_array($currentId, $translationIds, true)
+                && (count($translationIds) === 1 || $language !== null);
+        }
+
+        $legacyLanguage = $this->normalizeCatalogLanguage($item['lang'] ?? null);
+        $legacyTranslations = (array) ($item['translations'] ?? []);
+        $legacyTranslationIds = $this->translationIds($legacyTranslations);
+        $currentId = isset($item['variation_id'])
+            ? trim((string) $item['variation_id'])
+            : trim((string) ($item['id'] ?? ''));
+
+        return $legacyLanguage !== null
+            && $legacyTranslationIds !== []
+            && $currentId !== ''
+            && in_array($currentId, $legacyTranslationIds, true);
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function catalogItemLanguage(array $item): ?string
+    {
+        if ($this->hasCatalogContract($item) && array_key_exists('lemon_erp_language', $item)) {
+            return $this->normalizeCatalogLanguage($item['lemon_erp_language']);
+        }
+
+        return $this->normalizeCatalogLanguage($item['lang'] ?? null);
+    }
+
+    private function normalizeCatalogLanguage(mixed $language): ?string
+    {
+        $language = mb_strtolower(trim((string) ($language ?? '')));
+
+        return $language !== '' ? $language : null;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function translationIds(mixed $translations): array
+    {
+        return collect(is_array($translations) ? $translations : [])
+            ->map(fn (mixed $id): string => trim((string) $id))
+            ->filter()
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function wooItemIdentity(array $item): ?string
+    {
+        $productId = trim((string) ($item['id'] ?? ''));
+
+        if ($productId === '') {
+            return null;
+        }
+
+        if (isset($item['variation_id'])) {
+            $variationId = trim((string) $item['variation_id']);
+
+            return $variationId !== '' ? 'variation:'.$productId.'|'.$variationId : null;
+        }
+
+        return 'product:'.$productId;
+    }
+
+    private function languageBucketKey(?string $language): string
+    {
+        return $this->normalizeCatalogLanguage($language) ?? 'default';
     }
 
     private function variationDisplayName(array $parentProduct, array $variation): string

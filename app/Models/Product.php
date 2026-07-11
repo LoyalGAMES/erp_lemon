@@ -47,6 +47,11 @@ class Product extends Model
         return $this->hasMany(ProductChannelMapping::class);
     }
 
+    public function channelAliases(): HasMany
+    {
+        return $this->hasMany(ProductChannelAlias::class);
+    }
+
     public function ledgerEntries(): HasMany
     {
         return $this->hasMany(StockLedgerEntry::class);

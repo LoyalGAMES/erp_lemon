@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Lemon ERP for WooCommerce
- * Description: Adds Lemon ERP checkout fields and invoice metadata endpoints for WooCommerce orders.
- * Version: 0.1.4
+ * Description: Adds Lemon ERP checkout fields, catalog identity and invoice metadata endpoints for WooCommerce.
+ * Version: 0.2.0
  * Author: Lemon ERP
  * Requires PHP: 8.0
  * Requires Plugins: woocommerce
@@ -24,7 +24,8 @@ add_action('before_woocommerce_init', static function (): void {
 
 final class Lemon_Erp_WooCommerce
 {
-    private const VERSION = '0.1.4';
+    private const VERSION = '0.2.0';
+    private const CATALOG_CONTRACT = 1;
     private const CUSTOMER_TYPE_META = '_lemon_erp_customer_type';
     private const BILLING_NIP_META = '_lemon_erp_billing_nip';
     private const LEGACY_BILLING_NIP_META = '_billing_nip';
@@ -36,6 +37,15 @@ final class Lemon_Erp_WooCommerce
     private const MAX_PDF_BYTES = 15728640;
 
     private static ?self $instance = null;
+
+    /** @var array<string, array{language:?string,translations:array<string, int>,translation_group:string}> */
+    private array $postCatalogIdentityCache = [];
+
+    /** @var array<int, array{language:?string,translations:array<string, int>,translation_group:string}> */
+    private array $termCatalogIdentityCache = [];
+
+    /** @var array<int, list<WC_Product_Variation>> */
+    private array $variationCandidatesByParent = [];
 
     public static function boot(): void
     {
@@ -61,6 +71,9 @@ final class Lemon_Erp_WooCommerce
         add_action('woocommerce_admin_order_data_after_billing_address', [$this, 'renderAdminBillingFields']);
         add_action('woocommerce_order_details_after_order_table', [$this, 'renderCustomerInvoiceLink']);
         add_action('woocommerce_email_after_order_table', [$this, 'renderEmailInvoiceLink'], 20, 4);
+        add_filter('woocommerce_rest_prepare_product_object', [$this, 'appendProductCatalogContract'], 20, 3);
+        add_filter('woocommerce_rest_prepare_product_variation_object', [$this, 'appendVariationCatalogContract'], 20, 3);
+        add_filter('woocommerce_rest_prepare_product_cat', [$this, 'appendCategoryCatalogContract'], 20, 3);
         add_action('rest_api_init', [$this, 'registerRestRoutes']);
     }
 
@@ -440,6 +453,12 @@ final class Lemon_Erp_WooCommerce
 
     public function registerRestRoutes(): void
     {
+        register_rest_route('lemon-erp/v1', '/catalog/capabilities', [
+            'methods' => WP_REST_Server::READABLE,
+            'callback' => [$this, 'restCatalogCapabilities'],
+            'permission_callback' => [$this, 'canReadCatalogCapabilities'],
+        ]);
+
         register_rest_route('lemon-erp/v1', '/orders/(?P<order_id>\d+)/invoice', [
             'methods' => WP_REST_Server::CREATABLE,
             'callback' => [$this, 'restUpsertInvoice'],
@@ -463,6 +482,401 @@ final class Lemon_Erp_WooCommerce
                 ],
             ],
         ]);
+    }
+
+    public function canReadCatalogCapabilities(WP_REST_Request $request): bool
+    {
+        return current_user_can('manage_woocommerce') || current_user_can('edit_products');
+    }
+
+    public function restCatalogCapabilities(WP_REST_Request $request): WP_REST_Response
+    {
+        $polylangActive = $this->polylangCatalogAvailable();
+        $languages = [];
+        $defaultLanguage = null;
+
+        if ($polylangActive && function_exists('pll_languages_list')) {
+            $languages = array_values(array_filter(array_map(
+                fn (mixed $language): ?string => $this->languageSlug($language),
+                (array) pll_languages_list(['fields' => 'slug']),
+            )));
+        }
+
+        if ($polylangActive && function_exists('pll_default_language')) {
+            $defaultLanguage = $this->languageSlug(pll_default_language('slug'));
+        }
+
+        return new WP_REST_Response([
+            'catalog_contract' => self::CATALOG_CONTRACT,
+            'plugin_version' => self::VERSION,
+            'polylang_active' => $polylangActive,
+            'default_language' => $defaultLanguage,
+            'languages' => $languages,
+            'resources' => ['product', 'variation', 'category'],
+            'fields' => [
+                'contract' => 'lemon_erp_catalog_contract',
+                'language' => 'lemon_erp_language',
+                'translations' => 'lemon_erp_translations',
+                'translation_group' => 'lemon_erp_translation_group',
+            ],
+            'variation_translation_fallbacks' => [
+                'polylang_post_translations',
+                'translated_parent_and_sku',
+                'translated_parent_and_attributes',
+            ],
+        ], 200);
+    }
+
+    public function appendProductCatalogContract(mixed $response, mixed $object, mixed $request = null): mixed
+    {
+        if (! $response instanceof WP_REST_Response
+            || ! $object instanceof WC_Product
+            || $object instanceof WC_Product_Variation
+        ) {
+            return $response;
+        }
+
+        return $this->appendCatalogIdentity(
+            $response,
+            $this->postCatalogIdentity($object->get_id(), 'product'),
+        );
+    }
+
+    public function appendVariationCatalogContract(mixed $response, mixed $object, mixed $request = null): mixed
+    {
+        if (! $response instanceof WP_REST_Response || ! $object instanceof WC_Product_Variation) {
+            return $response;
+        }
+
+        $response = $this->appendCatalogIdentity(
+            $response,
+            $this->variationCatalogIdentity($object),
+        );
+        $data = $response->get_data();
+        $parentIdentity = $this->postCatalogIdentity($object->get_parent_id(), 'product');
+        $data['lemon_erp_parent_translations'] = $parentIdentity['translations'];
+        $data['lemon_erp_parent_translation_group'] = $parentIdentity['translation_group'];
+        $response->set_data($data);
+
+        return $response;
+    }
+
+    public function appendCategoryCatalogContract(mixed $response, mixed $object, mixed $request = null): mixed
+    {
+        if (! $response instanceof WP_REST_Response) {
+            return $response;
+        }
+
+        $termId = $object instanceof WP_Term
+            ? (int) $object->term_id
+            : (int) ($response->get_data()['id'] ?? 0);
+
+        if ($termId <= 0) {
+            return $response;
+        }
+
+        return $this->appendCatalogIdentity(
+            $response,
+            $this->termCatalogIdentity($termId),
+        );
+    }
+
+    /**
+     * @param array{language:?string,translations:array<string, int>,translation_group:string} $identity
+     */
+    private function appendCatalogIdentity(WP_REST_Response $response, array $identity): WP_REST_Response
+    {
+        $data = $response->get_data();
+        $data['lemon_erp_catalog_contract'] = self::CATALOG_CONTRACT;
+        $data['lemon_erp_language'] = $identity['language'];
+        $data['lemon_erp_translations'] = $identity['translations'];
+        $data['lemon_erp_translation_group'] = $identity['translation_group'];
+        $response->set_data($data);
+
+        return $response;
+    }
+
+    /**
+     * @return array{language:?string,translations:array<string, int>,translation_group:string}
+     */
+    private function postCatalogIdentity(int $postId, string $resource): array
+    {
+        $cacheKey = $resource.':'.$postId;
+
+        if (isset($this->postCatalogIdentityCache[$cacheKey])) {
+            return $this->postCatalogIdentityCache[$cacheKey];
+        }
+
+        $language = null;
+        $translations = [];
+
+        if ($postId > 0 && function_exists('pll_get_post_language')) {
+            $language = $this->languageSlug(pll_get_post_language($postId, 'slug'));
+        }
+
+        if ($postId > 0 && function_exists('pll_get_post_translations')) {
+            $translations = $this->translationMap((array) pll_get_post_translations($postId));
+            $expectedPostType = $resource === 'variation' ? 'product_variation' : 'product';
+            $translations = array_filter(
+                $translations,
+                fn (int $translationId): bool => get_post_type($translationId) === $expectedPostType,
+            );
+        }
+
+        if ($postId > 0) {
+            if ($language === null) {
+                $mappedLanguage = array_search($postId, $translations, true);
+                $language = is_string($mappedLanguage) ? $mappedLanguage : null;
+            }
+
+            $translations[$language ?? 'default'] = $postId;
+            ksort($translations);
+        }
+
+        return $this->postCatalogIdentityCache[$cacheKey] = [
+            'language' => $language,
+            'translations' => $translations,
+            'translation_group' => $this->translationGroup($resource, $postId, $translations),
+        ];
+    }
+
+    /**
+     * @return array{language:?string,translations:array<string, int>,translation_group:string}
+     */
+    private function termCatalogIdentity(int $termId): array
+    {
+        if (isset($this->termCatalogIdentityCache[$termId])) {
+            return $this->termCatalogIdentityCache[$termId];
+        }
+
+        $language = null;
+        $translations = [];
+
+        if ($termId > 0 && function_exists('pll_get_term_language')) {
+            $language = $this->languageSlug(pll_get_term_language($termId, 'slug'));
+        }
+
+        if ($termId > 0 && function_exists('pll_get_term_translations')) {
+            $translations = $this->translationMap((array) pll_get_term_translations($termId));
+            $translations = array_filter(
+                $translations,
+                fn (int $translationId): bool => get_term($translationId, 'product_cat') instanceof WP_Term,
+            );
+        }
+
+        if ($termId > 0) {
+            if ($language === null) {
+                $mappedLanguage = array_search($termId, $translations, true);
+                $language = is_string($mappedLanguage) ? $mappedLanguage : null;
+            }
+
+            $translations[$language ?? 'default'] = $termId;
+            ksort($translations);
+        }
+
+        return $this->termCatalogIdentityCache[$termId] = [
+            'language' => $language,
+            'translations' => $translations,
+            'translation_group' => $this->translationGroup('category', $termId, $translations),
+        ];
+    }
+
+    /**
+     * @return array{language:?string,translations:array<string, int>,translation_group:string}
+     */
+    private function variationCatalogIdentity(WC_Product_Variation $variation): array
+    {
+        $variationId = $variation->get_id();
+        $parentId = $variation->get_parent_id();
+        $directIdentity = $this->postCatalogIdentity($variationId, 'variation');
+        $parentIdentity = $this->postCatalogIdentity($parentId, 'product');
+        $language = $directIdentity['language'] ?? $parentIdentity['language'];
+        $translations = $directIdentity['translations'];
+
+        if (count(array_unique($translations)) < 2 && $parentIdentity['translations'] !== []) {
+            $translations = array_replace(
+                $translations,
+                $this->variationTranslationsFromParents(
+                    $variation,
+                    $parentIdentity['translations'],
+                ),
+            );
+        }
+
+        if ($language !== null) {
+            unset($translations['default']);
+            $translations[$language] = $variationId;
+            ksort($translations);
+        }
+
+        return [
+            'language' => $language,
+            'translations' => $translations,
+            'translation_group' => $this->translationGroup('variation', $variationId, $translations),
+        ];
+    }
+
+    /**
+     * @param array<string, int> $parentTranslations
+     * @return array<string, int>
+     */
+    private function variationTranslationsFromParents(
+        WC_Product_Variation $source,
+        array $parentTranslations,
+    ): array
+    {
+        $translations = [];
+        $sourceParentId = $source->get_parent_id();
+
+        foreach ($parentTranslations as $language => $translatedParentId) {
+            if ($translatedParentId === $sourceParentId) {
+                $translations[$language] = $source->get_id();
+
+                continue;
+            }
+
+            $translatedVariationId = $this->matchingVariationId($source, $translatedParentId);
+
+            if ($translatedVariationId !== null) {
+                $translations[$language] = $translatedVariationId;
+            }
+        }
+
+        ksort($translations);
+
+        return $translations;
+    }
+
+    private function matchingVariationId(
+        WC_Product_Variation $source,
+        int $translatedParentId,
+    ): ?int
+    {
+        $translatedParent = wc_get_product($translatedParentId);
+
+        if (! $translatedParent instanceof WC_Product_Variable) {
+            return null;
+        }
+
+        if (! isset($this->variationCandidatesByParent[$translatedParentId])) {
+            $this->variationCandidatesByParent[$translatedParentId] = [];
+
+            foreach ($translatedParent->get_children() as $childId) {
+                $candidate = wc_get_product((int) $childId);
+
+                if ($candidate instanceof WC_Product_Variation
+                    && $candidate->get_parent_id() === $translatedParentId
+                ) {
+                    $this->variationCandidatesByParent[$translatedParentId][] = $candidate;
+                }
+            }
+        }
+
+        $candidates = $this->variationCandidatesByParent[$translatedParentId];
+
+        $sourceSku = strtolower(trim((string) $source->get_sku('edit')));
+
+        if ($sourceSku !== '') {
+            $skuMatches = array_values(array_filter(
+                $candidates,
+                fn (WC_Product_Variation $candidate): bool => strtolower(trim((string) $candidate->get_sku('edit'))) === $sourceSku,
+            ));
+
+            if (count($skuMatches) === 1) {
+                return $skuMatches[0]->get_id();
+            }
+
+            if ($skuMatches !== []) {
+                $candidates = $skuMatches;
+            }
+        }
+
+        $sourceAttributes = $this->variationAttributeSignature($source);
+
+        if ($sourceAttributes === '') {
+            return null;
+        }
+
+        $attributeMatches = array_values(array_filter(
+            $candidates,
+            fn (WC_Product_Variation $candidate): bool => $this->variationAttributeSignature($candidate) === $sourceAttributes,
+        ));
+
+        return count($attributeMatches) === 1 ? $attributeMatches[0]->get_id() : null;
+    }
+
+    private function variationAttributeSignature(WC_Product_Variation $variation): string
+    {
+        $attributes = [];
+
+        foreach ($variation->get_variation_attributes(false) as $name => $value) {
+            $name = sanitize_key((string) $name);
+            $value = sanitize_title((string) $value);
+
+            if ($name !== '' && $value !== '') {
+                $attributes[$name] = $value;
+            }
+        }
+
+        if ($attributes === []) {
+            return '';
+        }
+
+        ksort($attributes);
+
+        return hash('sha256', (string) wp_json_encode($attributes));
+    }
+
+    /**
+     * @param array<mixed> $translations
+     * @return array<string, int>
+     */
+    private function translationMap(array $translations): array
+    {
+        $map = [];
+
+        foreach ($translations as $language => $id) {
+            $language = $this->languageSlug($language);
+            $id = absint($id);
+
+            if ($language !== null && $id > 0) {
+                $map[$language] = $id;
+            }
+        }
+
+        ksort($map);
+
+        return $map;
+    }
+
+    /**
+     * @param array<string, int> $translations
+     */
+    private function translationGroup(string $resource, int $currentId, array $translations): string
+    {
+        $ids = array_values(array_unique(array_filter([
+            $currentId,
+            ...array_values($translations),
+        ], fn (mixed $id): bool => (int) $id > 0)));
+        $ids = array_map('intval', $ids);
+        sort($ids, SORT_NUMERIC);
+
+        return sanitize_key($resource).':'.implode('|', $ids);
+    }
+
+    private function languageSlug(mixed $language): ?string
+    {
+        $language = sanitize_key((string) $language);
+
+        return $language !== '' ? $language : null;
+    }
+
+    private function polylangCatalogAvailable(): bool
+    {
+        return function_exists('pll_get_post_language')
+            && function_exists('pll_get_post_translations')
+            && function_exists('pll_get_term_language')
+            && function_exists('pll_get_term_translations');
     }
 
     public function canManageOrderViaRest(WP_REST_Request $request): bool

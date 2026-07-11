@@ -7,6 +7,7 @@ namespace Tests\Feature;
 use App\Jobs\ExportStockToWooCommerceJob;
 use App\Models\IntegrationSyncLog;
 use App\Models\Product;
+use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
@@ -30,6 +31,12 @@ class StockSyncExportTest extends TestCase
         Http::fake([
             'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
                 'id' => 123,
+                'sku' => 'SKU-003',
+                'stock_quantity' => 8,
+                'stock_status' => 'instock',
+            ]),
+            'https://shop.test/wp-json/wc/v3/products/124' => Http::response([
+                'id' => 124,
                 'sku' => 'SKU-003',
                 'stock_quantity' => 8,
                 'stock_status' => 'instock',
@@ -75,6 +82,13 @@ class StockSyncExportTest extends TestCase
             'external_sku' => 'SKU-003',
             'stock_sync_enabled' => true,
         ]);
+        ProductChannelAlias::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '124',
+            'external_sku' => 'SKU-003',
+            'language' => 'en',
+        ]);
 
         $queueItem = StockSyncQueueItem::query()->create([
             'warehouse_id' => $warehouse->id,
@@ -91,12 +105,16 @@ class StockSyncExportTest extends TestCase
 
         $this->assertSame('success', $queueItem->status);
         $this->assertSame('8', (string) $queueItem->metadata['woocommerce_stock_quantity']);
+        $this->assertSame(2, $queueItem->metadata['woocommerce_targets_updated']);
 
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
             && $request['manage_stock'] === true
             && $request['stock_quantity'] === 8
             && $request['stock_status'] === 'instock');
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
+            && $request['stock_quantity'] === 8);
     }
 
     public function test_stock_queue_item_is_exported_to_woocommerce_variation(): void

@@ -6,6 +6,7 @@ namespace Tests\Feature;
 
 use App\Models\Product;
 use App\Models\ProductCategory;
+use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
@@ -15,6 +16,7 @@ use App\Services\WooCommerce\WooCommerceImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use RuntimeException;
 use Tests\TestCase;
 
 class WooCommerceProductImportTest extends TestCase
@@ -112,6 +114,7 @@ class WooCommerceProductImportTest extends TestCase
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'stock_export_enabled' => true,
+            'settings' => ['product_import' => ['languages' => ['pl']]],
         ]);
 
         $stats = app(WooCommerceImportService::class)->importProducts($integration);
@@ -198,6 +201,7 @@ class WooCommerceProductImportTest extends TestCase
             'base_url' => 'https://shop.test',
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl']]],
         ]);
 
         $stats = app(WooCommerceImportService::class)->importProducts($integration);
@@ -205,7 +209,7 @@ class WooCommerceProductImportTest extends TestCase
         $parent = Product::query()->where('sku', 'DUP-SKU')->firstOrFail();
         $variant = Product::query()->where('sku', 'WC-B2C-VARIANT-888')->firstOrFail();
 
-        $this->assertSame(1, $stats['duplicate_sku_items']);
+        $this->assertSame(0, $stats['duplicate_sku_items']);
         $this->assertSame(1, $stats['duplicate_sku_resolved']);
         $this->assertDatabaseHas('product_channel_mappings', [
             'product_id' => $parent->id,
@@ -292,9 +296,128 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame(1, $stats['created']);
         $this->assertSame(1, Product::query()->count());
         $this->assertSame(1, ProductChannelMapping::query()->count());
+        $this->assertSame(1, ProductChannelAlias::query()->count());
+        $this->assertSame(1, $stats['translation_aliases_mapped']);
         $this->assertSame('101', data_get($product->attributes, 'woocommerce_translations.en.product_id'));
         $this->assertSame(1, ProductCategory::query()->count());
         $this->assertSame('11', data_get(ProductCategory::query()->firstOrFail()->metadata, 'woocommerce_ids.en'));
+    }
+
+    public function test_catalog_contract_merges_real_polylang_pair_even_when_translation_has_no_sku(): void
+    {
+        Http::fake(function ($request) {
+            $url = $request->url();
+            parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+            if (str_contains($url, '/products/categories')) {
+                return Http::response([]);
+            }
+
+            if (! str_contains($url, '/products') || (int) ($query['page'] ?? 1) > 1) {
+                return Http::response([]);
+            }
+
+            return Http::response([
+                [
+                    'id' => 700143,
+                    'sku' => 'BLS6A4FE375DAA5D',
+                    'name' => 'Koszula AVA Kremowo - różowa',
+                    'type' => 'simple',
+                    'status' => 'publish',
+                    'stock_quantity' => 2,
+                    'lemon_erp_catalog_contract' => 1,
+                    'lemon_erp_language' => 'pl',
+                    'lemon_erp_translations' => ['pl' => 700143, 'en' => 750099],
+                    'lemon_erp_translation_group' => 'product:700143|750099',
+                ],
+                [
+                    'id' => 750099,
+                    'sku' => '',
+                    'name' => 'AVA Cream and Pink Shirt',
+                    'type' => 'simple',
+                    'status' => 'publish',
+                    'stock_quantity' => 2,
+                    'lemon_erp_catalog_contract' => 1,
+                    'lemon_erp_language' => 'en',
+                    'lemon_erp_translations' => ['pl' => 700143, 'en' => 750099],
+                    'lemon_erp_translation_group' => 'product:700143|750099',
+                ],
+            ]);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+
+        $stats = app(WooCommerceImportService::class)->importProducts($integration);
+
+        $product = Product::query()->where('sku', 'BLS6A4FE375DAA5D')->firstOrFail();
+        $this->assertSame(1, Product::query()->where('is_translation', false)->count());
+        $this->assertSame(1, ProductChannelMapping::query()->count());
+        $this->assertSame(1, ProductChannelAlias::query()->count());
+        $this->assertSame('AVA Cream and Pink Shirt', data_get($product->attributes, 'master.content.en.name'));
+        $this->assertSame('750099', data_get($product->attributes, 'woocommerce_translations.en.product_id'));
+        $this->assertSame(1, $stats['source_items']);
+        $this->assertSame(0, $stats['duplicate_sku_items']);
+    }
+
+    public function test_multilingual_import_without_catalog_contract_stops_before_creating_duplicates(): void
+    {
+        Http::fake(function ($request) {
+            $url = $request->url();
+            parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+            if (str_contains($url, '/products/categories')) {
+                return Http::response([]);
+            }
+
+            if (! str_contains($url, '/products') || (int) ($query['page'] ?? 1) > 1) {
+                return Http::response([]);
+            }
+
+            return Http::response([
+                ['id' => 700143, 'sku' => 'BLS6A4FE375DAA5D', 'name' => 'Koszula AVA', 'type' => 'simple'],
+                ['id' => 750099, 'sku' => '', 'name' => 'AVA Shirt', 'type' => 'simple'],
+            ]);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+
+        try {
+            app(WooCommerceImportService::class)->importProducts($integration);
+            $this->fail('Import bez kontraktu katalogowego powinien zostać zatrzymany.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('Zaktualizuj i aktywuj wtyczkę', $exception->getMessage());
+            $this->assertStringContainsString('0.2.0', $exception->getMessage());
+        }
+
+        $this->assertSame(0, Product::query()->count());
+        $this->assertSame(0, ProductChannelMapping::query()->count());
+        $this->assertSame(0, ProductChannelAlias::query()->count());
     }
 
     public function test_import_reclassifies_a_legacy_polylang_twin_after_identifying_its_translation(): void
@@ -384,8 +507,20 @@ class WooCommerceProductImportTest extends TestCase
 
         $this->assertSame(1, $stats['source_items']);
         $this->assertSame(0, $stats['duplicate_sku_items']);
-        $this->assertSame(1, $stats['translation_products_reclassified']);
+        $this->assertSame(1, $stats['translation_products_merged']);
         $this->assertTrue($legacyTranslation->fresh()->is_translation);
+        $this->assertFalse($legacyTranslation->fresh()->is_active);
+        $this->assertSame($primary->id, data_get($legacyTranslation->fresh()->attributes, 'master.merge.canonical_product_id'));
+        $this->assertDatabaseHas('product_channel_aliases', [
+            'product_id' => $primary->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '101',
+            'language' => 'en',
+        ]);
+        $this->assertDatabaseMissing('product_channel_mappings', [
+            'product_id' => $legacyTranslation->id,
+            'external_product_id' => '101',
+        ]);
         $this->assertSame('101', data_get($primary->fresh()->attributes, 'woocommerce_translations.en.product_id'));
     }
 
@@ -434,6 +569,7 @@ class WooCommerceProductImportTest extends TestCase
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'stock_export_enabled' => true,
+            'settings' => ['product_import' => ['languages' => ['pl']]],
         ]);
 
         $stats = app(WooCommerceImportService::class)->importProducts($integration);
@@ -489,6 +625,7 @@ class WooCommerceProductImportTest extends TestCase
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'stock_export_enabled' => true,
+            'settings' => ['product_import' => ['languages' => ['pl']]],
         ]);
 
         $product = Product::query()->create([
@@ -726,6 +863,7 @@ class WooCommerceProductImportTest extends TestCase
             'base_url' => 'https://shop.test',
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl']]],
         ]);
 
         $stats = app(WooCommerceImportService::class)->importProducts($integration);

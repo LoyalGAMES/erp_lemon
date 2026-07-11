@@ -14,6 +14,8 @@
         'duplicate_ean_items' => 'Duplikaty EAN w imporcie',
         'translation_eans_reclaimed' => 'EAN odzyskane z tłumaczeń',
         'translation_products_reclassified' => 'Istniejące tłumaczenia oznaczone poza katalogiem głównym',
+        'translation_aliases_mapped' => 'Aliasów Polylang przypisanych do produktu',
+        'translation_products_merged' => 'Duplikatów tłumaczeń scalonych z produktem głównym',
         'mapping_overwrites' => 'Nadpisane mapowania kanału',
         'created' => 'Utworzone w ERP',
         'updated' => 'Zaktualizowane w ERP',
@@ -21,8 +23,11 @@
         'stock_updated' => 'Zaktualizowane stany',
         'skipped' => 'Pominięte',
         'skipped_missing_identifier' => 'Pominięte bez identyfikatora',
-        'products_total_before' => 'Produkty ERP przed importem',
-        'products_total_after' => 'Produkty ERP po imporcie',
+        'products_total_before' => 'Wszystkie rekordy ERP przed importem',
+        'products_primary_before' => 'Produkty główne ERP przed importem',
+        'products_total_after' => 'Wszystkie rekordy ERP po imporcie',
+        'products_primary_after' => 'Produkty główne ERP po imporcie',
+        'products_historical_aliases_after' => 'Scalone aliasy historyczne',
         'channel_mappings_total_after' => 'Mapowania kanału po imporcie',
         'lines' => 'Pozycje zamówień',
         'reserved' => 'Zarezerwowane',
@@ -122,7 +127,8 @@
                 <div class="integration-panel-body">
                     <p class="muted">
                         Pobierz paczkę ZIP, wgraj ją w WordPress przez Wtyczki -> Dodaj nową -> Wyślij wtyczkę, a potem aktywuj plugin.
-                        Wtyczka dodaje pola NIP/typ klienta i endpoint faktur bez używania Media Library.
+                        Wtyczka dodaje pola NIP/typ klienta, endpoint faktur oraz pewną identyfikację grup tłumaczeń Polylang.
+                        Wersja 0.2.0 lub nowsza jest wymagana do bezpiecznego importu produktów PL/EN bez duplikatów.
                     </p>
                     <div class="inline-actions">
                         <a class="button" href="{{ route('integrations.woocommerce-plugin.download') }}">Pobierz plugin ZIP</a>
