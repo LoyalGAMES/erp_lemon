@@ -55,11 +55,13 @@
     @endpush
 @endonce
 
-<div class="related-picker-grid">
-    <label>Dodaj produkt upsell
-        <input list="product-lookup-options" data-product-related-picker="related_upsell_skus" placeholder="Wpisz SKU lub nazwę" autocomplete="off">
-    </label>
-    <label>Dodaj produkt cross-sell
-        <input list="product-lookup-options" data-product-related-picker="related_cross_sell_skus" placeholder="Wpisz SKU lub nazwę" autocomplete="off">
-    </label>
-</div>
+@if ($showRelatedPickers ?? true)
+    <div class="related-picker-grid">
+        <label>Dodaj produkt upsell
+            <input list="product-lookup-options" data-product-related-picker="related_upsell_skus" placeholder="Wpisz SKU lub nazwę" autocomplete="off">
+        </label>
+        <label>Dodaj produkt cross-sell
+            <input list="product-lookup-options" data-product-related-picker="related_cross_sell_skus" placeholder="Wpisz SKU lub nazwę" autocomplete="off">
+        </label>
+    </div>
+@endif

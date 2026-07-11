@@ -153,6 +153,7 @@
             border-bottom: 1px solid var(--border);
             background: rgba(255, 255, 255, .52);
         }
+        .orders-mobile-filter-toggle, .orders-mobile-filter-trigger, .orders-mobile-filter-backdrop, .orders-filter-drawer-header { display: none; }
         .orders-filter-search input {
             min-width: 0;
         }
@@ -271,6 +272,14 @@
             }
         }
         @media (max-width: 620px) {
+            .orders-mobile-filter-trigger { display: inline-flex; margin: 12px 16px; }
+            .orders-mobile-filter-backdrop { position: fixed; inset: 0; z-index: 80; background: rgba(37, 31, 26, .42); }
+            .orders-filter-drawer { position: fixed; top: 0; right: 0; z-index: 90; width: min(420px, 94vw); height: 100dvh; overflow-y: auto; padding: 14px; border-left: 1px solid var(--border); background: var(--surface); box-shadow: -24px 0 48px rgba(37, 31, 26, .18); transform: translateX(105%); transition: transform .18s ease; }
+            .orders-filter-drawer-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; font-weight: 850; }
+            .orders-filter-drawer-close { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 22px; cursor: pointer; }
+            .orders-filter-drawer .orders-filter { padding: 0; border: 0; background: transparent; }
+            #orders-mobile-filter-toggle:checked ~ .orders-mobile-filter-backdrop { display: block; }
+            #orders-mobile-filter-toggle:checked ~ .orders-filter-drawer { transform: translateX(0); }
             .orders-filter {
                 grid-template-columns: 1fr;
             }

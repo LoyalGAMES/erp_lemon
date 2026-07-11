@@ -20,7 +20,6 @@
             .stock-readonly-summary .stock-pill.available strong { color: var(--green-dark); }
             .stock-readonly-note { color: var(--muted); font-size: 13px; }
             .stock-adjust-table input { min-width: 112px; min-height: 34px; }
-            .stock-adjust-table .stock-adjust-notes { min-width: 150px; }
             .stock-adjust-table .button { min-height: 34px; white-space: nowrap; }
             .stock-adjust-error { color: var(--red); font-size: 12px; min-height: 16px; }
         </style>
@@ -34,7 +33,7 @@
                 document.addEventListener('keydown', (event) => {
                     if (event.key !== 'Enter') return;
 
-                    const field = event.target.closest('[data-stock-adjust-quantity], [data-stock-adjust-notes]');
+                    const field = event.target.closest('[data-stock-adjust-quantity]');
 
                     if (!field) return;
 
@@ -50,7 +49,6 @@
                     const row = button.closest('[data-stock-adjust-row]');
                     const error = row?.querySelector('[data-stock-adjust-error]');
                     const quantityInput = row?.querySelector('[data-stock-adjust-quantity]');
-                    const notesInput = row?.querySelector('[data-stock-adjust-notes]');
                     const action = button.dataset.action || '';
                     const warehouseId = button.dataset.warehouseId || '';
                     const productSku = button.dataset.productSku || '';
@@ -76,7 +74,6 @@
                         _token: token,
                         warehouse_id: warehouseId,
                         new_quantity: quantity,
-                        notes: String(notesInput?.value || ''),
                         redirect_url: button.dataset.redirectUrl || window.location.href,
                     };
 
@@ -102,7 +99,7 @@
         <span class="stock-pill">Rezerwacje <strong>{{ $stockQty($stockReserved) }}</strong></span>
         <span class="stock-pill available">Dostępne do sprzedaży <strong>{{ $stockQty($stockAvailable) }}</strong></span>
     </div>
-    <div class="stock-readonly-note">Ręczna zmiana tworzy dokument KOR, księguje ruch magazynowy, aktualizuje stan i zapisuje audyt operacji.</div>
+    <div class="stock-readonly-note">Ręczna zmiana tworzy dokument KOR, księguje ruch magazynowy i od razu dodaje aktualny stan do synchronizacji z WooCommerce.</div>
     <div class="table-scroll">
         <table class="dense-table stock-adjust-table">
             <thead>
@@ -112,7 +109,6 @@
                     <th class="numeric">Rezerwacje</th>
                     <th class="numeric">Dostępne</th>
                     <th>Nowy stan</th>
-                    <th>Powód</th>
                     <th>Akcja</th>
                 </tr>
             </thead>
@@ -132,9 +128,6 @@
                             <div class="stock-adjust-error" data-stock-adjust-error></div>
                         </td>
                         <td>
-                            <input class="stock-adjust-notes" data-stock-adjust-notes value="{{ old('notes') }}" placeholder="np. korekta po imporcie">
-                        </td>
-                        <td>
                             <button
                                 class="button secondary"
                                 type="button"
@@ -149,7 +142,7 @@
                     </tr>
                 @empty
                     <tr>
-                        <td colspan="7">Brak aktywnych magazynów do ręcznej korekty stanu.</td>
+                        <td colspan="6">Brak aktywnych magazynów do ręcznej korekty stanu.</td>
                     </tr>
                 @endforelse
             </tbody>

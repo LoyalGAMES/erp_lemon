@@ -20,6 +20,7 @@ use App\Services\Gs1\Gs1GtinService;
 use App\Services\Gs1\Gs1SettingsService;
 use App\Services\Inventory\WarehouseDocumentNumberService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
+use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Products\ProductIdentifierService;
 use App\Services\WooCommerce\ProductDataExportService;
 use Carbon\CarbonImmutable;
@@ -97,7 +98,11 @@ class ProductController extends Controller
         return redirect()->route('products.edit', $product);
     }
 
-    public function edit(Product $product, Gs1SettingsService $gs1Settings): View
+    public function edit(
+        Product $product,
+        Gs1SettingsService $gs1Settings,
+        ProductEditFieldSettingsService $productEditFields,
+    ): View
     {
         $product->load([
             'stockBalances.warehouse',
@@ -116,6 +121,7 @@ class ProductController extends Controller
             'catalogOptions' => $this->catalogOptions(),
             'parameterOptions' => $this->parameterOptions(),
             'productLookupOptions' => $this->productLookupOptions($product),
+            'visibleProductEditFields' => $productEditFields->visibleFields(),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
             'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'availableWooCommerceCreateIntegrations' => WordpressIntegration::query()
@@ -199,8 +205,14 @@ class ProductController extends Controller
             : $redirect;
     }
 
-    public function update(Product $product, Request $request, AuditLogService $audit, ProductIdentifierService $identifiers): RedirectResponse
-    {
+    public function update(
+        Product $product,
+        Request $request,
+        AuditLogService $audit,
+        ProductIdentifierService $identifiers,
+        ProductEditFieldSettingsService $productEditFields,
+    ): RedirectResponse {
+        $this->preserveHiddenProductFields($request, $product, $productEditFields->visibleFields());
         $validated = $request->validate($this->productValidationRules($product));
         $this->validateProductTypeSelection($request, $validated);
 
@@ -546,6 +558,84 @@ class ProductController extends Controller
         }
 
         return redirect()->route('products.edit', $product);
+    }
+
+    /**
+     * Hidden fields are presentation choices, not data deletion requests. Keep
+     * their current values when the product form is saved without rendering them.
+     *
+     * @param  array<string, bool>  $visibleFields
+     */
+    private function preserveHiddenProductFields(Request $request, Product $product, array $visibleFields): void
+    {
+        $master = $product->masterData();
+        $preserved = [];
+        $preserve = function (string $field, string $input, mixed $value) use ($request, $visibleFields, &$preserved): void {
+            if (($visibleFields[$field] ?? true) === false && ! $request->has($input)) {
+                $preserved[$input] = $value;
+            }
+        };
+
+        $preserve('name', 'name', $product->name);
+        $preserve('catalog', 'catalog', data_get($master, 'catalog'));
+        $preserve('categories', 'category_ids', (array) data_get($master, 'category_ids', []));
+        $preserve('tags', 'tags', implode(', ', (array) data_get($master, 'tags', [])));
+        $preserve('sku', 'sku', $product->sku);
+        $preserve('ean', 'ean', $product->ean);
+        $preserve('asin', 'asin', data_get($master, 'asin'));
+        $preserve('weight', 'weight_kg', $product->weight_kg);
+        $preserve('height', 'height_cm', data_get($master, 'dimensions.height_cm'));
+        $preserve('width', 'width_cm', data_get($master, 'dimensions.width_cm'));
+        $preserve('length', 'length_cm', data_get($master, 'dimensions.length_cm'));
+        $preserve('unit', 'unit', $product->unit);
+        $preserve('is_active', 'is_active', $product->is_active ? 1 : 0);
+        $preserve('publication_status', 'publication_status', data_get($master, 'publication_status', 'publish'));
+        $preserve('publication_date', 'publication_date', data_get($master, 'publication_date'));
+        $preserve('catalog_visibility', 'catalog_visibility', data_get($master, 'catalog_visibility', 'visible'));
+        $preserve('product_type', 'product_type', data_get($master, 'product_type', 'simple'));
+        $preserve('variant_attribute', 'variant_attribute', data_get($master, 'variant_attribute'));
+        $preserve('developed', 'developed', data_get($master, 'developed', false) ? 1 : 0);
+        $preserve('wholesale_price', 'wholesale_price_pln', data_get($master, 'prices.wholesale_price_pln'));
+        $preserve('retail_price', 'retail_price_pln', data_get($master, 'prices.retail_price_pln'));
+        $preserve('sale_price', 'sale_price_pln', data_get($master, 'prices.sale_price_pln'));
+        $preserve('sale_price_starts_at', 'sale_price_starts_at', data_get($master, 'prices.sale_price_starts_at'));
+        $preserve('sale_price_ends_at', 'sale_price_ends_at', data_get($master, 'prices.sale_price_ends_at'));
+        $preserve('vat_rate', 'vat_rate', $product->vat_rate);
+        $preserve('warehouse_location', 'warehouse_location', data_get($master, 'stock.location'));
+        $preserve('purchase_price', 'purchase_price_pln', data_get($master, 'prices.purchase_price_pln'));
+        $preserve('extra_cost', 'extra_cost_pln', data_get($master, 'prices.extra_cost_pln'));
+        $preserve('manage_stock', 'manage_stock', data_get($master, 'inventory.manage_stock', true) ? 1 : 0);
+        $preserve('backorders', 'backorders', data_get($master, 'inventory.backorders', 'no'));
+        $preserve('low_stock_amount', 'low_stock_amount', data_get($master, 'inventory.low_stock_amount'));
+        $preserve('sold_individually', 'sold_individually', data_get($master, 'inventory.sold_individually', false) ? 1 : 0);
+        $preserve('name_en', 'name_en', data_get($master, 'content.en.name'));
+
+        $preserve('custom_label_pl', 'custom_label_pl', data_get($master, 'custom_label.pl'));
+        $preserve('custom_label_en', 'custom_label_en', data_get($master, 'custom_label.en'));
+        $preserve('custom_label_bg_color', 'custom_label_bg_color', data_get($master, 'custom_label.bg_color'));
+        $preserve('custom_label_text_color', 'custom_label_text_color', data_get($master, 'custom_label.text_color'));
+
+        $preserve('description_pl', 'description_pl', data_get($master, 'content.pl.description'));
+        $preserve('description_en', 'description_en', data_get($master, 'content.en.description'));
+        $preserve('short_description_pl', 'short_description_pl', data_get($master, 'content.pl.additional_description'));
+        $preserve('short_description_en', 'short_description_en', data_get($master, 'content.en.additional_description'));
+        $preserve('related_upsell_products', 'related_upsell_skus', implode("\n", (array) data_get($master, 'related_products.upsell_skus', [])));
+        $preserve('related_cross_sell_products', 'related_cross_sell_skus', implode("\n", (array) data_get($master, 'related_products.cross_sell_skus', [])));
+
+        if (($visibleFields['parameters'] ?? true) === false && ! $request->has('parameters')) {
+            $parameters = collect((array) data_get($master, 'parameters', []))
+                ->filter(fn (mixed $parameter): bool => is_array($parameter))
+                ->values();
+            $preserved['parameters'] = [
+                'name' => $parameters->pluck('name')->all(),
+                'value' => $parameters->pluck('value')->all(),
+                'variation' => $parameters->map(fn (array $parameter): int => (int) (bool) ($parameter['variation'] ?? false))->all(),
+            ];
+        }
+
+        if ($preserved !== []) {
+            $request->merge($preserved);
+        }
     }
 
     private function queueWooCommerceDataExport(Product $product): void

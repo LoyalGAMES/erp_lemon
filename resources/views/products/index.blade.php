@@ -9,6 +9,7 @@
         .products-table table { min-width: 1180px; }
         .product-filter-panel { margin-bottom: 14px; padding: 14px; display: grid; gap: 12px; }
         .product-filters { display: grid; grid-template-columns: minmax(260px, 2fr) repeat(6, minmax(130px, 1fr)) auto auto; gap: 10px; align-items: end; }
+        .product-mobile-filter-toggle, .product-mobile-filter-trigger, .product-mobile-filter-backdrop, .product-filter-drawer-header { display: none; }
         .product-filters label { min-width: 0; }
         .product-filters .button { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; white-space: nowrap; }
         .filter-result-line { color: var(--muted); font-size: 12px; }
@@ -94,9 +95,23 @@
             .product-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         }
         @media (max-width: 720px) {
+            .product-mobile-filter-trigger { display: inline-flex; margin-bottom: 12px; }
+            .product-mobile-filter-backdrop { position: fixed; inset: 0; z-index: 80; background: rgba(37, 31, 26, .42); }
+            .product-filter-panel { padding: 0; border: 0; background: transparent; box-shadow: none; }
+            .product-filter-drawer { position: fixed; top: 0; right: 0; z-index: 90; width: min(420px, 94vw); height: 100dvh; overflow-y: auto; padding: 14px; border-left: 1px solid var(--border); background: var(--surface); box-shadow: -24px 0 48px rgba(37, 31, 26, .18); transform: translateX(105%); transition: transform .18s ease; }
+            .product-filter-drawer-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 16px; font-weight: 850; }
+            .product-filter-drawer-close { width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; color: var(--muted); font-size: 22px; cursor: pointer; }
             .product-filters { grid-template-columns: 1fr; }
+            #product-mobile-filter-toggle:checked ~ .product-mobile-filter-backdrop { display: block; }
+            #product-mobile-filter-toggle:checked ~ .product-filter-panel .product-filter-drawer { transform: translateX(0); }
             .drawer-form-grid, .drawer-form-grid.three { grid-template-columns: 1fr; }
             .drawer-step-actions { align-items: stretch; flex-direction: column; }
+            .stock-modal { padding: 0; align-items: end; }
+            .stock-modal-card { width: 100vw; max-height: 94dvh; border-radius: 14px 14px 0 0; }
+            .stock-modal-header { align-items: flex-start; padding: 12px; }
+            .stock-modal-body { padding: 12px; }
+            .stock-modal-body .stock-readonly-panel { padding: 10px; }
+            .stock-modal-body .stock-adjust-table { min-width: 620px; }
         }
     </style>
 @endpush
@@ -178,8 +193,17 @@
         @endif
     </div>
 
+    <input id="product-mobile-filter-toggle" class="product-mobile-filter-toggle" type="checkbox">
+    <label class="button secondary product-mobile-filter-trigger" for="product-mobile-filter-toggle">Filtry i wyszukiwanie</label>
+    <label class="product-mobile-filter-backdrop" for="product-mobile-filter-toggle"></label>
+
     <article class="card product-filter-panel">
-        <form class="product-filters" method="GET" action="{{ route('products.index') }}" data-product-filters>
+        <div class="product-filter-drawer">
+            <div class="product-filter-drawer-header">
+                <span>Filtry produktów</span>
+                <label class="product-filter-drawer-close" for="product-mobile-filter-toggle" aria-label="Zamknij filtry">×</label>
+            </div>
+            <form class="product-filters" method="GET" action="{{ route('products.index') }}" data-product-filters>
             <label>Szybkie wyszukiwanie
                 <input
                     name="q"
@@ -236,7 +260,8 @@
             </label>
             <button class="button secondary" type="submit">Filtruj</button>
             <a class="button secondary" href="{{ $isFavorites ? route('products.favorites') : route('products.index') }}">Wyczyść</a>
-        </form>
+            </form>
+        </div>
         <div class="filter-result-line">
             Wynik: {{ $productRows->total() }} {{ $isFavorites ? 'ulubionych produktów głównych' : 'polskich produktów głównych' }} po filtrach / {{ $productsCount }} SKU w systemie.
             Wyszukiwarka działa po nazwie, SKU, EAN, kategorii, parametrach i opisach.
@@ -810,26 +835,6 @@
 
 @push('scripts')
     <script>
-        const productFiltersForm = document.querySelector('[data-product-filters]');
-        const productSearchInput = document.querySelector('[data-product-search]');
-        let productFilterTimer = null;
-
-        function submitProductFiltersWithDelay(delay = 250) {
-            if (!productFiltersForm) {
-                return;
-            }
-
-            window.clearTimeout(productFilterTimer);
-            productFilterTimer = window.setTimeout(() => {
-                productFiltersForm.requestSubmit();
-            }, delay);
-        }
-
-        productSearchInput?.addEventListener('input', () => submitProductFiltersWithDelay(380));
-        document.querySelectorAll('[data-product-filter-control]').forEach((control) => {
-            control.addEventListener('change', () => submitProductFiltersWithDelay(0));
-        });
-
         const productLookupUrl = @json($productLookupUrl);
         const productLookupDatalist = document.getElementById('product-lookup-options');
         let productLookupTimer = null;

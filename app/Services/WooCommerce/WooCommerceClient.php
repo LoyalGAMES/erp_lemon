@@ -138,11 +138,23 @@ final class WooCommerceClient
                     continue;
                 }
 
+                // WooCommerce does not always pass Polylang's `lang` query
+                // argument through to its REST controller. When Polylang still
+                // exposes the language in the response, honour it here instead
+                // of importing both members of a translation pair as ERP items.
+                if (! $this->matchesRequestedLanguage($product, $language)) {
+                    continue;
+                }
+
                 $product['erp_import_language'] = $language ?? 'default';
                 $items[] = $product;
 
                 if (($product['type'] ?? null) === 'variable') {
                     foreach ($this->variations($integration, $product, $language) as $variation) {
+                        if (! $this->matchesRequestedLanguage($variation, $language)) {
+                            continue;
+                        }
+
                         $variation['erp_import_language'] = $language ?? 'default';
                         $items[] = $variation;
                     }
@@ -187,7 +199,7 @@ final class WooCommerceClient
             }
 
             foreach ($categories as $category) {
-                if (is_array($category)) {
+                if (is_array($category) && $this->matchesRequestedLanguage($category, $primaryLanguage)) {
                     yield $category;
                 }
             }
@@ -749,6 +761,21 @@ final class WooCommerceClient
      */
     private function translationKeys(array $item): array
     {
+        $translationIds = collect((array) ($item['translations'] ?? []))
+            ->map(fn (mixed $id): string => trim((string) $id))
+            ->filter()
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+
+        // Polylang exposes a stable translation family in REST responses. It
+        // distinguishes actual translation twins from unrelated products that
+        // happen to reuse a SKU, including a parent and its variation.
+        if (count($translationIds) > 1) {
+            return ['translation:'.implode('|', $translationIds)];
+        }
+
         $keys = [];
         $sku = trim((string) ($item['sku'] ?? ''));
 
@@ -765,6 +792,24 @@ final class WooCommerceClient
         }
 
         return array_values(array_unique($keys));
+    }
+
+    /**
+     * Accept responses without Polylang REST fields for backwards
+     * compatibility, but validate the requested language whenever it is
+     * explicitly present in the WooCommerce payload.
+     *
+     * @param  array<string, mixed>  $item
+     */
+    private function matchesRequestedLanguage(array $item, ?string $requestedLanguage): bool
+    {
+        if ($requestedLanguage === null) {
+            return true;
+        }
+
+        $actualLanguage = mb_strtolower(trim((string) ($item['lang'] ?? '')));
+
+        return $actualLanguage === '' || $actualLanguage === mb_strtolower($requestedLanguage);
     }
 
     private function variationDisplayName(array $parentProduct, array $variation): string

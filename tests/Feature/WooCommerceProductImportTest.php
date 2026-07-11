@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Models\Product;
+use App\Models\ProductCategory;
 use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
@@ -219,6 +220,173 @@ class WooCommerceProductImportTest extends TestCase
             'external_variation_id' => '888',
         ]);
         $this->assertTrue($parent->variantChildren()->whereKey($variant->id)->exists());
+    }
+
+    public function test_import_filters_polylang_twins_when_woocommerce_ignores_the_requested_language(): void
+    {
+        Http::fake(function ($request) {
+            $url = $request->url();
+            parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+            if (str_contains($url, '/products/categories')) {
+                return (int) ($query['page'] ?? 1) === 1
+                    ? Http::response([
+                        ['id' => 10, 'name' => 'Koszule', 'lang' => 'pl', 'translations' => ['pl' => 10, 'en' => 11]],
+                        ['id' => 11, 'name' => 'Shirts', 'lang' => 'en', 'translations' => ['pl' => 10, 'en' => 11]],
+                    ])
+                    : Http::response([]);
+            }
+
+            if (str_contains($url, '/products')) {
+                return (int) ($query['page'] ?? 1) === 1
+                    ? Http::response([
+                        [
+                            'id' => 100,
+                            'sku' => 'POLYLANG-SKU',
+                            'name' => 'Koszula AURA',
+                            'type' => 'simple',
+                            'status' => 'publish',
+                            'lang' => 'pl',
+                            'translations' => ['pl' => 100, 'en' => 101],
+                            'categories' => [['id' => 10, 'name' => 'Koszule']],
+                        ],
+                        [
+                            'id' => 101,
+                            'sku' => 'POLYLANG-SKU',
+                            'name' => 'AURA Shirt',
+                            'type' => 'simple',
+                            'status' => 'publish',
+                            'lang' => 'en',
+                            'translations' => ['pl' => 100, 'en' => 101],
+                            'categories' => [['id' => 11, 'name' => 'Shirts']],
+                        ],
+                    ])
+                    : Http::response([]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+
+        $stats = app(WooCommerceImportService::class)->importProducts($integration);
+
+        $product = Product::query()->where('sku', 'POLYLANG-SKU')->firstOrFail();
+
+        $this->assertSame(1, $stats['source_items']);
+        $this->assertSame(1, $stats['source_products']);
+        $this->assertSame(0, $stats['duplicate_sku_items']);
+        $this->assertSame(1, $stats['created']);
+        $this->assertSame(1, Product::query()->count());
+        $this->assertSame(1, ProductChannelMapping::query()->count());
+        $this->assertSame('101', data_get($product->attributes, 'woocommerce_translations.en.product_id'));
+        $this->assertSame(1, ProductCategory::query()->count());
+        $this->assertSame('11', data_get(ProductCategory::query()->firstOrFail()->metadata, 'woocommerce_ids.en'));
+    }
+
+    public function test_import_reclassifies_a_legacy_polylang_twin_after_identifying_its_translation(): void
+    {
+        Http::fake(function ($request) {
+            $url = $request->url();
+            parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+            if (str_contains($url, '/products/categories')) {
+                return Http::response([]);
+            }
+
+            if (str_contains($url, '/products')) {
+                return (int) ($query['page'] ?? 1) === 1
+                    ? Http::response([
+                        [
+                            'id' => 100,
+                            'sku' => 'POLYLANG-SKU',
+                            'name' => 'Koszula AURA',
+                            'type' => 'simple',
+                            'status' => 'publish',
+                            'lang' => 'pl',
+                            'translations' => ['pl' => 100, 'en' => 101],
+                        ],
+                        [
+                            'id' => 101,
+                            'sku' => 'POLYLANG-SKU',
+                            'name' => 'AURA Shirt',
+                            'type' => 'simple',
+                            'status' => 'publish',
+                            'lang' => 'en',
+                            'translations' => ['pl' => 100, 'en' => 101],
+                        ],
+                    ])
+                    : Http::response([]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+        $primary = Product::query()->create([
+            'sku' => 'POLYLANG-SKU',
+            'name' => 'Koszula AURA',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $legacyTranslation = Product::query()->create([
+            'sku' => 'WC-B2C-PARENT-101',
+            'name' => 'AURA Shirt',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $primary->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '100',
+            'external_sku' => 'POLYLANG-SKU',
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $legacyTranslation->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '101',
+            'external_sku' => 'POLYLANG-SKU',
+            'stock_sync_enabled' => true,
+        ]);
+
+        $stats = app(WooCommerceImportService::class)->importProducts($integration);
+
+        $this->assertSame(1, $stats['source_items']);
+        $this->assertSame(0, $stats['duplicate_sku_items']);
+        $this->assertSame(1, $stats['translation_products_reclassified']);
+        $this->assertTrue($legacyTranslation->fresh()->is_translation);
+        $this->assertSame('101', data_get($primary->fresh()->attributes, 'woocommerce_translations.en.product_id'));
     }
 
     public function test_import_reads_all_product_pages(): void
@@ -654,14 +822,14 @@ class WooCommerceProductImportTest extends TestCase
 
                 return Http::response([[
                     'id' => ($query['lang'] ?? 'pl') === 'en' ? 700037 : 700036,
-                        'sku' => 'M700036',
-                        'name' => ($query['lang'] ?? 'pl') === 'en'
-                            ? 'TIFFANY Off White Blazer'
-                            : 'Marynarka TIFFANY Off White',
-                        'type' => 'simple',
-                        'status' => 'publish',
-                        'global_unique_id' => $ean,
-                    ]]);
+                    'sku' => 'M700036',
+                    'name' => ($query['lang'] ?? 'pl') === 'en'
+                        ? 'TIFFANY Off White Blazer'
+                        : 'Marynarka TIFFANY Off White',
+                    'type' => 'simple',
+                    'status' => 'publish',
+                    'global_unique_id' => $ean,
+                ]]);
             }
 
             return Http::response([], 404);

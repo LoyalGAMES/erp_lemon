@@ -261,6 +261,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee('data-product-filters', false)
             ->assertSee('data-product-search', false)
+            ->assertDontSee('requestSubmit', false)
             ->assertSee('pagination-bar', false)
             ->assertSee('Szybkie wyszukiwanie')
             ->assertSee('Magazyn')
@@ -535,6 +536,9 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee('Sprzedaż i magazyn')
             ->assertSee('Ręczna zmiana tworzy dokument KOR')
+            ->assertSeeInOrder(['Stan ogółem', 'Cena hurt (PLN)'])
+            ->assertSee('synchronizacji z WooCommerce')
+            ->assertDontSee('<th>Powód</th>', false)
             ->assertSee('data-stock-adjust-submit', false);
 
         $this->get(route('products.index'))

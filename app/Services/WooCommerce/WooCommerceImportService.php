@@ -54,6 +54,7 @@ final class WooCommerceImportService
             'duplicate_sku_resolved' => 0,
             'duplicate_ean_items' => 0,
             'translation_eans_reclaimed' => 0,
+            'translation_products_reclassified' => 0,
             'mapping_overwrites' => 0,
             'created' => 0,
             'updated' => 0,
@@ -162,6 +163,16 @@ final class WooCommerceImportService
                     ]);
                 }
                 $product->save();
+
+                // Imports made before the language-response guard could leave
+                // an existing Polylang twin as a separately mapped ERP item.
+                // Keep it out of the primary catalogue once the primary item
+                // has identified that remote translation.
+                $stats['translation_products_reclassified'] += $this->markExistingTranslationProducts(
+                    $integration,
+                    $product,
+                    $item,
+                );
 
                 $incomingExternalProductId = (string) $item['id'];
                 $incomingExternalVariationId = isset($item['variation_id']) ? (string) $item['variation_id'] : null;
@@ -1290,8 +1301,7 @@ final class WooCommerceImportService
         Product $product,
         array $item,
         ?string $ean,
-    ): array
-    {
+    ): array {
         if ($ean === null) {
             return [
                 'conflict' => null,
@@ -1391,6 +1401,55 @@ final class WooCommerceImportService
                     && $reference['variation_id'] === $externalVariationId,
             );
         });
+    }
+
+    /**
+     * Mark legacy ERP rows that are mapped to a known Polylang translation.
+     * Their mappings remain intact so historical stock and order references
+     * are preserved, while the product catalogue presents one primary item.
+     *
+     * @param  array<string, mixed>  $item
+     */
+    private function markExistingTranslationProducts(
+        WordpressIntegration $integration,
+        Product $product,
+        array $item,
+    ): int {
+        $references = collect($this->translationReferences($item))
+            ->filter(fn (array $reference): bool => $reference['product_id'] !== '')
+            ->unique(fn (array $reference): string => $reference['product_id'].'|'.($reference['variation_id'] ?? ''))
+            ->values();
+
+        if ($references->isEmpty()) {
+            return 0;
+        }
+
+        $translationProductIds = $references
+            ->flatMap(function (array $reference) use ($integration): array {
+                return ProductChannelMapping::query()
+                    ->where('sales_channel_id', $integration->sales_channel_id)
+                    ->where('external_product_id', $reference['product_id'])
+                    ->when(
+                        $reference['variation_id'] !== null,
+                        fn ($query) => $query->where('external_variation_id', $reference['variation_id']),
+                        fn ($query) => $query->whereNull('external_variation_id'),
+                    )
+                    ->pluck('product_id')
+                    ->all();
+            })
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id !== (int) $product->id)
+            ->unique()
+            ->values();
+
+        if ($translationProductIds->isEmpty()) {
+            return 0;
+        }
+
+        return Product::query()
+            ->whereIn('id', $translationProductIds->all())
+            ->where('is_translation', false)
+            ->update(['is_translation' => true]);
     }
 
     /**

@@ -1,5 +1,6 @@
 @php
     $supplierMaster = isset($supplierMaster) && is_array($supplierMaster) ? $supplierMaster : [];
+    $showSupplierField = $showSupplierField ?? fn (string $field): bool => true;
     $storedSuppliers = collect((array) data_get($supplierMaster, 'suppliers', []))->values();
     $oldNames = old('suppliers.name');
     $supplierRows = collect(range(0, max(2, $storedSuppliers->count() - 1)))->map(function (int $index) use ($storedSuppliers, $oldNames): array {
@@ -18,13 +19,13 @@
     <p class="muted">Możesz zapisać kilku dostawców wraz z ich kodem produktu i ceną zakupu.</p>
     @foreach ($supplierRows as $supplier)
         <div class="product-form-grid three">
-            <label>Nazwa dostawcy
+            <label @class(['product-edit-field-hidden' => ! $showSupplierField('supplier_name')])>Nazwa dostawcy
                 <input name="suppliers[name][]" value="{{ $supplier['name'] }}">
             </label>
-            <label>Kod produktu dostawcy
+            <label @class(['product-edit-field-hidden' => ! $showSupplierField('supplier_product_code')])>Kod produktu dostawcy
                 <input name="suppliers[product_code][]" value="{{ $supplier['product_code'] }}">
             </label>
-            <label>Cena zakupu u dostawcy
+            <label @class(['product-edit-field-hidden' => ! $showSupplierField('supplier_purchase_price')])>Cena zakupu u dostawcy
                 <input name="suppliers[purchase_price_pln][]" type="number" step="0.01" min="0" value="{{ $supplier['purchase_price_pln'] }}">
             </label>
         </div>

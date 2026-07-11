@@ -41,6 +41,8 @@ class OrderListPerformanceTest extends TestCase
 
         $this->get(route('modules.show', 'orders'))
             ->assertOk()
+            ->assertSee('Filtry i wyszukiwanie')
+            ->assertSee('orders-mobile-filter-toggle', false)
             ->assertSee('9060')
             ->assertSee('9011')
             ->assertDontSee('9010')

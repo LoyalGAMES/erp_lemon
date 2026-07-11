@@ -34,6 +34,10 @@
             <strong>Stanowiska pakowania</strong>
             <span>Stanowiska, adresy aplikacji Windows, drukarki etykiet i podział asortymentu.</span>
         </a>
+        <a class="settings-card" href="{{ route('settings.products') }}">
+            <strong>Edycja produktów</strong>
+            <span>Widoczność pojedynczych pól formularza produktu, np. tagów, dostawców i opisów.</span>
+        </a>
         <a class="settings-card" href="{{ route('settings.shipping') }}">
             <strong>Wysyłki i konta kurierskie</strong>
             <span>Konta InPost (ShipX) do generowania etykiet z wyborem konta nadawczego.</span>

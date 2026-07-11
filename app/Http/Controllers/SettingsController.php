@@ -15,6 +15,7 @@ use App\Services\Inventory\WarehouseDocumentSettingsService;
 use App\Services\Payments\MbankTransferBasketSettingsService;
 use App\Services\Payments\PayuRefundSettingsService;
 use App\Services\Packing\PackingSettingsService;
+use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Returns\ReturnSettingsService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -113,6 +114,29 @@ class SettingsController extends Controller
             'packingSettings' => $packingSettings->data(),
             'printListenerApp' => $this->windowsPrintListenerAppData(),
         ]);
+    }
+
+    public function products(ProductEditFieldSettingsService $productEditFields): View
+    {
+        return view('settings.products', [
+            'title' => 'Edycja produktów',
+            'subtitle' => 'Wybierz pola widoczne podczas edycji pojedynczego towaru.',
+            'module' => 'settings',
+            'productEditFieldDefinitions' => $productEditFields->definitions(),
+            'visibleProductEditFields' => $productEditFields->visibleFields(),
+        ]);
+    }
+
+    public function updateProducts(Request $request, ProductEditFieldSettingsService $productEditFields): RedirectResponse
+    {
+        $validated = $request->validate([
+            'visible_fields' => ['nullable', 'array'],
+            'visible_fields.*' => ['string', 'max:100'],
+        ]);
+
+        $productEditFields->update((array) ($validated['visible_fields'] ?? []));
+
+        return back()->with('status', 'Widoczność pól edycji produktu została zapisana.');
     }
 
     public function downloadWindowsPrintListener(): BinaryFileResponse

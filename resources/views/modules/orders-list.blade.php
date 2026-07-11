@@ -61,7 +61,15 @@
         <span>{{ $recordLabel }}</span>
     </div>
 
-    <form class="orders-filter" method="GET" action="{{ route('modules.show', 'orders') }}">
+    <input id="orders-mobile-filter-toggle" class="orders-mobile-filter-toggle" type="checkbox">
+    <label class="button secondary orders-mobile-filter-trigger" for="orders-mobile-filter-toggle">Filtry i wyszukiwanie</label>
+    <label class="orders-mobile-filter-backdrop" for="orders-mobile-filter-toggle"></label>
+    <div class="orders-filter-drawer">
+        <div class="orders-filter-drawer-header">
+            <span>Filtry zamówień</span>
+            <label class="orders-filter-drawer-close" for="orders-mobile-filter-toggle" aria-label="Zamknij filtry">×</label>
+        </div>
+        <form class="orders-filter" method="GET" action="{{ route('modules.show', 'orders') }}">
         <label class="orders-filter-search">Szukaj
             <input
                 name="q"
@@ -91,7 +99,8 @@
                 <a class="button secondary" href="{{ route('modules.show', 'orders') }}">Wyczyść</a>
             @endif
         </div>
-    </form>
+        </form>
+    </div>
 
     <div class="table-scroll orders-table-scroll">
         <table class="dense-table orders-table">
