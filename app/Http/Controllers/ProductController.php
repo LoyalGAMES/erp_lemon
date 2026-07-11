@@ -12,7 +12,6 @@ use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
-use App\Models\StockLedgerEntry;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
@@ -44,12 +43,14 @@ class ProductController extends Controller
 
     public function index(Request $request): View
     {
-        $filters = $this->productFilters($request);
+        $isFavorites = $request->routeIs('products.favorites');
+        $filters = $this->productFilters($request, $isFavorites);
 
         return view('products.index', [
             'productRows' => $this->productListRows($filters),
-            'productsCount' => Product::query()->count(),
+            'productsCount' => Product::query()->where('is_translation', false)->count(),
             'filters' => $filters,
+            'isFavorites' => $isFavorites,
             'channelOptions' => $this->productListChannelOptions(),
             'warehouseOptions' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'categoryOptions' => $this->productListCategoryOptions(),
@@ -73,6 +74,7 @@ class ProductController extends Controller
         return response()->json(
             Product::query()
                 ->select(['sku', 'name', 'ean'])
+                ->where('is_translation', false)
                 ->where(function (Builder $product) use ($like): void {
                     $product
                         ->where('sku', 'like', $like)
@@ -90,70 +92,9 @@ class ProductController extends Controller
         );
     }
 
-    public function show(Product $product, Gs1SettingsService $gs1Settings): View
+    public function show(Product $product): RedirectResponse
     {
-        $product->load([
-            'stockBalances.warehouse',
-            'channelMappings.salesChannel',
-            'childRelations.childProduct',
-            'variantChildren.stockBalances.warehouse',
-            'variantChildren.channelMappings.salesChannel',
-        ]);
-        $mappedSalesChannelIds = $product->channelMappings
-            ->pluck('sales_channel_id')
-            ->filter()
-            ->all();
-        $externalProductIds = $product->channelMappings
-            ->pluck('external_product_id')
-            ->filter()
-            ->unique()
-            ->values();
-        $externalVariants = $externalProductIds->isEmpty()
-            ? collect()
-            : Product::query()
-                ->with(['stockBalances.warehouse', 'channelMappings.salesChannel'])
-                ->whereKeyNot($product->id)
-                ->whereHas('channelMappings', function ($query) use ($externalProductIds): void {
-                    $query->whereIn('external_product_id', $externalProductIds)
-                        ->whereNotNull('external_variation_id');
-                })
-                ->orderBy('name')
-                ->get();
-        $relatedVariants = $product->variantChildren
-            ->concat($externalVariants)
-            ->unique('id')
-            ->sortBy(fn (Product $variant): string => mb_strtolower($variant->name.' '.$variant->sku))
-            ->values();
-        $variantRelationByChildId = $product->childRelations
-            ->where('relation_type', 'variant')
-            ->keyBy('child_product_id');
-
-        return view('products.show', [
-            'product' => $product,
-            'relatedVariants' => $relatedVariants,
-            'variantRelationByChildId' => $variantRelationByChildId,
-            'ledgerEntries' => StockLedgerEntry::query()
-                ->with(['warehouse', 'document'])
-                ->where('product_id', $product->id)
-                ->latest('posted_at')
-                ->limit(50)
-                ->get(),
-            'availableWooCommerceCreateIntegrations' => WordpressIntegration::query()
-                ->with('salesChannel')
-                ->whereNotIn('sales_channel_id', $mappedSalesChannelIds)
-                ->whereHas('salesChannel', fn ($query) => $query->where('is_active', true))
-                ->orderBy('name')
-                ->get(),
-            'categoryOptions' => $this->categoryOptions(),
-            'catalogOptions' => $this->catalogOptions(),
-            'parameterOptions' => $this->parameterOptions(),
-            'productLookupOptions' => $this->productLookupOptions($product),
-            'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
-            'gs1Settings' => $gs1Settings->publicConfiguration(),
-            'module' => 'products',
-            'title' => $product->name,
-            'subtitle' => $this->productSubtitle($product),
-        ]);
+        return redirect()->route('products.edit', $product);
     }
 
     public function edit(Product $product, Gs1SettingsService $gs1Settings): View
@@ -164,6 +105,10 @@ class ProductController extends Controller
             'childRelations.childProduct',
             'variantChildren.stockBalances.warehouse',
         ]);
+        $mappedSalesChannelIds = $product->channelMappings
+            ->pluck('sales_channel_id')
+            ->filter()
+            ->all();
 
         return view('products.edit', [
             'product' => $product,
@@ -173,6 +118,12 @@ class ProductController extends Controller
             'productLookupOptions' => $this->productLookupOptions($product),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
             'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
+            'availableWooCommerceCreateIntegrations' => WordpressIntegration::query()
+                ->with('salesChannel')
+                ->whereNotIn('sales_channel_id', $mappedSalesChannelIds)
+                ->whereHas('salesChannel', fn ($query) => $query->where('is_active', true))
+                ->orderBy('name')
+                ->get(),
             'module' => 'products',
             'title' => 'Edycja produktu',
             'subtitle' => $product->name.' | '.$this->productSubtitle($product),
@@ -236,7 +187,7 @@ class ProductController extends Controller
         }
 
         $redirect = redirect()
-            ->route('products.show', $product)
+            ->route('products.edit', $product)
             ->with('status', $generatedVariants['created'] > 0
                 ? "Produkt został dodany razem z {$generatedVariants['created']} wariantami. Każdy wariant otrzymał własne SKU i EAN."
                 : 'Produkt został dodany jako dane główne ERP.');
@@ -322,7 +273,7 @@ class ProductController extends Controller
         }
 
         $redirect = redirect()
-            ->route('products.show', $product)
+            ->route('products.edit', $product)
             ->with('status', $generatedVariants['created'] > 0
                 ? "Dane produktu zostały zapisane i utworzono {$generatedVariants['created']} brakujących wariantów. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle."
                 : 'Dane produktu zostały zapisane jako dane główne ERP. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle.');
@@ -458,6 +409,15 @@ class ProductController extends Controller
         return back()->with('status', "Dodano {$child->sku} jako wariant produktu {$product->sku}.");
     }
 
+    public function toggleFavorite(Product $product): RedirectResponse
+    {
+        $product->forceFill(['is_favorite' => ! $product->is_favorite])->save();
+
+        return back()->with('status', $product->is_favorite
+            ? "Produkt {$product->name} dodano do ulubionych."
+            : "Produkt {$product->name} usunięto z ulubionych.");
+    }
+
     public function destroyRelation(Product $product, ProductRelation $relation, AuditLogService $audit): RedirectResponse
     {
         if ((int) $relation->parent_product_id !== (int) $product->id) {
@@ -585,7 +545,7 @@ class ProductController extends Controller
             return redirect()->to($redirectUrl);
         }
 
-        return redirect()->route('products.show', $product);
+        return redirect()->route('products.edit', $product);
     }
 
     private function queueWooCommerceDataExport(Product $product): void
@@ -1286,6 +1246,7 @@ class ProductController extends Controller
     {
         $products = Product::query()
             ->select($this->productListColumns())
+            ->where('is_translation', false)
             ->whereDoesntHave('parentRelations', fn (Builder $relations) => $relations->where('relation_type', 'variant'))
             ->with([
                 'stockBalances' => fn ($balances) => $balances->select([
@@ -1304,7 +1265,9 @@ class ProductController extends Controller
                     'external_variation_id',
                 ]),
                 'channelMappings.salesChannel:id,code,name',
-                'variantChildren' => fn ($children) => $children->select($this->productListColumns(qualified: true)),
+                'variantChildren' => fn ($children) => $children
+                    ->select($this->productListColumns(qualified: true))
+                    ->where('products.is_translation', false),
                 'variantChildren.stockBalances' => fn ($balances) => $balances->select([
                     'id',
                     'product_id',
@@ -1358,6 +1321,8 @@ class ProductController extends Controller
             'vat_rate',
             'attributes',
             'is_active',
+            'is_favorite',
+            'is_translation',
             'created_at',
         ])->map(fn (string $column): string => $prefix.$column)->all();
     }
@@ -1383,6 +1348,14 @@ class ProductController extends Controller
 
         if ($filters['type'] === 'without_variants') {
             $products->whereDoesntHave('variantChildren');
+        }
+
+        if ($filters['favorites']) {
+            $products->where(function (Builder $family): void {
+                $family
+                    ->where('is_favorite', true)
+                    ->orWhereHas('variantChildren', fn (Builder $variants) => $variants->where('is_favorite', true));
+            });
         }
     }
 
@@ -1523,11 +1496,8 @@ class ProductController extends Controller
      */
     private function productListCategoryOptions(): Collection
     {
-        return ProductCategory::query()
-            ->with('salesChannel:id,code')
-            ->orderBy('path')
-            ->orderBy('name')
-            ->get()
+        return $this->primaryProductCategories()
+            ->sortBy(fn (ProductCategory $category): string => mb_strtolower($category->path ?: $category->name))
             ->map(fn (ProductCategory $category): array => [
                 'id' => $category->id,
                 'name' => $category->name,
@@ -1558,7 +1528,7 @@ class ProductController extends Controller
     /**
      * @return array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string}
      */
-    private function productFilters(Request $request): array
+    private function productFilters(Request $request, bool $favorites = false): array
     {
         $warehouseId = (string) ($request->query('warehouse') ?? '');
 
@@ -1578,6 +1548,7 @@ class ProductController extends Controller
             'status' => in_array($request->query('status'), ['active', 'inactive', 'publish', 'draft'], true)
                 ? (string) $request->query('status')
                 : '',
+            'favorites' => $favorites,
         ];
     }
 
@@ -1689,10 +1660,8 @@ class ProductController extends Controller
      */
     private function categoryOptions(): Collection
     {
-        $storedCategories = ProductCategory::query()
-            ->with('salesChannel')
-            ->orderBy('name')
-            ->get()
+        $storedCategories = $this->primaryProductCategories()
+            ->sortBy(fn (ProductCategory $category): string => mb_strtolower($category->path ?: $category->name))
             ->map(fn (ProductCategory $category): array => [
                 'id' => $category->id,
                 'name' => $category->name,
@@ -1733,6 +1702,27 @@ class ProductController extends Controller
             ->filter(fn (array $category): bool => $category['name'] !== null && $category['name'] !== '')
             ->unique(fn (array $category): string => mb_strtolower((string) $category['path']))
             ->sortBy('path')
+            ->values();
+    }
+
+    /**
+     * Polish is the canonical PIM category. English values live on that same
+     * record in metadata, so stale EN-only import rows are never offered as a
+     * second category in product forms or filters.
+     *
+     * @return Collection<int, ProductCategory>
+     */
+    private function primaryProductCategories(): Collection
+    {
+        return ProductCategory::query()
+            ->with('salesChannel:id,code,name')
+            ->get()
+            ->reject(function (ProductCategory $category): bool {
+                $woocommerceIds = (array) data_get($category->metadata, 'woocommerce_ids', []);
+
+                return filled($woocommerceIds['en'] ?? null)
+                    && blank($woocommerceIds['pl'] ?? null);
+            })
             ->values();
     }
 
@@ -1807,6 +1797,7 @@ class ProductController extends Controller
     private function productLookupOptions(?Product $excludedProduct = null): Collection
     {
         return Product::query()
+            ->where('is_translation', false)
             ->when($excludedProduct !== null, fn ($query) => $query->whereKeyNot($excludedProduct->id))
             ->orderBy('name')
             ->orderBy('sku')

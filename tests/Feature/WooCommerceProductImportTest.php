@@ -488,4 +488,202 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertDatabaseHas('product_parameter_definitions', ['name' => 'Rozmiar', 'is_variant' => true]);
         $this->assertDatabaseHas('product_parameter_definitions', ['name' => 'Skład', 'is_variant' => false]);
     }
+
+    public function test_import_marks_a_duplicate_ean_for_manual_review_without_stopping_sync(): void
+    {
+        $ean = '5906065008508';
+        $owner = Product::query()->create([
+            'sku' => 'EXISTING-EAN-OWNER',
+            'name' => 'Produkt z istniejącym EAN',
+            'ean' => $ean,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $conflictedProduct = Product::query()->create([
+            'sku' => 'M700036',
+            'name' => 'Marynarka TIFFANY Off White',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'woocommerce_import',
+                    'identifier_conflict' => [
+                        'type' => 'duplicated_ean',
+                        'previous_ean' => $ean,
+                        'resolution' => 'cleared_for_manual_review',
+                    ],
+                ],
+            ],
+        ]);
+
+        Http::fake(function ($request) use ($ean) {
+            $url = $request->url();
+
+            if (str_contains($url, '/products/categories')) {
+                return Http::response([]);
+            }
+
+            if (str_contains($url, '/products')) {
+                parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+                return (int) ($query['page'] ?? 1) === 1
+                    ? Http::response([[
+                        'id' => 700036,
+                        'sku' => 'M700036',
+                        'name' => 'Marynarka TIFFANY Off White',
+                        'type' => 'simple',
+                        'status' => 'publish',
+                        'global_unique_id' => $ean,
+                        'stock_quantity' => 0,
+                    ]])
+                    : Http::response([]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+
+        $stats = app(WooCommerceImportService::class)->importProducts($integration);
+
+        $conflictedProduct->refresh();
+
+        $this->assertSame(1, $stats['duplicate_ean_items']);
+        $this->assertNull($conflictedProduct->ean);
+        $this->assertSame($ean, data_get($conflictedProduct->attributes, 'woocommerce_ean'));
+        $this->assertNull(data_get($conflictedProduct->attributes, 'master.ean'));
+        $this->assertSame('duplicated_ean', data_get($conflictedProduct->attributes, 'master.identifier_conflict.type'));
+        $this->assertSame($ean, data_get($conflictedProduct->attributes, 'master.identifier_conflict.previous_ean'));
+        $this->assertSame($owner->id, data_get($conflictedProduct->attributes, 'master.identifier_conflict.conflicting_product_id'));
+        $this->assertSame('EXISTING-EAN-OWNER', data_get($conflictedProduct->attributes, 'master.identifier_conflict.conflicting_product_sku'));
+        $this->assertDatabaseHas('product_channel_mappings', [
+            'product_id' => $conflictedProduct->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '700036',
+            'external_variation_id' => null,
+        ]);
+    }
+
+    public function test_import_reclaims_an_ean_from_a_polylang_translation(): void
+    {
+        $ean = '5906065008508';
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => [
+                'product_import' => ['languages' => ['pl', 'en']],
+            ],
+        ]);
+        $polishProduct = Product::query()->create([
+            'sku' => 'M700036',
+            'name' => 'Marynarka TIFFANY Off White',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => ['source' => 'woocommerce_import'],
+                'woocommerce_translations' => [
+                    'en' => ['product_id' => '700037'],
+                ],
+            ],
+        ]);
+        $englishTranslation = Product::query()->create([
+            'sku' => 'WC-B2C-PARENT-700037',
+            'name' => 'TIFFANY Off White Blazer',
+            'ean' => $ean,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'is_translation' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'woocommerce_import',
+                    'ean' => $ean,
+                ],
+            ],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $englishTranslation->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '700037',
+            'external_variation_id' => null,
+            'external_sku' => 'M700036',
+            'stock_sync_enabled' => true,
+        ]);
+
+        Http::fake(function ($request) use ($ean) {
+            $url = $request->url();
+
+            if (str_contains($url, '/products/categories')) {
+                return Http::response([]);
+            }
+
+            if (str_contains($url, '/products')) {
+                parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+                if ((int) ($query['page'] ?? 1) > 1) {
+                    return Http::response([]);
+                }
+
+                return Http::response([[
+                    'id' => ($query['lang'] ?? 'pl') === 'en' ? 700037 : 700036,
+                        'sku' => 'M700036',
+                        'name' => ($query['lang'] ?? 'pl') === 'en'
+                            ? 'TIFFANY Off White Blazer'
+                            : 'Marynarka TIFFANY Off White',
+                        'type' => 'simple',
+                        'status' => 'publish',
+                        'global_unique_id' => $ean,
+                    ]]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $stats = app(WooCommerceImportService::class)->importProducts($integration);
+
+        $polishProduct->refresh();
+        $englishTranslation->refresh();
+
+        $this->assertSame(1, $stats['translation_eans_reclaimed']);
+        $this->assertSame($ean, $polishProduct->ean);
+        $this->assertSame($ean, data_get($polishProduct->attributes, 'master.ean'));
+        $this->assertNull($englishTranslation->ean);
+        $this->assertNull(data_get($englishTranslation->attributes, 'master.ean'));
+        $this->assertSame(
+            'translation_ean_reassigned',
+            data_get($englishTranslation->attributes, 'master.identifier_conflict.type'),
+        );
+        $this->assertSame(
+            'assigned_to_primary_product',
+            data_get($englishTranslation->attributes, 'master.identifier_conflict.resolution'),
+        );
+    }
 }

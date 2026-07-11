@@ -162,7 +162,7 @@ class Gs1IntegrationWorkflowTest extends TestCase
             ],
         ]);
 
-        $this->get(route('products.show', $product))
+        $this->get(route('products.edit', $product))
             ->assertOk()
             ->assertSee('Wygeneruj EAN GS1')
             ->assertSee('Strój kąpielowy - jednoczęściowy');
@@ -190,7 +190,7 @@ class Gs1IntegrationWorkflowTest extends TestCase
             && ! array_key_exists('productWebsite', $request['data']['attributes'])
             && $request['data']['attributes']['gpcCode'] === 10008068.0);
 
-        $this->get(route('products.show', $product))
+        $this->get(route('products.edit', $product))
             ->assertOk()
             ->assertSee('5901234000017')
             ->assertDontSee('Wygeneruj EAN GS1');

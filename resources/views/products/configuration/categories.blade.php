@@ -5,7 +5,6 @@
 ])
 
 @push('styles')
-    <link href="https://unpkg.com/sortable-tree/dist/sortable-tree.css" rel="stylesheet">
     <style>
         .product-config-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
         .product-config-panel { margin-bottom: 16px; }
@@ -44,6 +43,15 @@
         .category-tree-root .tree__node--drop-inside > .tree__label,
         .category-tree-root .tree__node--drop-before > .tree__label,
         .category-tree-root .tree__node--drop-after > .tree__label { border-color: var(--green-dark); background: var(--green-soft); }
+        .category-tree-list, .category-tree-children { list-style: none; padding: 0; margin: 0; }
+        .category-tree-children { position: relative; margin-left: 18px; }
+        .category-tree-children::before { content: ''; position: absolute; left: 14px; top: 0; bottom: 13px; border-left: 1px solid var(--border); }
+        .category-tree-item { position: relative; }
+        .category-tree-node { position: relative; z-index: 1; width: 100%; min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+        .category-tree-node:hover, .category-tree-node.is-selected { background: var(--green-soft); border-color: var(--green-dark); }
+        .category-tree-branch { flex: 0 0 18px; color: var(--green-dark); font-weight: 900; text-align: center; }
+        .category-tree-node-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }
+        .category-tree-node-meta { margin-left: auto; display: inline-flex; flex: 0 0 auto; gap: 7px; color: var(--muted); font-size: 11px; }
         @media (max-width: 1080px) {
             .category-create-form, .category-tree-layout, .category-editor-grid, .category-technical-grid { grid-template-columns: 1fr; }
             .category-create-form .full { grid-column: 1 / -1; }
@@ -95,6 +103,7 @@
     <div class="product-config-toolbar">
         <div class="inline-actions">
             <a class="button secondary" href="{{ route('products.index') }}">Lista produktów</a>
+            <a class="button secondary" href="{{ route('products.favorites') }}">Ulubione</a>
             <a class="button secondary" href="{{ route('products.parameters.index') }}">Parametry</a>
         </div>
         <div class="toolbar-note">Drzewo kategorii PIM i WooCommerce</div>
@@ -119,6 +128,9 @@
             <label>Nazwa kategorii
                 <input name="name" value="{{ old('name') }}" required placeholder="np. Koszule">
             </label>
+            <label>Nazwa kategorii (EN)
+                <input name="name_en" value="{{ old('name_en') }}" placeholder="np. Shirts">
+            </label>
             <label>Kategoria nadrzędna
                 <input
                     value=""
@@ -130,8 +142,11 @@
                 <input id="new-category-parent" type="hidden" name="parent_external_id" value="{{ old('parent_external_id') }}">
             </label>
             <button class="button" type="submit">Dodaj</button>
-            <label class="full">Opis kategorii
+            <label class="full">Opis kategorii (PL)
                 <textarea name="description" placeholder="Opis kategorii do PIM i WooCommerce">{{ old('description') }}</textarea>
+            </label>
+            <label class="full">Opis kategorii (EN)
+                <textarea name="description_en" placeholder="English category description">{{ old('description_en') }}</textarea>
             </label>
             <label>Kategoria GS1 (GPC)
                 <select name="gs1_gpc_code" data-gpc-select data-gpc-label-target="new-category-gpc-label">
@@ -151,6 +166,9 @@
                     <label>Adres URL kategorii
                         <input name="slug" value="{{ old('slug') }}" placeholder="np. koszule">
                     </label>
+                    <label>Adres URL kategorii (EN)
+                        <input name="slug_en" value="{{ old('slug_en') }}" placeholder="np. shirts">
+                    </label>
                 </div>
             </details>
         </form>
@@ -163,10 +181,21 @@
         </div>
         <div class="category-tree-layout">
             <div>
-                <script id="category-tree-data" type="application/json">@json($treeNodes, JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_AMP | JSON_HEX_QUOT)</script>
-                <div id="category-sortable-tree" class="category-tree-root">
+                <div id="category-tree" class="category-tree-root">
                     @if ($categories->isEmpty())
                         <div class="category-tree-empty">Brak kategorii. Dodaj pierwszą kategorię formularzem powyżej albo zaimportuj produkty z WooCommerce.</div>
+                    @else
+                        <ul class="category-tree-list">
+                            @foreach ($childrenByParentKey->get('__root__', collect())->sortBy(fn ($category) => sprintf('%05d %s', (int) ($category->sort_order ?? 100), mb_strtolower($category->name))) as $category)
+                                @include('products.configuration._category_tree_node', [
+                                    'category' => $category,
+                                    'childrenByParentKey' => $childrenByParentKey,
+                                    'categoryKey' => $categoryKey,
+                                    'categoryUsage' => $categoryUsage,
+                                    'depth' => 0,
+                                ])
+                            @endforeach
+                        </ul>
                     @endif
                 </div>
                 <div class="toolbar-note" data-category-tree-status></div>
@@ -183,6 +212,7 @@
                         $parentKey = $category->parent_external_id ? (($category->sales_channel_id ?: 'global') . '|' . $category->parent_external_id) : null;
                         $parentCategory = $parentKey ? $categoryByScopedExternalId->get($parentKey) : null;
                         $parentLabel = $parentCategory ? (($parentCategory->path ?: $parentCategory->name) . ($parentCategory->salesChannel ? ' | ' . $parentCategory->salesChannel->code : '')) : '';
+                        $english = (array) data_get($category->metadata, 'translations.en', []);
                     @endphp
                     <section class="category-editor-panel" data-category-editor="{{ $category->id }}" hidden>
                         <div class="panel-header">
@@ -194,8 +224,11 @@
                             @method('PUT')
                             <input id="category-sort-order-{{ $category->id }}" type="hidden" name="sort_order" value="{{ $category->sort_order ?? 100 }}">
                             <div class="category-editor-grid">
-                                <label>Nazwa kategorii
+                                <label>Nazwa kategorii (PL)
                                     <input name="name" value="{{ $category->name }}" required>
+                                </label>
+                                <label>Nazwa kategorii (EN)
+                                    <input name="name_en" value="{{ old('name_en', $english['name'] ?? '') }}" placeholder="np. Shirts">
                                 </label>
                                 <label>Kategoria nadrzędna
                                     <input
@@ -210,8 +243,11 @@
                                     <input id="category-parent-{{ $category->id }}" type="hidden" name="parent_external_id" value="{{ $category->parent_external_id }}">
                                 </label>
                             </div>
-                            <label>Opis kategorii
+                            <label>Opis kategorii (PL)
                                 <textarea name="description" placeholder="Opis kategorii do PIM i WooCommerce">{{ $category->description }}</textarea>
+                            </label>
+                            <label>Opis kategorii (EN)
+                                <textarea name="description_en" placeholder="English category description">{{ old('description_en', $english['description'] ?? '') }}</textarea>
                             </label>
                             <label>Kategoria GS1 (GPC)
                                 <select name="gs1_gpc_code" data-gpc-select data-gpc-label-target="category-gpc-label-{{ $category->id }}">
@@ -243,6 +279,9 @@
                                     <label>Adres URL kategorii
                                         <input name="slug" value="{{ $category->slug }}" placeholder="np. koszule">
                                     </label>
+                                    <label>Adres URL kategorii (EN)
+                                        <input name="slug_en" value="{{ old('slug_en', $english['slug'] ?? '') }}" placeholder="np. shirts">
+                                    </label>
                                 </div>
                             </details>
                         </form>
@@ -272,7 +311,6 @@
 @endsection
 
 @push('scripts')
-    <script src="https://unpkg.com/sortable-tree/dist/sortable-tree.js"></script>
     <script>
         (() => {
             const parentOptions = Array.from(document.querySelectorAll('#category-parent-options option'));
@@ -347,6 +385,10 @@
                 });
                 selectedLabel?.classList.add('is-selected');
             }
+
+            document.querySelectorAll('[data-category-tree-select]').forEach((button) => {
+                button.addEventListener('click', () => showCategoryEditor(button.dataset.categoryTreeSelect, button));
+            });
 
             function directSiblingData(nodes, targetParentNode) {
                 if (Array.isArray(targetParentNode?.subnodesData)) {

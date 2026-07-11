@@ -20,6 +20,7 @@ use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderStatusPolicyService;
 use App\Services\Orders\OrderWzDocumentService;
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Throwable;
@@ -51,6 +52,8 @@ final class WooCommerceImportService
             'synthetic_sku_items' => 0,
             'duplicate_sku_items' => 0,
             'duplicate_sku_resolved' => 0,
+            'duplicate_ean_items' => 0,
+            'translation_eans_reclaimed' => 0,
             'mapping_overwrites' => 0,
             'created' => 0,
             'updated' => 0,
@@ -119,23 +122,42 @@ final class WooCommerceImportService
                 );
 
                 if (! $product->isErpMaster()) {
+                    $incomingEan = $this->eanForImport($item);
+                    $eanResolution = $this->eanResolutionForImport($integration, $product, $item, $incomingEan);
+                    $eanConflict = $eanResolution['conflict'];
+                    $masterData = $this->importedMasterData($integration, $item);
+
+                    if ($eanConflict !== null) {
+                        $stats['duplicate_ean_items']++;
+                        $masterData['ean'] = null;
+                        data_set($attributes, 'master.identifier_conflict', $eanConflict);
+                    } elseif ($incomingEan !== null) {
+                        if ($eanResolution['reclaimed_translation_ean']) {
+                            $stats['translation_eans_reclaimed']++;
+                        }
+
+                        Arr::forget($attributes, 'master.identifier_conflict');
+                    }
+
                     $attributes['master'] = array_replace_recursive(
                         (array) data_get($attributes, 'master', []),
-                        $this->importedMasterData($integration, $item),
+                        $masterData,
                     );
 
                     $product->fill([
                         'name' => (string) ($item['name'] ?? $sku),
-                        'ean' => $this->eanForImport($item),
+                        'ean' => $eanConflict === null ? $incomingEan : null,
                         'unit' => 'szt',
                         'vat_rate' => 23,
                         'weight_kg' => $this->nullableFloat($item['weight'] ?? null),
                         'quantity_precision' => 0,
                         'is_active' => true,
+                        'is_translation' => false,
                         'attributes' => $attributes,
                     ]);
                 } else {
                     $product->fill([
+                        'is_translation' => false,
                         'attributes' => $attributes,
                     ]);
                 }
@@ -247,6 +269,10 @@ final class WooCommerceImportService
         ]);
         data_set($metadata, "woocommerce_ids.{$language}", $externalId);
 
+        if ($language !== 'pl') {
+            data_set($metadata, "translations.{$language}", $this->categoryTranslation($category));
+        }
+
         ProductCategory::query()->updateOrCreate(
             [
                 'id' => $existing?->id,
@@ -290,13 +316,32 @@ final class WooCommerceImportService
 
                 if ($local instanceof ProductCategory && isset($category['id'])) {
                     $metadata = (array) $local->metadata;
-                    data_set($metadata, 'woocommerce_ids.'.$this->normalizeLanguage($language), (string) $category['id']);
+                    $language = $this->normalizeLanguage($language);
+                    data_set($metadata, 'woocommerce_ids.'.$language, (string) $category['id']);
+                    data_set($metadata, 'translations.'.$language, $this->categoryTranslation($category));
                     $local->update(['metadata' => $metadata]);
                 } else {
                     $this->upsertCategory($integration, $category, $this->normalizeLanguage($language));
                 }
             }
         }
+    }
+
+    /**
+     * @param  array<string, mixed>  $category
+     * @return array{name:?string,slug:?string,description:?string,path:?string,parent_external_id:?string}
+     */
+    private function categoryTranslation(array $category): array
+    {
+        return [
+            'name' => $this->nullableString($category['name'] ?? null),
+            'slug' => $this->nullableString($category['slug'] ?? null),
+            'description' => $this->nullableString($category['description'] ?? null),
+            'path' => $this->nullableString($category['path'] ?? null),
+            'parent_external_id' => isset($category['parent']) && (string) $category['parent'] !== '0'
+                ? (string) $category['parent']
+                : null,
+        ];
     }
 
     /**
@@ -1231,6 +1276,121 @@ final class WooCommerceImportService
         }
 
         return null;
+    }
+
+    /**
+     * Assign an EAN held by a local translation back to its primary product.
+     * Other collisions remain marked for manual review. The unique database
+     * index remains the source of truth.
+     *
+     * @return array{conflict:array<string, int|string>|null,reclaimed_translation_ean:bool}
+     */
+    private function eanResolutionForImport(
+        WordpressIntegration $integration,
+        Product $product,
+        array $item,
+        ?string $ean,
+    ): array
+    {
+        if ($ean === null) {
+            return [
+                'conflict' => null,
+                'reclaimed_translation_ean' => false,
+            ];
+        }
+
+        $existingProduct = Product::query()
+            ->where('ean', $ean)
+            ->when(
+                $product->exists,
+                fn ($query) => $query->where('id', '<>', $product->id),
+            )
+            ->lockForUpdate()
+            ->first(['id', 'sku', 'attributes', 'is_translation']);
+
+        if (! $existingProduct instanceof Product) {
+            return [
+                'conflict' => null,
+                'reclaimed_translation_ean' => false,
+            ];
+        }
+
+        if ($existingProduct->is_translation
+            && $this->isTranslationOfImportedProduct($integration, $product, $item, $existingProduct)) {
+            $attributes = (array) $existingProduct->attributes;
+            data_set($attributes, 'master.ean', null);
+            data_set($attributes, 'master.identifier_conflict', [
+                'type' => 'translation_ean_reassigned',
+                'previous_ean' => $ean,
+                'detected_at' => now()->toISOString(),
+                'resolution' => 'assigned_to_primary_product',
+            ]);
+
+            $existingProduct->forceFill([
+                'ean' => null,
+                'attributes' => $attributes,
+            ])->save();
+
+            return [
+                'conflict' => null,
+                'reclaimed_translation_ean' => true,
+            ];
+        }
+
+        return [
+            'conflict' => [
+                'type' => 'duplicated_ean',
+                'previous_ean' => $ean,
+                'conflicting_product_id' => $existingProduct->id,
+                'conflicting_product_sku' => $existingProduct->sku,
+                'detected_at' => now()->toISOString(),
+                'resolution' => 'cleared_for_manual_review',
+            ],
+            'reclaimed_translation_ean' => false,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function isTranslationOfImportedProduct(
+        WordpressIntegration $integration,
+        Product $product,
+        array $item,
+        Product $translation,
+    ): bool {
+        $references = collect([
+            ...array_values((array) data_get($product->attributes, 'woocommerce_translations', [])),
+            ...array_values($this->translationReferences($item)),
+        ])
+            ->filter(fn (mixed $reference): bool => is_array($reference))
+            ->map(fn (array $reference): array => [
+                'product_id' => trim((string) ($reference['product_id'] ?? '')),
+                'variation_id' => isset($reference['variation_id']) ? (string) $reference['variation_id'] : null,
+            ])
+            ->filter(fn (array $reference): bool => $reference['product_id'] !== '')
+            ->unique(fn (array $reference): string => $reference['product_id'].'|'.($reference['variation_id'] ?? ''));
+
+        if ($references->isEmpty()) {
+            return false;
+        }
+
+        $translationMappings = ProductChannelMapping::query()
+            ->where('product_id', $translation->id)
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->get(['external_product_id', 'external_variation_id']);
+
+        return $translationMappings->contains(function (ProductChannelMapping $mapping) use ($references): bool {
+            $externalProductId = (string) $mapping->external_product_id;
+            $externalVariationId = $mapping->external_variation_id !== null
+                ? (string) $mapping->external_variation_id
+                : null;
+
+            return $references->contains(
+                fn (array $reference): bool => $reference['product_id'] === $externalProductId
+                    && $reference['variation_id'] === $externalVariationId,
+            );
+        });
     }
 
     /**

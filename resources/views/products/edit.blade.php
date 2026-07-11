@@ -23,6 +23,15 @@
         .media-edit-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
         .media-edit-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fffdfb; display: grid; gap: 8px; }
         .media-edit-item img { width: 100%; aspect-ratio: 4 / 5; object-fit: cover; border-radius: 7px; background: #f4f1ef; border: 1px solid var(--border); }
+        .product-category-checklist { max-height: 250px; overflow: auto; display: grid; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: #fffdfb; }
+        .product-category-check { display: flex; align-items: flex-start; gap: 9px; padding: 7px 8px; border-radius: 6px; color: var(--text); cursor: pointer; }
+        .product-category-check:hover { background: var(--green-soft); }
+        .product-category-check input { width: auto; margin-top: 3px; }
+        .product-category-check span { display: grid; gap: 1px; min-width: 0; }
+        .product-category-check strong { font-size: 13px; }
+        .product-category-check small { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+        .product-category-check em { color: var(--green-dark); font-size: 11px; font-style: normal; }
+        .product-category-help, .pim-ready-help { color: var(--muted); font-size: 12px; font-weight: 500; }
         .product-step-actions { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 14px; }
         .product-step-actions .inline-actions { justify-content: flex-end; }
         .button[disabled] { opacity: .55; cursor: not-allowed; }
@@ -110,11 +119,29 @@
 
     <div class="page-toolbar">
         <div class="inline-actions">
-            <a class="button secondary" href="{{ route('products.show', $product) }}">Wróć do szczegółów</a>
             <a class="button secondary" href="{{ route('products.index') }}">Lista produktów</a>
+            @if (! $product->ean)
+                <button class="button secondary" type="button" data-gs1-open-modal>Wygeneruj EAN GS1</button>
+            @endif
+            @foreach ($availableWooCommerceCreateIntegrations as $integration)
+                <form method="POST" action="{{ route('products.woocommerce.create', [$product, $integration]) }}" onsubmit="return confirm('Utworzyć ten produkt w kanale WooCommerce {{ $integration->salesChannel?->code ?? $integration->name }}?');">
+                    @csrf
+                    <button class="button" type="submit" aria-label="Utwórz produkt w kanale WooCommerce: {{ $integration->salesChannel?->code ?? $integration->name }} - {{ $integration->salesChannel?->name ?? $integration->name }}">Wyślij do sklepu {{ $integration->salesChannel?->code ?? 'WooCommerce' }}</button>
+                </form>
+            @endforeach
+            @if ($product->channelMappings->isNotEmpty())
+                <form method="POST" action="{{ route('products.woocommerce.export', $product) }}" onsubmit="return confirm('Wysłać dane produktu z ERP do powiązanych kanałów WooCommerce?');">
+                    @csrf
+                    <button class="button secondary" type="submit">Wyślij dane do WooCommerce</button>
+                </form>
+            @endif
         </div>
         <div class="toolbar-note">Po zapisie ERP przejmuje produkt jako źródło prawdy i import WooCommerce nie nadpisuje tych pól.</div>
     </div>
+
+    @if (! $product->ean)
+        @include('products._gs1_gpc_modal', ['product' => $product, 'gs1Settings' => $gs1Settings])
+    @endif
 
     <nav class="product-edit-nav" aria-label="Sekcje edycji produktu">
         <button class="active" type="button" data-product-tab="produkt" aria-selected="true">Produkt</button>
@@ -144,14 +171,10 @@
                         </select>
                     </label>
                     <label>Kategorie produktu
-                        <select name="category_ids[]" multiple size="6" aria-describedby="product-category-help">
-                            @foreach ($categoryOptions as $category)
-                                @if ($category['id'] ?? null)
-                                    <option value="{{ $category['id'] }}" @selected(in_array((int) $category['id'], $selectedCategoryIds, true))>{{ $category['path'] }}{{ ($category['gs1_gpc_code'] ?? null) ? ' · GS1 '.$category['gs1_gpc_code'] : '' }}</option>
-                                @endif
-                            @endforeach
-                        </select>
-                        <small id="product-category-help">Wyszukaj kategorię z WooCommerce; możesz zaznaczyć kilka. Pierwsza z mapowaniem GS1 posłuży do automatycznego EAN.</small>
+                        @include('products._category_checkbox_list', [
+                            'categoryOptions' => $categoryOptions,
+                            'selectedCategoryIds' => $selectedCategoryIds,
+                        ])
                     </label>
                     <label>Tagi
                         <input name="tags" value="{{ $tags }}" placeholder="tag 1, tag 2">
@@ -221,9 +244,10 @@
                             'value' => $masterField('variant_attribute', 'variant_attribute'),
                         ])
                     </label>
-                    <label>Gotowe do publikacji
+                    <label>Kompletność danych PIM
                         <input type="hidden" name="developed" value="0">
-                        <span class="toggle-row"><input name="developed" type="checkbox" value="1" @checked(old('developed', (bool) data_get($master, 'developed'))) > Dane PIM kompletne</span>
+                        <span class="toggle-row"><input name="developed" type="checkbox" value="1" @checked(old('developed', (bool) data_get($master, 'developed'))) > Dane gotowe do publikacji</span>
+                        <small class="pim-ready-help">Flaga robocza: potwierdza sprawdzenie nazwy, kategorii, cen, opisów i zdjęć. Nie publikuje produktu samodzielnie.</small>
                     </label>
                 </div>
             </div>

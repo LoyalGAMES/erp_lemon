@@ -137,7 +137,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('https://cdn.test/koszula.jpg')
             ->assertSee('/products/image-thumbnail?src=', false)
             ->assertDontSee('src="https://cdn.test/koszula.jpg"', false)
-            ->assertSee('Szczegóły')
+            ->assertDontSee('>Szczegóły<', false)
             ->assertSee('Edytuj')
             ->assertSee('Ogółem')
             ->assertSee('Dostępne')
@@ -145,29 +145,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertDontSee('4,0000');
 
         $this->get(route('products.show', $product))
-            ->assertOk()
-            ->assertSee('data-product-view-tab="produkt"', false)
-            ->assertSee('data-product-view-panel="sprzedaz"', false)
-            ->assertSee('product-quick-edit-drawer', false)
-            ->assertSee('data-product-quick-edit-open="produkt"', false)
-            ->assertSee('data-product-quick-edit-open="sprzedaz"', false)
-            ->assertSee('data-product-quick-edit-open="informacje"', false)
-            ->assertSee('data-product-quick-edit-open="media"', false)
-            ->assertSee('data-product-quick-edit-tab="warianty"', false)
-            ->assertSee('Szybka edycja produktu')
-            ->assertSee('/products/'.$product->id.'/edit', false)
-            ->assertSee('Produkt')
-            ->assertSee('Sprzedaż i magazyn')
-            ->assertSee('Informacje')
-            ->assertSee('Media')
-            ->assertSee('Warianty')
-            ->assertSee('https://cdn.test/koszula.jpg')
-            ->assertSee('Stan tego SKU')
-            ->assertSee('Relacje i kanały')
-            ->assertSee('Ostatnie ruchy magazynowe')
-            ->assertSee('PZ/2026/000123')
-            ->assertSee('Otwórz w sklepie')
-            ->assertDontSee('5,0000');
+            ->assertRedirect(route('products.edit', $product));
     }
 
     public function test_product_catalog_defaults_to_newest_products_first(): void
@@ -449,7 +427,7 @@ class ProductCatalogWorkflowTest extends TestCase
 
         $product = Product::query()->where('sku', 'SKU-NEW')->firstOrFail();
 
-        $response->assertRedirect(route('products.show', $product));
+        $response->assertRedirect(route('products.edit', $product));
         $this->assertSame('Nowa koszula ERP', $product->name);
         $this->assertSame('erp', data_get($product->attributes, 'master.source'));
         $this->assertSame('Koszule', data_get($product->attributes, 'master.category'));
@@ -551,12 +529,7 @@ class ProductCatalogWorkflowTest extends TestCase
         ]);
 
         $this->get(route('products.show', $product))
-            ->assertOk()
-            ->assertSee('Magazyny tego SKU i ręczna korekta stanu')
-            ->assertSee('Ustaw stan')
-            ->assertSee('Szybka edycja produktu')
-            ->assertSee('Ręczna zmiana tworzy dokument KOR')
-            ->assertSee('data-stock-adjust-submit', false);
+            ->assertRedirect(route('products.edit', $product));
 
         $this->get(route('products.edit', $product))
             ->assertOk()
@@ -574,7 +547,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'warehouse_id' => $warehouse->id,
             'new_quantity' => 8,
             'notes' => 'Inwentaryzacja testowa',
-        ])->assertRedirect(route('products.show', $product))
+        ])->assertRedirect(route('products.edit', $product))
             ->assertSessionHas('status');
 
         $balance = StockBalance::query()
@@ -637,7 +610,7 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('data-product-tab="warianty"', false)
             ->assertSee('Status publikacji w sklepie')
             ->assertSee('Data publikacji w sklepie')
-            ->assertSee('Wyszukaj kategorię z WooCommerce')
+            ->assertSee('product-category-checklist', false)
             ->assertSee('Dodaj zdjęcia z komputera');
 
         $this->post(route('products.update', $product), [
@@ -695,7 +668,7 @@ class ProductCatalogWorkflowTest extends TestCase
                 'product_code' => ['AURA-01', ''],
                 'purchase_price_pln' => ['99.50', ''],
             ],
-        ])->assertRedirect(route('products.show', $product));
+        ])->assertRedirect(route('products.edit', $product));
 
         $product->refresh();
         $this->assertSame('Koszula AURA Czarno-ecru', $product->name);
@@ -725,23 +698,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame(1, AuditLog::query()->where('action', 'product.master_data_updated')->count());
 
         $this->get(route('products.show', $product))
-            ->assertOk()
-            ->assertSee('Źródło danych głównych: ERP')
-            ->assertSee('Koszula AURA Czarno-ecru')
-            ->assertSee('Koszule')
-            ->assertSee('Cena detal')
-            ->assertSee('2026-07-20 08:15')
-            ->assertSee('369,00 PLN')
-            ->assertSee('Dostępne do sprzedaży')
-            ->assertSee('Opis PL HTML')
-            ->assertSee('Krótki opis EN HTML')
-            ->assertSee('Sprzedaż dodatkowa SKU')
-            ->assertSee('Szybka edycja produktu')
-            ->assertSee('data-product-quick-edit-tab="sprzedaz"', false)
-            ->assertSee('data-product-quick-edit-step="media"', false)
-            ->assertSee('Stylowa koszula')
-            ->assertSee('Rozmiar')
-            ->assertSee($mediaSrc);
+            ->assertRedirect(route('products.edit', $product));
 
         @unlink(public_path(ltrim($mediaSrc, '/')));
     }
@@ -779,7 +736,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'vat_rate' => 23,
             'is_active' => '1',
         ])
-            ->assertRedirect(route('products.show', $product))
+            ->assertRedirect(route('products.edit', $product))
             ->assertSessionHas('status', 'Dane produktu zostały zapisane jako dane główne ERP. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle.');
 
         Queue::assertPushed(ExportWooCommerceProductDataJob::class, 1);
@@ -929,10 +886,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame(0, StockBalance::query()->where('product_id', $variantCopy->id)->count());
 
         $this->get(route('products.show', $copy))
-            ->assertOk()
-            ->assertSee('Ten produkt istnieje tylko w ERP')
-            ->assertSee('Wyślij do sklepu')
-            ->assertDontSee('Otwórz w sklepie');
+            ->assertRedirect(route('products.edit', $copy));
 
         $this->get(route('products.edit', $copy))
             ->assertOk()
@@ -1155,7 +1109,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'vat_rate' => 23,
             'is_active' => 1,
             'product_type' => 'simple',
-        ])->assertRedirect(route('products.show', $product))->assertSessionHasNoErrors();
+        ])->assertRedirect(route('products.edit', $product))->assertSessionHasNoErrors();
 
         $master = $product->refresh()->masterData();
         $this->assertNull(data_get($master, 'category'));
@@ -1215,7 +1169,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'vat_rate' => 23,
             'product_type' => 'simple',
             'category_ids' => [$category->id],
-        ])->assertRedirect(route('products.show', $copy))->assertSessionHasNoErrors();
+        ])->assertRedirect(route('products.edit', $copy))->assertSessionHasNoErrors();
 
         $copy->refresh();
         $this->assertNotNull($copy->ean);
@@ -1272,10 +1226,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame('variation', data_get($variant->refresh()->attributes, 'master.product_type'));
 
         $this->get(route('products.show', $parent))
-            ->assertOk()
-            ->assertSee('Komplet wariantowy S')
-            ->assertSee('Odłącz')
-            ->assertSee('Dodaj istniejący produkt jako wariant');
+            ->assertRedirect(route('products.edit', $parent));
 
         $this->delete(route('products.relations.destroy', [$parent, $relation]))
             ->assertRedirect()

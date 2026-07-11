@@ -22,14 +22,7 @@ class ProductConfigurationController extends Controller
     public function categories(Gs1SettingsService $gs1Settings): View
     {
         return view('products.configuration.categories', [
-            'categories' => ProductCategory::query()
-                ->with('salesChannel')
-                ->orderBy('sales_channel_id')
-                ->orderBy('parent_external_id')
-                ->orderBy('sort_order')
-                ->orderBy('path')
-                ->orderBy('name')
-                ->get(),
+            'categories' => $this->primaryCategories(),
             'salesChannels' => SalesChannel::query()
                 ->where('is_active', true)
                 ->orderBy('code')
@@ -177,9 +170,12 @@ class ProductConfigurationController extends Controller
             ],
             'parent_external_id' => ['nullable', 'string', 'max:255'],
             'name' => ['required', 'string', 'max:255'],
+            'name_en' => ['nullable', 'string', 'max:255'],
             'slug' => ['nullable', 'string', 'max:255'],
+            'slug_en' => ['nullable', 'string', 'max:255'],
             'path' => ['nullable', 'string', 'max:255'],
             'description' => ['nullable', 'string', 'max:8000'],
+            'description_en' => ['nullable', 'string', 'max:8000'],
             'gs1_gpc_code' => ['nullable', 'string', 'regex:/^\d{8}$/'],
             'gs1_gpc_label' => ['nullable', 'string', 'max:255'],
             'sort_order' => ['nullable', 'integer', 'min:0', 'max:65000'],
@@ -210,6 +206,22 @@ class ProductConfigurationController extends Controller
             $parentExternalId = null;
         }
 
+        $metadata = array_merge((array) $category?->metadata, [
+            'source' => ctype_digit($externalId) ? 'woocommerce' : 'erp',
+            'managed_in_erp' => true,
+        ]);
+        $englishTranslation = array_filter([
+            'name' => $this->nullableString($validated['name_en'] ?? null),
+            'slug' => $this->nullableString($validated['slug_en'] ?? null),
+            'description' => $this->nullableString($validated['description_en'] ?? null),
+        ], fn (?string $value): bool => $value !== null);
+
+        if ($englishTranslation === []) {
+            data_forget($metadata, 'translations.en');
+        } else {
+            data_set($metadata, 'translations.en', $englishTranslation);
+        }
+
         return [
             'sales_channel_id' => $salesChannelId,
             'external_id' => $externalId,
@@ -221,11 +233,30 @@ class ProductConfigurationController extends Controller
             'gs1_gpc_code' => $this->nullableString($validated['gs1_gpc_code'] ?? null),
             'gs1_gpc_label' => $this->nullableString($validated['gs1_gpc_label'] ?? null),
             'sort_order' => (int) ($validated['sort_order'] ?? $category?->sort_order ?? 100),
-            'metadata' => array_merge((array) $category?->metadata, [
-                'source' => ctype_digit($externalId) ? 'woocommerce' : 'erp',
-                'managed_in_erp' => true,
-            ]),
+            'metadata' => $metadata,
         ];
+    }
+
+    /**
+     * @return Collection<int, ProductCategory>
+     */
+    private function primaryCategories(): Collection
+    {
+        return ProductCategory::query()
+            ->with('salesChannel')
+            ->orderBy('sales_channel_id')
+            ->orderBy('parent_external_id')
+            ->orderBy('sort_order')
+            ->orderBy('path')
+            ->orderBy('name')
+            ->get()
+            ->reject(function (ProductCategory $category): bool {
+                $woocommerceIds = (array) data_get($category->metadata, 'woocommerce_ids', []);
+
+                return filled($woocommerceIds['en'] ?? null)
+                    && blank($woocommerceIds['pl'] ?? null);
+            })
+            ->values();
     }
 
     /**

@@ -81,6 +81,8 @@
         .status-chip { min-height: 42px; display: inline-flex; align-items: center; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 13px; background: var(--surface); font-weight: 650; white-space: nowrap; box-shadow: 0 5px 18px rgba(134, 115, 100, .08); }
         .top-shortcut { color: var(--text); text-decoration: none; }
         .top-shortcut.active { color: var(--green-dark); background: var(--green-soft); }
+        .mobile-status-shortcuts { display: none; }
+        .mobile-status-shortcuts a { color: var(--text); text-decoration: none; }
         .dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--green); }
         .dot.green { background: var(--green); }
         .dot.orange { background: var(--orange); }
@@ -167,8 +169,12 @@
             .main { padding: 0 14px 18px; }
             .topbar { height: auto; align-items: flex-start; flex-direction: column; margin: 0 -14px 18px; padding: 14px; }
             .top-title { width: 100%; }
-            .top-actions { width: 100%; gap: 8px; }
-            .top-actions .status-chip { min-height: 38px; }
+            .top-actions { display: none; }
+            .mobile-status-shortcuts { display: grid; gap: 5px; margin: 10px 8px 0; padding: 10px 8px; border-top: 1px solid var(--border); }
+            .mobile-status-shortcuts a { min-height: 40px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 10px; border-radius: 7px; font-size: 13px; font-weight: 700; }
+            .mobile-status-shortcuts a.active { color: var(--green-dark); background: var(--green-soft); }
+            .mobile-status-shortcuts a > span:first-child { display: grid; gap: 1px; }
+            .mobile-status-shortcuts small { color: var(--muted); font-size: 11px; font-weight: 600; }
             .metrics, .route-cards { grid-template-columns: 1fr; }
             .card { overflow-x: auto; }
             .drawer-panel { width: 96vw; }
@@ -215,6 +221,7 @@
         $settingsNav = array_values(array_filter($settingsNav, fn (array $item): bool => $canAccessArea($item[0])));
         $productSubnav = $canAccessArea('products') ? [
             ['products', route('products.index'), 'Lista produktów'],
+            ['product-favorites', route('products.favorites'), 'Ulubione'],
             ['product-categories', route('products.categories.index'), 'Kategorie'],
             ['product-parameters', route('products.parameters.index'), 'Parametry'],
         ] : [];
@@ -302,6 +309,21 @@
                     @endif
                 @endforeach
             </nav>
+            @if ($topActions !== [])
+                <div class="mobile-status-shortcuts" aria-label="Skróty operacyjne">
+                    @foreach ($topActions as $topAction)
+                        <a href="{{ $topAction['url'] }}" @class(['active' => $active === $topAction['key']])>
+                            <span>
+                                <strong>{{ $topAction['label'] }}</strong>
+                                @if ($topAction['status'] !== '')
+                                    <small>{{ $topAction['status'] }}</small>
+                                @endif
+                            </span>
+                            <span class="dot {{ $topAction['tone'] }}"></span>
+                        </a>
+                    @endforeach
+                </div>
+            @endif
             <details class="user-menu" {{ in_array($active, array_column($settingsNav, 0), true) ? 'open' : '' }}>
                 <summary class="user-card">
                     <div class="avatar">{{ $operatorInitials }}</div>

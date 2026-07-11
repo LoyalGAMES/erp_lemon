@@ -24,11 +24,15 @@ class Product extends Model
         'weight_kg',
         'attributes',
         'is_active',
+        'is_favorite',
+        'is_translation',
     ];
 
     protected $casts = [
         'attributes' => 'array',
         'is_active' => 'boolean',
+        'is_favorite' => 'boolean',
+        'is_translation' => 'boolean',
         'vat_rate' => 'decimal:2',
         'weight_kg' => 'decimal:4',
     ];

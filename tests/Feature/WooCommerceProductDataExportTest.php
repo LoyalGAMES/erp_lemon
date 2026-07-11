@@ -579,7 +579,7 @@ class WooCommerceProductDataExportTest extends TestCase
             ],
         ]);
 
-        $this->get(route('products.show', $product))
+        $this->get(route('products.edit', $product))
             ->assertOk()
             ->assertSee('Utwórz produkt w kanale WooCommerce')
             ->assertSee('B2C - Sklep B2C')

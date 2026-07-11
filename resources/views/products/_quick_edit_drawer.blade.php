@@ -101,14 +101,10 @@
                         </select>
                     </label>
                     <label>Kategorie produktu
-                        <select name="category_ids[]" multiple size="5">
-                            @foreach ($categoryOptions as $category)
-                                @if ($category['id'] ?? null)
-                                    <option value="{{ $category['id'] }}" @selected(in_array((int) $category['id'], $quickSelectedCategoryIds, true))>{{ $category['path'] }}{{ ($category['gs1_gpc_code'] ?? null) ? ' · GS1 '.$category['gs1_gpc_code'] : '' }}</option>
-                                @endif
-                            @endforeach
-                        </select>
-                        <small>Wyszukaj kategorię z WooCommerce i zaznacz jedną lub kilka pozycji.</small>
+                        @include('products._category_checkbox_list', [
+                            'categoryOptions' => $categoryOptions,
+                            'selectedCategoryIds' => $quickSelectedCategoryIds,
+                        ])
                     </label>
                     <label>Tagi
                         <input name="tags" value="{{ $quickTags }}" placeholder="tag 1, tag 2">
@@ -178,9 +174,10 @@
                             'value' => $quickMasterField('variant_attribute', 'variant_attribute'),
                         ])
                     </label>
-                    <label>Gotowe do publikacji
+                    <label>Kompletność danych PIM
                         <input type="hidden" name="developed" value="0">
-                        <span class="product-quick-toggle-row"><input name="developed" type="checkbox" value="1" @checked(old('developed', (bool) data_get($quickMaster, 'developed'))) > Dane PIM kompletne</span>
+                        <span class="product-quick-toggle-row"><input name="developed" type="checkbox" value="1" @checked(old('developed', (bool) data_get($quickMaster, 'developed'))) > Dane gotowe do publikacji</span>
+                        <small class="pim-ready-help">Flaga potwierdza komplet danych PIM; nie publikuje produktu samodzielnie.</small>
                     </label>
                 </div>
             </div>

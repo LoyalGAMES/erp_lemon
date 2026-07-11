@@ -1,7 +1,7 @@
 @extends('layouts.app', [
-    'title' => 'Produkty',
-    'subtitle' => 'Katalog głównych produktów ERP z wariantami, ceną PLN, stanami i szybkim przejściem do szczegółów.',
-    'module' => 'products',
+    'title' => ($isFavorites ?? false) ? 'Ulubione produkty' : 'Produkty',
+    'subtitle' => ($isFavorites ?? false) ? 'Oznaczone produkty główne ERP wraz z ich wariantami.' : 'Polski katalog głównych produktów ERP z wariantami, ceną PLN i stanami.',
+    'module' => ($isFavorites ?? false) ? 'product-favorites' : 'products',
 ])
 
 @push('styles')
@@ -12,14 +12,16 @@
         .product-filters label { min-width: 0; }
         .product-filters .button { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; white-space: nowrap; }
         .filter-result-line { color: var(--muted); font-size: 12px; }
-        .product-cell { display: grid; grid-template-columns: 62px minmax(260px, 1fr); gap: 12px; align-items: center; white-space: normal; }
-        .product-cell.variant { padding-left: 42px; grid-template-columns: 48px minmax(220px, 1fr); }
+        .product-cell { display: grid; grid-template-columns: 34px 62px minmax(260px, 1fr); gap: 12px; align-items: center; white-space: normal; }
+        .product-cell.variant { padding-left: 42px; grid-template-columns: 34px 48px minmax(220px, 1fr); }
         .product-thumb-button { width: 58px; height: 72px; border: 1px solid var(--border); border-radius: 8px; padding: 0; overflow: hidden; background: #f4f1ef; cursor: pointer; display: grid; place-items: center; color: var(--muted); font-weight: 850; font-size: 11px; }
         .product-cell.variant .product-thumb-button { width: 44px; height: 56px; }
         .product-thumb-button img { width: 100%; height: 100%; object-fit: cover; display: block; }
         .product-thumb-button:disabled { cursor: default; }
         .product-title { color: var(--text); text-decoration: none; font-size: 15px; font-weight: 850; }
         .product-title:hover { color: var(--green-dark); }
+        .favorite-button { width: 34px; height: 34px; flex: 0 0 auto; display: inline-grid; place-items: center; border: 1px solid var(--border); border-radius: 8px; background: #fffdfb; color: var(--muted); cursor: pointer; font-size: 19px; line-height: 1; }
+        .favorite-button.is-favorite { color: #a97955; background: #fff4e8; border-color: #d9ae81; }
         .product-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 5px; color: var(--muted); font-size: 12px; }
         .variant-toggle { margin-top: 8px; border: 1px solid rgba(134, 115, 100, .28); border-radius: 999px; padding: 5px 9px; background: var(--green-soft); color: var(--green-dark); font: inherit; font-size: 12px; font-weight: 850; cursor: pointer; }
         .variant-toggle:hover { border-color: rgba(134, 115, 100, .45); }
@@ -33,7 +35,13 @@
         .stock-pill { border: 1px solid var(--border); border-radius: 8px; padding: 5px 8px; background: #fffdfb; color: var(--muted); font-size: 12px; }
         .stock-pill strong { color: var(--text); font-size: 14px; margin-left: 4px; }
         .stock-pill.available strong { color: var(--green-dark); }
-        .warehouse-details summary { cursor: pointer; color: var(--green-dark); font-size: 12px; font-weight: 760; }
+        .warehouse-modal-trigger { width: max-content; border: 0; padding: 0; background: transparent; color: var(--green-dark); font: inherit; font-size: 12px; font-weight: 760; cursor: pointer; }
+        .stock-modal { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: rgba(37, 31, 26, .62); }
+        .stock-modal[hidden] { display: none; }
+        .stock-modal-card { width: min(1060px, 96vw); max-height: 90vh; overflow: auto; border-radius: 9px; background: var(--surface); box-shadow: 0 24px 70px rgba(0, 0, 0, .32); }
+        .stock-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 820; }
+        .stock-modal-close { width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--muted); font: inherit; font-size: 22px; cursor: pointer; }
+        .stock-modal-body { padding: 16px; }
         .warehouse-tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 7px; margin-top: 8px; }
         .warehouse-tile { border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: #fff; display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
         .warehouse-tile strong { color: var(--text); font-size: 13px; }
@@ -70,6 +78,16 @@
         .drawer-step-actions { padding: 0 16px 16px; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
         .drawer-step-actions .inline-actions { justify-content: flex-end; }
         .media-upload-panel { border: 1px dashed rgba(134, 115, 100, .34); border-radius: 8px; padding: 16px; background: #fffdfb; display: grid; gap: 12px; }
+        .product-category-checklist { max-height: 224px; overflow: auto; display: grid; gap: 6px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: #fffdfb; }
+        .product-category-check { display: flex; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 9px; padding: 7px 8px; border-radius: 6px; color: var(--text); cursor: pointer; }
+        .product-category-check:hover { background: var(--green-soft); }
+        .product-category-check input { margin-top: 3px; }
+        .product-category-check span { display: grid; gap: 1px; min-width: 0; }
+        .product-category-check strong { font-size: 13px; }
+        .product-category-check small { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+        .product-category-check em { color: var(--green-dark); font-size: 11px; font-style: normal; }
+        .product-category-help { color: var(--muted); font-size: 12px; font-weight: 500; }
+        .pim-ready-help { color: var(--muted); font-size: 12px; font-weight: 500; }
         textarea.product-html { min-height: 150px; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; line-height: 1.45; }
         .button[disabled] { opacity: .55; cursor: not-allowed; }
         @media (max-width: 1400px) {
@@ -143,13 +161,21 @@
         while (count($createParameterRows) < 4) {
             $createParameterRows[] = ['name' => '', 'value' => '', 'variation' => false];
         }
+
+        $createSelectedCategoryIds = collect(old('category_ids', []))
+            ->map(fn ($id): int => (int) $id)
+            ->all();
     @endphp
 
     <input id="product-drawer" class="drawer-toggle" type="checkbox" @checked($errors->any())>
 
     <div class="page-toolbar">
-        <div class="toolbar-note">Pokazujemy produkty główne. Warianty są pod przyciskiem „Warianty”, tak jak drzewo w Base.</div>
-        <label class="button" for="product-drawer">Dodaj produkt</label>
+        <div class="toolbar-note">
+            {{ $isFavorites ? 'Pokazujemy tylko oznaczone gwiazdką produkty i ich warianty.' : 'Pokazujemy wyłącznie polskie produkty główne. Warianty są pod przyciskiem „Warianty”.' }}
+        </div>
+        @if (! $isFavorites)
+            <label class="button" for="product-drawer">Dodaj produkt</label>
+        @endif
     </div>
 
     <article class="card product-filter-panel">
@@ -209,10 +235,10 @@
                 <input name="category" list="product-filter-category-options" value="{{ $filters['category'] }}" placeholder="Dowolna">
             </label>
             <button class="button secondary" type="submit">Filtruj</button>
-            <a class="button secondary" href="{{ route('products.index') }}">Wyczyść</a>
+            <a class="button secondary" href="{{ $isFavorites ? route('products.favorites') : route('products.index') }}">Wyczyść</a>
         </form>
         <div class="filter-result-line">
-            Wynik: {{ $productRows->total() }} produktów głównych po filtrach / {{ $productsCount }} SKU w systemie.
+            Wynik: {{ $productRows->total() }} {{ $isFavorites ? 'ulubionych produktów głównych' : 'polskich produktów głównych' }} po filtrach / {{ $productsCount }} SKU w systemie.
             Wyszukiwarka działa po nazwie, SKU, EAN, kategorii, parametrach i opisach.
         </div>
     </article>
@@ -246,11 +272,10 @@
                         </select>
                     </label>
                     <label>Kategorie produktu
-                        <select name="category_ids[]" multiple size="5">
-                            @foreach ($categoryOptions as $category)
-                                <option value="{{ $category['id'] }}" @selected(in_array((int) $category['id'], collect(old('category_ids', []))->map(fn ($id) => (int) $id)->all(), true))>{{ $category['path'] }}{{ $category['gs1_gpc_code'] ? ' · GS1 '.$category['gs1_gpc_code'] : '' }}</option>
-                            @endforeach
-                        </select>
+                        @include('products._category_checkbox_list', [
+                            'categoryOptions' => $categoryOptions,
+                            'selectedCategoryIds' => $createSelectedCategoryIds,
+                        ])
                     </label>
                     <label>Tagi
                         <input name="tags" value="{{ old('tags') }}" placeholder="tag 1, tag 2">
@@ -326,9 +351,10 @@
                             'selectedVariantAttribute' => old('variant_attribute'),
                         ])
                     </div>
-                    <label>Gotowe do publikacji
+                    <label>Kompletność danych PIM
                         <input type="hidden" name="developed" value="0">
-                        <span class="toggle-row"><input name="developed" type="checkbox" value="1" @checked(old('developed'))> Dane PIM kompletne</span>
+                        <span class="toggle-row"><input name="developed" type="checkbox" value="1" @checked(old('developed'))> Dane gotowe do publikacji</span>
+                        <small class="pim-ready-help">Flaga robocza: potwierdza sprawdzenie danych (nazwa, kategorie, ceny, opisy i zdjęcia). Sama nie publikuje produktu.</small>
                     </label>
                 </div>
             </section>
@@ -502,12 +528,21 @@
                             $stock = $stockTotals($familyProducts);
                             $channelNames = $channels($familyProducts);
                             $price = $retailPrice($product, $variants);
-                            $displaySku = $product->displaySku();
                             $externalId = $product->externalDisplayId();
                         @endphp
                         <tr class="parent-row">
                             <td>
                                 <div class="product-cell">
+                                    <form method="POST" action="{{ route('products.favorite.toggle', $product) }}">
+                                        @csrf
+                                        <button
+                                            class="favorite-button {{ $product->is_favorite ? 'is-favorite' : '' }}"
+                                            type="submit"
+                                            aria-label="{{ $product->is_favorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych' }}: {{ $product->name }}"
+                                            aria-pressed="{{ $product->is_favorite ? 'true' : 'false' }}"
+                                            title="{{ $product->is_favorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych' }}"
+                                        >★</button>
+                                    </form>
                                     <button
                                         class="product-thumb-button"
                                         type="button"
@@ -523,16 +558,11 @@
                                         @endif
                                     </button>
                                     <div>
-                                        <a class="product-title" href="{{ route('products.show', $product) }}">{{ $product->name }}</a>
+                                        <a class="product-title" href="{{ route('products.edit', $product) }}">{{ $product->name }}</a>
                                         <div class="product-meta">
-                                            @if ($displaySku)
-                                                <span><strong>SKU:</strong> {{ $displaySku }}</span>
-                                            @elseif ($externalId)
-                                                <span><strong>ID Woo:</strong> {{ $externalId }}</span>
-                                            @endif
-                                            @if ($product->ean)
-                                                <span><strong>EAN:</strong> {{ $product->ean }}</span>
-                                            @endif
+                                            <span><strong>ID Woo:</strong> {{ $externalId ?: '—' }}</span>
+                                            <span><strong>SKU:</strong> {{ $product->displaySku() ?: '—' }}</span>
+                                            <span><strong>EAN:</strong> {{ $product->ean ?: '—' }}</span>
                                             <span><strong>JM:</strong> {{ $product->unit }}</span>
                                         </div>
                                         @if ($variants->isNotEmpty())
@@ -554,8 +584,14 @@
                                         <span class="stock-pill">Rezerwacje <strong>{{ $qty($stock['reserved'], $product) }}</strong></span>
                                         <span class="stock-pill available">Dostępne <strong>{{ $qty($stock['available'], $product) }}</strong></span>
                                     </div>
-                                    <details class="warehouse-details">
-                                        <summary>Magazyny i korekta</summary>
+                                    <button class="warehouse-modal-trigger" type="button" data-stock-modal-open="stock-modal-{{ $product->id }}">Magazyny i korekta</button>
+                                    <div class="stock-modal" id="stock-modal-{{ $product->id }}" data-stock-modal hidden aria-hidden="true">
+                                        <div class="stock-modal-card" role="dialog" aria-modal="true" aria-labelledby="stock-modal-title-{{ $product->id }}">
+                                            <div class="stock-modal-header">
+                                                <span id="stock-modal-title-{{ $product->id }}">Magazyny i korekta — {{ $product->name }}</span>
+                                                <button class="stock-modal-close" type="button" data-stock-modal-close aria-label="Zamknij">&times;</button>
+                                            </div>
+                                            <div class="stock-modal-body">
                                         @if ($variants->isNotEmpty())
                                             <div class="toolbar-note">Stan ogółem obejmuje warianty. Korektę konkretnego wariantu wykonaj po rozwinięciu wariantów.</div>
                                         @endif
@@ -563,7 +599,9 @@
                                             'stockProduct' => $product,
                                             'stockWarehouses' => $warehouseOptions,
                                         ])
-                                    </details>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </td>
                             <td>
@@ -577,7 +615,6 @@
                             </td>
                             <td>
                                 <div class="inline-actions">
-                                    <a class="button secondary" href="{{ route('products.show', $product) }}">Szczegóły</a>
                                     <a class="button secondary" href="{{ route('products.edit', $product) }}">Edytuj</a>
                                     <form method="POST" action="{{ route('products.duplicate', $product) }}">
                                         @csrf
@@ -599,7 +636,6 @@
                                 $variantStock = $stockTotals(collect([$variant]));
                                 $variantChannels = $channels(collect([$variant]));
                                 $variantPrice = $retailPrice($variant, collect());
-                                $variantDisplaySku = $variant->displaySku();
                                 $variantExternalId = $variant->externalDisplayId();
                                 $variation = collect($variant->wooVariationAttributes())
                                     ->map(function (array $attribute): string {
@@ -618,6 +654,16 @@
                             <tr class="variant-row" data-variant-parent="{{ $rowKey }}" hidden>
                                 <td>
                                     <div class="product-cell variant">
+                                        <form method="POST" action="{{ route('products.favorite.toggle', $variant) }}">
+                                            @csrf
+                                            <button
+                                                class="favorite-button {{ $variant->is_favorite ? 'is-favorite' : '' }}"
+                                                type="submit"
+                                                aria-label="{{ $variant->is_favorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych' }}: {{ $variant->name }}"
+                                                aria-pressed="{{ $variant->is_favorite ? 'true' : 'false' }}"
+                                                title="{{ $variant->is_favorite ? 'Usuń z ulubionych' : 'Dodaj do ulubionych' }}"
+                                            >★</button>
+                                        </form>
                                         <button
                                             class="product-thumb-button"
                                             type="button"
@@ -632,16 +678,11 @@
                                             @endif
                                         </button>
                                         <div>
-                                            <a class="product-title" href="{{ route('products.show', $variant) }}">{{ $variant->name }}</a>
+                                            <a class="product-title" href="{{ route('products.edit', $variant) }}">{{ $variant->name }}</a>
                                             <div class="product-meta">
-                                                @if ($variantDisplaySku)
-                                                    <span><strong>SKU:</strong> {{ $variantDisplaySku }}</span>
-                                                @elseif ($variantExternalId)
-                                                    <span><strong>ID Woo:</strong> {{ $variantExternalId }}</span>
-                                                @endif
-                                                @if ($variant->ean)
-                                                    <span><strong>EAN:</strong> {{ $variant->ean }}</span>
-                                                @endif
+                                                <span><strong>ID Woo:</strong> {{ $variantExternalId ?: '—' }}</span>
+                                                <span><strong>SKU:</strong> {{ $variant->displaySku() ?: '—' }}</span>
+                                                <span><strong>EAN:</strong> {{ $variant->ean ?: '—' }}</span>
                                                 @if ($variation)
                                                     <span>{{ $variation }}</span>
                                                 @endif
@@ -662,13 +703,21 @@
                                             <span class="stock-pill">Rezerwacje <strong>{{ $qty($variantStock['reserved'], $variant) }}</strong></span>
                                             <span class="stock-pill available">Dostępne <strong>{{ $qty($variantStock['available'], $variant) }}</strong></span>
                                         </div>
-                                        <details class="warehouse-details">
-                                            <summary>Magazyny i korekta</summary>
+                                        <button class="warehouse-modal-trigger" type="button" data-stock-modal-open="stock-modal-{{ $variant->id }}">Magazyny i korekta</button>
+                                        <div class="stock-modal" id="stock-modal-{{ $variant->id }}" data-stock-modal hidden aria-hidden="true">
+                                            <div class="stock-modal-card" role="dialog" aria-modal="true" aria-labelledby="stock-modal-title-{{ $variant->id }}">
+                                                <div class="stock-modal-header">
+                                                    <span id="stock-modal-title-{{ $variant->id }}">Magazyny i korekta — {{ $variant->name }}</span>
+                                                    <button class="stock-modal-close" type="button" data-stock-modal-close aria-label="Zamknij">&times;</button>
+                                                </div>
+                                                <div class="stock-modal-body">
                                             @include('products._stock_readonly_panel', [
                                                 'stockProduct' => $variant,
                                                 'stockWarehouses' => $warehouseOptions,
                                             ])
-                                        </details>
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
                                 </td>
                                 <td>
@@ -682,7 +731,6 @@
                                 </td>
                                 <td>
                                     <div class="inline-actions">
-                                        <a class="button secondary" href="{{ route('products.show', $variant) }}">Szczegóły</a>
                                         <a class="button secondary" href="{{ route('products.edit', $variant) }}">Edytuj</a>
                                     </div>
                                 </td>
@@ -889,6 +937,32 @@
             });
         });
 
+        function closeStockModal(modal) {
+            if (!modal) return;
+            modal.hidden = true;
+            modal.setAttribute('aria-hidden', 'true');
+        }
+
+        document.querySelectorAll('[data-stock-modal-open]').forEach((button) => {
+            button.addEventListener('click', () => {
+                const modal = document.getElementById(button.dataset.stockModalOpen || '');
+                if (!modal) return;
+                modal.hidden = false;
+                modal.setAttribute('aria-hidden', 'false');
+                modal.querySelector('[data-stock-modal-close]')?.focus();
+            });
+        });
+
+        document.querySelectorAll('[data-stock-modal-close]').forEach((button) => {
+            button.addEventListener('click', () => closeStockModal(button.closest('[data-stock-modal]')));
+        });
+
+        document.querySelectorAll('[data-stock-modal]').forEach((modal) => {
+            modal.addEventListener('click', (event) => {
+                if (event.target === modal) closeStockModal(modal);
+            });
+        });
+
         const productImageModal = document.querySelector('[data-product-image-modal]');
         const productImageLarge = document.querySelector('[data-product-image-large]');
         const productImageTitle = document.querySelector('[data-product-image-title]');
@@ -928,6 +1002,7 @@
         });
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') {
+                document.querySelectorAll('[data-stock-modal]').forEach(closeStockModal);
                 closeProductImageModal();
             }
         });

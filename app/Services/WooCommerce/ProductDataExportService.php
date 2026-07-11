@@ -1091,10 +1091,12 @@ final class ProductDataExportService
                     continue;
                 }
 
+                $translation = (array) data_get($metadata, "translations.{$language}", []);
+
                 $response = $this->client->createProductCategory($integration, array_filter([
-                    'name' => $category->name,
-                    'slug' => $category->slug ?: null,
-                    'description' => $category->description ?: '',
+                    'name' => $translation['name'] ?? $category->name,
+                    'slug' => $translation['slug'] ?? $category->slug ?: null,
+                    'description' => $translation['description'] ?? $category->description ?: '',
                 ], fn (mixed $value): bool => $value !== null), $language);
                 $externalId = trim((string) ($response['id'] ?? ''));
 

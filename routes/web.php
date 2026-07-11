@@ -79,6 +79,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
 
     Route::middleware(EnsureErpRole::class.':products')->group(function (): void {
         Route::get('/products', [ProductController::class, 'index'])->name('products.index');
+        Route::get('/products/favorites', [ProductController::class, 'index'])->name('products.favorites');
         Route::get('/products/lookup', [ProductController::class, 'lookup'])->name('products.lookup');
         Route::get('/products/configuration/categories', [ProductConfigurationController::class, 'categories'])->name('products.categories.index');
         Route::post('/products/configuration/categories', [ProductConfigurationController::class, 'storeCategory'])->name('products.categories.store');
@@ -94,6 +95,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::get('/products/{product}/edit', [ProductController::class, 'edit'])->name('products.edit');
         Route::put('/products/{product}', [ProductController::class, 'update'])->name('products.update');
         Route::post('/products/{product}/duplicate', [ProductController::class, 'duplicate'])->name('products.duplicate');
+        Route::post('/products/{product}/favorite', [ProductController::class, 'toggleFavorite'])->name('products.favorite.toggle');
         Route::post('/products/{product}/relations', [ProductController::class, 'storeRelation'])->name('products.relations.store');
         Route::delete('/products/{product}/relations/{relation}', [ProductController::class, 'destroyRelation'])->name('products.relations.destroy');
         Route::post('/products/{product}/stock-adjustments', [ProductController::class, 'adjustStock'])->name('products.stock.adjust');

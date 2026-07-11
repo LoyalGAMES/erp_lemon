@@ -158,15 +158,23 @@ final class WooCommerceClient
      */
     public function productCategories(WordpressIntegration $integration): iterable
     {
+        $primaryLanguage = $integration->productImportLanguages()[0] ?? null;
+
         for ($page = 1; $page <= 10; $page++) {
+            $query = [
+                'per_page' => 100,
+                'page' => $page,
+                'hide_empty' => false,
+                'orderby' => 'name',
+                'order' => 'asc',
+            ];
+
+            if ($primaryLanguage !== null) {
+                $query['lang'] = $primaryLanguage;
+            }
+
             $response = $this->request($integration)
-                ->get($this->endpoint($integration, '/products/categories'), [
-                    'per_page' => 100,
-                    'page' => $page,
-                    'hide_empty' => false,
-                    'orderby' => 'name',
-                    'order' => 'asc',
-                ]);
+                ->get($this->endpoint($integration, '/products/categories'), $query);
 
             if (! $response->successful()) {
                 throw new RuntimeException("Import kategorii produktów zwrócił HTTP {$response->status()}.");
