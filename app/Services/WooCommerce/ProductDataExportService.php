@@ -44,6 +44,9 @@ final class ProductDataExportService
             }
 
             $isVariation = filled($mapping->external_variation_id);
+            if (! $isVariation) {
+                $this->removePendingVariants($product, $integration, $mapping);
+            }
             $variants = $this->variantChildren($product);
             $this->ensureRemoteCategories($product, $integration, (int) $mapping->sales_channel_id);
             $payload = $this->payload($product, $isVariation, (int) $mapping->sales_channel_id, 'pl');
@@ -122,13 +125,29 @@ final class ProductDataExportService
             throw new RuntimeException('Integracja WooCommerce nie ma przypisanego kanału sprzedaży.');
         }
 
-        $alreadyMapped = $product->channelMappings
-            ->contains(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === (int) $integration->sales_channel_id);
+        $existingMapping = $product->channelMappings
+            ->first(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === (int) $integration->sales_channel_id);
 
-        if ($alreadyMapped) {
-            $channelCode = $integration->salesChannel?->code ?? (string) $integration->sales_channel_id;
+        if ($existingMapping instanceof ProductChannelMapping) {
+            $exportResult = $this->export($product);
+            $this->markCreationCompleted($existingMapping);
+            $channelResult = collect($exportResult['results'])->first(
+                fn (array $result): bool => (string) ($result['external_id'] ?? '') === (string) $existingMapping->external_product_id,
+            ) ?? [];
 
-            throw new RuntimeException("Produkt ma już mapowanie do kanału {$channelCode}.");
+            return [
+                'mapping' => $existingMapping->refresh(),
+                'response' => (array) ($channelResult['response'] ?? []),
+                'payload' => $this->payload($product, false, (int) $integration->sales_channel_id, 'pl'),
+                'variant_mappings' => ProductChannelMapping::query()
+                    ->where('sales_channel_id', $integration->sales_channel_id)
+                    ->whereIn('product_id', $this->variantChildren($product)->pluck('id'))
+                    ->get()
+                    ->all(),
+                'variant_responses' => (array) ($channelResult['variants'] ?? []),
+                'translation_responses' => (array) ($channelResult['translations'] ?? []),
+                'resumed' => true,
+            ];
         }
 
         $variants = $this->variantChildren($product);
@@ -167,6 +186,7 @@ final class ProductDataExportService
                 'last_product_export_at' => now()->toDateTimeString(),
                 'last_product_export_status' => 'success',
                 'last_product_export_payload_hash' => $payloadHash,
+                'creation_state' => 'creating',
             ],
         ]);
 
@@ -250,6 +270,7 @@ final class ProductDataExportService
             (int) $integration->sales_channel_id,
             (string) $externalId,
         );
+        $this->markCreationCompleted($mapping);
 
         return [
             'mapping' => $mapping,
@@ -281,6 +302,12 @@ final class ProductDataExportService
                 continue;
             }
 
+            $existingReference = data_get($product->attributes, "woocommerce_translations.{$language}");
+
+            if (is_array($existingReference) && filled($existingReference['product_id'] ?? null)) {
+                continue;
+            }
+
             $payload = $this->payload($product, false, $salesChannelId, $language);
             $payload = $this->prepareVariablePayload($product, $variants, $payload);
             $desiredSku = $payload['sku'] ?? null;
@@ -294,13 +321,13 @@ final class ProductDataExportService
                 throw new RuntimeException("WooCommerce nie zwrócił ID utworzonego tłumaczenia produktu ({$language}).");
             }
 
+            $this->saveTranslationReference($product, $language, $translatedProductId, null, (string) $desiredSku);
+
             if (filled($desiredSku)) {
                 $response = $this->client->updateProductDataByIds($integration, $translatedProductId, null, [
                     'sku' => $desiredSku,
                 ]);
             }
-
-            $this->saveTranslationReference($product, $language, $translatedProductId, null, (string) $desiredSku);
             $variantResponses = [];
 
             foreach ($variants as $variant) {
@@ -495,6 +522,77 @@ final class ProductDataExportService
         }
 
         return $results;
+    }
+
+    private function removePendingVariants(
+        Product $parent,
+        WordpressIntegration $integration,
+        ProductChannelMapping $parentMapping,
+    ): void {
+        $pendingMappings = ProductChannelMapping::query()
+            ->with('product')
+            ->where('sales_channel_id', $parentMapping->sales_channel_id)
+            ->where('external_product_id', $parentMapping->external_product_id)
+            ->whereNotNull('external_variation_id')
+            ->get()
+            ->filter(fn (ProductChannelMapping $mapping): bool => (int) data_get(
+                $mapping->metadata,
+                'pending_variant_removal.parent_product_id',
+            ) === (int) $parent->id);
+        $parentTranslations = (array) data_get($parent->attributes, 'woocommerce_translations', []);
+
+        foreach ($pendingMappings as $mapping) {
+            $variant = $mapping->product;
+
+            if ($variant instanceof Product) {
+                $attributes = (array) $variant->attributes;
+
+                foreach ((array) data_get($attributes, 'woocommerce_translations', []) as $language => $reference) {
+                    if (! is_array($reference)) {
+                        continue;
+                    }
+
+                    $translatedProductId = trim((string) ($reference['product_id'] ?? ''));
+                    $translatedVariationId = trim((string) ($reference['variation_id'] ?? ''));
+                    $expectedParentId = trim((string) data_get($parentTranslations, "{$language}.product_id", ''));
+
+                    if ($translatedProductId === '' || $translatedVariationId === '' || $translatedProductId !== $expectedParentId) {
+                        continue;
+                    }
+
+                    $this->client->deleteProductVariation($integration, $translatedProductId, $translatedVariationId);
+                    data_forget($attributes, "woocommerce_translations.{$language}");
+                }
+
+                $variant->forceFill(['attributes' => $attributes])->save();
+            }
+
+            $this->client->deleteProductVariation(
+                $integration,
+                (string) $mapping->external_product_id,
+                (string) $mapping->external_variation_id,
+            );
+
+            IntegrationSyncLog::query()->create([
+                'sales_channel_id' => $mapping->sales_channel_id,
+                'wordpress_integration_id' => $integration->id,
+                'direction' => 'out',
+                'operation' => 'delete_product_variation',
+                'status' => 'success',
+                'external_resource' => 'product_variation',
+                'external_id' => $mapping->external_variation_id,
+                'request_payload' => [
+                    'parent_product_id' => $parent->id,
+                    'product_id' => $mapping->product_id,
+                ],
+                'response_payload' => ['deleted' => true],
+                'attempts' => 1,
+                'started_at' => now(),
+                'finished_at' => now(),
+            ]);
+
+            $mapping->delete();
+        }
     }
 
     /**
@@ -1129,7 +1227,16 @@ final class ProductDataExportService
         bool $isVariation,
         Collection $variants,
     ): array {
-        $results = [];
+        $results = $isVariation || data_get($mapping->metadata, 'creation_state') !== 'creating'
+            ? []
+            : $this->createTranslations(
+                $product,
+                $variants,
+                $integration,
+                (int) $mapping->sales_channel_id,
+                (string) $mapping->external_product_id,
+            );
+        $createdLanguages = collect($results)->pluck('language')->filter()->map(fn (mixed $language): string => (string) $language);
         $mainProductId = (string) $mapping->external_product_id;
         $mainVariationId = filled($mapping->external_variation_id) ? (string) $mapping->external_variation_id : null;
 
@@ -1146,6 +1253,10 @@ final class ProductDataExportService
             }
 
             $language = in_array((string) $language, ['pl', 'en'], true) ? (string) $language : 'en';
+
+            if ($createdLanguages->contains($language)) {
+                continue;
+            }
 
             if (! $this->hasTranslationData($product, $language)) {
                 continue;
@@ -1174,6 +1285,19 @@ final class ProductDataExportService
         }
 
         return $results;
+    }
+
+    private function markCreationCompleted(ProductChannelMapping $mapping): void
+    {
+        $metadata = (array) $mapping->metadata;
+
+        if (($metadata['creation_state'] ?? null) !== 'creating') {
+            return;
+        }
+
+        $metadata['creation_state'] = 'completed';
+        $metadata['creation_completed_at'] = now()->toDateTimeString();
+        $mapping->forceFill(['metadata' => $metadata])->save();
     }
 
     private function hasTranslationData(Product $product, string $language): bool

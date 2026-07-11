@@ -344,6 +344,29 @@ final class WooCommerceClient
     }
 
     /**
+     * @return array<string, mixed>
+     */
+    public function deleteProductVariation(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        string $externalVariationId,
+    ): array {
+        $endpoint = $this->endpoint(
+            $integration,
+            "/products/{$externalProductId}/variations/{$externalVariationId}",
+        ).'?force=true';
+        $response = $this->request($integration)->delete($endpoint);
+
+        if (! $response->successful() && $response->status() !== 404) {
+            throw new RuntimeException("Usunięcie wariantu WooCommerce zwróciło HTTP {$response->status()}.");
+        }
+
+        $json = $response->json();
+
+        return is_array($json) ? $json : [];
+    }
+
+    /**
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */

@@ -34,6 +34,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 use Illuminate\View\View;
 use RuntimeException;
 
@@ -181,45 +182,58 @@ class ProductController extends Controller
     public function store(Request $request, ProductIdentifierService $identifiers): RedirectResponse
     {
         $validated = $request->validate($this->productValidationRules());
+        $this->validateProductTypeSelection($request, $validated);
         $requestedSku = $this->nullableString($validated['sku'] ?? null);
+        $uploadedMedia = [];
 
-        $product = Product::query()->create([
-            'sku' => $requestedSku ?? $identifiers->temporarySku(),
-            'name' => $validated['name'],
-            'ean' => $this->nullableString($validated['ean'] ?? null),
-            'unit' => $validated['unit'],
-            'vat_rate' => $validated['vat_rate'],
-            'weight_kg' => $this->nullableFloat($validated['weight_kg'] ?? null),
-            'quantity_precision' => 0,
-            'is_active' => $request->boolean('is_active', true),
-            'attributes' => [
-                'master' => [
-                    'source' => 'erp',
-                    'content' => [
-                        'pl' => [
-                            'name' => $validated['name'],
+        try {
+            [$product, $eanResult, $generatedVariants] = DB::transaction(function () use ($validated, $request, $requestedSku, $identifiers, &$uploadedMedia): array {
+                $product = Product::query()->create([
+                    'sku' => $requestedSku ?? $identifiers->temporarySku(),
+                    'name' => $validated['name'],
+                    'ean' => $this->nullableString($validated['ean'] ?? null),
+                    'unit' => $validated['unit'],
+                    'vat_rate' => $validated['vat_rate'],
+                    'weight_kg' => $this->nullableFloat($validated['weight_kg'] ?? null),
+                    'quantity_precision' => 0,
+                    'is_active' => $request->boolean('is_active', true),
+                    'attributes' => [
+                        'master' => [
+                            'source' => 'erp',
+                            'content' => [
+                                'pl' => [
+                                    'name' => $validated['name'],
+                                ],
+                            ],
                         ],
                     ],
-                ],
-            ],
-        ]);
+                ]);
 
-        $attributes = (array) $product->attributes;
-        $attributes['master'] = $this->masterDataFromRequest(
-            $validated,
-            $request,
-            $this->storeUploadedMedia($product, $request),
-        );
-        $product->forceFill(['attributes' => $attributes])->save();
-        $identifiers->ensureSku($product, $requestedSku === null);
-        $eanResult = $identifiers->ensureEan($product);
-        $this->syncVariantRelations($product, (array) $request->input('variant_skus', []), [], $validated['variant_attribute'] ?? null);
-        $generatedVariants = $this->createGeneratedVariants(
-            $product,
-            $request,
-            $validated['variant_attribute'] ?? null,
-            $identifiers,
-        );
+                $attributes = (array) $product->attributes;
+                $uploadedMedia = $this->storeUploadedMedia($product, $request);
+                $attributes['master'] = $this->masterDataFromRequest(
+                    $validated,
+                    $request,
+                    $uploadedMedia,
+                );
+                $product->forceFill(['attributes' => $attributes])->save();
+                $identifiers->ensureSku($product, $requestedSku === null);
+                $eanResult = $identifiers->ensureEan($product);
+                $this->syncVariantRelations($product, (array) $request->input('variant_skus', []), [], $validated['variant_attribute'] ?? null);
+                $generatedVariants = $this->createGeneratedVariants(
+                    $product,
+                    $request,
+                    $validated['variant_attribute'] ?? null,
+                    $identifiers,
+                );
+
+                return [$product, $eanResult, $generatedVariants];
+            });
+        } catch (\Throwable $exception) {
+            $this->deleteStoredMediaFiles($uploadedMedia);
+
+            throw $exception;
+        }
 
         $redirect = redirect()
             ->route('products.show', $product)
@@ -237,55 +251,75 @@ class ProductController extends Controller
     public function update(Product $product, Request $request, AuditLogService $audit, ProductIdentifierService $identifiers): RedirectResponse
     {
         $validated = $request->validate($this->productValidationRules($product));
+        $this->validateProductTypeSelection($request, $validated);
 
         $before = [
             'product' => $product->only(['sku', 'name', 'ean', 'unit', 'vat_rate', 'weight_kg', 'is_active']),
             'attributes' => $product->attributes,
         ];
 
-        $attributes = (array) $product->attributes;
-        $currentMaster = data_get($attributes, 'master', []);
-        $media = $request->has('existing_media') || $request->hasFile('new_media')
-            ? array_merge(
-                $this->normalizeExistingMedia((array) $request->input('existing_media', [])),
-                $this->storeUploadedMedia($product, $request),
-            )
-            : (array) data_get($currentMaster, 'media', []);
+        $uploadedMedia = [];
 
-        $attributes['master'] = $this->masterDataFromRequest($validated, $request, $media, (array) $currentMaster);
+        try {
+            [$eanResult, $generatedVariants] = DB::transaction(function () use ($product, $request, $validated, $identifiers, $audit, $before, &$uploadedMedia): array {
+                $attributes = (array) $product->attributes;
+                $currentMaster = data_get($attributes, 'master', []);
+                $uploadedMedia = $this->storeUploadedMedia($product, $request);
+                $media = $request->has('existing_media') || $request->hasFile('new_media')
+                ? array_merge(
+                    $this->normalizeExistingMedia((array) $request->input('existing_media', [])),
+                    $uploadedMedia,
+                )
+                : (array) data_get($currentMaster, 'media', []);
 
-        $product->fill([
-            'sku' => $this->nullableString($validated['sku'] ?? null) ?? $product->sku,
-            'name' => $validated['name'],
-            'ean' => $this->nullableString($validated['ean'] ?? null),
-            'unit' => $validated['unit'],
-            'vat_rate' => $validated['vat_rate'],
-            'weight_kg' => $this->nullableFloat($validated['weight_kg'] ?? null),
-            'quantity_precision' => 0,
-            'is_active' => $request->boolean('is_active'),
-            'attributes' => $attributes,
-        ]);
-        $product->save();
-        $identifiers->ensureSku($product, $this->nullableString($validated['sku'] ?? null) === null);
-        $eanResult = $identifiers->ensureEan($product);
-        $this->syncVariantRelations(
-            $product,
-            (array) $request->input('variant_skus', []),
-            (array) $request->input('variant_remove', []),
-            $validated['variant_attribute'] ?? null,
-        );
-        $generatedVariants = $this->createGeneratedVariants(
-            $product,
-            $request,
-            $validated['variant_attribute'] ?? null,
-            $identifiers,
-        );
+                $attributes['master'] = $this->masterDataFromRequest($validated, $request, $media, (array) $currentMaster);
 
-        $audit->record('product.master_data_updated', $product, $before, [
-            'product' => $product->only(['sku', 'name', 'ean', 'unit', 'vat_rate', 'weight_kg', 'is_active']),
-            'attributes' => $product->attributes,
-        ]);
-        $this->queueWooCommerceDataExport($product);
+                $product->fill([
+                    'sku' => $this->nullableString($validated['sku'] ?? null) ?? $product->sku,
+                    'name' => $validated['name'],
+                    'ean' => $this->nullableString($validated['ean'] ?? null),
+                    'unit' => $validated['unit'],
+                    'vat_rate' => $validated['vat_rate'],
+                    'weight_kg' => $this->nullableFloat($validated['weight_kg'] ?? null),
+                    'quantity_precision' => 0,
+                    'is_active' => $request->boolean('is_active'),
+                    'attributes' => $attributes,
+                ]);
+                $product->save();
+                $identifiers->ensureSku($product, $this->nullableString($validated['sku'] ?? null) === null);
+                $eanResult = $identifiers->ensureEan($product);
+                $this->syncVariantRelations(
+                    $product,
+                    (array) $request->input('variant_skus', []),
+                    (array) $request->input('variant_remove', []),
+                    $validated['variant_attribute'] ?? null,
+                );
+                $generatedVariants = $this->createGeneratedVariants(
+                    $product,
+                    $request,
+                    $validated['variant_attribute'] ?? null,
+                    $identifiers,
+                );
+                $product->load('variantChildren');
+
+                foreach ($product->variantChildren as $variant) {
+                    $variantEanResult = $identifiers->ensureEan($variant);
+                    $eanResult['error'] ??= $variantEanResult['error'];
+                }
+
+                $audit->record('product.master_data_updated', $product, $before, [
+                    'product' => $product->only(['sku', 'name', 'ean', 'unit', 'vat_rate', 'weight_kg', 'is_active']),
+                    'attributes' => $product->attributes,
+                ]);
+                $this->queueWooCommerceDataExport($product);
+
+                return [$eanResult, $generatedVariants];
+            });
+        } catch (\Throwable $exception) {
+            $this->deleteStoredMediaFiles($uploadedMedia);
+
+            throw $exception;
+        }
 
         $redirect = redirect()
             ->route('products.show', $product)
@@ -310,63 +344,64 @@ class ProductController extends Controller
                 ->where('relation_type', 'variant')
                 ->with('childProduct'),
         ]);
-        $copy = $product->replicate(['sku', 'created_at', 'updated_at']);
-        $copy->name = $this->copyName($product->name);
-        $copy->sku = $identifiers->temporarySku();
-        $copy->ean = null;
-        $copy->attributes = $this->copyAttributes((array) $product->attributes, $copy->name, $product->id);
-        $copy->is_active = false;
-        $copy->save();
-        $identifiers->ensureSku($copy, true);
+        [$copy, $copiedVariants] = DB::transaction(function () use ($product, $identifiers, $audit): array {
+            $copy = $product->replicate(['sku', 'created_at', 'updated_at']);
+            $copy->name = $this->copyName($product->name);
+            $copy->sku = $identifiers->temporarySku();
+            $copy->ean = null;
+            $copy->attributes = $this->copyAttributes((array) $product->attributes, $copy->name, $product->id);
+            $copy->is_active = false;
+            $copy->save();
+            $identifiers->ensureSku($copy, true);
 
-        $copiedVariants = [];
+            $copiedVariants = [];
 
-        foreach ($product->childRelations as $sourceRelation) {
-            $sourceVariant = $sourceRelation->childProduct;
+            foreach ($product->childRelations as $sourceRelation) {
+                $sourceVariant = $sourceRelation->childProduct;
 
-            if (! $sourceVariant instanceof Product) {
-                continue;
+                if (! $sourceVariant instanceof Product) {
+                    continue;
+                }
+
+                $variantCopy = $sourceVariant->replicate(['sku', 'created_at', 'updated_at']);
+                $variantCopy->name = $this->copyName($sourceVariant->name);
+                $variantCopy->sku = $identifiers->temporarySku();
+                $variantCopy->ean = null;
+                $variantCopy->attributes = $this->copyAttributes(
+                    (array) $sourceVariant->attributes,
+                    $variantCopy->name,
+                    $sourceVariant->id,
+                );
+                $variantCopy->is_active = $sourceVariant->is_active;
+                $variantCopy->save();
+
+                ProductRelation::query()->create([
+                    'parent_product_id' => $copy->id,
+                    'child_product_id' => $variantCopy->id,
+                    'relation_type' => 'variant',
+                    'sort_order' => $sourceRelation->sort_order,
+                    'metadata' => array_merge((array) $sourceRelation->metadata, [
+                        'copied_from_relation_id' => $sourceRelation->id,
+                        'copied_at' => now()->toISOString(),
+                    ]),
+                ]);
+
+                $identifiers->ensureSku($variantCopy, true);
+                $copiedVariants[] = $variantCopy;
             }
 
-            $variantCopy = $sourceVariant->replicate(['sku', 'created_at', 'updated_at']);
-            $variantCopy->name = $this->copyName($sourceVariant->name);
-            $variantCopy->sku = $identifiers->temporarySku();
-            $variantCopy->ean = null;
-            $variantCopy->attributes = $this->copyAttributes(
-                (array) $sourceVariant->attributes,
-                $variantCopy->name,
-                $sourceVariant->id,
-            );
-            $variantCopy->is_active = $sourceVariant->is_active;
-            $variantCopy->save();
-
-            ProductRelation::query()->create([
-                'parent_product_id' => $copy->id,
-                'child_product_id' => $variantCopy->id,
-                'relation_type' => 'variant',
-                'sort_order' => $sourceRelation->sort_order,
-                'metadata' => array_merge((array) $sourceRelation->metadata, [
-                    'copied_from_relation_id' => $sourceRelation->id,
-                    'copied_at' => now()->toISOString(),
-                ]),
+            $audit->record('product.duplicated', $copy, null, [
+                'source_product_id' => $product->id,
+                'source_sku' => $product->sku,
+                'copy_sku' => $copy->sku,
+                'copied_variants' => collect($copiedVariants)->map(fn (Product $variant): array => [
+                    'product_id' => $variant->id,
+                    'sku' => $variant->sku,
+                ])->values()->all(),
             ]);
 
-            $identifiers->ensureSku($variantCopy, true);
-            $copiedVariants[] = $variantCopy;
-        }
-
-        $identifierResults = collect([$copy, ...$copiedVariants])
-            ->map(fn (Product $copiedProduct): array => $identifiers->ensureEan($copiedProduct));
-
-        $audit->record('product.duplicated', $copy, null, [
-            'source_product_id' => $product->id,
-            'source_sku' => $product->sku,
-            'copy_sku' => $copy->sku,
-            'copied_variants' => collect($copiedVariants)->map(fn (Product $variant): array => [
-                'product_id' => $variant->id,
-                'sku' => $variant->sku,
-            ])->values()->all(),
-        ]);
+            return [$copy, $copiedVariants];
+        });
 
         $redirect = redirect()
             ->route('products.edit', $copy)
@@ -374,9 +409,7 @@ class ProductController extends Controller
                 ? "Utworzono kopię produktu {$product->sku} razem z ".count($copiedVariants).' wariantami. Nadano nowe SKU i usunięto zdjęcia oraz stare identyfikatory WooCommerce.'
                 : "Utworzono kopię produktu {$product->sku}. Nadano nowe SKU i usunięto zdjęcia oraz stare identyfikatory WooCommerce.");
 
-        $eanError = $identifierResults->pluck('error')->filter()->first();
-
-        return is_string($eanError) ? $redirect->with('warning', $eanError) : $redirect;
+        return $redirect->with('warning', 'EAN produktu i wariantów zostanie nadany przy pierwszym zapisie po wybraniu właściwych kategorii.');
     }
 
     public function storeRelation(Product $product, Request $request, AuditLogService $audit): RedirectResponse
@@ -384,10 +417,7 @@ class ProductController extends Controller
         $validated = $request->validate([
             'relation_type' => ['required', 'string', 'in:variant'],
             'child_sku' => ['required', 'string', 'exists:products,sku'],
-            'variant_attribute' => ['nullable', 'string', 'max:255', 'required_with:new_variant_values,new_variant_values_custom'],
-            'new_variant_values' => ['nullable', 'array', 'max:100'],
-            'new_variant_values.*' => ['nullable', 'string', 'max:120'],
-            'new_variant_values_custom' => ['nullable', 'string', 'max:4000'],
+            'variant_attribute' => ['nullable', 'string', 'max:255'],
         ]);
         $child = Product::query()->where('sku', $validated['child_sku'])->firstOrFail();
 
@@ -434,7 +464,9 @@ class ProductController extends Controller
             abort(404);
         }
 
-        $childSku = $relation->childProduct?->sku;
+        $child = $relation->childProduct;
+        $childSku = $child?->sku;
+        $this->markVariantForWooRemoval($product, $child);
         $relation->delete();
 
         $audit->record('product.variant_detached', $product, [
@@ -640,6 +672,13 @@ class ProductController extends Controller
         $channel = $integration->salesChannel?->code ?? $integration->name;
         $variantCount = count($result['variant_mappings'] ?? []);
 
+        if (($result['resumed'] ?? false) === true) {
+            return back()->with(
+                'status',
+                "Wznowiono i dokończono synchronizację produktu w WooCommerce dla kanału {$channel}.",
+            );
+        }
+
         return back()->with(
             'status',
             $variantCount > 0
@@ -715,15 +754,31 @@ class ProductController extends Controller
     private function productValidationRules(?Product $product = null): array
     {
         $skuRule = Rule::unique('products', 'sku');
+        $eanRule = Rule::unique('products', 'ean');
 
         if ($product !== null) {
             $skuRule->ignore($product->id);
+            $eanRule->ignore($product->id);
         }
 
         return [
             'sku' => ['nullable', 'string', 'max:255', $skuRule],
             'name' => ['required', 'string', 'max:255'],
-            'ean' => ['nullable', 'string', 'max:255'],
+            'ean' => [
+                'nullable',
+                'string',
+                'regex:/^(?:\d{8}|\d{12}|\d{13}|\d{14})$/',
+                $eanRule,
+                function (string $attribute, mixed $value, \Closure $fail) use ($product): void {
+                    if ($product !== null && (string) $product->ean === (string) $value) {
+                        return;
+                    }
+
+                    if (! $this->hasValidGtinCheckDigit((string) $value)) {
+                        $fail('Pole EAN musi zawierać poprawny numer GTIN z prawidłową cyfrą kontrolną.');
+                    }
+                },
+            ],
             'unit' => ['required', 'string', 'max:16'],
             'vat_rate' => ['required', 'numeric', 'min:0', 'max:100'],
             'weight_kg' => ['nullable', 'numeric', 'min:0'],
@@ -738,15 +793,18 @@ class ProductController extends Controller
             'publication_date' => ['nullable', 'date'],
             'catalog_visibility' => ['nullable', 'string', 'in:visible,catalog,search,hidden'],
             'product_type' => ['nullable', 'string', 'in:simple,variable,variation'],
-            'variant_attribute' => ['nullable', 'string', 'max:255'],
+            'variant_attribute' => ['nullable', 'string', 'max:255', 'required_with:new_variant_values,new_variant_values_custom'],
+            'new_variant_values' => ['nullable', 'array', 'max:100'],
+            'new_variant_values.*' => ['nullable', 'string', 'max:120'],
+            'new_variant_values_custom' => ['nullable', 'string', 'max:4000'],
             'height_cm' => ['nullable', 'numeric', 'min:0'],
             'width_cm' => ['nullable', 'numeric', 'min:0'],
             'length_cm' => ['nullable', 'numeric', 'min:0'],
             'wholesale_price_pln' => ['nullable', 'numeric', 'min:0'],
             'retail_price_pln' => ['nullable', 'numeric', 'min:0'],
-            'sale_price_pln' => ['nullable', 'numeric', 'min:0'],
+            'sale_price_pln' => ['nullable', 'numeric', 'min:0', 'lte:retail_price_pln'],
             'sale_price_starts_at' => ['nullable', 'date'],
-            'sale_price_ends_at' => ['nullable', 'date'],
+            'sale_price_ends_at' => ['nullable', 'date', 'after_or_equal:sale_price_starts_at'],
             'price_eur' => ['nullable', 'numeric', 'min:0'],
             'price_gbp' => ['nullable', 'numeric', 'min:0'],
             'price_usd' => ['nullable', 'numeric', 'min:0'],
@@ -824,7 +882,7 @@ class ProductController extends Controller
             'catalog' => $this->nullableString($validated['catalog'] ?? null) ?? 'Domyślny',
             'category' => $legacyCategory,
             'category_ids' => $categoryIds->all(),
-            'categories' => $categoryNames !== [] ? $categoryNames : array_values(array_filter((array) data_get($existingMaster, 'categories', []))),
+            'categories' => $categoryNames,
             'producer' => $this->nullableString($validated['producer'] ?? null) ?? 'SEMPRE',
             'tags' => $this->tagList($validated['tags'] ?? ''),
             'asin' => $this->nullableString($validated['asin'] ?? null),
@@ -839,7 +897,7 @@ class ProductController extends Controller
                 'width_cm' => $this->nullableFloat($validated['width_cm'] ?? null),
                 'length_cm' => $this->nullableFloat($validated['length_cm'] ?? null),
             ],
-            'prices' => $this->priceData($validated),
+            'prices' => $this->priceData($validated, (array) data_get($existingMaster, 'prices', [])),
             'stock' => [
                 'location' => $this->nullableString($validated['warehouse_location'] ?? null),
             ],
@@ -881,7 +939,9 @@ class ProductController extends Controller
             ],
             'parameters' => $this->normalizeParameters((array) $request->input('parameters', [])),
             'media' => $media,
-            'suppliers' => $this->normalizeSuppliers((array) $request->input('suppliers', [])),
+            'suppliers' => $request->has('suppliers')
+                ? $this->normalizeSuppliers((array) $request->input('suppliers', []))
+                : array_values((array) data_get($existingMaster, 'suppliers', [])),
             'gs1' => (array) data_get($existingMaster, 'gs1', []),
         ];
     }
@@ -890,7 +950,7 @@ class ProductController extends Controller
      * @param  array<string, mixed>  $validated
      * @return array<string, float|null>
      */
-    private function priceData(array $validated): array
+    private function priceData(array $validated, array $existingPrices = []): array
     {
         $retailPrice = $this->nullableFloat($validated['retail_price_pln'] ?? null);
 
@@ -903,8 +963,12 @@ class ProductController extends Controller
             'price_eur' => $this->convertedPrice($retailPrice, 'EUR'),
             'price_gbp' => $this->convertedPrice($retailPrice, 'GBP'),
             'price_usd' => $this->convertedPrice($retailPrice, 'USD'),
-            'purchase_price_pln' => $this->nullableFloat($validated['purchase_price_pln'] ?? null),
-            'extra_cost_pln' => $this->nullableFloat($validated['extra_cost_pln'] ?? null),
+            'purchase_price_pln' => array_key_exists('purchase_price_pln', $validated)
+                ? $this->nullableFloat($validated['purchase_price_pln'])
+                : $this->nullableFloat($existingPrices['purchase_price_pln'] ?? null),
+            'extra_cost_pln' => array_key_exists('extra_cost_pln', $validated)
+                ? $this->nullableFloat($validated['extra_cost_pln'])
+                : $this->nullableFloat($existingPrices['extra_cost_pln'] ?? null),
         ];
     }
 
@@ -1155,7 +1219,12 @@ class ProductController extends Controller
             }
 
             if (filter_var($removeFlags[$index] ?? false, FILTER_VALIDATE_BOOLEAN)) {
-                $currentRelationBySku->get(mb_strtolower($sku))?->delete();
+                $relation = $currentRelationBySku->get(mb_strtolower($sku));
+
+                if ($relation instanceof ProductRelation) {
+                    $this->markVariantForWooRemoval($product, $relation->childProduct);
+                    $relation->delete();
+                }
 
                 continue;
             }
@@ -1793,6 +1862,14 @@ class ProductController extends Controller
             }
         }
 
+        foreach (['pl', 'en'] as $language) {
+            $name = $this->nullableString(data_get($attributes, "master.content.{$language}.name"));
+
+            if ($name !== null) {
+                data_set($attributes, "master.content.{$language}.name", $this->copyName($name));
+            }
+        }
+
         data_set($attributes, 'master.content.pl.name', $copyName);
         data_set($attributes, 'master.source', 'erp');
         data_set($attributes, 'master.copy.created_from_product_id', $sourceProductId);
@@ -1800,6 +1877,82 @@ class ProductController extends Controller
         data_set($attributes, 'master.media', []);
 
         return $attributes;
+    }
+
+    private function markVariantForWooRemoval(Product $parent, ?Product $variant): void
+    {
+        if (! $variant instanceof Product) {
+            return;
+        }
+
+        $parentMappings = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->get()
+            ->keyBy('sales_channel_id');
+
+        foreach ($variant->channelMappings()->get() as $mapping) {
+            $parentMapping = $parentMappings->get($mapping->sales_channel_id);
+
+            if (! $parentMapping instanceof ProductChannelMapping
+                || (string) $parentMapping->external_product_id !== (string) $mapping->external_product_id) {
+                continue;
+            }
+
+            $metadata = (array) $mapping->metadata;
+            $metadata['pending_variant_removal'] = [
+                'parent_product_id' => $parent->id,
+                'requested_at' => now()->toISOString(),
+            ];
+            $mapping->forceFill([
+                'stock_sync_enabled' => false,
+                'metadata' => $metadata,
+            ])->save();
+        }
+    }
+
+    private function hasValidGtinCheckDigit(string $value): bool
+    {
+        if (preg_match('/^(?:\d{8}|\d{12}|\d{13}|\d{14})$/', $value) !== 1) {
+            return false;
+        }
+
+        $sum = 0;
+        $position = 0;
+
+        for ($index = strlen($value) - 2; $index >= 0; $index--, $position++) {
+            $sum += (int) $value[$index] * ($position % 2 === 0 ? 3 : 1);
+        }
+
+        return (int) $value[strlen($value) - 1] === (10 - ($sum % 10)) % 10;
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     */
+    private function validateProductTypeSelection(Request $request, array $validated): void
+    {
+        if (($validated['product_type'] ?? 'simple') !== 'simple') {
+            return;
+        }
+
+        $hasGeneratedVariants = collect((array) $request->input('new_variant_values', []))
+            ->filter(fn (mixed $value): bool => filled($value))
+            ->isNotEmpty()
+            || filled($request->input('new_variant_values_custom'));
+        $remainingAttachedVariants = collect((array) $request->input('variant_skus', []))
+            ->filter(function (mixed $sku, int|string $index) use ($request): bool {
+                return filled($sku) && ! filter_var(
+                    data_get((array) $request->input('variant_remove', []), $index, false),
+                    FILTER_VALIDATE_BOOLEAN,
+                );
+            })
+            ->isNotEmpty();
+
+        if ($hasGeneratedVariants || $remainingAttachedVariants) {
+            throw ValidationException::withMessages([
+                'product_type' => 'Produkt prosty nie może mieć wariantów. Usuń wszystkie warianty albo wybierz typ „Produkt wariantowy”.',
+            ]);
+        }
     }
 
     /**
@@ -1866,6 +2019,22 @@ class ProductController extends Controller
         }
 
         return $rows;
+    }
+
+    /**
+     * @param  list<array{src:string,alt:?string,name:string}>  $media
+     */
+    private function deleteStoredMediaFiles(array $media): void
+    {
+        foreach ($media as $row) {
+            $src = ltrim((string) ($row['src'] ?? ''), '/');
+
+            if ($src === '' || (! str_starts_with($src, 'uploads/products/') && ! str_starts_with($src, 'uploads/testing-products/'))) {
+                continue;
+            }
+
+            File::delete(public_path($src));
+        }
     }
 
     private function productMediaDirectory(Product $product): string

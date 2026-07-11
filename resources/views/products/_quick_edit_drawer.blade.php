@@ -217,6 +217,9 @@
                     <label>Cena zakupu (średnia)
                         <input name="purchase_price_pln" type="number" step="0.01" min="0" value="{{ $quickMasterField('purchase_price_pln', 'prices.purchase_price_pln') }}">
                     </label>
+                    <label>Koszt dodatkowy (PLN)
+                        <input name="extra_cost_pln" type="number" step="0.01" min="0" value="{{ $quickMasterField('extra_cost_pln', 'prices.extra_cost_pln') }}">
+                    </label>
                     <label>Zarządzanie stanem
                         <input type="hidden" name="manage_stock" value="0">
                         <span class="product-quick-toggle-row"><input name="manage_stock" type="checkbox" value="1" @checked(old('manage_stock', data_get($quickMaster, 'inventory.manage_stock', true)))> Włączone</span>
@@ -236,6 +239,7 @@
                         <span class="product-quick-toggle-row"><input name="sold_individually" type="checkbox" value="1" @checked(old('sold_individually', data_get($quickMaster, 'inventory.sold_individually', false)))> Maks. 1 szt.</span>
                     </label>
                 </div>
+                @include('products._supplier_fields', ['supplierMaster' => $quickMaster])
                 @include('products._stock_management_panels', ['stockOwner' => $product])
             </div>
         </section>

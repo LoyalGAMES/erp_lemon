@@ -679,6 +679,88 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertCount(1, $result['translation_responses']);
     }
 
+    public function test_failed_bilingual_creation_can_be_resumed_without_duplicating_polish_product(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-RESUME',
+            'name' => 'Produkt PL',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => false,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'publication_status' => 'draft',
+                    'content' => [
+                        'pl' => ['name' => 'Produkt PL'],
+                        'en' => ['name' => 'Product EN'],
+                    ],
+                ],
+            ],
+        ]);
+
+        $retry = false;
+        Http::fake(function ($request) use (&$retry) {
+            if (! $retry && $request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products') {
+                return Http::response(['id' => 123, 'sku' => 'SKU-RESUME', 'name' => 'Produkt PL']);
+            }
+
+            if (! $retry && $request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en') {
+                return Http::response([], 500);
+            }
+
+            if ($retry && $request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123') {
+                return Http::response(['id' => 123, 'sku' => 'SKU-RESUME', 'name' => 'Produkt PL']);
+            }
+
+            if ($retry && $request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en') {
+                return Http::response(['id' => 223, 'name' => 'Product EN']);
+            }
+
+            if ($retry && $request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223') {
+                return Http::response(['id' => 223, 'sku' => 'SKU-RESUME', 'name' => 'Product EN']);
+            }
+
+            throw new \RuntimeException('Unexpected request: '.$request->method().' '.$request->url());
+        });
+
+        $this->post(route('products.woocommerce.create', [$product, $integration]))
+            ->assertRedirect()
+            ->assertSessionHas('error');
+
+        $mapping = ProductChannelMapping::query()->where('product_id', $product->id)->firstOrFail();
+        $this->assertSame('123', $mapping->external_product_id);
+        $this->assertSame('creating', data_get($mapping->metadata, 'creation_state'));
+
+        $retry = true;
+
+        $this->post(route('products.woocommerce.create', [$product, $integration]))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Wznowiono i dokończono synchronizację produktu w WooCommerce dla kanału B2C.');
+
+        $this->assertSame('completed', data_get($mapping->refresh()->metadata, 'creation_state'));
+        $this->assertSame('223', data_get($product->refresh()->attributes, 'woocommerce_translations.en.product_id'));
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123');
+        $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]->url() === 'https://shop.test/wp-json/wc/v3/products')->count());
+    }
+
     public function test_erp_variable_product_creates_parent_and_variants_in_woocommerce(): void
     {
         Http::fake(function ($request) {
@@ -898,7 +980,98 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame(1, IntegrationSyncLog::query()->where('operation', 'create_product_variation')->count());
     }
 
-    public function test_product_create_is_blocked_when_channel_mapping_already_exists(): void
+    public function test_detached_variant_is_deleted_from_polish_and_english_woocommerce_products(): void
+    {
+        Http::fake(fn ($request) => Http::response(['id' => 123, 'sku' => 'SET-REMOVE']));
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'SET-REMOVE',
+            'name' => 'Komplet',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variable',
+                    'content' => [
+                        'pl' => ['name' => 'Komplet'],
+                        'en' => ['name' => 'Set'],
+                    ],
+                ],
+                'woocommerce_translations' => [
+                    'en' => ['product_id' => '223', 'variation_id' => null, 'sku' => 'SET-REMOVE'],
+                ],
+            ],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'SET-REMOVE-S',
+            'name' => 'Komplet S',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => ['source' => 'erp', 'product_type' => 'variation'],
+                'woocommerce_translations' => [
+                    'en' => ['product_id' => '223', 'variation_id' => '224', 'sku' => 'SET-REMOVE-S'],
+                ],
+            ],
+        ]);
+        $relation = ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'SET-REMOVE',
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '124',
+            'external_sku' => 'SET-REMOVE-S',
+            'stock_sync_enabled' => true,
+        ]);
+
+        $this->delete(route('products.relations.destroy', [$parent, $relation]))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Wariant został odłączony od produktu.');
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223/variations/224?force=true');
+        Http::assertSent(fn ($request): bool => $request->method() === 'DELETE'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/124?force=true');
+        $this->assertDatabaseMissing('product_channel_mappings', ['product_id' => $variant->id]);
+        $this->assertNull(data_get($variant->refresh()->attributes, 'woocommerce_translations.en'));
+        $this->assertDatabaseHas('integration_sync_logs', [
+            'operation' => 'delete_product_variation',
+            'external_id' => '124',
+            'status' => 'success',
+        ]);
+    }
+
+    public function test_product_create_resumes_synchronization_when_channel_mapping_already_exists(): void
     {
         Http::fake();
 
@@ -937,11 +1110,12 @@ class WooCommerceProductDataExportTest extends TestCase
 
         $this->post(route('products.woocommerce.create', [$product, $integration]))
             ->assertRedirect()
-            ->assertSessionHas('error', 'Produkt ma już mapowanie do kanału B2C.');
+            ->assertSessionHas('status', 'Wznowiono i dokończono synchronizację produktu w WooCommerce dla kanału B2C.');
 
-        Http::assertNothingSent();
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123');
         $this->assertSame(1, ProductChannelMapping::query()->count());
-        $this->assertSame(1, AuditLog::query()->where('action', 'product.woocommerce_create_failed')->count());
+        $this->assertSame(1, AuditLog::query()->where('action', 'product.woocommerce_created')->count());
     }
 
     public function test_export_creates_selected_erp_category_for_both_languages_and_maps_it_to_product(): void

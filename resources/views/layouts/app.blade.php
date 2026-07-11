@@ -112,6 +112,7 @@
         .button.secondary { background: rgba(134, 115, 100, .08); color: var(--green-dark); border: 1px solid var(--border); }
         .alert { margin: 0 0 16px; border-radius: 8px; padding: 12px 14px; border: 1px solid var(--border); background: var(--surface); }
         .alert.ok { border-color: rgba(134, 115, 100, .32); background: rgba(134, 115, 100, .09); color: var(--green-dark); }
+        .alert.warning { border-color: #ead09b; background: #fff8e8; color: #765216; }
         .alert.error { border-color: #f0c3c3; background: #fff0f0; color: var(--red); }
         label { display: grid; gap: 6px; color: var(--muted); font-weight: 650; }
         input, select, textarea { width: 100%; border: 1px solid var(--border); border-radius: 7px; padding: 10px 11px; font: inherit; color: var(--text); background: #fff; }
@@ -349,6 +350,9 @@
             @endif
             @if (session('error'))
                 <div class="alert error">{{ session('error') }}</div>
+            @endif
+            @if (session('warning'))
+                <div class="alert warning">{{ session('warning') }}</div>
             @endif
 
             @yield('content')

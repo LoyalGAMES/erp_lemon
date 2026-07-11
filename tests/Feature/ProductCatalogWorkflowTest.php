@@ -10,6 +10,7 @@ use App\Models\AuditLog;
 use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
@@ -405,7 +406,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $response = $this->post(route('products.store'), [
             'sku' => 'SKU-NEW',
             'name' => 'Nowa koszula ERP',
-            'ean' => '5901234567000',
+            'ean' => '5901234567008',
             'unit' => 'szt',
             'vat_rate' => 23,
             'weight_kg' => '0.3000',
@@ -643,7 +644,7 @@ class ProductCatalogWorkflowTest extends TestCase
             '_method' => 'PUT',
             'sku' => 'SKU-BASE',
             'name' => 'Koszula AURA Czarno-ecru',
-            'ean' => '5901234567890',
+            'ean' => '5901234567893',
             'unit' => 'szt',
             'vat_rate' => 23,
             'weight_kg' => '0.4000',
@@ -1035,6 +1036,190 @@ class ProductCatalogWorkflowTest extends TestCase
         );
         $this->assertSame(3, $parent->variantChildren->pluck('sku')->unique()->count());
         $this->assertSame(3, $parent->variantChildren->pluck('ean')->filter()->unique()->count());
+    }
+
+    public function test_product_form_rejects_duplicate_invalid_ean_and_variants_without_attribute(): void
+    {
+        Product::query()->create([
+            'sku' => 'SKU-EAN-EXISTING',
+            'ean' => '5901234567893',
+            'name' => 'Istniejący produkt',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $this->from(route('products.index'))->post(route('products.store'), [
+            'name' => 'Duplikat EAN',
+            'sku' => 'SKU-EAN-DUPLICATE',
+            'ean' => '5901234567893',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+        ])->assertRedirect(route('products.index'))->assertSessionHasErrors('ean');
+
+        $this->from(route('products.index'))->post(route('products.store'), [
+            'name' => 'Niepoprawny EAN',
+            'sku' => 'SKU-EAN-INVALID',
+            'ean' => '5901234567890',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+        ])->assertRedirect(route('products.index'))->assertSessionHasErrors('ean');
+
+        $this->from(route('products.index'))->post(route('products.store'), [
+            'name' => 'Wariant bez atrybutu',
+            'sku' => 'SKU-NO-ATTRIBUTE',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'product_type' => 'variable',
+            'new_variant_values' => ['S'],
+        ])->assertRedirect(route('products.index'))->assertSessionHasErrors('variant_attribute');
+
+        $this->assertSame(1, Product::query()->count());
+    }
+
+    public function test_failed_variant_generation_rolls_back_product_variants_and_uploaded_media(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Inny atrybut',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => [],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
+        $this->withoutExceptionHandling();
+        $directory = public_path('uploads/testing-products/1');
+        $filesBefore = File::isDirectory($directory)
+            ? collect(File::files($directory))->map->getFilename()->sort()->values()->all()
+            : [];
+
+        try {
+            $this->post(route('products.store'), [
+                'name' => 'Produkt do wycofania',
+                'sku' => '',
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'new_variant_values' => ['S'],
+                'new_media' => [UploadedFile::fake()->image('rollback.jpg')],
+            ]);
+        } catch (\Throwable) {
+            $this->assertSame(0, Product::query()->count());
+            $filesAfter = File::isDirectory($directory)
+                ? collect(File::files($directory))->map->getFilename()->sort()->values()->all()
+                : [];
+            $this->assertSame($filesBefore, $filesAfter);
+
+            return;
+        }
+
+        $this->fail('Oczekiwano błędu zapisu definicji wariantu.');
+    }
+
+    public function test_edit_can_clear_all_categories_and_preserves_hidden_commercial_data(): void
+    {
+        $category = ProductCategory::query()->create([
+            'external_id' => 'ERP-OLD',
+            'name' => 'Stara kategoria',
+            'path' => 'Stara kategoria',
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-CLEAR-CATEGORY',
+            'name' => 'Produkt do edycji',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'category' => 'Stara kategoria',
+                    'category_ids' => [$category->id],
+                    'categories' => ['Stara kategoria'],
+                    'prices' => ['extra_cost_pln' => 12.5],
+                    'suppliers' => [[
+                        'name' => 'Dostawca historyczny',
+                        'product_code' => 'OLD-1',
+                        'purchase_price_pln' => 80,
+                    ]],
+                ],
+            ],
+        ]);
+
+        $this->put(route('products.update', $product), [
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => 1,
+            'product_type' => 'simple',
+        ])->assertRedirect(route('products.show', $product))->assertSessionHasNoErrors();
+
+        $master = $product->refresh()->masterData();
+        $this->assertNull(data_get($master, 'category'));
+        $this->assertSame([], data_get($master, 'category_ids'));
+        $this->assertSame([], data_get($master, 'categories'));
+        $this->assertEquals(12.5, data_get($master, 'prices.extra_cost_pln'));
+        $this->assertSame('Dostawca historyczny', data_get($master, 'suppliers.0.name'));
+    }
+
+    public function test_copy_renames_both_languages_and_generates_ean_after_category_is_confirmed(): void
+    {
+        AppSetting::query()->create([
+            'key' => 'gs1_configuration',
+            'value' => [
+                'company_prefix' => '5901234',
+                'next_item_reference' => 1,
+                'register_products' => false,
+            ],
+        ]);
+        $category = ProductCategory::query()->create([
+            'external_id' => 'ERP-NEW-CATEGORY',
+            'name' => 'Nowa kategoria',
+            'path' => 'Nowa kategoria',
+            'gs1_gpc_code' => '10001352',
+            'gs1_gpc_label' => 'Nowa kategoria GS1',
+        ]);
+        $source = Product::query()->create([
+            'sku' => 'SKU-BILINGUAL-COPY',
+            'ean' => '5901234567893',
+            'name' => 'Polska nazwa',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'content' => [
+                        'pl' => ['name' => 'Polska nazwa'],
+                        'en' => ['name' => 'English name'],
+                    ],
+                    'media' => [['src' => '/old.jpg']],
+                ],
+            ],
+        ]);
+
+        $this->post(route('products.duplicate', $source))->assertRedirect();
+        $copy = Product::query()->whereKeyNot($source->id)->firstOrFail();
+        $this->assertNull($copy->ean);
+        $this->assertSame('Polska nazwa (kopia)', data_get($copy->masterData(), 'content.pl.name'));
+        $this->assertSame('English name (kopia)', data_get($copy->masterData(), 'content.en.name'));
+
+        $this->put(route('products.update', $copy), [
+            'sku' => $copy->sku,
+            'name' => $copy->name,
+            'name_en' => 'New English name',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'product_type' => 'simple',
+            'category_ids' => [$category->id],
+        ])->assertRedirect(route('products.show', $copy))->assertSessionHasNoErrors();
+
+        $copy->refresh();
+        $this->assertNotNull($copy->ean);
+        $this->assertSame('10001352', data_get($copy->masterData(), 'gs1.gpc_code'));
     }
 
     public function test_operator_can_attach_and_remove_variant_relation(): void

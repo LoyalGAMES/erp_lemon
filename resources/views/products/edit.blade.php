@@ -96,6 +96,12 @@
         $relatedCrossSells = old('related_cross_sell_skus', implode("\n", (array) data_get($master, 'related_products.cross_sell_skus', [])));
     @endphp
 
+    @if (data_get($master, 'identifier_conflict.type') === 'duplicated_ean')
+        <div class="alert warning">
+            Wykryto zduplikowany EAN {{ data_get($master, 'identifier_conflict.previous_ean') }}. Numer został wyczyszczony — sprawdź kategorię GS1 i zapisz produkt, aby nadać poprawny EAN.
+        </div>
+    @endif
+
     @if ($errors->any())
         <div class="alert error">
             Nie zapisano produktu. Popraw pola formularza oznaczone przez walidację.
@@ -258,6 +264,9 @@
                     <label>Cena zakupu (średnia)
                         <input name="purchase_price_pln" type="number" step="0.01" min="0" value="{{ $masterField('purchase_price_pln', 'prices.purchase_price_pln') }}">
                     </label>
+                    <label>Koszt dodatkowy (PLN)
+                        <input name="extra_cost_pln" type="number" step="0.01" min="0" value="{{ $masterField('extra_cost_pln', 'prices.extra_cost_pln') }}">
+                    </label>
                     <label>Zarządzanie stanem
                         <input type="hidden" name="manage_stock" value="0">
                         <span class="toggle-row"><input name="manage_stock" type="checkbox" value="1" @checked(old('manage_stock', data_get($master, 'inventory.manage_stock', true)))> Włączone w WooCommerce</span>
@@ -277,6 +286,7 @@
                         <span class="toggle-row"><input name="sold_individually" type="checkbox" value="1" @checked(old('sold_individually', data_get($master, 'inventory.sold_individually', false)))> Maks. 1 szt. w zamówieniu</span>
                     </label>
                 </div>
+                @include('products._supplier_fields', ['supplierMaster' => $master])
                 @include('products._stock_management_panels', ['stockOwner' => $product])
             </div>
         </section>

@@ -158,6 +158,12 @@
         $publicationDate = data_get($master, 'publication_date');
     @endphp
 
+    @if (data_get($master, 'identifier_conflict.type') === 'duplicated_ean')
+        <div class="alert warning">
+            Wykryto zduplikowany EAN {{ data_get($master, 'identifier_conflict.previous_ean') }}. Edytuj produkt, sprawdź kategorię GS1 i zapisz go, aby nadać poprawny EAN.
+        </div>
+    @endif
+
     @include('products._quick_edit_drawer', [
         'product' => $product,
         'categoryOptions' => $categoryOptions,

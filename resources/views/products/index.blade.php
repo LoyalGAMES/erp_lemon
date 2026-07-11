@@ -363,6 +363,9 @@
                     <label>Cena zakupu (średnia)
                         <input name="purchase_price_pln" type="number" step="0.01" min="0" value="{{ old('purchase_price_pln') }}">
                     </label>
+                    <label>Koszt dodatkowy (PLN)
+                        <input name="extra_cost_pln" type="number" step="0.01" min="0" value="{{ old('extra_cost_pln') }}">
+                    </label>
                     <label>Zamówienia oczekujące
                         <select name="backorders">
                             @foreach (['no' => 'Nie zezwalaj', 'notify' => 'Zezwalaj i informuj', 'yes' => 'Zezwalaj'] as $value => $label)
@@ -377,6 +380,7 @@
                     <label class="toggle-row"><input name="sold_individually" type="checkbox" value="1" @checked(old('sold_individually'))> Sprzedawany pojedynczo</label>
                     <div class="toolbar-note">Stany magazynowe produktu powstaną z dokumentów magazynowych po zapisaniu produktu.</div>
                 </div>
+                @include('products._supplier_fields', ['supplierMaster' => []])
             </section>
 
             <section class="drawer-step" data-create-step="informacje" hidden>
