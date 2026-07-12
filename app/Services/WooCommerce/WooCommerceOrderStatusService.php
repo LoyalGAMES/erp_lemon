@@ -16,8 +16,7 @@ final class WooCommerceOrderStatusService
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly CustomerEmailWorkflowSettingsService $emailWorkflow,
-    ) {
-    }
+    ) {}
 
     /**
      * @return array<string, mixed>
@@ -46,8 +45,27 @@ final class WooCommerceOrderStatusService
     /**
      * @return array<string, mixed>
      */
-    private function updateStatus(ExternalOrder $order, string $settingsKey, string $defaultStatus, string $operation): array
+    public function updateManually(ExternalOrder $order, string $status): array
     {
+        return $this->updateStatus(
+            $order,
+            settingsKey: null,
+            defaultStatus: $status,
+            operation: 'order_status_manual_update',
+            respectWorkflow: false,
+        );
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function updateStatus(
+        ExternalOrder $order,
+        ?string $settingsKey,
+        string $defaultStatus,
+        string $operation,
+        bool $respectWorkflow = true,
+    ): array {
         $order = ExternalOrder::query()->findOrFail($order->id);
         $integration = WordpressIntegration::query()
             ->where('sales_channel_id', $order->sales_channel_id)
@@ -57,11 +75,13 @@ final class WooCommerceOrderStatusService
             throw new RuntimeException('Brak aktywnej integracji WooCommerce dla kanału tego zamówienia.');
         }
 
-        $status = trim((string) data_get($integration->orderStatusSettings(), $settingsKey, $defaultStatus));
+        $status = $settingsKey !== null
+            ? trim((string) data_get($integration->orderStatusSettings(), $settingsKey, $defaultStatus))
+            : trim($defaultStatus);
         $status = $status !== '' ? $status : $defaultStatus;
         $startedAt = now();
 
-        if (! $this->emailWorkflow->isEnabled($operation)) {
+        if ($respectWorkflow && ! $this->emailWorkflow->isEnabled($operation)) {
             $this->syncLog($integration, $order, $operation, 'skipped', $startedAt, [
                 'status' => $status,
                 'workflow_disabled' => true,
@@ -108,7 +128,7 @@ final class WooCommerceOrderStatusService
     }
 
     /**
-     * @param array<string, mixed>|null $responsePayload
+     * @param  array<string, mixed>|null  $responsePayload
      */
     private function syncLog(
         WordpressIntegration $integration,

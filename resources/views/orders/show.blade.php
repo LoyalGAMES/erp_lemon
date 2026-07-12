@@ -27,6 +27,20 @@
         return implode(', ', $parts) ?: '-';
     };
     $shippingProviderResolver = app(\App\Services\Shipping\ShippingProviderResolver::class);
+    $thumbnailService = app(\App\Services\Products\ProductImageThumbnailService::class);
+    $lineImage = function ($line) use ($thumbnailService): ?string {
+        $raw = is_array($line->raw_payload) ? $line->raw_payload : [];
+        $source = $line->product?->imageUrl()
+            ?: data_get($raw, 'image.src')
+            ?: data_get($raw, 'image.url')
+            ?: data_get($raw, 'images.0.src')
+            ?: data_get($raw, 'images.0.url')
+            ?: data_get($raw, 'parent_image.src')
+            ?: data_get($raw, 'parent_image.url');
+
+        return $line->product?->thumbnailUrl(72, 88)
+            ?: $thumbnailService->thumbnailUrl(is_string($source) ? $source : null, 72, 88);
+    };
     $shipmentLabels = $order->shippingLabels->where('purpose', 'shipment');
     $fulfillmentStatusLabel = match ($order->fulfillment_status) {
         'awaiting_courier' => 'Oczekuje na kuriera',
@@ -39,7 +53,10 @@
 @push('styles')
     <style>
         .order-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
-        .order-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .order-jump-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+        .order-jump-nav a { display: inline-flex; align-items: center; min-height: 36px; padding: 7px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--muted); text-decoration: none; font-weight: 760; font-size: 13px; }
+        .order-jump-nav a:hover { color: var(--green-dark); border-color: var(--green); }
+        .order-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
         .order-summary-card { padding: 14px 16px; }
         .order-summary-card span { display: block; color: var(--muted); font-size: 12px; font-weight: 720; margin-bottom: 4px; }
         .order-summary-card strong { display: block; font-size: 20px; line-height: 1.15; }
@@ -53,9 +70,30 @@
         .shipping-label-card-header, .shipping-label-card-actions { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
         .shipping-label-number { font-weight: 850; overflow-wrap: anywhere; }
         .shipping-label-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-        .address-grid { display: grid; gap: 14px; }
+        .address-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
         .address-box { border: 1px solid var(--border); border-radius: 8px; padding: 13px; }
         .address-box strong { display: block; margin-bottom: 6px; }
+        .order-command-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 16px; }
+        .order-command-card { padding: 16px; display: grid; gap: 10px; align-content: start; }
+        .order-command-card h2 { margin: 0; font-size: 18px; }
+        .order-command-card p { margin: 0; }
+        .order-command-form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+        .order-command-form label { margin: 0; }
+        .order-command-form .button { min-height: 44px; white-space: nowrap; }
+        .order-product-table { min-width: 1040px; }
+        .order-product-table th.numeric, .order-product-table td.numeric { text-align: right; }
+        .order-product-photo { width: 86px; }
+        .order-product-thumb { width: 64px; height: 78px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; display: grid; place-items: center; background: #f4f1ef; color: var(--muted); font-size: 11px; font-weight: 780; }
+        .order-product-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .order-product-picker { min-width: 290px; display: grid; gap: 5px; }
+        .order-product-picker input { min-height: 42px; }
+        .order-product-name { display: block; font-weight: 820; white-space: normal; }
+        .order-product-meta { color: var(--muted); font-size: 12px; white-space: normal; }
+        .order-quantity-input { width: 92px; min-height: 42px; text-align: right; }
+        .order-remove-control { display: inline-flex; align-items: center; gap: 7px; color: var(--red); font-weight: 720; }
+        .order-product-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; padding: 13px 16px; border-top: 1px solid var(--border); background: #fffdfb; }
+        .order-new-line { display: grid; grid-template-columns: minmax(280px, 1fr) 110px; gap: 8px; align-items: end; }
+        .order-edit-lock { margin: 0; padding: 12px 16px; border-top: 1px solid var(--border); background: #fff8e8; color: var(--orange); font-weight: 720; }
         .note-list { display: grid; gap: 10px; }
         .note-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }
         .note-card-header { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; margin-bottom: 6px; }
@@ -80,11 +118,14 @@
         @media (max-width: 1000px) {
             .order-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .order-grid { grid-template-columns: 1fr; }
+            .order-command-grid { grid-template-columns: 1fr; }
+            .address-grid { grid-template-columns: 1fr; }
         }
         @media (max-width: 560px) {
             .order-summary { grid-template-columns: 1fr; }
             .split-line-grid { grid-template-columns: 1fr; }
             .compact-form-grid { grid-template-columns: 1fr; }
+            .order-command-form, .order-new-line { grid-template-columns: 1fr; }
         }
     </style>
 @endpush
@@ -101,6 +142,15 @@
             'showDetailsLink' => false,
         ])
     </section>
+
+    <nav class="order-jump-nav" aria-label="Sekcje zamówienia">
+        <a href="#obsluga-zamowienia">Obsługa</a>
+        <a href="#pozycje-zamowienia">Produkty</a>
+        <a href="#dane-klienta">Klient i dostawa</a>
+        <a href="#logistyka-zamowienia">Logistyka</a>
+        <a href="#komunikacja-z-klientem">Komunikacja</a>
+        <a href="#rozliczenia-zamowienia">Rozliczenia</a>
+    </nav>
 
     <section class="order-summary" aria-label="Podsumowanie zamówienia">
         <article class="card order-summary-card">
@@ -129,74 +179,158 @@
         </article>
     </section>
 
-    <section class="order-grid">
-        <article class="card order-section">
-            <div class="panel-header">Dane klienta i dostawy</div>
-            <div class="order-section-body address-grid">
-                <div class="address-box">
-                    <strong>Rozliczenie</strong>
-                    <div>{{ $person($order->billing_data) }}</div>
-                    <div class="muted">{{ $address($order->billing_data) }}</div>
-                    <div class="muted">{{ data_get($order->billing_data, 'email', '-') }} · {{ data_get($order->billing_data, 'phone', '-') }}</div>
-                </div>
-                <div class="address-box">
-                    <strong>Wysyłka</strong>
-                    <div>{{ $person($order->shipping_data) }}</div>
-                    <div class="muted">{{ $address($order->shipping_data) }}</div>
-                    <div class="muted">Metoda: {{ data_get($order->raw_payload, 'shipping_lines.0.method_title', '-') }}</div>
-                </div>
-                <div class="address-box">
-                    <strong>Płatność i daty</strong>
-                    <div>{{ data_get($order->raw_payload, 'payment_method_title', '-') }}</div>
-                    <div class="muted">Utworzone: {{ $order->external_created_at?->format('Y-m-d H:i') ?? '-' }}</div>
-                    <div class="muted">Aktualizacja Woo: {{ $order->external_updated_at?->format('Y-m-d H:i') ?? '-' }}</div>
-                </div>
-            </div>
+    <section id="obsluga-zamowienia" class="order-command-grid" aria-label="Obsługa zamówienia">
+        <article class="card order-command-card">
+            <h2>Zmień status zamówienia</h2>
+            <p class="muted">Zmiana zostanie zapisana w WooCommerce i od razu odświeży rezerwacje oraz kolejkę pakowania w ERP.</p>
+            <form class="order-command-form" method="POST" action="{{ route('orders.status.update', $order) }}">
+                @csrf
+                @method('PATCH')
+                <label>Status WooCommerce
+                    <select name="status" required>
+                        @foreach ($orderStatusOptions as $statusValue => $statusLabel)
+                            <option value="{{ $statusValue }}" @selected(old('status', $order->status) === $statusValue)>{{ $statusLabel }} ({{ $statusValue }})</option>
+                        @endforeach
+                    </select>
+                </label>
+                <button class="button" type="submit">Zapisz status</button>
+            </form>
+            <span class="muted">Status realizacji ERP: <strong>{{ $fulfillmentStatusLabel }}</strong> — jest wyliczany z kompletacji i wysyłki.</span>
         </article>
 
-        <article class="card order-section">
-            <div class="panel-header">
-                <span>Pozycje zamówienia</span>
-                <span>{{ $order->lines->count() }} pozycji</span>
-            </div>
+        <article class="card order-command-card">
+            <h2>Ponów prośbę o wpłatę</h2>
+            <p class="muted">Klient otrzyma gotowy mail z przyciskiem „Przejdź do płatności”. Link możesz uzupełnić, jeśli WooCommerce nie przekazał go automatycznie.</p>
+            <form class="order-command-form" method="POST" action="{{ route('orders.payment-reminder.send', $order) }}">
+                @csrf
+                <label>Link do płatności
+                    <input name="payment_url" type="url" maxlength="1000" value="{{ old('payment_url', $paymentUrl) }}" placeholder="https://sklep.pl/checkout/order-pay/..." required>
+                </label>
+                <button class="button" type="submit">Wyślij przypomnienie</button>
+            </form>
+            <span class="muted">Odbiorca: {{ data_get($order->billing_data, 'email') ?: data_get($order->shipping_data, 'email') ?: 'brak adresu e-mail' }}</span>
+        </article>
+    </section>
+
+    <article id="pozycje-zamowienia" class="card order-section">
+        <div class="panel-header">
+            <span>Pozycje zamówienia</span>
+            <span>{{ $order->lines->count() }} pozycji · pełna szerokość</span>
+        </div>
+        <form method="POST" action="{{ route('orders.lines.update', $order) }}" data-order-lines-form data-product-lookup-url="{{ $productLookupUrl }}">
+            @csrf
+            @method('PUT')
             <div class="table-scroll">
-                <table class="dense-table">
+                <table class="dense-table order-product-table">
                     <thead>
                         <tr>
-                            <th>SKU</th>
-                            <th>Nazwa</th>
+                            <th>Zdjęcie</th>
+                            <th>Produkt</th>
                             <th>Ilość</th>
-                            <th>Cena netto</th>
-                            <th>Cena brutto</th>
-                            <th>Produkt ERP</th>
+                            <th class="numeric">Cena netto</th>
+                            <th class="numeric">Cena brutto</th>
+                            <th class="numeric">Wartość</th>
+                            @if ($lineEditing['editable'])
+                                <th>Usuń</th>
+                            @endif
                         </tr>
                     </thead>
                     <tbody>
                         @forelse ($order->lines as $line)
+                            @php $productImage = $lineImage($line); @endphp
                             <tr>
-                                <td>{{ $line->sku ?? '-' }}</td>
-                                <td class="wrap-cell">{{ $line->name }}</td>
-                                <td>{{ $qty($line->quantity) }}</td>
-                                <td>{{ $line->unit_net_price !== null ? $money($line->unit_net_price, $order->currency) : '-' }}</td>
-                                <td>{{ $line->unit_gross_price !== null ? $money($line->unit_gross_price, $order->currency) : '-' }}</td>
+                                <td class="order-product-photo">
+                                    <div class="order-product-thumb">
+                                        @if ($productImage)
+                                            <img src="{{ $productImage }}" alt="{{ $line->name }}" loading="lazy" decoding="async" referrerpolicy="no-referrer">
+                                        @else
+                                            Brak foto
+                                        @endif
+                                    </div>
+                                </td>
                                 <td>
-                                    @if ($line->product)
-                                        <a class="status" href="{{ route('products.show', $line->product) }}">{{ $line->product->sku }}</a>
+                                    @if ($lineEditing['editable'])
+                                        <div class="order-product-picker">
+                                            <input list="order-product-options" value="{{ $line->product?->sku }}" placeholder="Wpisz SKU lub nazwę" autocomplete="off" data-order-product-lookup>
+                                            <input type="hidden" name="lines[{{ $line->id }}][product_id]" value="{{ $line->product_id }}" data-order-product-id>
+                                            <span class="order-product-name">{{ $line->name }}</span>
+                                            <span class="order-product-meta">Woo SKU: {{ $line->sku ?: '-' }}@if ($line->product) · <a href="{{ route('products.show', $line->product) }}">karta produktu ERP</a>@endif</span>
+                                        </div>
                                     @else
-                                        <span class="status orange">Brak mapowania</span>
+                                        <span class="order-product-name">{{ $line->name }}</span>
+                                        <span class="order-product-meta">{{ $line->sku ?: 'brak SKU' }}@if ($line->product) · <a href="{{ route('products.show', $line->product) }}">{{ $line->product->sku }}</a>@else · brak mapowania ERP @endif</span>
                                     @endif
                                 </td>
+                                <td>
+                                    @if ($lineEditing['editable'])
+                                        <input class="order-quantity-input" name="lines[{{ $line->id }}][quantity]" type="number" min="0.0001" max="999999.9999" step="0.0001" value="{{ old('lines.'.$line->id.'.quantity', (float) $line->quantity) }}" required>
+                                    @else
+                                        {{ $qty($line->quantity) }}
+                                    @endif
+                                </td>
+                                <td class="numeric">{{ $line->unit_net_price !== null ? $money($line->unit_net_price, $order->currency) : '-' }}</td>
+                                <td class="numeric">{{ $line->unit_gross_price !== null ? $money($line->unit_gross_price, $order->currency) : '-' }}</td>
+                                <td class="numeric"><strong>{{ $line->unit_gross_price !== null ? $money((float) $line->quantity * (float) $line->unit_gross_price, $order->currency) : '-' }}</strong></td>
+                                @if ($lineEditing['editable'])
+                                    <td>
+                                        <label class="order-remove-control">
+                                            <input name="lines[{{ $line->id }}][remove]" type="checkbox" value="1">
+                                            Usuń
+                                        </label>
+                                    </td>
+                                @endif
                             </tr>
                         @empty
-                            <tr><td colspan="6">Brak pozycji zamówienia.</td></tr>
+                            <tr><td colspan="{{ $lineEditing['editable'] ? 7 : 6 }}">Brak pozycji zamówienia.</td></tr>
                         @endforelse
                     </tbody>
                 </table>
             </div>
-        </article>
-    </section>
+            @if ($lineEditing['editable'])
+                <div class="order-product-footer">
+                    <div class="order-new-line">
+                        <label>Dodaj produkt
+                            <input list="order-product-options" placeholder="Wpisz SKU lub nazwę" autocomplete="off" data-order-product-lookup>
+                            <input type="hidden" name="new_line[product_id]" value="" data-order-product-id>
+                        </label>
+                        <label>Ilość
+                            <input name="new_line[quantity]" type="number" min="0.0001" max="999999.9999" step="0.0001" value="1">
+                        </label>
+                    </div>
+                    <button class="button" type="submit">Zapisz zmiany produktów</button>
+                </div>
+            @else
+                <p class="order-edit-lock">{{ $lineEditing['reason'] }}</p>
+            @endif
+        </form>
+        <datalist id="order-product-options"></datalist>
+    </article>
 
-    <article class="card order-section">
+    <article id="dane-klienta" class="card order-section">
+        <div class="panel-header">Dane klienta i dostawy</div>
+        <div class="order-section-body address-grid">
+            <div class="address-box">
+                <strong>Rozliczenie</strong>
+                <div>{{ $person($order->billing_data) }}</div>
+                <div class="muted">{{ $address($order->billing_data) }}</div>
+                <div class="muted">{{ data_get($order->billing_data, 'email', '-') }} · {{ data_get($order->billing_data, 'phone', '-') }}</div>
+            </div>
+            <div class="address-box">
+                <strong>Wysyłka</strong>
+                <div>{{ $person($order->shipping_data) }}</div>
+                <div class="muted">{{ $address($order->shipping_data) }}</div>
+                <div class="muted">Metoda: {{ data_get($order->raw_payload, 'shipping_lines.0.method_title', '-') }}</div>
+            </div>
+            <div class="address-box">
+                <strong>Płatność i daty</strong>
+                <div>{{ data_get($order->raw_payload, 'payment_method_title', '-') }}</div>
+                <div class="muted">Utworzone: {{ $order->external_created_at?->format('Y-m-d H:i') ?? '-' }}</div>
+                <div class="muted">Aktualizacja Woo: {{ $order->external_updated_at?->format('Y-m-d H:i') ?? '-' }}</div>
+            </div>
+        </div>
+    </article>
+
+    <article id="logistyka-zamowienia" class="card order-section">
         <div class="panel-header">
             <span>Rezerwacje magazynowe</span>
             <span>{{ $reservations->count() }} rekordów</span>
@@ -448,7 +582,7 @@
             </div>
         </article>
 
-        <article class="card order-section">
+        <article id="komunikacja-z-klientem" class="card order-section">
             <div class="panel-header">
                 <span>Komunikacja z klientem</span>
                 <span>{{ $order->customerMessages->count() }} wiadomości</span>
@@ -460,6 +594,7 @@
                         'order_number' => $order->external_number ?: $order->external_id,
                         'customer_name' => $person($order->billing_data),
                         'customer_email' => data_get($order->billing_data, 'email', ''),
+                        'payment_url' => $paymentUrl ?? '',
                         'from_name' => config('mail.from.name', config('app.name', 'Sempre ERP')),
                     ];
                 @endphp
@@ -515,7 +650,7 @@
     </section>
 
     <section class="order-grid">
-        <article class="card order-section">
+        <article id="rozliczenia-zamowienia" class="card order-section">
             <div class="panel-header">
                 <span>Rozliczenia klienta</span>
                 @php
@@ -634,6 +769,66 @@
 @push('scripts')
     <script>
         (() => {
+            const lineForm = document.querySelector('[data-order-lines-form]');
+            const productOptions = document.getElementById('order-product-options');
+            const productResults = new Map();
+            let productLookupTimer = null;
+
+            const applyProductSelection = (input) => {
+                const hidden = input.closest('.order-product-picker, .order-new-line')?.querySelector('[data-order-product-id]');
+                const selected = productResults.get(input.value.trim());
+
+                if (hidden) {
+                    hidden.value = selected ? String(selected.id) : '';
+                }
+            };
+
+            const loadProducts = async (query) => {
+                if (!lineForm || !productOptions || query.length < 2) {
+                    return;
+                }
+
+                const url = `${lineForm.dataset.productLookupUrl}?q=${encodeURIComponent(query)}`;
+
+                try {
+                    const response = await fetch(url, {
+                        headers: { Accept: 'application/json' },
+                        credentials: 'same-origin',
+                    });
+
+                    if (!response.ok) {
+                        return;
+                    }
+
+                    const products = await response.json();
+                    productResults.clear();
+                    productOptions.replaceChildren();
+
+                    products.forEach((product) => {
+                        productResults.set(String(product.sku), product);
+                        const option = document.createElement('option');
+                        option.value = String(product.sku);
+                        option.label = String(product.name);
+                        productOptions.appendChild(option);
+                    });
+                } catch (error) {
+                    // Formularz nadal pozwala wpisać dane; błąd sieci pokaże walidacja po zapisie.
+                }
+            };
+
+            lineForm?.querySelectorAll('[data-order-product-lookup]').forEach((input) => {
+                input.addEventListener('input', () => {
+                    const hidden = input.closest('.order-product-picker, .order-new-line')?.querySelector('[data-order-product-id]');
+                    if (hidden) {
+                        hidden.value = '';
+                    }
+
+                    window.clearTimeout(productLookupTimer);
+                    productLookupTimer = window.setTimeout(() => loadProducts(input.value.trim()), 220);
+                });
+                input.addEventListener('change', () => applyProductSelection(input));
+            });
+
             const renderTemplate = (value, context) => String(value || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) => {
                 return Object.prototype.hasOwnProperty.call(context, key) ? String(context[key] ?? '') : match;
             });

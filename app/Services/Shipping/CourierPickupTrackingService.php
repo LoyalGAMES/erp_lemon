@@ -27,36 +27,51 @@ final class CourierPickupTrackingService
     /**
      * @return array{checked:int,picked_up:int,orders:int,warnings:list<string>}
      */
-    public function trackPackedOrders(int $limit = 50): array
+    public function trackPackedOrders(int $limit = 50, bool $force = false): array
     {
         $orderIds = ExternalOrder::query()
             ->whereHas('packingTasks', fn ($query) => $query->whereIn('status', ['packed', 'shipped']))
             ->whereDoesntHave('packingTasks', fn ($query) => $query->whereNotIn('status', ['packed', 'shipped', 'cancelled']))
             ->pluck('id');
 
-        $labels = ShippingLabel::query()
+        $labelsQuery = ShippingLabel::query()
             ->with(['order', 'courierAccount'])
             ->shipments()
             ->whereIn('external_order_id', $orderIds)
-            ->where('status', 'generated')
-            ->where(function ($query): void {
+            ->where('status', 'generated');
+
+        if (! $force) {
+            $labelsQuery->where(function ($query): void {
                 $query->whereNull('next_tracking_check_at')
                     ->orWhere('next_tracking_check_at', '<=', now());
-            })
-            ->where(function ($query): void {
-                $query
-                    ->where(function ($query): void {
-                        $query->whereNotNull('tracking_number')->where('tracking_number', '!=', '');
-                    })
-                    ->orWhere(function ($query): void {
-                        $query->whereNotNull('label_number')
-                            ->where('label_number', '!=', '');
-                    });
-            })
-            ->orderByRaw('case when next_tracking_check_at is null then 0 else 1 end')
-            ->orderBy('next_tracking_check_at')
-            ->orderBy('tracking_checked_at')
-            ->orderBy('generated_at')
+            });
+        }
+
+        $labelsQuery->where(function ($query): void {
+            $query
+                ->where(function ($query): void {
+                    $query->whereNotNull('tracking_number')->where('tracking_number', '!=', '');
+                })
+                ->orWhere(function ($query): void {
+                    $query->whereNotNull('label_number')
+                        ->where('label_number', '!=', '');
+                });
+        });
+
+        if (! $force) {
+            $labelsQuery
+                ->orderByRaw('case when next_tracking_check_at is null then 0 else 1 end')
+                ->orderBy('next_tracking_check_at')
+                ->orderBy('tracking_checked_at')
+                ->orderBy('generated_at');
+        } else {
+            $labelsQuery
+                ->orderByRaw('case when tracking_checked_at is null then 0 else 1 end')
+                ->orderBy('tracking_checked_at')
+                ->orderBy('generated_at');
+        }
+
+        $labels = $labelsQuery
             ->limit($limit)
             ->get()
             ->values();
@@ -67,13 +82,18 @@ final class CourierPickupTrackingService
         $warnings = [];
 
         foreach ($labels as $label) {
-            $claimed = ShippingLabel::query()
+            $claim = ShippingLabel::query()
                 ->whereKey($label->id)
-                ->where('status', 'generated')
-                ->where(function ($query): void {
+                ->where('status', 'generated');
+
+            if (! $force) {
+                $claim->where(function ($query): void {
                     $query->whereNull('next_tracking_check_at')
                         ->orWhere('next_tracking_check_at', '<=', now());
-                })
+                });
+            }
+
+            $claimed = $claim
                 ->update(['next_tracking_check_at' => now()->addMinutes(10)]);
 
             if ($claimed !== 1) {

@@ -218,6 +218,41 @@ class PackingShipmentAutomationTest extends TestCase
         Http::assertSent(fn ($request): bool => str_ends_with($request->url(), '/v1/tracking/'.$trackingNumber));
     }
 
+    public function test_manual_pickup_check_rechecks_waiting_shipments_immediately(): void
+    {
+        $this->travelTo(Carbon::parse('2026-07-12 11:30:00'));
+        $channel = $this->createChannel();
+        [$order] = $this->createOrderWithTask($channel, 'packed', 'InPost');
+        $trackingNumber = '520000000000000000006060';
+        $label = $this->createLabel($order, [
+            'provider' => 'inpost',
+            'tracking_number' => $trackingNumber,
+            'next_tracking_check_at' => now()->addMinutes(5),
+        ]);
+
+        Http::fake([
+            "*/v1/tracking/{$trackingNumber}" => Http::response([
+                'tracking_number' => $trackingNumber,
+                'status' => 'confirmed',
+                'tracking_details' => [],
+            ], 200),
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'waiting']))
+            ->assertOk()
+            ->assertSee('Sprawdź odbiory')
+            ->assertSee(route('packing.couriers.check-pickups'), false);
+
+        $this->post(route('packing.couriers.check-pickups'))
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'Ręcznie sprawdzono odbiory: 1 paczek'));
+
+        $label->refresh();
+        $this->assertSame('confirmed', $label->tracking_status);
+        $this->assertSame(now()->toDateTimeString(), $label->tracking_checked_at?->toDateTimeString());
+        Http::assertSent(fn ($request): bool => str_ends_with($request->url(), '/v1/tracking/'.$trackingNumber));
+    }
+
     public function test_tracker_and_manual_pickup_ignore_an_order_until_every_active_task_is_packed(): void
     {
         $channel = $this->createChannel();

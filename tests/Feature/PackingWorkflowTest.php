@@ -395,6 +395,7 @@ class PackingWorkflowTest extends TestCase
         $this->get(route('packing.index', ['view' => 'pack']))
             ->assertOk()
             ->assertSee('Zamówienie 611')
+            ->assertSee(route('orders.show', $task->external_order_id), false)
             ->assertSee('Oczekuje na kuriera')
             ->assertDontSee('Spakowane dzisiaj')
             ->assertDontSee('Ustawienia sposobu pracy');

@@ -103,6 +103,8 @@
         .order-card { padding: 18px; display: grid; gap: 13px; }
         .order-card-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
         .order-title { font-size: 24px; line-height: 1.1; font-weight: 880; letter-spacing: -.02em; }
+        .order-title a { color: inherit; text-decoration: none; }
+        .order-title a:hover { text-decoration: underline; }
         .order-meta { color: var(--muted); margin-top: 4px; font-size: 15px; }
         .order-items { display: grid; gap: 8px; }
         .order-item { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: #fffdfb; }
@@ -118,6 +120,8 @@
         .order-problem-form { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 8px; }
         .order-problem-form input { min-height: 58px; }
         .courier-panel { margin-top: 2px; }
+        .courier-panel-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+        .courier-panel-actions .button { min-height: 38px; }
         .courier-list { display: grid; gap: 10px; padding: 12px; }
         .courier-card { padding: 14px; display: grid; gap: 12px; }
         .courier-card-header { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
@@ -486,7 +490,7 @@
                     <article class="order-card">
                         <div class="order-card-header">
                             <div>
-                                <div class="order-title">Zamówienie {{ $order->external_number }}</div>
+                                <div class="order-title"><a href="{{ route('orders.show', $order) }}">Zamówienie {{ $order->external_number }}</a></div>
                                 <div class="order-meta">{{ $order->salesChannel?->code ?? '-' }} · {{ $firstTask?->customer_name ?: '-' }}</div>
                             </div>
                             <div class="order-badges">
@@ -602,7 +606,13 @@
             <section class="card courier-panel">
                 <div class="panel-header">
                     <span>Oczekuje na kuriera</span>
-                    <span>{{ $waitingCourierOrders }} paczek</span>
+                    <div class="courier-panel-actions">
+                        <span>{{ $waitingCourierOrders }} paczek</span>
+                        <form method="POST" action="{{ route('packing.couriers.check-pickups') }}">
+                            @csrf
+                            <button class="button secondary" type="submit">Sprawdź odbiory</button>
+                        </form>
+                    </div>
                 </div>
                 <div class="courier-list">
                     @forelse ($waitingCourierGroups as $group)

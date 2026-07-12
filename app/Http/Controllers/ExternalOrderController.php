@@ -10,17 +10,27 @@ use App\Models\EmailTemplate;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\InternalNote;
+use App\Models\ProductChannelMapping;
 use App\Models\StockReservation;
+use App\Services\Audit\AuditLogService;
 use App\Services\Communication\CustomerCommunicationService;
+use App\Services\Inventory\StockReservationService;
+use App\Services\Orders\OrderEditingService;
 use App\Services\Orders\OrderFulfillmentStatusService;
+use App\Services\Orders\OrderPaymentLinkService;
 use App\Services\Orders\OrderSplitService;
+use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
 use App\Services\Shipping\ShippingLabelService;
+use App\Services\WooCommerce\WooCommerceOrderStatusService;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\View\View;
 use RuntimeException;
+use Throwable;
 
 class ExternalOrderController extends Controller
 {
@@ -28,6 +38,8 @@ class ExternalOrderController extends Controller
         ExternalOrder $order,
         OrderFulfillmentStatusService $fulfillmentStatus,
         ProductSegmentService $segments,
+        OrderEditingService $editing,
+        OrderPaymentLinkService $paymentLinks,
     ): View {
         $order->load([
             'salesChannel',
@@ -92,7 +104,157 @@ class ExternalOrderController extends Controller
                 ->whereIn('context', ['order', 'both'])
                 ->orderBy('name')
                 ->get(),
+            'lineEditing' => $editing->availability($order),
+            'productLookupUrl' => route('orders.products.lookup', $order),
+            'paymentUrl' => $paymentLinks->resolve($order),
+            'orderStatusOptions' => $this->orderStatusOptions((string) $order->status),
         ]);
+    }
+
+    public function lookupProducts(Request $request, ExternalOrder $order): JsonResponse
+    {
+        $query = trim((string) $request->query('q', ''));
+
+        if (mb_strlen($query) < 2) {
+            return response()->json([]);
+        }
+
+        $like = '%'.$query.'%';
+
+        return response()->json(
+            ProductChannelMapping::query()
+                ->with('product')
+                ->where('sales_channel_id', $order->sales_channel_id)
+                ->whereHas('product', function (Builder $product) use ($like): void {
+                    $product
+                        ->where('is_translation', false)
+                        ->where(function (Builder $product) use ($like): void {
+                            $product
+                                ->where('sku', 'like', $like)
+                                ->orWhere('name', 'like', $like)
+                                ->orWhere('ean', 'like', $like);
+                        });
+                })
+                ->orderBy('external_sku')
+                ->limit(20)
+                ->get()
+                ->filter(fn (ProductChannelMapping $mapping): bool => $mapping->product !== null)
+                ->map(fn (ProductChannelMapping $mapping): array => [
+                    'id' => $mapping->product->id,
+                    'sku' => $mapping->product->sku,
+                    'name' => $mapping->product->name,
+                    'label' => $mapping->product->sku.' | '.$mapping->product->name,
+                    'thumbnail_url' => $mapping->product->thumbnailUrl(72, 88),
+                ])
+                ->unique('id')
+                ->values(),
+        );
+    }
+
+    public function updateLines(Request $request, ExternalOrder $order, OrderEditingService $editing): RedirectResponse
+    {
+        $validated = $request->validate([
+            'lines' => ['required', 'array', 'min:1'],
+            'lines.*.product_id' => ['nullable', 'integer', 'exists:products,id'],
+            'lines.*.quantity' => ['required', 'numeric', 'min:0.0001', 'max:999999.9999'],
+            'lines.*.remove' => ['nullable', 'boolean'],
+            'new_line' => ['nullable', 'array'],
+            'new_line.product_id' => ['nullable', 'integer', 'exists:products,id'],
+            'new_line.quantity' => ['nullable', 'numeric', 'min:0.0001', 'max:999999.9999'],
+        ]);
+
+        try {
+            $result = $editing->updateLines(
+                $order,
+                (array) $validated['lines'],
+                (array) ($validated['new_line'] ?? []),
+            );
+        } catch (Throwable $exception) {
+            return back()->withInput()->with('error', 'Nie udało się zapisać pozycji: '.$exception->getMessage());
+        }
+
+        $message = "Zapisano pozycje zamówienia w WooCommerce i ERP: {$result['updated']} zmienionych, {$result['added']} dodanych, {$result['removed']} usuniętych.";
+
+        if ($result['warnings'] !== []) {
+            $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
+        }
+
+        return back()->with('status', $message);
+    }
+
+    public function updateStatus(
+        Request $request,
+        ExternalOrder $order,
+        WooCommerceOrderStatusService $statuses,
+        StockReservationService $reservations,
+        PackingTaskService $packingTasks,
+        AuditLogService $audit,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'status' => ['required', 'string', 'max:80', 'regex:/^[a-z0-9][a-z0-9-]*$/'],
+        ]);
+        $before = ['status' => $order->status, 'fulfillment_status' => $order->fulfillment_status];
+
+        try {
+            $result = $statuses->updateManually($order, $validated['status']);
+        } catch (Throwable $exception) {
+            return back()->withInput()->with('error', 'Nie udało się zmienić statusu: '.$exception->getMessage());
+        }
+
+        $warnings = [];
+        $freshOrder = $order->fresh();
+
+        try {
+            $reservations->syncForOrder($freshOrder);
+        } catch (Throwable $exception) {
+            $warnings[] = 'rezerwacje: '.$exception->getMessage();
+        }
+
+        try {
+            $packingTasks->syncForOrder($freshOrder);
+        } catch (Throwable $exception) {
+            $warnings[] = 'pakowanie: '.$exception->getMessage();
+        }
+
+        $freshOrder = $order->fresh();
+        $audit->record('order.status_updated', $freshOrder, $before, [
+            'status' => $freshOrder->status,
+            'fulfillment_status' => $freshOrder->fulfillment_status,
+        ], [
+            'source' => 'order_view',
+            'warnings' => $warnings,
+        ]);
+
+        $message = "Status zamówienia zmieniono w WooCommerce i ERP na {$result['status']}.";
+
+        if ($warnings !== []) {
+            $message .= ' Ostrzeżenia: '.implode(' | ', $warnings);
+        }
+
+        return back()->with('status', $message);
+    }
+
+    public function sendPaymentReminder(
+        Request $request,
+        ExternalOrder $order,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'payment_url' => ['required', 'url', 'max:1000'],
+        ]);
+        $scheme = mb_strtolower((string) parse_url($validated['payment_url'], PHP_URL_SCHEME));
+
+        if (! in_array($scheme, ['http', 'https'], true)) {
+            return back()->withInput()->with('error', 'Link do płatności musi używać protokołu HTTPS lub HTTP.');
+        }
+
+        try {
+            $communication->sendPaymentReminderForOrder($order, $validated['payment_url']);
+        } catch (RuntimeException $exception) {
+            return back()->withInput()->with('error', $exception->getMessage());
+        }
+
+        return back()->with('status', "Ponowienie prośby o wpłatę dla zamówienia {$order->external_number} zostało wysłane.");
     }
 
     public function sendMessage(
@@ -268,5 +430,28 @@ class ExternalOrderController extends Controller
         return redirect()
             ->route('orders.show', $splitOrder)
             ->with('status', "Buty z zamówienia trafiły do osobnego zamówienia {$splitOrder->external_number} i idą od razu do kompletacji. Reszta zamówienia czeka na skompletowanie.");
+    }
+
+    /**
+     * @return array<string, string>
+     */
+    private function orderStatusOptions(string $currentStatus): array
+    {
+        $options = [
+            'pending' => 'Oczekujące na płatność',
+            'processing' => 'W realizacji',
+            'on-hold' => 'Wstrzymane',
+            'ready-to-ship' => 'Gotowe do wysyłki',
+            'completed' => 'Zrealizowane',
+            'cancelled' => 'Anulowane',
+            'refunded' => 'Zwrócone',
+            'failed' => 'Nieudane',
+        ];
+
+        if ($currentStatus !== '' && ! array_key_exists($currentStatus, $options)) {
+            $options = [$currentStatus => $currentStatus] + $options;
+        }
+
+        return $options;
     }
 }

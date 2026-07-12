@@ -800,13 +800,20 @@ final class WooCommerceClient
      */
     public function updateOrderStatus(WordpressIntegration $integration, string $orderId, string $status): array
     {
+        return $this->updateOrder($integration, $orderId, ['status' => $status]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    public function updateOrder(WordpressIntegration $integration, string $orderId, array $payload): array
+    {
         $response = $this->request($integration)
-            ->put($this->endpoint($integration, "/orders/{$orderId}"), [
-                'status' => $status,
-            ]);
+            ->put($this->endpoint($integration, "/orders/{$orderId}"), $payload);
 
         if (! $response->successful()) {
-            throw new RuntimeException("Zmiana statusu zamówienia WooCommerce zwróciła HTTP {$response->status()}.");
+            throw new RuntimeException("Edycja zamówienia WooCommerce zwróciła HTTP {$response->status()}.");
         }
 
         $json = $response->json();

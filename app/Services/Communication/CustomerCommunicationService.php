@@ -15,14 +15,14 @@ use Throwable;
 final class CustomerCommunicationService
 {
     public const TYPE_AUTOMATED = 'automated';
+
     public const TYPE_MANUAL = 'manual';
 
     public function __construct(
         private readonly MailSettingsService $mailSettings,
         private readonly EmailTemplateRenderer $templateRenderer,
         private readonly CustomerEmailWorkflowSettingsService $emailWorkflow,
-    ) {
-    }
+    ) {}
 
     public function sendManualForOrder(ExternalOrder $order, string $subject, string $body): CustomerMessage
     {
@@ -66,6 +66,39 @@ final class CustomerCommunicationService
             'recipient_name' => $recipient['name'],
             'subject' => $this->renderTemplate(trim($subject), $templateContext),
             'body' => $this->renderTemplate(trim($body), $templateContext),
+            'metadata' => $templateContext,
+        ], true);
+    }
+
+    public function sendPaymentReminderForOrder(ExternalOrder $order, string $paymentUrl): CustomerMessage
+    {
+        $recipient = $this->orderRecipient($order);
+
+        if ($recipient['email'] === null) {
+            throw new RuntimeException('Zamówienie nie ma adresu e-mail klienta.');
+        }
+
+        $paymentUrl = trim($paymentUrl);
+        $scheme = mb_strtolower((string) parse_url($paymentUrl, PHP_URL_SCHEME));
+
+        if (filter_var($paymentUrl, FILTER_VALIDATE_URL) === false || ! in_array($scheme, ['http', 'https'], true)) {
+            throw new RuntimeException('Brak poprawnego linku do płatności dla tego zamówienia.');
+        }
+
+        $templateContext = $this->orderTemplateContext($order, $recipient, [
+            'payment_url' => $paymentUrl,
+            'amount' => number_format((float) $order->total_gross, 2, ',', ' '),
+        ]);
+        $number = $this->orderNumber($order);
+
+        return $this->createAndSend([
+            'external_order_id' => $order->id,
+            'type' => self::TYPE_MANUAL,
+            'trigger' => 'manual_payment_reminder',
+            'recipient_email' => $recipient['email'],
+            'recipient_name' => $recipient['name'],
+            'subject' => "Przypomnienie o płatności za zamówienie {$number}",
+            'body' => "Dzień dobry,\n\nprzypominamy o płatności za zamówienie {$number} w kwocie {$templateContext['amount']} {$templateContext['currency']}. Aby ponowić płatność, użyj przycisku poniżej.",
             'metadata' => $templateContext,
         ], true);
     }
@@ -137,7 +170,7 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array<string, mixed> $attributes
+     * @param  array<string, mixed>  $attributes
      */
     private function createAutomated(array $attributes): CustomerMessage
     {
@@ -167,7 +200,7 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array<string, mixed> $attributes
+     * @param  array<string, mixed>  $attributes
      */
     private function createWorkflowSkipped(array $attributes): CustomerMessage
     {
@@ -180,7 +213,7 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array<string, mixed> $attributes
+     * @param  array<string, mixed>  $attributes
      */
     private function createAndSend(array $attributes, bool $throwOnFailure): CustomerMessage
     {
@@ -271,7 +304,7 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array<string, mixed>|null $data
+     * @param  array<string, mixed>|null  $data
      */
     private function personName(?array $data): ?string
     {
@@ -286,7 +319,7 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array<string, mixed> $context
+     * @param  array<string, mixed>  $context
      * @return array{subject:string,body:string}
      */
     private function orderStatusContent(ExternalOrder $order, string $trigger, array $context): array
@@ -314,7 +347,7 @@ final class CustomerCommunicationService
             ],
             'order_partial_created' => [
                 'subject' => "Zamówienie {$number} zostało podzielone",
-                'body' => "Dzień dobry,\n\nczęść produktów z zamówienia {$number} została wydzielona do osobnej wysyłki. Numer zamówienia częściowego: ".($context['child_order_number'] ?? 'w przygotowaniu').".",
+                'body' => "Dzień dobry,\n\nczęść produktów z zamówienia {$number} została wydzielona do osobnej wysyłki. Numer zamówienia częściowego: ".($context['child_order_number'] ?? 'w przygotowaniu').'.',
             ],
             default => [
                 'subject' => "Aktualizacja zamówienia {$number}",
@@ -324,7 +357,7 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array<string, mixed> $context
+     * @param  array<string, mixed>  $context
      * @return array{subject:string,body:string}
      */
     private function returnStatusContent(ReturnCase $returnCase, string $trigger, array $context): array
@@ -373,8 +406,8 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array{email:?string,name:?string} $recipient
-     * @param array<string, mixed> $context
+     * @param  array{email:?string,name:?string}  $recipient
+     * @param  array<string, mixed>  $context
      * @return array<string, mixed>
      */
     private function orderTemplateContext(ExternalOrder $order, array $recipient, array $context = []): array
@@ -388,8 +421,8 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array{email:?string,name:?string} $recipient
-     * @param array<string, mixed> $context
+     * @param  array{email:?string,name:?string}  $recipient
+     * @param  array<string, mixed>  $context
      * @return array<string, mixed>
      */
     private function returnTemplateContext(ReturnCase $returnCase, array $recipient, array $context = []): array
@@ -421,8 +454,8 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array{subject:string,body:string} $content
-     * @param array<string, mixed> $context
+     * @param  array{subject:string,body:string}  $content
+     * @param  array<string, mixed>  $context
      * @return array{subject:string,body:string}
      */
     private function renderContent(array $content, array $context): array
@@ -434,7 +467,7 @@ final class CustomerCommunicationService
     }
 
     /**
-     * @param array<string, mixed> $context
+     * @param  array<string, mixed>  $context
      */
     private function renderTemplate(string $template, array $context): string
     {

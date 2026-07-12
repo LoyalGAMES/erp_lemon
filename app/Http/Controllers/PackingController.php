@@ -14,6 +14,7 @@ use App\Services\Packing\PackingFulfillmentService;
 use App\Services\Packing\PackingSettingsService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
+use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippingLabelService;
 use App\Services\Shipping\ShippingProviderResolver;
 use Illuminate\Http\RedirectResponse;
@@ -360,6 +361,28 @@ class PackingController extends Controller
         }
 
         $message = "Oznaczono odbiór kuriera {$data['courier']}: {$result['orders']} zamówień, {$result['tasks']} pozycji. W ERP zamówienia przeniesiono do wysłanych.";
+
+        if ($result['warnings'] !== []) {
+            $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
+        }
+
+        return back()->with('status', $message);
+    }
+
+    public function checkCourierPickups(CourierPickupTrackingService $tracking): RedirectResponse
+    {
+        try {
+            $result = $tracking->trackPackedOrders(limit: 50, force: true);
+        } catch (Throwable $exception) {
+            return back()->with('error', 'Nie udało się sprawdzić odbiorów kurierów: '.$exception->getMessage());
+        }
+
+        $message = sprintf(
+            'Ręcznie sprawdzono odbiory: %d paczek, potwierdzono %d odbiorów, przeniesiono %d zamówień do wysłanych.',
+            $result['checked'],
+            $result['picked_up'],
+            $result['orders'],
+        );
 
         if ($result['warnings'] !== []) {
             $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);

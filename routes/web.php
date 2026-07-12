@@ -152,6 +152,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/packing/orders/{order}/unpack', [PackingController::class, 'unpackOrder'])->name('packing.orders.unpack');
         Route::post('/packing/orders/{order}/problem', [PackingController::class, 'problemOrder'])->name('packing.orders.problem');
         Route::post('/packing/orders/{order}/label', [PackingController::class, 'label'])->name('packing.orders.label');
+        Route::post('/packing/couriers/check-pickups', [PackingController::class, 'checkCourierPickups'])->name('packing.couriers.check-pickups');
         Route::post('/packing/couriers/pickup', [PackingController::class, 'courierPickup'])->name('packing.couriers.pickup');
         Route::get('/packing/labels/{label}/download', [PackingController::class, 'downloadLabel'])->name('packing.labels.download');
     });
@@ -214,6 +215,10 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
 
     Route::middleware(EnsureErpRole::class.':orders')->group(function (): void {
         Route::get('/orders/{order}', [ExternalOrderController::class, 'show'])->name('orders.show');
+        Route::get('/orders/{order}/products/lookup', [ExternalOrderController::class, 'lookupProducts'])->name('orders.products.lookup');
+        Route::put('/orders/{order}/lines', [ExternalOrderController::class, 'updateLines'])->name('orders.lines.update');
+        Route::patch('/orders/{order}/status', [ExternalOrderController::class, 'updateStatus'])->name('orders.status.update');
+        Route::post('/orders/{order}/payment-reminder', [ExternalOrderController::class, 'sendPaymentReminder'])->name('orders.payment-reminder.send');
         Route::post('/orders/{order}/split', [ExternalOrderController::class, 'split'])->name('orders.split');
         Route::post('/orders/{order}/shipping-decision', [ExternalOrderController::class, 'shippingDecision'])->name('orders.shipping-decision');
         Route::post('/orders/{order}/label', [ExternalOrderController::class, 'generateLabel'])->name('orders.label.generate');
