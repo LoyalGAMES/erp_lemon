@@ -13,6 +13,15 @@
         .product-filters label { min-width: 0; }
         .product-filters .button { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; text-decoration: none; white-space: nowrap; }
         .filter-result-line { color: var(--muted); font-size: 12px; }
+        .product-import-issue { margin-bottom: 14px; border-color: rgba(207, 54, 54, .32); }
+        .product-import-issue .panel-header { align-items: flex-start; }
+        .product-import-issue-summary { display: grid; gap: 4px; }
+        .product-import-issue-summary small { color: var(--muted); font-weight: 500; }
+        .product-import-issue-items { display: grid; gap: 6px; min-width: 290px; }
+        .product-import-issue-item { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+        .product-import-issue-item small { color: var(--muted); }
+        .product-import-issue-row { background: rgba(207, 54, 54, .055); box-shadow: inset 3px 0 0 rgba(207, 54, 54, .48); }
+        .product-import-issue-badge { display: inline-flex; margin-left: 7px; border-radius: 999px; padding: 3px 7px; background: rgba(207, 54, 54, .1); color: var(--red); font-size: 10px; font-weight: 850; vertical-align: middle; }
         .product-cell { display: grid; grid-template-columns: 34px 62px minmax(260px, 1fr); gap: 12px; align-items: center; white-space: normal; }
         .product-cell.variant { padding-left: 42px; grid-template-columns: 34px 48px minmax(220px, 1fr); }
         .product-thumb-button { width: 58px; height: 72px; border: 1px solid var(--border); border-radius: 8px; padding: 0; overflow: hidden; background: #f4f1ef; cursor: pointer; display: grid; place-items: center; color: var(--muted); font-weight: 850; font-size: 11px; }
@@ -182,6 +191,84 @@
             ->all();
     @endphp
 
+    @if ($importIssue)
+        <article class="card product-import-issue">
+            <div class="panel-header">
+                <div class="product-import-issue-summary">
+                    <strong>Produkty wymagające sprawdzenia po imporcie</strong>
+                    <small>
+                        Log #{{ $importIssue['log_id'] }}
+                        @if ($importIssue['channel_code'])
+                            · kanał {{ $importIssue['channel_code'] }}
+                        @endif
+                        @if ($importIssue['created_at'])
+                            · {{ $importIssue['created_at']->format('Y-m-d H:i:s') }}
+                        @endif
+                    </small>
+                </div>
+                <a class="button secondary" href="{{ route('products.index') }}">Wróć do wszystkich produktów</a>
+            </div>
+            @if ($importIssue['uses_current_mappings'])
+                <div class="toolbar-note">
+                    Ten starszy log nie zawierał jeszcze listy pozycji. Poniżej pokazujemy aktualne duplikaty SKU odtworzone z mapowań kanału, osobno dla produktów i wariantów.
+                </div>
+            @endif
+            @if ($importIssue['groups'] !== [])
+                <div class="table-scroll">
+                    <table class="dense-table">
+                        <thead>
+                            <tr>
+                                <th>SKU</th>
+                                <th>Rodzaj</th>
+                                <th>Wystąpienia</th>
+                                <th>Pozycje WooCommerce</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach ($importIssue['groups'] as $group)
+                                <tr>
+                                    <td><strong>{{ $group['sku'] }}</strong></td>
+                                    <td>{{ $group['entity_kind'] === 'variation' ? 'Wariant' : 'Produkt' }}</td>
+                                    <td>{{ $group['occurrences'] }}</td>
+                                    <td>
+                                        <div class="product-import-issue-items">
+                                            @forelse ($group['items'] as $item)
+                                                <div class="product-import-issue-item">
+                                                    <span>{{ $item['name'] ?: 'Pozycja WooCommerce' }}</span>
+                                                    <small>
+                                                        ID {{ $item['woo_product_id'] ?: '—' }}
+                                                        @if ($item['woo_variation_id'])
+                                                            / wariant {{ $item['woo_variation_id'] }}
+                                                        @endif
+                                                        @if ($item['language'])
+                                                            · {{ mb_strtoupper($item['language']) }}
+                                                        @endif
+                                                    </small>
+                                                    @if ($item['erp_product_id'])
+                                                        <a href="{{ route('products.edit', $item['erp_product_id']) }}">Otwórz w ERP</a>
+                                                    @endif
+                                                    @if ($item['permalink'])
+                                                        <a href="{{ $item['permalink'] }}" target="_blank" rel="noopener noreferrer">Otwórz w WooCommerce</a>
+                                                    @endif
+                                                </div>
+                                            @empty
+                                                <span class="muted">Brak danych pozycji w tym logu.</span>
+                                            @endforelse
+                                        </div>
+                                    </td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+            @else
+                <div class="empty-state">
+                    Nie znaleziono już aktualnych duplikatów w mapowaniach kanału. Uruchom ponownie import, aby zapisać nową listę diagnostyczną.
+                </div>
+            @endif
+        </article>
+    @endif
+
     <input id="product-drawer" class="drawer-toggle" type="checkbox" @checked($errors->any())>
 
     <div class="page-toolbar">
@@ -204,6 +291,9 @@
                 <label class="product-filter-drawer-close" for="product-mobile-filter-toggle" aria-label="Zamknij filtry">×</label>
             </div>
             <form class="product-filters" method="GET" action="{{ route('products.index') }}" data-product-filters>
+            @if ($importIssue)
+                <input type="hidden" name="import_issue" value="{{ $importIssue['log_id'] }}">
+            @endif
             <label>Szybkie wyszukiwanie
                 <input
                     name="q"
@@ -263,7 +353,7 @@
             </form>
         </div>
         <div class="filter-result-line">
-            Wynik: {{ $productRows->total() }} {{ $isFavorites ? 'ulubionych produktów głównych' : 'polskich produktów głównych' }} po filtrach / {{ $productsCount }} SKU w systemie.
+            Wynik: {{ $productRows->total() }} {{ $importIssue ? 'rodzin produktów dotkniętych błędem importu' : ($isFavorites ? 'ulubionych produktów głównych' : 'polskich produktów głównych') }} po filtrach / {{ $productsCount }} SKU w systemie.
             Wyszukiwarka działa po nazwie, SKU, EAN, kategorii, parametrach i opisach.
         </div>
     </article>
@@ -546,16 +636,18 @@
                         @php
                             $product = $row['product'];
                             $variants = $row['variants'];
+                            $familyVariants = $row['family_variants'] ?? $variants;
                             $rowKey = 'product-' . $product->id;
-                            $familyProducts = collect([$product])->merge($variants);
+                            $familyProducts = collect([$product])->merge($familyVariants);
                             $imageUrl = $product->imageUrl();
                             $thumbnailUrl = $product->thumbnailUrl();
                             $stock = $stockTotals($familyProducts);
                             $channelNames = $channels($familyProducts);
-                            $price = $retailPrice($product, $variants);
+                            $price = $retailPrice($product, $familyVariants);
                             $externalId = $product->externalDisplayId();
+                            $isImportIssueProduct = (bool) ($row['is_import_issue'] ?? false);
                         @endphp
-                        <tr class="parent-row">
+                        <tr @class(['parent-row', 'product-import-issue-row' => $isImportIssueProduct])>
                             <td>
                                 <div class="product-cell">
                                     <form method="POST" action="{{ route('products.favorite.toggle', $product) }}">
@@ -584,6 +676,9 @@
                                     </button>
                                     <div>
                                         <a class="product-title" href="{{ route('products.edit', $product) }}">{{ $product->name }}</a>
+                                        @if ($isImportIssueProduct)
+                                            <span class="product-import-issue-badge">Błąd importu</span>
+                                        @endif
                                         <div class="product-meta">
                                             <span><strong>ID Woo:</strong> {{ $externalId ?: '—' }}</span>
                                             <span><strong>SKU:</strong> {{ $product->displaySku() ?: '—' }}</span>
@@ -591,7 +686,7 @@
                                             <span><strong>JM:</strong> {{ $product->unit }}</span>
                                         </div>
                                         @if ($variants->isNotEmpty())
-                                            <button class="variant-toggle" type="button" data-toggle-variants="{{ $rowKey }}" aria-expanded="false">Warianty: {{ $variants->count() }}</button>
+                                            <button class="variant-toggle" type="button" data-toggle-variants="{{ $rowKey }}" aria-expanded="{{ $importIssue ? 'true' : 'false' }}">{{ $importIssue ? 'Warianty dotknięte błędem' : 'Warianty' }}: {{ $variants->count() }}</button>
                                         @endif
                                     </div>
                                 </div>
@@ -676,7 +771,7 @@
                                     ->filter()
                                     ->implode(' | ');
                             @endphp
-                            <tr class="variant-row" data-variant-parent="{{ $rowKey }}" hidden>
+                            <tr @class(['variant-row', 'product-import-issue-row' => $importIssue]) data-variant-parent="{{ $rowKey }}" @if (! $importIssue) hidden @endif>
                                 <td>
                                     <div class="product-cell variant">
                                         <form method="POST" action="{{ route('products.favorite.toggle', $variant) }}">
@@ -704,6 +799,9 @@
                                         </button>
                                         <div>
                                             <a class="product-title" href="{{ route('products.edit', $variant) }}">{{ $variant->name }}</a>
+                                            @if ($importIssue)
+                                                <span class="product-import-issue-badge">Błąd importu</span>
+                                            @endif
                                             <div class="product-meta">
                                                 <span><strong>ID Woo:</strong> {{ $variantExternalId ?: '—' }}</span>
                                                 <span><strong>SKU:</strong> {{ $variant->displaySku() ?: '—' }}</span>

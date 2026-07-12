@@ -22,6 +22,7 @@ use App\Services\Inventory\WarehouseDocumentNumberService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Products\ProductIdentifierService;
+use App\Services\Products\ProductImportIssueService;
 use App\Services\WooCommerce\ProductDataExportService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
@@ -42,15 +43,17 @@ class ProductController extends Controller
 {
     private const PRODUCT_LIST_PER_PAGE = 30;
 
-    public function index(Request $request): View
+    public function index(Request $request, ProductImportIssueService $importIssues): View
     {
         $isFavorites = $request->routeIs('products.favorites');
         $filters = $this->productFilters($request, $isFavorites);
+        $importIssue = $importIssues->resolve($request->query('import_issue'));
 
         return view('products.index', [
-            'productRows' => $this->productListRows($filters),
+            'productRows' => $this->productListRows($filters, $importIssue),
             'productsCount' => Product::query()->where('is_translation', false)->count(),
             'filters' => $filters,
+            'importIssue' => $importIssue,
             'isFavorites' => $isFavorites,
             'channelOptions' => $this->productListChannelOptions(),
             'warehouseOptions' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
@@ -1330,9 +1333,9 @@ class ProductController extends Controller
      * the collection in PHP.
      *
      * @param  array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string}  $filters
-     * @return LengthAwarePaginator<int, array{product:Product,variants:Collection<int, Product>}>
+     * @return LengthAwarePaginator<int, array{product:Product,variants:Collection<int, Product>,family_variants:Collection<int, Product>,is_import_issue:bool}>
      */
-    private function productListRows(array $filters): LengthAwarePaginator
+    private function productListRows(array $filters, ?array $importIssue = null): LengthAwarePaginator
     {
         $products = Product::query()
             ->select($this->productListColumns())
@@ -1376,7 +1379,7 @@ class ProductController extends Controller
                 'variantChildren.channelMappings.salesChannel:id,code,name',
             ]);
 
-        $this->applyProductListFilters($products, $filters);
+        $this->applyProductListFilters($products, $filters, $importIssue);
         $this->applyProductListOrder($products);
 
         $paginator = $products
@@ -1385,10 +1388,24 @@ class ProductController extends Controller
 
         $paginator->setCollection(
             $paginator->getCollection()
-                ->map(fn (Product $product): array => [
-                    'product' => $product,
-                    'variants' => $product->variantChildren->values(),
-                ]),
+                ->map(function (Product $product) use ($importIssue): array {
+                    $familyVariants = $product->variantChildren->values();
+                    $variants = $familyVariants;
+
+                    if ($importIssue !== null) {
+                        $variants = $variants
+                            ->filter(fn (Product $variant): bool => $this->matchesProductImportIssue($variant, $importIssue, 'variation'))
+                            ->values();
+                    }
+
+                    return [
+                        'product' => $product,
+                        'variants' => $variants,
+                        'family_variants' => $familyVariants,
+                        'is_import_issue' => $importIssue !== null
+                            && $this->matchesProductImportIssue($product, $importIssue, 'product'),
+                    ];
+                }),
         );
 
         return $paginator;
@@ -1420,7 +1437,7 @@ class ProductController extends Controller
     /**
      * @param  array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string}  $filters
      */
-    private function applyProductListFilters(Builder $products, array $filters): void
+    private function applyProductListFilters(Builder $products, array $filters, ?array $importIssue = null): void
     {
         if ($this->hasProductListModelFilters($filters)) {
             $products->where(function (Builder $family) use ($filters): void {
@@ -1447,6 +1464,86 @@ class ProductController extends Controller
                     ->orWhereHas('variantChildren', fn (Builder $variants) => $variants->where('is_favorite', true));
             });
         }
+
+        if ($importIssue !== null) {
+            $this->applyProductImportIssueFilter($products, $importIssue);
+        }
+    }
+
+    /**
+     * Limits the product family query to the exact ERP records reported by an
+     * import log. IDs are preferred because the duplicated SKU is shared by
+     * more than one WooCommerce entity. The SKU is only a fallback for older
+     * payloads which did not persist an ERP product ID.
+     *
+     * @param  array<string, mixed>  $importIssue
+     */
+    private function applyProductImportIssueFilter(Builder $products, array $importIssue): void
+    {
+        $targetIds = (array) data_get($importIssue, 'targets.ids', []);
+        $productSkus = (array) data_get($importIssue, 'targets.product_skus', []);
+        $variationSkus = (array) data_get($importIssue, 'targets.variation_skus', []);
+
+        $products->where(function (Builder $family) use ($targetIds, $productSkus, $variationSkus): void {
+            $hasParentTargets = $targetIds !== [] || $productSkus !== [];
+            $hasVariantTargets = $targetIds !== [] || $variationSkus !== [];
+
+            if ($hasParentTargets) {
+                $family->where(function (Builder $product) use ($targetIds, $productSkus): void {
+                    $this->applyProductImportIssueModelFilter($product, $targetIds, $productSkus);
+                });
+            }
+
+            if ($hasVariantTargets) {
+                $method = $hasParentTargets ? 'orWhereHas' : 'whereHas';
+                $family->{$method}('variantChildren', function (Builder $variant) use ($targetIds, $variationSkus): void {
+                    $this->applyProductImportIssueModelFilter($variant, $targetIds, $variationSkus);
+                });
+            }
+
+            if (! $hasParentTargets && ! $hasVariantTargets) {
+                $family->whereRaw('1 = 0');
+            }
+        });
+    }
+
+    /**
+     * @param  list<int>  $targetIds
+     * @param  list<string>  $targetSkus
+     */
+    private function applyProductImportIssueModelFilter(Builder $products, array $targetIds, array $targetSkus): void
+    {
+        $qualifiedId = $products->qualifyColumn('id');
+        $qualifiedSku = $products->qualifyColumn('sku');
+
+        $products->where(function (Builder $match) use ($qualifiedId, $qualifiedSku, $targetIds, $targetSkus): void {
+            if ($targetIds !== []) {
+                $match->whereIn($qualifiedId, $targetIds);
+            }
+
+            if ($targetSkus !== []) {
+                $method = $targetIds !== [] ? 'orWhereIn' : 'whereIn';
+                $match->{$method}(DB::raw('LOWER('.$qualifiedSku.')'), $targetSkus);
+            }
+        });
+    }
+
+    /**
+     * @param  array<string, mixed>  $importIssue
+     */
+    private function matchesProductImportIssue(Product $product, array $importIssue, string $entityKind): bool
+    {
+        if (in_array((int) $product->id, (array) data_get($importIssue, 'targets.ids', []), true)) {
+            return true;
+        }
+
+        $skuKey = $entityKind === 'variation' ? 'variation_skus' : 'product_skus';
+
+        return in_array(
+            mb_strtolower(trim((string) $product->sku)),
+            (array) data_get($importIssue, 'targets.'.$skuKey, []),
+            true,
+        );
     }
 
     /**

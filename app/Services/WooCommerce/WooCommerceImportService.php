@@ -45,7 +45,7 @@ final class WooCommerceImportService
     ) {}
 
     /**
-     * @return array<string, int>
+     * @return array<string, mixed>
      */
     public function importProducts(WordpressIntegration $integration): array
     {
@@ -58,6 +58,8 @@ final class WooCommerceImportService
             'unique_skus_seen' => 0,
             'synthetic_sku_items' => 0,
             'duplicate_sku_items' => 0,
+            'duplicate_sku_groups_count' => 0,
+            'duplicate_sku_groups' => [],
             'duplicate_sku_resolved' => 0,
             'duplicate_ean_items' => 0,
             'translation_eans_reclaimed' => 0,
@@ -89,6 +91,9 @@ final class WooCommerceImportService
             'category_aliases_total_after' => 0,
         ];
         $seenSourceSkus = [];
+        $seenSourceSkuLabels = [];
+        $seenSourceIdentities = [];
+        $duplicateSkuGroups = [];
 
         $this->syncProductCategories($integration);
 
@@ -121,15 +126,16 @@ final class WooCommerceImportService
             }
 
             $entityKind = isset($item['variation_id']) ? 'variation' : 'product';
-            $seenSku = $entityKind.':'.($sourceSku !== '' ? $sourceSku : $sku);
+            $seenSku = $entityKind.':'.Str::lower($sourceSku !== '' ? $sourceSku : $sku);
+            $sourceIdentity = $this->wooItemIdentityForDuplicateSku($item);
+            $isRepeatedSourceItem = isset($seenSourceIdentities[$seenSku][$sourceIdentity]);
+            $isDuplicateSku = isset($seenSourceSkus[$seenSku]) && ! $isRepeatedSourceItem;
 
-            if (isset($seenSourceSkus[$seenSku])) {
+            if ($isDuplicateSku) {
                 $stats['duplicate_sku_items']++;
-            } else {
-                $seenSourceSkus[$seenSku] = true;
             }
 
-            DB::transaction(function () use ($integration, $item, $sku, &$stats): void {
+            $erpProductId = DB::transaction(function () use ($integration, $item, $sku, &$stats): int {
                 $this->syncItemCategories($integration, (array) ($item['categories'] ?? []), $this->normalizeLanguage($item['erp_import_language'] ?? 'pl'));
                 $this->syncTranslationCategories($integration, $item);
                 $parameterSync = $this->parameterTranslations->syncFromWooItem($item);
@@ -237,12 +243,36 @@ final class WooCommerceImportService
 
                 $isNew ? $stats['created']++ : $stats['updated']++;
                 $stats['mapped']++;
+
+                return (int) $product->id;
             });
+
+            $diagnosticItem = $this->duplicateSkuDiagnosticItem($item, $erpProductId);
+            $seenSourceIdentities[$seenSku][$sourceIdentity] = true;
+
+            if ($isDuplicateSku) {
+                if (! isset($duplicateSkuGroups[$seenSku])) {
+                    $duplicateSkuGroups[$seenSku] = [
+                        'sku' => $seenSourceSkuLabels[$seenSku],
+                        'entity_kind' => $entityKind,
+                        'occurrences' => 1,
+                        'items' => [$seenSourceSkus[$seenSku]],
+                    ];
+                }
+
+                $duplicateSkuGroups[$seenSku]['items'][] = $diagnosticItem;
+                $duplicateSkuGroups[$seenSku]['occurrences'] = count($duplicateSkuGroups[$seenSku]['items']);
+            } elseif (! isset($seenSourceSkus[$seenSku])) {
+                $seenSourceSkus[$seenSku] = $diagnosticItem;
+                $seenSourceSkuLabels[$seenSku] = $sourceSku !== '' ? $sourceSku : $sku;
+            }
         }
 
         $this->syncImportedRelatedProductSkus($integration);
 
         $stats['unique_skus_seen'] = count($seenSourceSkus);
+        $stats['duplicate_sku_groups_count'] = count($duplicateSkuGroups);
+        $stats['duplicate_sku_groups'] = array_values($duplicateSkuGroups);
         $stats['products_total_after'] = Product::query()->count();
         $stats['products_primary_after'] = Product::query()->where('is_translation', false)->count();
         $stats['products_historical_aliases_after'] = Product::query()->where('is_translation', true)->count();
@@ -257,6 +287,40 @@ final class WooCommerceImportService
             ->count();
 
         return $stats;
+    }
+
+    /**
+     * Keep diagnostic payload deliberately small and limited to identifiers
+     * required to find the conflicting records in ERP and WooCommerce.
+     *
+     * @param  array<string, mixed>  $item
+     * @return array{erp_product_id:int,woo_product_id:string,woo_variation_id:?string,name:string,language:string,permalink:?string}
+     */
+    private function duplicateSkuDiagnosticItem(array $item, int $erpProductId): array
+    {
+        $permalink = $this->nullableString($item['permalink'] ?? $item['parent_permalink'] ?? null);
+
+        return [
+            'erp_product_id' => $erpProductId,
+            'woo_product_id' => trim((string) ($item['id'] ?? '')),
+            'woo_variation_id' => isset($item['variation_id'])
+                ? trim((string) $item['variation_id'])
+                : null,
+            'name' => Str::limit(trim((string) ($item['name'] ?? '')), 255, ''),
+            'language' => $this->normalizeLanguage($item['erp_import_language'] ?? 'pl'),
+            'permalink' => $permalink !== null ? Str::limit($permalink, 1000, '') : null,
+        ];
+    }
+
+    /**
+     * Pagination can move while WooCommerce is being read and return the same
+     * record more than once. Such a repeated identity is not a SKU conflict.
+     *
+     * @param  array<string, mixed>  $item
+     */
+    private function wooItemIdentityForDuplicateSku(array $item): string
+    {
+        return trim((string) ($item['id'] ?? '')).'|'.trim((string) ($item['variation_id'] ?? ''));
     }
 
     private function syncProductCategories(WordpressIntegration $integration): void

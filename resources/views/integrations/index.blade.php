@@ -9,7 +9,8 @@
         'source_simple_products' => 'Produkty proste',
         'unique_skus_seen' => 'Unikalne SKU w imporcie',
         'synthetic_sku_items' => 'Pozycje z nadanym SKU ERP',
-        'duplicate_sku_items' => 'Duplikaty SKU w WooCommerce',
+        'duplicate_sku_items' => 'Dodatkowe wystąpienia powielonego SKU',
+        'duplicate_sku_groups_count' => 'Grupy zduplikowanych SKU',
         'duplicate_sku_resolved' => 'Duplikaty SKU rozdzielone na osobne mapowania',
         'duplicate_ean_items' => 'Duplikaty EAN w imporcie',
         'translation_eans_reclaimed' => 'EAN odzyskane z tłumaczeń',
@@ -41,6 +42,7 @@
         'reservation_skipped' => 'Pominięte rezerwacje',
     ];
     $syncWarningKeys = ['duplicate_sku_items', 'mapping_overwrites'];
+    $syncHiddenResultKeys = ['duplicate_sku_groups'];
     $formatSyncResultValue = function (mixed $value): string {
         if (is_bool($value)) {
             return $value ? 'tak' : 'nie';
@@ -516,10 +518,11 @@
                                             <div class="sync-warning">
                                                 Import produktów wymaga sprawdzenia:
                                                 @if ($duplicateSkuItems > 0)
-                                                    {{ $duplicateSkuItems }} pozycji ma SKU użyte więcej niż raz.
+                                                    Wykryto powielone SKU (dodatkowe wystąpienia: {{ $duplicateSkuItems }}).
                                                     @if ($duplicateSkuResolved > 0)
                                                         {{ $duplicateSkuResolved }} z nich otrzymało automatycznie osobne mapowanie ERP.
                                                     @endif
+                                                    <a href="{{ route('products.index', ['import_issue' => $log->id]) }}">Pokaż produkty z powtórzonym SKU</a>
                                                 @endif
                                                 @if ($mappingOverwrites > 0)
                                                     {{ $mappingOverwrites }} mapowań zostało nadpisanych innym ID WooCommerce.
@@ -528,6 +531,7 @@
                                         @endif
                                         <ul class="sync-result-list">
                                             @foreach ($payload as $key => $value)
+                                                @continue(in_array($key, $syncHiddenResultKeys, true))
                                                 @php
                                                     $isWarningValue = in_array($key, $syncWarningKeys, true) && (int) $value > 0;
                                                 @endphp
@@ -625,6 +629,7 @@
         .sync-result-list li.is-warning span,
         .sync-result-list li.is-warning strong { color: var(--red); }
         .sync-warning { max-width: 520px; margin-bottom: 8px; padding: 8px 10px; border: 1px solid rgba(220, 38, 38, .28); border-radius: 8px; background: rgba(220, 38, 38, .08); color: var(--red); font-size: 12px; font-weight: 800; line-height: 1.35; }
+        .sync-warning a { display: inline-block; margin-left: 5px; color: var(--red); text-decoration: underline; text-underline-offset: 2px; }
         @media (max-width: 1120px) {
             .integration-section-grid, .integration-facts, .integration-config-grid { grid-template-columns: 1fr; }
             .integration-store-head { align-items: flex-start; flex-direction: column; }
