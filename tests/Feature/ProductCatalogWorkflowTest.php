@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Jobs\ExportStockToWooCommerceJob;
 use App\Jobs\ExportWooCommerceProductDataJob;
 use App\Models\AppSetting;
 use App\Models\AuditLog;
@@ -15,11 +16,15 @@ use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
 use App\Models\StockLedgerEntry;
+use App\Models\StockReservation;
+use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
+use App\Services\WooCommerce\StockSyncExportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -592,6 +597,99 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame(2, WarehouseDocument::query()->where('type', 'KOR')->where('status', 'posted')->count());
         $this->assertSame(2, AuditLog::query()->where('action', 'product.stock_adjusted')->count());
         $this->assertSame(2, AuditLog::query()->where('action', 'warehouse_document.posted')->count());
+    }
+
+    public function test_setting_unchanged_stock_queues_available_quantity_and_exports_it_to_woocommerce(): void
+    {
+        Queue::fake();
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/777' => Http::response([
+                'id' => 777,
+                'sku' => 'SKU-UNCHANGED-SYNC',
+                'stock_quantity' => 2,
+                'stock_status' => 'instock',
+            ]),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'stock_export_enabled' => true,
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Magazyn główny',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $warehouse->routes()->create([
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 100,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-UNCHANGED-SYNC',
+            'name' => 'Produkt z niezmienionym stanem',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '777',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 4,
+            'quantity_reserved' => 2,
+            'quantity_available' => 2,
+        ]);
+        StockReservation::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_order_id' => 'ORDER-RESERVED-2',
+            'quantity' => 2,
+            'status' => 'active',
+            'reserved_at' => now(),
+        ]);
+
+        $this->post(route('products.stock.adjust', $product), [
+            'warehouse_id' => $warehouse->id,
+            'new_quantity' => 4,
+        ])->assertRedirect(route('products.edit', $product))
+            ->assertSessionHas('status');
+
+        $this->assertSame(0, WarehouseDocument::query()->where('type', 'KOR')->count());
+
+        $queueItem = StockSyncQueueItem::query()->firstOrFail();
+        $this->assertSame('2.0000', (string) $queueItem->quantity_to_push);
+        $this->assertSame('manual_stock_sync_requested', $queueItem->metadata['reason']);
+        Queue::assertPushed(ExportStockToWooCommerceJob::class, 1);
+
+        app(StockSyncExportService::class)->export($queueItem);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/777'
+            && $request['manage_stock'] === true
+            && $request['stock_quantity'] === 2
+            && $request['stock_status'] === 'instock');
     }
 
     public function test_variable_product_stock_is_consolidated_into_one_quick_edit_table(): void

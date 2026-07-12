@@ -367,10 +367,10 @@
                                 <td class="numeric">{{ $qty($balance?->quantity_available ?? 0) }}</td>
                                 <td>{{ $balance?->recalculated_at?->format('Y-m-d H:i') ?? '-' }}</td>
                                 <td>
-                                    <form class="stock-adjust-form" method="POST" action="{{ route('products.stock.adjust', $product) }}" onsubmit="return confirm('Zaksięgować korektę stanu dla SKU {{ $product->sku }} w magazynie {{ $warehouse->code }}?');">
+                                    <form class="stock-adjust-form" method="POST" action="{{ route('products.stock.adjust', $product) }}" onsubmit="return confirm('Ustawić stan ogółem dla SKU {{ $product->sku }} w magazynie {{ $warehouse->code }}? ERP odejmie rezerwacje przed synchronizacją z WooCommerce.');">
                                         @csrf
                                         <input type="hidden" name="warehouse_id" value="{{ $warehouse->id }}">
-                                        <label>Nowy stan
+                                        <label>Nowy stan ogółem
                                             <input name="new_quantity" type="number" min="0" step="0.0001" value="{{ old('new_quantity', $currentOnHand) }}" required>
                                         </label>
                                         <label>Powód

@@ -18,7 +18,7 @@
         <span class="stock-pill">Rezerwacje <strong>{{ $stockQty($stockReserved) }}</strong></span>
         <span class="stock-pill available">Dostępne do sprzedaży <strong>{{ $stockQty($stockAvailable) }}</strong></span>
     </div>
-    <div class="stock-readonly-note">Ręczna zmiana tworzy dokument KOR, księguje ruch magazynowy i od razu dodaje aktualny stan do synchronizacji z WooCommerce.</div>
+    <div class="stock-readonly-note">Wpisujesz stan ogółem (fizyczny). ERP odejmuje rezerwacje i synchronizuje z WooCommerce wyłącznie stan dostępny do sprzedaży. Ręczna zmiana tworzy dokument KOR, księguje ruch magazynowy i od razu dodaje stan dostępny do synchronizacji z WooCommerce.</div>
     <div class="table-scroll">
         <table class="dense-table stock-adjust-table">
             <thead>
@@ -27,7 +27,7 @@
                     <th class="numeric">Stan</th>
                     <th class="numeric">Rezerwacje</th>
                     <th class="numeric">Dostępne</th>
-                    <th>Nowy stan</th>
+                    <th>Nowy stan ogółem</th>
                     <th>Akcja</th>
                 </tr>
             </thead>
@@ -43,7 +43,7 @@
                         <td class="numeric">{{ $stockQty($balance?->quantity_reserved ?? 0) }}</td>
                         <td class="numeric">{{ $stockQty($balance?->quantity_available ?? 0) }}</td>
                         <td>
-                            <input data-stock-adjust-quantity type="number" min="0" step="0.0001" value="{{ old('new_quantity', $currentOnHand) }}" aria-label="Nowy stan {{ $stockProduct->sku }} w {{ $warehouse->code }}">
+                            <input data-stock-adjust-quantity type="number" min="0" step="0.0001" value="{{ old('new_quantity', $currentOnHand) }}" aria-label="Nowy stan ogółem {{ $stockProduct->sku }} w {{ $warehouse->code }}">
                             <div class="stock-adjust-error" data-stock-adjust-error></div>
                         </td>
                         <td>

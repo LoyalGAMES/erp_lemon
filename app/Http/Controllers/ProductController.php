@@ -18,6 +18,7 @@ use App\Models\WordpressIntegration;
 use App\Services\Audit\AuditLogService;
 use App\Services\Gs1\Gs1GtinService;
 use App\Services\Gs1\Gs1SettingsService;
+use App\Services\Inventory\StockSyncQueueService;
 use App\Services\Inventory\WarehouseDocumentNumberService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\Products\ProductEditFieldSettingsService;
@@ -458,6 +459,7 @@ class ProductController extends Controller
         Request $request,
         WarehouseDocumentNumberService $numbers,
         WarehouseDocumentPostingService $posting,
+        StockSyncQueueService $stockSyncQueue,
         AuditLogService $audit,
     ): RedirectResponse {
         $validated = $request->validate([
@@ -480,8 +482,28 @@ class ProductController extends Controller
         $delta = round($target - $current, 4);
 
         if (abs($delta) < 0.0001) {
+            $queued = $stockSyncQueue->queueForTriggers([
+                [
+                    'warehouse_id' => (int) $warehouse->id,
+                    'product_id' => (int) $product->id,
+                ],
+            ], 'manual_stock_sync_requested');
+
+            $audit->record('product.stock_sync_requested', $product, null, null, [
+                'warehouse_id' => $warehouse->id,
+                'warehouse_code' => $warehouse->code,
+                'quantity_on_hand' => $current,
+                'quantity_reserved' => (float) ($balance?->quantity_reserved ?? 0),
+                'quantity_available' => (float) ($balance?->quantity_available ?? 0),
+                'queued_channels' => $queued,
+            ]);
+
+            $syncMessage = $queued > 0
+                ? ' Aktualny stan dostępny dodano ponownie do synchronizacji z WooCommerce.'
+                : ' Nie znaleziono aktywnej trasy eksportu stanu do WooCommerce.';
+
             return $this->redirectAfterStockAdjustment($request, $product)
-                ->with('status', "Stan SKU {$product->sku} w magazynie {$warehouse->code} już wynosi {$this->formatQuantity($target)}.");
+                ->with('status', "Stan ogółem SKU {$product->sku} w magazynie {$warehouse->code} już wynosi {$this->formatQuantity($target)}.{$syncMessage}");
         }
 
         $document = DB::transaction(function () use ($product, $warehouse, $validated, $numbers, $current, $target, $delta): WarehouseDocument {
@@ -549,7 +571,7 @@ class ProductController extends Controller
         ]);
 
         return $this->redirectAfterStockAdjustment($request, $product)
-            ->with('status', "Zmieniono stan SKU {$product->sku} w magazynie {$warehouse->code} z {$this->formatQuantity($current)} na {$this->formatQuantity($target)} dokumentem {$document->number}.");
+            ->with('status', "Zmieniono stan ogółem SKU {$product->sku} w magazynie {$warehouse->code} z {$this->formatQuantity($current)} na {$this->formatQuantity($target)} dokumentem {$document->number}. Stan dostępny do synchronizacji z WooCommerce jest liczony po odjęciu rezerwacji.");
     }
 
     private function redirectAfterStockAdjustment(Request $request, Product $product): RedirectResponse

@@ -32,7 +32,7 @@
         <div class="variant-stock-management-head">
             <div>
                 <strong>Stany magazynowe wariantów</strong>
-                <div class="toolbar-note">Każdy wariant i magazyn edytujesz w jednym wierszu. Ustawienie stanu tworzy korektę KOR i od razu przekazuje stan do synchronizacji z WooCommerce.</div>
+                <div class="toolbar-note">Każdy wariant i magazyn edytujesz w jednym wierszu. Wpisujesz stan ogółem (fizyczny). ERP odejmuje rezerwacje i synchronizuje z WooCommerce wyłącznie stan dostępny do sprzedaży. Ustawienie stanu tworzy korektę KOR.</div>
             </div>
         </div>
         <div class="table-scroll">
@@ -45,7 +45,7 @@
                         <th class="numeric">Stan</th>
                         <th class="numeric">Rezerwacje</th>
                         <th class="numeric">Dostępne</th>
-                        <th>Nowy stan</th>
+                        <th>Nowy stan ogółem</th>
                         <th>Edycja</th>
                     </tr>
                 </thead>
@@ -86,7 +86,7 @@
                                             min="0"
                                             step="0.0001"
                                             value="{{ $currentOnHand }}"
-                                            aria-label="Nowy stan {{ $variant->sku }} w {{ $warehouse->code }}"
+                                            aria-label="Nowy stan ogółem {{ $variant->sku }} w {{ $warehouse->code }}"
                                         >
                                         <button
                                             class="button secondary"

@@ -128,11 +128,7 @@ final class StockReservationService
 
     public function recalculateBalance(int $warehouseId, int $productId): void
     {
-        $reserved = (float) StockReservation::query()
-            ->where('warehouse_id', $warehouseId)
-            ->where('product_id', $productId)
-            ->where('status', self::ACTIVE_STATUS)
-            ->sum('quantity');
+        $reserved = $this->activeQuantity($warehouseId, $productId);
 
         $balance = StockBalance::query()->firstOrCreate(
             [
@@ -152,6 +148,15 @@ final class StockReservationService
             'quantity_available' => max(0, $onHand - $reserved),
             'recalculated_at' => now(),
         ]);
+    }
+
+    public function activeQuantity(int $warehouseId, int $productId): float
+    {
+        return (float) StockReservation::query()
+            ->where('warehouse_id', $warehouseId)
+            ->where('product_id', $productId)
+            ->where('status', self::ACTIVE_STATUS)
+            ->sum('quantity');
     }
 
     public function releaseForPostedDocument(WarehouseDocument $document): int
@@ -409,11 +414,7 @@ final class StockReservationService
             ->first();
 
         $onHand = (float) ($balance?->quantity_on_hand ?? 0);
-        $reserved = (float) StockReservation::query()
-            ->where('warehouse_id', $warehouseId)
-            ->where('product_id', $productId)
-            ->where('status', self::ACTIVE_STATUS)
-            ->sum('quantity');
+        $reserved = $this->activeQuantity($warehouseId, $productId);
 
         return max(0, $onHand - $reserved);
     }

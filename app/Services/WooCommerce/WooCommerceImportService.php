@@ -12,7 +12,10 @@ use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\ProductRelation;
 use App\Models\StockBalance;
+use App\Models\StockReservation;
+use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
+use App\Models\WarehouseChannelRoute;
 use App\Models\WordpressIntegration;
 use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Communication\CustomerCommunicationService;
@@ -73,6 +76,9 @@ final class WooCommerceImportService
             'updated' => 0,
             'mapped' => 0,
             'stock_updated' => 0,
+            'stock_skipped_ambiguous_routes' => 0,
+            'stock_skipped_pending_export' => 0,
+            'stock_skipped_waiting_reservations' => 0,
             'skipped' => 0,
             'skipped_missing_identifier' => 0,
             'products_total_before' => Product::query()->count(),
@@ -232,11 +238,6 @@ final class WooCommerceImportService
 
                 $this->syncVariationRelation($integration, $product, $item);
 
-                if (array_key_exists('stock_quantity', $item) && $item['stock_quantity'] !== null) {
-                    $this->syncImportedStock($integration, $product, (float) $item['stock_quantity']);
-                    $stats['stock_updated']++;
-                }
-
                 $translationSync = $this->syncTranslationAliases($integration, $product, $item);
                 $stats['translation_aliases_mapped'] += $translationSync['aliases'];
                 $stats['translation_products_merged'] += $translationSync['merged'];
@@ -246,6 +247,20 @@ final class WooCommerceImportService
 
                 return (int) $product->id;
             });
+
+            if (array_key_exists('stock_quantity', $item) && $item['stock_quantity'] !== null) {
+                $stockSkipReason = $this->syncImportedStock(
+                    $integration,
+                    Product::query()->findOrFail($erpProductId),
+                    (float) $item['stock_quantity'],
+                );
+
+                if ($stockSkipReason === null) {
+                    $stats['stock_updated']++;
+                } else {
+                    $stats[$stockSkipReason]++;
+                }
+            }
 
             $diagnosticItem = $this->duplicateSkuDiagnosticItem($item, $erpProductId);
             $seenSourceIdentities[$seenSku][$sourceIdentity] = true;
@@ -966,24 +981,103 @@ final class WooCommerceImportService
             ->all();
     }
 
-    private function syncImportedStock(WordpressIntegration $integration, Product $product, float $quantity): void
+    private function syncImportedStock(WordpressIntegration $integration, Product $product, float $quantity): ?string
     {
         $warehouse = $this->stockImportWarehouse($integration);
-        $balance = StockBalance::query()->firstOrNew([
-            'warehouse_id' => $warehouse->id,
-            'product_id' => $product->id,
-        ]);
 
-        $reserved = (float) ($balance->quantity_reserved ?? 0);
-        $onHand = max(0, $quantity);
+        if (! $this->stockImportIsUnambiguous($integration, $warehouse)) {
+            return 'stock_skipped_ambiguous_routes';
+        }
 
-        $balance->fill([
-            'quantity_on_hand' => $onHand,
-            'quantity_reserved' => $reserved,
-            'quantity_available' => max(0, $onHand - $reserved),
-            'recalculated_at' => now(),
-        ]);
-        $balance->save();
+        return DB::transaction(function () use ($integration, $product, $quantity, $warehouse): ?string {
+            $now = now();
+
+            DB::table('stock_balances')->insertOrIgnore([
+                'warehouse_id' => $warehouse->id,
+                'product_id' => $product->id,
+                'quantity_on_hand' => 0,
+                'quantity_reserved' => 0,
+                'quantity_available' => 0,
+                'recalculated_at' => $now,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            $balance = StockBalance::query()
+                ->where('warehouse_id', $warehouse->id)
+                ->where('product_id', $product->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $exportQuery = StockSyncQueueItem::query()
+                ->where('product_id', $product->id)
+                ->where('sales_channel_id', $integration->sales_channel_id);
+
+            if ((clone $exportQuery)
+                ->whereIn('status', ['pending', 'queued', 'running'])
+                ->exists()
+            ) {
+                return 'stock_skipped_pending_export';
+            }
+
+            $latestExportStatus = $exportQuery
+                ->latest('id')
+                ->value('status');
+
+            if ($latestExportStatus === 'failed') {
+                return 'stock_skipped_pending_export';
+            }
+
+            if (StockReservation::query()
+                ->where('warehouse_id', $warehouse->id)
+                ->where('product_id', $product->id)
+                ->where('status', 'waiting')
+                ->exists()
+            ) {
+                return 'stock_skipped_waiting_reservations';
+            }
+
+            $reserved = $this->reservationService->activeQuantity(
+                (int) $warehouse->id,
+                (int) $product->id,
+            );
+
+            // WooCommerce exposes stock_quantity as the quantity still available
+            // to buy. ERP keeps physical stock separately, so active reservations
+            // must be added back when reconstructing quantity_on_hand.
+            $remoteAvailable = max(0, $quantity);
+            $onHand = $remoteAvailable + $reserved;
+
+            $balance->update([
+                'quantity_on_hand' => $onHand,
+                'quantity_reserved' => $reserved,
+                'quantity_available' => $remoteAvailable,
+                'recalculated_at' => $now,
+            ]);
+
+            return null;
+        }, 3);
+    }
+
+    private function stockImportIsUnambiguous(WordpressIntegration $integration, Warehouse $warehouse): bool
+    {
+        if (! $integration->stock_export_enabled) {
+            return true;
+        }
+
+        $routes = WarehouseChannelRoute::query()
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->where('push_stock', true)
+            ->get(['warehouse_id', 'stock_buffer']);
+
+        if ($routes->count() !== 1) {
+            return false;
+        }
+
+        $route = $routes->first();
+
+        return (int) $route->warehouse_id === (int) $warehouse->id
+            && abs((float) $route->stock_buffer) < 0.0001;
     }
 
     /**

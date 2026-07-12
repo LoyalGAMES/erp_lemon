@@ -24,6 +24,9 @@
         'updated' => 'Zaktualizowane w ERP',
         'mapped' => 'Zmapowane pozycje',
         'stock_updated' => 'Zaktualizowane stany',
+        'stock_skipped_ambiguous_routes' => 'Pominięte stany przy wielu magazynach lub buforze',
+        'stock_skipped_pending_export' => 'Pominięte stany z oczekującym lub nieudanym eksportem ERP → Woo',
+        'stock_skipped_waiting_reservations' => 'Pominięte stany z oczekującymi rezerwacjami',
         'skipped' => 'Pominięte',
         'skipped_missing_identifier' => 'Pominięte bez identyfikatora',
         'products_total_before' => 'Wszystkie rekordy ERP przed importem',
@@ -41,7 +44,13 @@
         'released' => 'Zwolnione rezerwacje',
         'reservation_skipped' => 'Pominięte rezerwacje',
     ];
-    $syncWarningKeys = ['duplicate_sku_items', 'mapping_overwrites'];
+    $syncWarningKeys = [
+        'duplicate_sku_items',
+        'mapping_overwrites',
+        'stock_skipped_ambiguous_routes',
+        'stock_skipped_pending_export',
+        'stock_skipped_waiting_reservations',
+    ];
     $syncHiddenResultKeys = ['duplicate_sku_groups'];
     $formatSyncResultValue = function (mixed $value): string {
         if (is_bool($value)) {
@@ -513,8 +522,11 @@
                                             $duplicateSkuItems = (int) ($payload['duplicate_sku_items'] ?? 0);
                                             $duplicateSkuResolved = (int) ($payload['duplicate_sku_resolved'] ?? 0);
                                             $mappingOverwrites = (int) ($payload['mapping_overwrites'] ?? 0);
+                                            $stockSkipped = (int) ($payload['stock_skipped_ambiguous_routes'] ?? 0)
+                                                + (int) ($payload['stock_skipped_pending_export'] ?? 0)
+                                                + (int) ($payload['stock_skipped_waiting_reservations'] ?? 0);
                                         @endphp
-                                        @if ($log->operation === 'import_products' && ($duplicateSkuItems > 0 || $mappingOverwrites > 0))
+                                        @if ($log->operation === 'import_products' && ($duplicateSkuItems > 0 || $mappingOverwrites > 0 || $stockSkipped > 0))
                                             <div class="sync-warning">
                                                 Import produktów wymaga sprawdzenia:
                                                 @if ($duplicateSkuItems > 0)
@@ -526,6 +538,9 @@
                                                 @endif
                                                 @if ($mappingOverwrites > 0)
                                                     {{ $mappingOverwrites }} mapowań zostało nadpisanych innym ID WooCommerce.
+                                                @endif
+                                                @if ($stockSkipped > 0)
+                                                    {{ $stockSkipped }} stanów nie nadpisano dla bezpieczeństwa. Szczegóły są widoczne poniżej.
                                                 @endif
                                             </div>
                                         @endif

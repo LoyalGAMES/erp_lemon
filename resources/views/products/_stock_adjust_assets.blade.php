@@ -68,12 +68,12 @@
                     const quantity = String(quantityInput?.value || '').trim();
 
                     if (!action || !warehouseId || quantity === '') {
-                        if (error) error.textContent = 'Uzupełnij nowy stan magazynowy.';
+                        if (error) error.textContent = 'Uzupełnij nowy stan ogółem.';
                         quantityInput?.focus();
                         return;
                     }
 
-                    if (!confirm(`Zaksięgować ręczną korektę stanu SKU ${productSku} w magazynie ${warehouseCode}?`)) {
+                    if (!confirm(`Ustawić stan ogółem SKU ${productSku} w magazynie ${warehouseCode}? ERP odejmie rezerwacje przed synchronizacją z WooCommerce.`)) {
                         return;
                     }
 

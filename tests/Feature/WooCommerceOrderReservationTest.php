@@ -12,7 +12,9 @@ use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
 use App\Models\StockReservation;
+use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
+use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\WooCommerceImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -117,6 +119,138 @@ class WooCommerceOrderReservationTest extends TestCase
         $balance->refresh();
         $this->assertSame('0.0000', (string) $balance->quantity_reserved);
         $this->assertSame('10.0000', (string) $balance->quantity_available);
+    }
+
+    public function test_product_stock_reimport_preserves_physical_stock_behind_reservations_until_wz_is_posted(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => true,
+            'settings' => [
+                'product_import' => ['languages' => ['pl']],
+            ],
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Main',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $warehouse->routes()->create([
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 100,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-RES',
+            'name' => 'Reserved product',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '7001',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $balance = StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 2,
+            'quantity_reserved' => 0,
+            'quantity_available' => 2,
+        ]);
+
+        $status = 'processing';
+        $httpMode = 'orders';
+        $ordersResponse = $this->ordersResponse($status)['*'];
+        Http::fake(function ($request) use (&$httpMode, $ordersResponse) {
+            if ($httpMode === 'orders') {
+                return $ordersResponse($request);
+            }
+
+            $url = $request->url();
+            parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+            if (str_contains($url, '/products/categories')) {
+                return Http::response([]);
+            }
+
+            if (str_contains($url, '/products')) {
+                if ((int) ($query['page'] ?? 1) > 1) {
+                    return Http::response([]);
+                }
+
+                return Http::response([[
+                    'id' => 7001,
+                    'sku' => 'SKU-RES',
+                    'name' => 'Reserved product',
+                    'type' => 'simple',
+                    'status' => 'publish',
+                    'manage_stock' => true,
+                    'stock_quantity' => 0,
+                    'stock_status' => 'outofstock',
+                ]]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $orderStats = app(WooCommerceImportService::class)->importOrders($integration);
+
+        $this->assertSame(1, $orderStats['reserved']);
+        $balance->refresh();
+        $this->assertSame('2.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('2.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('0.0000', (string) $balance->quantity_available);
+
+        StockSyncQueueItem::query()->update([
+            'status' => 'success',
+            'processed_at' => now(),
+        ]);
+        $httpMode = 'products';
+
+        $productStats = app(WooCommerceImportService::class)->importProducts($integration);
+
+        $this->assertSame(1, $productStats['stock_updated']);
+        $balance->refresh();
+        $this->assertSame('2.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('2.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('0.0000', (string) $balance->quantity_available);
+
+        $order = ExternalOrder::query()->where('external_id', '501')->firstOrFail();
+
+        $this->post(route('orders.wz.create', $order))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $document = WarehouseDocument::query()->where('type', 'WZ')->firstOrFail();
+
+        $this->post(route('documents.post', $document))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $balance->refresh();
+        $this->assertSame('0.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('0.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('0.0000', (string) $balance->quantity_available);
+        $this->assertSame('released', StockReservation::query()->firstOrFail()->status);
     }
 
     public function test_pending_order_is_imported_for_customer_communication_and_reserves_stock(): void
