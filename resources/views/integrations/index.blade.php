@@ -58,7 +58,6 @@
     };
     $activeStoresCount = $integrations->count();
     $storesWithLabels = $integrations->filter(fn ($integration): bool => $integration->shippingLabelsEnabled())->count();
-    $failedLogsCount = $logs->where('status', 'failed')->count();
     $activeJobsCount = $logs->whereIn('status', ['queued', 'running'])->count();
 @endphp
 
@@ -463,7 +462,20 @@
         <article class="card">
             <div class="panel-header">
                 <span>Ostatnie logi synchronizacji</span>
-                <span>{{ $logs->count() }} wpisów</span>
+                <div class="inline-actions integration-log-actions">
+                    <span>{{ $logs->count() }} ostatnich wpisów</span>
+                    @if ($failedLogsCount > 0)
+                        <form
+                            method="POST"
+                            action="{{ route('integrations.logs.failed.destroy') }}"
+                            onsubmit="return confirm('Usunąć wszystkie nieudane logi synchronizacji ({{ $failedLogsCount }})? Poprawne i aktywne wpisy pozostaną bez zmian.');"
+                        >
+                            @csrf
+                            @method('DELETE')
+                            <button class="button danger" type="submit">Wyczyść błędy ({{ $failedLogsCount }})</button>
+                        </form>
+                    @endif
+                </div>
             </div>
             <div class="table-scroll">
                 <table class="dense-table">
@@ -606,6 +618,7 @@
         .integration-form-grid .wide { grid-column: 1 / -1; }
         .integration-empty { padding: 18px; display: grid; gap: 8px; justify-items: start; color: var(--muted); }
         .integration-empty strong { color: var(--text); font-size: 18px; }
+        .integration-log-actions { justify-content: flex-end; font-weight: 650; }
         .sync-result-list { display: grid; gap: 4px; min-width: 280px; margin: 0; padding: 0; list-style: none; }
         .sync-result-list li { display: grid; grid-template-columns: minmax(170px, 1fr) auto; gap: 12px; align-items: baseline; color: var(--muted); font-size: 12px; }
         .sync-result-list strong { color: var(--text); font-variant-numeric: tabular-nums; }
@@ -622,6 +635,8 @@
             .integration-edit-form, .integration-form-grid { grid-template-columns: 1fr; }
             .integration-action-rail { align-items: stretch; flex-direction: column; }
             .integration-action-rail form, .integration-action-rail .button { width: 100%; }
+            #logs .panel-header { align-items: flex-start; flex-direction: column; gap: 8px; padding: 12px 16px; }
+            .integration-log-actions { width: 100%; justify-content: flex-start; }
             .sync-result-list li { grid-template-columns: 1fr; gap: 1px; }
         }
     </style>

@@ -208,6 +208,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::put('/integrations/ksef/configuration', [IntegrationController::class, 'updateKsefConfiguration'])->name('integrations.ksef.configuration.update');
         Route::put('/integrations/gs1/configuration', [IntegrationController::class, 'updateGs1Configuration'])->name('integrations.gs1.configuration.update');
         Route::post('/integrations/logs/{log}/retry', [IntegrationController::class, 'retryLog'])->name('integrations.logs.retry');
+        Route::delete('/integrations/logs/failed', [IntegrationController::class, 'destroyFailedLogs'])->name('integrations.logs.failed.destroy');
         Route::delete('/integrations/{integration}', [IntegrationController::class, 'destroy'])->name('integrations.destroy');
     });
 

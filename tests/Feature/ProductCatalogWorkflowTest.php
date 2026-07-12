@@ -594,6 +594,138 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame(2, AuditLog::query()->where('action', 'warehouse_document.posted')->count());
     }
 
+    public function test_variable_product_stock_is_consolidated_into_one_quick_edit_table(): void
+    {
+        $warehouse = Warehouse::query()->create([
+            'code' => 'WC_B2C',
+            'name' => 'WooCommerce B2C',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $shopWarehouse = Warehouse::query()->create([
+            'code' => 'SHOP',
+            'name' => 'Sklep stacjonarny',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'HEROS-BEZ',
+            'name' => 'Klapki HEROS Beżowe',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variable',
+                    'variant_attribute' => 'Rozmiar',
+                ],
+            ],
+        ]);
+
+        $variants = collect([
+            ['size' => '37', 'sku' => 'HEROS-BEZ-37', 'ean' => '5900000000037', 'stock' => [5, 1, 4]],
+            ['size' => '38', 'sku' => 'HEROS-BEZ-38', 'ean' => '5900000000038', 'stock' => [4, 0, 4]],
+        ])->map(function (array $row, int $index) use ($product, $warehouse): Product {
+            $variant = Product::query()->create([
+                'sku' => $row['sku'],
+                'ean' => $row['ean'],
+                'name' => "Klapki HEROS Beżowe - {$row['size']}",
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => [
+                    'master' => [
+                        'source' => 'erp',
+                        'product_type' => 'variation',
+                        'parameters' => [
+                            ['name' => 'Rozmiar', 'value' => $row['size'], 'variation' => true],
+                        ],
+                    ],
+                ],
+            ]);
+
+            ProductRelation::query()->create([
+                'parent_product_id' => $product->id,
+                'child_product_id' => $variant->id,
+                'relation_type' => 'variant',
+                'sort_order' => ($index + 1) * 10,
+                'metadata' => ['variant_attribute' => 'Rozmiar'],
+            ]);
+            StockBalance::query()->create([
+                'warehouse_id' => $warehouse->id,
+                'product_id' => $variant->id,
+                'quantity_on_hand' => $row['stock'][0],
+                'quantity_reserved' => $row['stock'][1],
+                'quantity_available' => $row['stock'][2],
+            ]);
+
+            return $variant;
+        });
+
+        foreach ($variants as $variant) {
+            StockBalance::query()->create([
+                'warehouse_id' => $shopWarehouse->id,
+                'product_id' => $variant->id,
+                'quantity_on_hand' => 2,
+                'quantity_reserved' => 0,
+                'quantity_available' => 2,
+            ]);
+        }
+
+        $response = $this->get(route('products.edit', $product))
+            ->assertOk()
+            ->assertSee('Stany magazynowe wariantów')
+            ->assertSee('Każdy wariant i magazyn edytujesz w jednym wierszu.')
+            ->assertSee('data-variant-stock-table', false)
+            ->assertSee('HEROS-BEZ-37')
+            ->assertSee('5900000000037')
+            ->assertSee('HEROS-BEZ-38')
+            ->assertSee('5900000000038')
+            ->assertSee('Magazyn')
+            ->assertSee('WC_B2C')
+            ->assertSee('SHOP')
+            ->assertSee('Nowy stan')
+            ->assertSee('Ustaw')
+            ->assertSee('Edytuj')
+            ->assertDontSee('variant-stock-management-item', false)
+            ->assertDontSee('Stan ogółem');
+
+        $html = $response->getContent();
+        $this->assertSame(1, substr_count($html, 'data-variant-stock-table'));
+        $this->assertSame(4, substr_count($html, '<tr data-variant-stock-row>'));
+        $this->assertStringNotContainsString('class="stock-readonly-panel"', $html);
+        $this->assertSame(4, preg_match_all('/<button\b[^>]*\bdata-stock-adjust-submit\b[^>]*>/s', $html));
+
+        foreach ($variants as $variant) {
+            $this->assertSame(2, substr_count(
+                $html,
+                'data-action="'.route('products.stock.adjust', $variant).'"',
+            ));
+        }
+
+        $this->post(route('products.stock.adjust', $variants->first()), [
+            'warehouse_id' => $warehouse->id,
+            'new_quantity' => 7,
+            'redirect_url' => route('products.edit', $product),
+        ])->assertRedirect(route('products.edit', $product));
+
+        $this->assertSame('7.0000', (string) StockBalance::query()
+            ->whereBelongsTo($variants->first())
+            ->whereBelongsTo($warehouse)
+            ->value('quantity_on_hand'));
+        $this->assertSame('2.0000', (string) StockBalance::query()
+            ->whereBelongsTo($variants->first())
+            ->whereBelongsTo($shopWarehouse)
+            ->value('quantity_on_hand'));
+        $this->assertSame('4.0000', (string) StockBalance::query()
+            ->whereBelongsTo($variants->last())
+            ->whereBelongsTo($warehouse)
+            ->value('quantity_on_hand'));
+    }
+
     public function test_operator_can_edit_product_master_data_in_erp(): void
     {
         $product = Product::query()->create([
@@ -892,13 +1024,17 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->get(route('products.show', $copy))
             ->assertRedirect(route('products.edit', $copy));
 
-        $this->get(route('products.edit', $copy))
+        $response = $this->get(route('products.edit', $copy))
             ->assertOk()
             ->assertSee('Stany magazynowe wariantów')
             ->assertSee($variantCopy->sku)
-            ->assertSee('Wszystkie stany produktu edytujesz w tej sekcji.')
-            ->assertSee('Edytuj dane wariantu')
+            ->assertSee('Każdy wariant i magazyn edytujesz w jednym wierszu.')
+            ->assertSee('data-variant-stock-table', false)
+            ->assertSee('Edytuj')
+            ->assertDontSee('variant-stock-management-item', false)
             ->assertDontSee('Edytuj cenę, EAN, SKU i stan');
+
+        $this->assertSame(1, substr_count($response->getContent(), '<tr data-variant-stock-row>'));
     }
 
     public function test_new_variable_product_generates_variants_with_unique_sku_and_inherited_gs1_ean(): void

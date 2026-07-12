@@ -18,6 +18,7 @@ use App\Services\Wordpress\LemonErpWooCommercePluginPackageService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
@@ -43,6 +44,9 @@ class IntegrationController extends Controller
                 ->latest()
                 ->limit(20)
                 ->get(),
+            'failedLogsCount' => IntegrationSyncLog::query()
+                ->where('status', 'failed')
+                ->count(),
             'ksefConfiguration' => $ksefClient->configurationStatus(),
             'ksefSettings' => $ksefSettings->publicConfiguration(),
             'gs1Settings' => $gs1Settings->publicConfiguration(),
@@ -317,6 +321,72 @@ class IntegrationController extends Controller
         );
 
         return back()->with('status', 'Import został ponownie dodany do kolejki.');
+    }
+
+    public function destroyFailedLogs(AuditLogService $audit): RedirectResponse
+    {
+        $deletedCount = DB::transaction(function () use ($audit): int {
+            $failedLogs = IntegrationSyncLog::query()
+                ->where('status', 'failed')
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get(['id', 'operation']);
+
+            if ($failedLogs->isEmpty()) {
+                return 0;
+            }
+
+            $ids = $failedLogs->modelKeys();
+            $operationCounts = $failedLogs
+                ->countBy(fn (IntegrationSyncLog $log): string => $log->operation)
+                ->sortKeys()
+                ->all();
+            $sampleIds = count($ids) <= 50
+                ? $ids
+                : [...array_slice($ids, 0, 25), ...array_slice($ids, -25)];
+            $deleted = 0;
+
+            foreach (array_chunk($ids, 500) as $idChunk) {
+                $deleted += IntegrationSyncLog::query()
+                    ->where('status', 'failed')
+                    ->whereKey($idChunk)
+                    ->delete();
+            }
+
+            $audit->record(
+                'integration_sync.failed_logs_cleared',
+                null,
+                [
+                    'status' => 'failed',
+                    'count' => count($ids),
+                    'id_min' => $ids[0],
+                    'id_max' => $ids[array_key_last($ids)],
+                ],
+                [
+                    'deleted_count' => $deleted,
+                    'remaining_failed_count' => IntegrationSyncLog::query()
+                        ->where('status', 'failed')
+                        ->count(),
+                ],
+                [
+                    'operation_counts' => $operationCounts,
+                    'sample_ids' => $sampleIds,
+                    'sample_ids_truncated' => count($ids) > count($sampleIds),
+                ],
+            );
+
+            return $deleted;
+        });
+
+        if ($deletedCount === 0) {
+            return redirect()
+                ->to(route('integrations.index').'#logs')
+                ->with('status', 'Brak błędów synchronizacji do usunięcia.');
+        }
+
+        return redirect()
+            ->to(route('integrations.index').'#logs')
+            ->with('status', "Usunięto nieudane logi synchronizacji: {$deletedCount}.");
     }
 
     public function updateWordpressCredentials(Request $request, WordpressIntegration $integration): RedirectResponse
