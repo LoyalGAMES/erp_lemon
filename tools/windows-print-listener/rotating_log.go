@@ -34,6 +34,9 @@ func newRotatingLogWriter(path string, maxBytes int64, backups int) (*rotatingLo
 func (writer *rotatingLogWriter) Write(data []byte) (int, error) {
 	writer.mu.Lock()
 	defer writer.mu.Unlock()
+	if writer.file == nil {
+		return 0, os.ErrClosed
+	}
 	if writer.size > 0 && writer.size+int64(len(data)) > writer.maxBytes {
 		if err := writer.rotate(); err != nil {
 			return 0, err
@@ -42,6 +45,17 @@ func (writer *rotatingLogWriter) Write(data []byte) (int, error) {
 	n, err := writer.file.Write(data)
 	writer.size += int64(n)
 	return n, err
+}
+
+func (writer *rotatingLogWriter) Close() error {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	if writer.file == nil {
+		return nil
+	}
+	err := writer.file.Close()
+	writer.file = nil
+	return err
 }
 
 func (writer *rotatingLogWriter) open() error {

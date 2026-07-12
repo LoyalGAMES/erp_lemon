@@ -39,6 +39,11 @@ func TestRotatingLogWriterBoundsActiveLogAndKeepsBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := writer.Close(); err != nil {
+			t.Errorf("close rotating log: %v", err)
+		}
+	})
 	if _, err := writer.Write([]byte("first-log-entry\n")); err != nil {
 		t.Fatal(err)
 	}
