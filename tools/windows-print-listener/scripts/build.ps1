@@ -142,7 +142,11 @@ try {
         "/DOUTPUT_DIR=$($OutputDirectory.Replace('/', '\'))"
     )
     if ($Sign) {
-        $nsisArguments += '/DSIGN_ARTIFACTS'
+        $signingScript = (Join-Path $PSScriptRoot 'sign-artifact.ps1').Replace('/', '\')
+        $nsisArguments += @(
+            '/DSIGN_ARTIFACTS',
+            "/DSIGN_SCRIPT=$signingScript"
+        )
     }
     $nsisArguments += (Join-Path $root 'installer\sempre-erp-print-listener.nsi')
 

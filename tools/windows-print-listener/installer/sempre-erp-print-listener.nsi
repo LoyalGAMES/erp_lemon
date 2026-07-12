@@ -78,10 +78,13 @@ Page custom ConfigPageCreate ConfigPageLeave
 !insertmacro MUI_LANGUAGE "English"
 
 !ifdef SIGN_ARTIFACTS
+  !ifndef SIGN_SCRIPT
+    !error "SIGN_SCRIPT is required when SIGN_ARTIFACTS is enabled"
+  !endif
   ; The signing script reads only an ephemeral certificate thumbprint and TSA URL
   ; from the environment. No PFX password is placed on a process command line.
-  !uninstfinalize 'pwsh.exe -NoLogo -NoProfile -NonInteractive -File ".\scripts\sign-artifact.ps1" "%1"'
-  !finalize 'pwsh.exe -NoLogo -NoProfile -NonInteractive -File ".\scripts\sign-artifact.ps1" "%1"'
+  !uninstfinalize 'pwsh.exe -NoLogo -NoProfile -NonInteractive -File "${SIGN_SCRIPT}" "%1"' = 0
+  !finalize 'pwsh.exe -NoLogo -NoProfile -NonInteractive -File "${SIGN_SCRIPT}" "%1"' = 0
 !endif
 
 Function .onInit
