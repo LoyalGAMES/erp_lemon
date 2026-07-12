@@ -78,6 +78,8 @@ PATH="$temporary_directory/bin:$PATH" \
     fail 'inicjalizator nie utworzył katalogu wydania.'
 [[ -d "${deploy_path}.deploy/shared/windows-print-listener/releases" ]] ||
     fail 'inicjalizator nie utworzył trwałego katalogu instalatora Windows.'
+[[ -d "${deploy_path}.deploy/shared/database" && -d "${deploy_path}.deploy/shared/public/uploads" ]] ||
+    fail 'inicjalizator nie utworzył trwałych katalogów bazy i plików publicznych.'
 expect_failure env PATH="$temporary_directory/bin:$PATH" \
     bash "$repository_root/scripts/deploy/initialize-release.sh" \
     "$deploy_path" abcdef1-100-1

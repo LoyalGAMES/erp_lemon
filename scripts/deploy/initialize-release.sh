@@ -45,10 +45,18 @@ flock -w 300 9 || fail 'inne wdrożenie utrzymuje blokadę dłużej niż 300 sek
 
 mkdir -p \
     "${deploy_root}/releases" \
+    "${deploy_root}/shared/storage" \
+    "${deploy_root}/shared/public/uploads" \
+    "${deploy_root}/shared/database" \
     "${deploy_root}/shared/windows-print-listener/releases" \
     "${deploy_root}/backups"
 chmod 0755 "${deploy_root}/releases"
 chmod 0750 "${deploy_root}/shared"
+chmod 0750 \
+    "${deploy_root}/shared/storage" \
+    "${deploy_root}/shared/public" \
+    "${deploy_root}/shared/public/uploads" \
+    "${deploy_root}/shared/database"
 chmod 0750 "${deploy_root}/shared/windows-print-listener" "${deploy_root}/shared/windows-print-listener/releases"
 chmod 0700 "${deploy_root}/backups"
 
