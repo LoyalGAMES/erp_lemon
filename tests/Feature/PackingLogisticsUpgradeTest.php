@@ -67,9 +67,13 @@ class PackingLogisticsUpgradeTest extends TestCase
             ->assertOk()
             ->assertSee('Stanowiska i drukarki etykiet')
             ->assertSee('Most wydruku Windows')
-            ->assertSee('Aplikacja na Windows')
-            ->assertSee('Pobierz lemon-print-listener.exe')
-            ->assertSee(route('settings.packing.windows-listener.download'), false);
+            ->assertSee('Kod stanowiska')
+            ->assertSee('Wpisz ręcznie dokładną nazwę drukarki z Windows')
+            ->assertSee('Dane do instalatora')
+            ->assertSee('Token mostu wydruku')
+            ->assertSee('Podpisany instalator nie został jeszcze opublikowany')
+            ->assertDontSee('listener_url')
+            ->assertDontSee('Pobierz lemon-print-listener.exe');
 
         $this->put(route('settings.packing.update'), [
             'stations' => [
@@ -82,24 +86,16 @@ class PackingLogisticsUpgradeTest extends TestCase
         $settings = app(PackingSettingsService::class)->data();
 
         $this->assertSame('Zebra ZD421', $settings['stations'][0]['printer_name']);
-        $this->assertSame('http://192.168.1.25:17777', $settings['stations'][0]['listener_url']);
+        $this->assertArrayNotHasKey('listener_url', $settings['stations'][0]);
         $this->assertSame('Zebra ZD621', $settings['stations'][1]['printer_name']);
         $this->assertContains('sneakersy', $settings['footwear_keywords']);
+        $this->assertFalse(app('router')->has('settings.packing.listener.printers'));
     }
 
-    public function test_windows_print_listener_can_be_downloaded_from_packing_settings(): void
+    public function test_legacy_raw_windows_executable_is_never_downloaded(): void
     {
-        $response = $this->get(route('settings.packing.windows-listener.download'));
-
-        $response->assertOk();
-        $this->assertStringContainsString(
-            'attachment; filename=lemon-print-listener.exe',
-            (string) $response->headers->get('Content-Disposition'),
-        );
-        $this->assertSame(
-            'application/vnd.microsoft.portable-executable',
-            (string) $response->headers->get('Content-Type'),
-        );
+        $this->get(route('settings.packing.windows-listener.download'))
+            ->assertNotFound();
     }
 
     public function test_mixed_order_shows_shipping_decision_and_footwear_split_creates_partial_order(): void
@@ -191,12 +187,20 @@ class PackingLogisticsUpgradeTest extends TestCase
         $this->assertSame($secondAccount->id, $label->courier_account_id);
         $this->assertSame('520000123456789012345678', $label->tracking_number);
         $this->assertSame('drugie', data_get($label->response_payload, 'courier_account'));
+        $this->assertDatabaseMissing('print_jobs', [
+            'shipping_label_id' => $label->id,
+        ]);
+
+        $this->post(route('packing.orders.pack', $order))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
         $this->assertDatabaseHas('print_jobs', [
             'shipping_label_id' => $label->id,
             'status' => 'pending',
             'station_code' => 'station-1',
             'printer_name' => 'Zebra ZD421',
-            'source' => 'packing.label.generated',
+            'source' => 'packing.order.packed',
         ]);
     }
 

@@ -831,9 +831,14 @@ final class WooCommerceClient
         $payload = [
             'order_id' => $orderId,
             'order_number' => $orderNumber,
+            'idempotency_key' => "sempre-shipment:{$integration->id}:{$orderId}",
         ];
 
-        $request = $this->shippingLabelRequest($integration, $settings);
+        $request = $this->shippingLabelRequest($integration, $settings, retry: $method === 'GET')
+            ->withHeaders([
+                'Idempotency-Key' => $payload['idempotency_key'],
+                'X-Sempre-Idempotency-Key' => $payload['idempotency_key'],
+            ]);
         $response = $method === 'GET'
             ? $request->get($url, $payload)
             : $request->send($method, $url, ['json' => $payload]);
@@ -1276,13 +1281,20 @@ final class WooCommerceClient
     /**
      * @param  array<string, mixed>  $settings
      */
-    private function shippingLabelRequest(WordpressIntegration $integration, array $settings): PendingRequest
+    private function shippingLabelRequest(
+        WordpressIntegration $integration,
+        array $settings,
+        bool $retry = true,
+    ): PendingRequest
     {
         $request = Http::timeout(60)
-            ->retry(2, 300)
             ->withHeaders([
                 'Accept' => 'application/pdf, image/png, application/json;q=0.9, */*;q=0.8',
             ]);
+
+        if ($retry) {
+            $request = $request->retry(2, 300);
+        }
 
         return match ((string) ($settings['auth'] ?? 'woocommerce')) {
             'wordpress' => $integration->hasWordpressMediaCredentials()
@@ -1311,7 +1323,7 @@ final class WooCommerceClient
                 'mime_type' => 'application/pdf',
                 'filename' => $this->filenameFromResponse($response),
                 'source_url' => null,
-                'response_payload' => null,
+                'response_payload' => $this->shippingLabelResponseMetadata($response),
             ];
         }
 
@@ -1321,7 +1333,7 @@ final class WooCommerceClient
                 'mime_type' => 'image/png',
                 'filename' => $this->filenameFromResponse($response),
                 'source_url' => null,
-                'response_payload' => null,
+                'response_payload' => $this->shippingLabelResponseMetadata($response),
             ];
         }
 
@@ -1390,6 +1402,35 @@ final class WooCommerceClient
         ]);
 
         return $this->absoluteUrl($integration, $endpoint);
+    }
+
+    /**
+     * Pozwala endpointowi wtyczki zwrócić dane przesyłki także wtedy, gdy body
+     * odpowiedzi jest bezpośrednio plikiem PDF/PNG.
+     *
+     * @return array<string, string>|null
+     */
+    private function shippingLabelResponseMetadata(Response $response): ?array
+    {
+        $headers = [
+            'provider' => ['X-Shipping-Provider', 'X-Carrier'],
+            'label_number' => ['X-Label-Number', 'X-Shipment-Id'],
+            'tracking_number' => ['X-Tracking-Number', 'X-Waybill-Number'],
+        ];
+        $metadata = [];
+
+        foreach ($headers as $key => $candidates) {
+            foreach ($candidates as $header) {
+                $value = trim((string) $response->header($header));
+
+                if ($value !== '') {
+                    $metadata[$key] = $value;
+                    break;
+                }
+            }
+        }
+
+        return $metadata !== [] ? $metadata : null;
     }
 
     private function absoluteUrl(WordpressIntegration $integration, string $url): string

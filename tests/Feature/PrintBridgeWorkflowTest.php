@@ -4,13 +4,17 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\AppSetting;
 use App\Models\ExternalOrder;
 use App\Models\PrintJob;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
+use App\Services\Printing\PrintBridgeTokenService;
 use App\Services\Printing\ShippingLabelPrintQueueService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
@@ -77,11 +81,28 @@ class PrintBridgeWorkflowTest extends TestCase
             ->assertJsonPath('success', false);
     }
 
-    public function test_label_can_be_pushed_directly_to_windows_listener(): void
+    public function test_print_bridge_has_a_stable_secure_fallback_token_visible_to_the_erp(): void
     {
-        Http::fake([
-            'http://192.168.1.25:17777/print' => Http::response(['success' => true, 'message' => 'printed'], 200),
+        config([
+            'erp.print_bridge_token' => '',
+            'app.key' => 'base64:print-bridge-fallback-test-key',
         ]);
+
+        $token = app(PrintBridgeTokenService::class)->token();
+
+        $this->assertSame(64, strlen($token));
+        $this->assertSame($token, app(PrintBridgeTokenService::class)->token());
+        $this->getJson('/api/print-bridge/jobs/next?station=station-1', [
+            'Authorization' => 'Bearer '.$token,
+        ])
+            ->assertOk()
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('job', null);
+    }
+
+    public function test_legacy_listener_url_is_ignored_and_job_waits_for_outbound_bridge(): void
+    {
+        Http::fake();
 
         $label = $this->createLabel();
 
@@ -94,38 +115,89 @@ class PrintBridgeWorkflowTest extends TestCase
         ], 'test');
 
         $this->assertInstanceOf(PrintJob::class, $job);
-        $this->assertSame('printed', $job->status);
-        $this->assertSame('direct-listener', $job->reserved_by);
-
-        Http::assertSent(function ($request): bool {
-            return $request->url() === 'http://192.168.1.25:17777/print'
-                && data_get($request->data(), 'printer_name') === 'Zebra ZD421'
-                && data_get($request->data(), 'filename') === 'test-bridge.pdf'
-                && base64_decode((string) data_get($request->data(), 'content_base64'), true) === '%PDF-1.4 test-label';
-        });
+        $this->assertSame('pending', $job->status);
+        $this->assertNull($job->reserved_by);
+        $this->assertArrayNotHasKey('listener_url', $job->getAttributes());
+        $this->assertSame(0, $job->attempts);
+        $this->assertArrayNotHasKey('listener_url', app(ShippingLabelPrintQueueService::class)->apiPayload($job));
+        Http::assertNothingSent();
     }
 
-    public function test_erp_can_fetch_printer_list_from_windows_listener(): void
+    public function test_existing_direct_listener_reservation_is_released_for_outbound_bridge(): void
     {
-        Http::fake([
-            'http://192.168.1.25:17777/printers' => Http::response([
-                'success' => true,
-                'printers' => [
-                    ['name' => 'Zebra ZD421', 'driver' => 'ZDesigner ZD421-203dpi ZPL', 'port' => 'USB001', 'default' => true],
-                    ['name' => 'Microsoft Print to PDF', 'driver' => 'Microsoft Print To PDF', 'port' => 'PORTPROMPT:', 'default' => false],
-                ],
-            ], 200),
+        $label = $this->createLabel();
+        $legacy = PrintJob::query()->create([
+            'shipping_label_id' => $label->id,
+            'status' => 'printing',
+            'source' => 'legacy',
+            'station_code' => 'station-1',
+            'printer_name' => 'Zebra ZD421',
+            'format' => 'pdf',
+            'attempts' => 1,
+            'reserved_by' => 'direct-listener',
+            'reserved_at' => now(),
         ]);
 
-        $this->postJson(route('settings.packing.listener.printers'), [
-            'listener_url' => 'http://192.168.1.25:17777',
-        ])
-            ->assertOk()
-            ->assertJsonPath('success', true)
-            ->assertJsonPath('printers.0.name', 'Zebra ZD421')
-            ->assertJsonPath('printers.0.default', true);
+        $job = app(ShippingLabelPrintQueueService::class)->enqueueForStation($label, [
+            'code' => 'station-1',
+            'name' => 'Stanowisko pakowania',
+            'printer_name' => 'Zebra ZD421',
+            'segment' => 'all',
+        ], 'test');
 
-        Http::assertSent(fn ($request): bool => $request->url() === 'http://192.168.1.25:17777/printers');
+        $this->assertSame($legacy->id, $job?->id);
+        $this->assertSame('pending', $job?->status);
+        $this->assertArrayNotHasKey('listener_url', $job?->getAttributes() ?? []);
+        $this->assertNull($job?->reserved_by);
+        $this->assertNull($job?->reserved_at);
+        $this->assertSame(0, $job?->attempts);
+    }
+
+    public function test_legacy_listener_data_migration_clears_urls_and_releases_jobs(): void
+    {
+        Schema::table('print_jobs', function (Blueprint $table): void {
+            $table->string('listener_url', 180)->nullable();
+        });
+
+        $label = $this->createLabel();
+        $legacy = PrintJob::query()->create([
+            'shipping_label_id' => $label->id,
+            'status' => 'printing',
+            'source' => 'legacy',
+            'station_code' => 'station-1',
+            'printer_name' => 'Zebra ZD421',
+            'format' => 'pdf',
+            'attempts' => 1,
+            'reserved_by' => 'direct-listener',
+            'reserved_at' => now(),
+        ]);
+        $legacy->forceFill(['listener_url' => 'http://192.168.1.25:17777'])->save();
+
+        AppSetting::query()->create([
+            'key' => 'packing_settings',
+            'value' => [
+                'stations' => [[
+                    'code' => 'station-1',
+                    'name' => 'Stanowisko',
+                    'printer_name' => 'Zebra ZD421',
+                    'listener_url' => 'http://192.168.1.25:17777',
+                    'segment' => 'all',
+                ]],
+            ],
+        ]);
+
+        $migration = require database_path('migrations/2026_07_12_000010_disable_legacy_direct_print_listener.php');
+        $migration->up();
+
+        $legacy->refresh();
+        $this->assertSame('pending', $legacy->status);
+        $this->assertFalse(Schema::hasColumn('print_jobs', 'listener_url'));
+        $this->assertNull($legacy->reserved_by);
+        $this->assertNull($legacy->reserved_at);
+        $this->assertSame(0, $legacy->attempts);
+
+        $settings = AppSetting::query()->where('key', 'packing_settings')->firstOrFail()->value;
+        $this->assertArrayNotHasKey('listener_url', $settings['stations'][0]);
     }
 
     private function createLabel(): ShippingLabel

@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -18,10 +21,23 @@ import (
 	"time"
 )
 
+var (
+	version = "dev"
+	commit  = "unknown"
+)
+
+const (
+	defaultRunMode      = "bridge"
+	defaultLegacyListen = "127.0.0.1:17777"
+)
+
 type appConfig struct {
+	mode        string
+	configPath  string
 	listen      string
 	sumatraPath string
 	token       string
+	logFile     string
 }
 
 type printRequest struct {
@@ -44,42 +60,188 @@ type printerInfo struct {
 type jsonResponse struct {
 	Success  bool          `json:"success"`
 	Message  string        `json:"message,omitempty"`
+	Version  string        `json:"version,omitempty"`
 	Printers []printerInfo `json:"printers,omitempty"`
 }
 
 func main() {
 	cfg := appConfig{}
-	flag.StringVar(&cfg.listen, "listen", ":17777", "HTTP listen address, for example :17777 or 0.0.0.0:17777")
+	var showVersion bool
+	var serviceAction string
+	var protectDirectory string
+	var protectFile string
+	var validateBridgeConfig bool
+	flag.StringVar(&cfg.mode, "mode", defaultRunMode, "Run mode: bridge (outbound ERP polling) or listener (legacy inbound HTTP)")
+	flag.StringVar(&cfg.configPath, "config", defaultBridgeConfigPath(), "Path to the ACL-protected outbound bridge configuration")
+	flag.StringVar(&cfg.listen, "listen", defaultLegacyListen, "Legacy HTTP listen address; non-loopback requires -token")
 	flag.StringVar(&cfg.sumatraPath, "sumatra", "", "Optional path to SumatraPDF.exe for PDF/image labels")
 	flag.StringVar(&cfg.token, "token", "", "Optional shared token required in Authorization: Bearer ... or X-Print-Token")
+	flag.StringVar(&cfg.logFile, "log-file", "", "Optional append-only log file path (recommended for the Windows service)")
+	flag.StringVar(&serviceAction, "service", "", "Windows service action: install, uninstall, start, or stop")
+	flag.StringVar(&protectDirectory, "protect-config-directory", "", "Apply the restricted SYSTEM/Administrators ACL to a config directory")
+	flag.StringVar(&protectFile, "protect-config-file", "", "Apply the restricted SYSTEM/Administrators ACL to a config file")
+	flag.BoolVar(&validateBridgeConfig, "validate-config", false, "Validate the outbound bridge config and its Windows ACL, then exit")
+	flag.BoolVar(&showVersion, "version", false, "Print version and source commit, then exit")
 	flag.Parse()
 
+	if showVersion {
+		fmt.Printf("Sempre ERP Print Listener %s (%s)\n", version, commit)
+		return
+	}
+
+	if err := configureLogging(cfg.logFile); err != nil {
+		log.Fatalf("Cannot configure logging: %v", err)
+	}
+
+	if serviceAction != "" {
+		if err := manageService(serviceAction, cfg); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if protectDirectory != "" && protectFile != "" {
+		log.Fatal("Only one config protection action can be requested at a time")
+	}
+	if protectDirectory != "" {
+		if err := protectConfigDirectory(protectDirectory); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if protectFile != "" {
+		if err := protectConfigFile(protectFile); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if validateBridgeConfig {
+		if strings.ToLower(strings.TrimSpace(cfg.mode)) != "bridge" {
+			log.Fatal("-validate-config requires -mode bridge")
+		}
+		bridgeConfig, err := loadBridgeConfig(cfg.configPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("Outbound bridge configuration is valid (station=%s, worker=%s)\n", bridgeConfig.Station, bridgeConfig.WorkerName)
+		return
+	}
+
+	cfg.mode = strings.ToLower(strings.TrimSpace(cfg.mode))
+	var runner applicationRunner
+
+	switch cfg.mode {
+	case "bridge":
+		bridgeConfig, err := loadBridgeConfig(cfg.configPath)
+		if err != nil {
+			log.Fatalf("Cannot load outbound bridge configuration: %v", err)
+		}
+		printerConfig := cfg
+		printerConfig.sumatraPath = bridgeConfig.SumatraPath
+		bridge := newPrintBridge(bridgeConfig, printerConfig)
+		log.Printf(
+			"Sempre ERP Print Listener %s (%s) starting in outbound bridge mode for station %s as %s",
+			version,
+			commit,
+			bridgeConfig.Station,
+			bridgeConfig.WorkerName,
+		)
+		runner = bridge.Run
+
+	case "listener":
+		if err := validateLegacyListenerConfig(cfg); err != nil {
+			log.Fatal(err)
+		}
+		server := newHTTPServer(cfg)
+		log.Printf("Sempre ERP Print Listener %s (%s) starting in legacy listener mode on %s", version, commit, cfg.listen)
+		if cfg.sumatraPath != "" {
+			log.Printf("Using SumatraPDF: %s", cfg.sumatraPath)
+		}
+		if cfg.token == "" {
+			log.Printf("Warning: legacy listener authentication is disabled; never expose it to the Internet")
+		}
+		if runtime.GOOS != "windows" {
+			log.Printf("Warning: this listener can receive requests on %s, but printing is implemented for Windows", runtime.GOOS)
+		}
+		runner = func(ctx context.Context) error {
+			return serveHTTP(ctx, server)
+		}
+
+	default:
+		log.Fatalf("Unknown mode %q (expected bridge or listener)", cfg.mode)
+	}
+
+	if err := runApplication(runner); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
+}
+
+type applicationRunner func(context.Context) error
+
+func defaultBridgeConfigPath() string {
+	if programData := strings.TrimSpace(os.Getenv("ProgramData")); programData != "" {
+		return filepath.Join(programData, "Sempre ERP", "Print Listener", "config.ini")
+	}
+
+	return "config.ini"
+}
+
+func validateLegacyListenerConfig(cfg appConfig) error {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(cfg.listen))
+	if err != nil {
+		return fmt.Errorf("invalid legacy listener address %q: %w", cfg.listen, err)
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	isLoopback := strings.EqualFold(host, "localhost")
+	if address := net.ParseIP(host); address != nil {
+		isLoopback = address.IsLoopback()
+	}
+	if !isLoopback && strings.TrimSpace(cfg.token) == "" {
+		return fmt.Errorf("legacy listener on non-loopback address %q requires a non-empty -token", cfg.listen)
+	}
+	return nil
+}
+
+func serveHTTP(ctx context.Context, server *http.Server) error {
+	serverErrors := make(chan error, 1)
+	go func() {
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	select {
+	case err := <-serverErrors:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := server.Shutdown(shutdownCtx); err != nil {
+			_ = server.Close()
+			return err
+		}
+		return nil
+	}
+}
+
+func newHTTPServer(cfg appConfig) *http.Server {
+	return &http.Server{
+		Addr:              cfg.listen,
+		Handler:           requestLogger(newHandler(cfg)),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      90 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+func newHandler(cfg appConfig) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, jsonResponse{Success: true, Message: "ready"})
+		writeJSON(w, http.StatusOK, jsonResponse{Success: true, Message: "ready", Version: version})
 	})
 	mux.HandleFunc("GET /printers", cfg.handlePrinters)
 	mux.HandleFunc("POST /print", cfg.handlePrint)
 
-	server := &http.Server{
-		Addr:              cfg.listen,
-		Handler:           requestLogger(mux),
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      90 * time.Second,
-	}
-
-	log.Printf("Lemon print listener started on %s", cfg.listen)
-	if cfg.sumatraPath != "" {
-		log.Printf("Using SumatraPDF: %s", cfg.sumatraPath)
-	}
-	if runtime.GOOS != "windows" {
-		log.Printf("Warning: this listener can receive requests on %s, but printing is implemented for Windows", runtime.GOOS)
-	}
-
-	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		log.Fatal(err)
-	}
+	return mux
 }
 
 func (cfg appConfig) handlePrinters(w http.ResponseWriter, r *http.Request) {
@@ -261,10 +423,39 @@ func (cfg appConfig) authorized(r *http.Request) bool {
 
 	auth := strings.TrimSpace(r.Header.Get("Authorization"))
 	if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
-		return strings.TrimSpace(auth[7:]) == cfg.token
+		return secureTokenEqual(strings.TrimSpace(auth[7:]), cfg.token)
 	}
 
-	return strings.TrimSpace(r.Header.Get("X-Print-Token")) == cfg.token
+	return secureTokenEqual(strings.TrimSpace(r.Header.Get("X-Print-Token")), cfg.token)
+}
+
+func secureTokenEqual(provided, expected string) bool {
+	if provided == "" || len(provided) != len(expected) {
+		return false
+	}
+
+	return subtle.ConstantTimeCompare([]byte(provided), []byte(expected)) == 1
+}
+
+func configureLogging(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	if err != nil {
+		return err
+	}
+
+	// Write to the durable service log first. A Windows service may not have a
+	// usable stderr handle, and io.MultiWriter stops after the first write error.
+	log.SetOutput(io.MultiWriter(file, os.Stderr))
+	return nil
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload jsonResponse) {

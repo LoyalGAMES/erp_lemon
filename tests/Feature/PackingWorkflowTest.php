@@ -688,10 +688,14 @@ class PackingWorkflowTest extends TestCase
                 && ($data['status'] ?? null) === 'ready-to-ship';
         });
 
-        $this->post(route('packing.couriers.pickup'), ['courier' => 'DPD'])
+        $this->post(route('packing.couriers.pickup'), [
+            'courier' => 'DPD',
+            'order_ids' => [$order->id],
+            'pickup_token' => hash_hmac('sha256', 'DPD|'.$order->id, (string) config('app.key')),
+        ])
             ->assertRedirect()
             ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'Oznaczono odbiór kuriera DPD')
-                && str_contains($message, 'Status w WooCommerce zmieniono na wysłano'));
+                && str_contains($message, 'W ERP zamówienia przeniesiono do wysłanych'));
 
         $task->refresh();
         $order->refresh();

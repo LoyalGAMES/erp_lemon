@@ -12,22 +12,61 @@ use App\Models\ShippingLabel;
 use App\Models\WordpressIntegration;
 use App\Services\Audit\AuditLogService;
 use App\Services\WooCommerce\WooCommerceClient;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Database\QueryException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
 
 final class ShippingLabelService
 {
+    private const GENERATION_LOCK_SECONDS = 900;
+
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly InPostShipmentService $inpost,
         private readonly BLPaczkaShipmentService $blpaczka,
         private readonly AuditLogService $audit,
-    ) {
-    }
+    ) {}
 
     public function generateForOrder(ExternalOrder $order, ?CourierAccount $courierAccount = null): ShippingLabel
     {
+        try {
+            return Cache::lock('shipping-label-order-'.$order->id, self::GENERATION_LOCK_SECONDS)
+                ->block(15, fn (): ShippingLabel => $this->generateForOrderWhileLocked($order, $courierAccount));
+        } catch (LockTimeoutException $exception) {
+            throw new RuntimeException(
+                'Generowanie etykiety dla tego zamówienia już trwa. Spróbuj ponownie za chwilę.',
+                previous: $exception,
+            );
+        }
+    }
+
+    private function generateForOrderWhileLocked(ExternalOrder $order, ?CourierAccount $courierAccount = null): ShippingLabel
+    {
+        $idempotencyKey = 'shipment:order:'.$order->id;
+        $existing = ShippingLabel::query()
+            ->where('idempotency_key', $idempotencyKey)
+            ->first();
+
+        if ($existing instanceof ShippingLabel) {
+            return $existing;
+        }
+
+        $existing = ShippingLabel::query()
+            ->shipments()
+            ->where('external_order_id', $order->id)
+            ->where('status', 'generated')
+            ->latest('generated_at')
+            ->latest('id')
+            ->first();
+
+        if ($existing instanceof ShippingLabel) {
+            return $existing;
+        }
+
         if ($courierAccount instanceof CourierAccount) {
             return $courierAccount->provider === 'blpaczka'
                 ? $this->generateViaBLPaczka($order, $courierAccount)
@@ -78,19 +117,25 @@ final class ShippingLabelService
             $contents = (string) $labelData['contents'];
             $mimeType = (string) ($labelData['mime_type'] ?? 'application/pdf');
             $filename = $this->filename($order, $labelData, $mimeType);
-            $path = 'shipping-labels/' . now()->format('Y/m') . '/' . $filename;
+            $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
+            $orderShipmentData = $this->shipmentDataFromOrder($order);
 
             Storage::disk('local')->put($path, $contents);
 
-            $label = ShippingLabel::query()->create([
+            $label = $this->createShipmentLabel([
                 'sales_channel_id' => $order->sales_channel_id,
                 'external_order_id' => $order->id,
                 'wordpress_integration_id' => $integration->id,
                 'purpose' => 'shipment',
+                'idempotency_key' => 'shipment:order:'.$order->id,
                 'status' => 'generated',
-                'provider' => $this->stringFromPayload($labelData, ['provider', 'carrier', 'shipping_provider']),
-                'label_number' => $this->stringFromPayload($labelData, ['label_number', 'label_id', 'id']),
-                'tracking_number' => $this->stringFromPayload($labelData, ['tracking_number', 'tracking', 'tracking_code']),
+                'provider' => $this->stringFromPayload($labelData, ['provider', 'carrier', 'shipping_provider'])
+                    ?: $orderShipmentData['provider'],
+                'label_number' => $this->stringFromPayload($labelData, ['label_number', 'label_id', 'id'])
+                    ?: $orderShipmentData['label_number'],
+                'tracking_number' => $this->stringFromPayload($labelData, ['tracking_number', 'tracking', 'tracking_code'])
+                    ?: $orderShipmentData['tracking_number']
+                    ?: $this->trackingNumberFromFilename((string) ($labelData['filename'] ?? '')),
                 'disk' => 'local',
                 'path' => $path,
                 'mime_type' => $mimeType,
@@ -141,8 +186,8 @@ final class ShippingLabelService
             $labelData = $this->inpost->createReturnShipmentWithLabel($returnCase, $account);
 
             $contents = $labelData['contents'];
-            $filename = 'zwrot-' . preg_replace('/[^A-Za-z0-9._-]+/', '-', $returnCase->number) . '-' . now()->format('YmdHis') . '.pdf';
-            $path = 'shipping-labels/returns/' . now()->format('Y/m') . '/' . $filename;
+            $filename = 'zwrot-'.preg_replace('/[^A-Za-z0-9._-]+/', '-', $returnCase->number).'-'.now()->format('YmdHis').'.pdf';
+            $path = 'shipping-labels/returns/'.now()->format('Y/m').'/'.$filename;
 
             Storage::disk('local')->put($path, $contents);
 
@@ -203,8 +248,8 @@ final class ShippingLabelService
             $labelData = $this->inpost->createExchangeShipmentWithLabel($returnCase, $account);
 
             $contents = $labelData['contents'];
-            $filename = 'wymiana-' . preg_replace('/[^A-Za-z0-9._-]+/', '-', $returnCase->number) . '-' . now()->format('YmdHis') . '.pdf';
-            $path = 'shipping-labels/returns/' . now()->format('Y/m') . '/' . $filename;
+            $filename = 'wymiana-'.preg_replace('/[^A-Za-z0-9._-]+/', '-', $returnCase->number).'-'.now()->format('YmdHis').'.pdf';
+            $path = 'shipping-labels/returns/'.now()->format('Y/m').'/'.$filename;
 
             Storage::disk('local')->put($path, $contents);
 
@@ -260,17 +305,19 @@ final class ShippingLabelService
             $labelData = $this->inpost->createShipmentWithLabel($order, $account);
 
             $contents = $labelData['contents'];
-            $filename = 'inpost-' . ($order->external_number ?: $order->external_id ?: $order->id);
-            $filename = preg_replace('/[^A-Za-z0-9._-]+/', '-', $filename) . '-' . now()->format('YmdHis') . '.pdf';
-            $path = 'shipping-labels/' . now()->format('Y/m') . '/' . $filename;
+            $filename = 'inpost-'.($order->external_number ?: $order->external_id ?: $order->id);
+            $filename = preg_replace('/[^A-Za-z0-9._-]+/', '-', $filename)
+                .'-order-'.$order->id.'-'.now()->format('YmdHis').'-'.Str::lower((string) Str::ulid()).'.pdf';
+            $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
 
             Storage::disk('local')->put($path, $contents);
 
-            $label = ShippingLabel::query()->create([
+            $label = $this->createShipmentLabel([
                 'sales_channel_id' => $order->sales_channel_id,
                 'external_order_id' => $order->id,
                 'courier_account_id' => $account->id,
                 'purpose' => 'shipment',
+                'idempotency_key' => 'shipment:order:'.$order->id,
                 'status' => 'generated',
                 'provider' => 'inpost',
                 'label_number' => $labelData['shipment_id'],
@@ -343,7 +390,7 @@ final class ShippingLabelService
     }
 
     /**
-     * @param array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>} $labelData
+     * @param  array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>}  $labelData
      */
     private function storeBLPaczkaLabel(
         ExternalOrder $order,
@@ -353,16 +400,17 @@ final class ShippingLabelService
     ): ShippingLabel {
         $extension = str_contains(mb_strtolower($labelData['mime_type']), 'pdf') ? 'pdf' : 'bin';
         $filename = 'blpaczka-'.preg_replace('/[^A-Za-z0-9._-]+/', '-', (string) ($order->external_number ?: $order->external_id))
-            .'-'.now()->format('YmdHis').'.'.$extension;
+            .'-order-'.$order->id.'-'.now()->format('YmdHis').'-'.Str::lower((string) Str::ulid()).'.'.$extension;
         $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
 
         Storage::disk('local')->put($path, $labelData['contents']);
 
-        $label = ShippingLabel::query()->create([
+        $label = $this->createShipmentLabel([
             'sales_channel_id' => $order->sales_channel_id,
             'external_order_id' => $order->id,
             'courier_account_id' => $account->id,
             'purpose' => 'shipment',
+            'idempotency_key' => 'shipment:order:'.$order->id,
             'status' => 'generated',
             'provider' => 'blpaczka',
             'label_number' => $labelData['shipment_id'],
@@ -456,7 +504,7 @@ final class ShippingLabelService
     }
 
     /**
-     * @param array<string, mixed> $labelData
+     * @param  array<string, mixed>  $labelData
      */
     private function filename(ExternalOrder $order, array $labelData, string $mimeType): string
     {
@@ -464,11 +512,13 @@ final class ShippingLabelService
         $extension = $this->extension($mimeType, $raw);
         $base = $raw !== ''
             ? pathinfo($raw, PATHINFO_FILENAME)
-            : 'etykieta-' . ($order->external_number ?: $order->external_id ?: $order->id);
+            : 'etykieta-'.($order->external_number ?: $order->external_id ?: $order->id);
 
         $safeBase = preg_replace('/[^A-Za-z0-9._-]+/', '-', $base) ?: 'etykieta';
 
-        return trim($safeBase, '-_.') . '-' . now()->format('YmdHis') . '.' . $extension;
+        $safeBase = mb_substr(trim($safeBase, '-_.'), 0, 140) ?: 'etykieta';
+
+        return $safeBase.'-order-'.$order->id.'-'.now()->format('YmdHis').'-'.Str::lower((string) Str::ulid()).'.'.$extension;
     }
 
     private function extension(string $mimeType, string $filename): string
@@ -488,8 +538,8 @@ final class ShippingLabelService
     }
 
     /**
-     * @param array<string, mixed> $payload
-     * @param list<string> $keys
+     * @param  array<string, mixed>  $payload
+     * @param  list<string>  $keys
      */
     private function stringFromPayload(array $payload, array $keys): ?string
     {
@@ -507,7 +557,117 @@ final class ShippingLabelService
     }
 
     /**
-     * @param array<string, mixed>|null $responsePayload
+     * @return array{provider:?string,label_number:?string,tracking_number:?string}
+     */
+    private function shipmentDataFromOrder(ExternalOrder $order): array
+    {
+        $provider = null;
+        $labelNumber = null;
+        $trackingNumber = null;
+        $shippingLines = (array) data_get($order->raw_payload, 'shipping_lines', []);
+
+        foreach ($shippingLines as $shippingLine) {
+            if (! is_array($shippingLine)) {
+                continue;
+            }
+
+            $method = mb_strtolower(trim((string) ($shippingLine['method_title'] ?? $shippingLine['method_id'] ?? '')));
+
+            foreach (['inpost', 'dpd', 'dhl', 'gls', 'ups', 'fedex', 'pocztex', 'orlen', 'blpaczka'] as $candidate) {
+                if ($provider === null && str_contains($method, $candidate)) {
+                    $provider = $candidate;
+                }
+            }
+
+            if ($provider === null && (str_contains($method, 'paczkomat') || str_contains($method, 'easypack'))) {
+                $provider = 'inpost';
+            }
+        }
+
+        $metaSources = [(array) data_get($order->raw_payload, 'meta_data', [])];
+        foreach ($shippingLines as $shippingLine) {
+            if (is_array($shippingLine)) {
+                $metaSources[] = (array) ($shippingLine['meta_data'] ?? []);
+            }
+        }
+
+        foreach ($metaSources as $metaData) {
+            foreach ($metaData as $meta) {
+                if (! is_array($meta) || ! is_scalar($meta['value'] ?? null)) {
+                    continue;
+                }
+
+                $key = mb_strtolower((string) ($meta['key'] ?? ''));
+                $value = trim((string) $meta['value']);
+
+                if ($value === '') {
+                    continue;
+                }
+
+                if ($trackingNumber === null
+                    && (str_contains($key, 'tracking') || str_contains($key, 'waybill') || str_contains($key, 'list_przewozowy'))
+                    && preg_match('/^[A-Za-z0-9-]{6,40}$/', $value) === 1) {
+                    $trackingNumber = $value;
+                }
+
+                if ($trackingNumber === null
+                    && (str_contains($key, 'inpost') || str_contains($key, 'easypack') || str_contains($key, 'shipx'))
+                    && preg_match('/^\d{20,26}$/', $value) === 1) {
+                    $trackingNumber = $value;
+                    $provider ??= 'inpost';
+                }
+
+                if ($labelNumber === null
+                    && (str_contains($key, 'label') || str_contains($key, 'shipment_id'))
+                    && preg_match('/^[A-Za-z0-9-]{1,80}$/', $value) === 1) {
+                    $labelNumber = $value;
+                }
+            }
+        }
+
+        return [
+            'provider' => $provider,
+            'label_number' => $labelNumber,
+            'tracking_number' => $trackingNumber,
+        ];
+    }
+
+    private function trackingNumberFromFilename(string $filename): ?string
+    {
+        return preg_match('/(?<!\d)(\d{24})(?!\d)/', $filename, $matches) === 1
+            ? $matches[1]
+            : null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $attributes
+     */
+    private function createShipmentLabel(array $attributes): ShippingLabel
+    {
+        try {
+            return ShippingLabel::query()->create($attributes);
+        } catch (QueryException $exception) {
+            $idempotencyKey = (string) ($attributes['idempotency_key'] ?? '');
+            $existing = $idempotencyKey !== ''
+                ? ShippingLabel::query()->where('idempotency_key', $idempotencyKey)->first()
+                : null;
+
+            if (! $existing instanceof ShippingLabel) {
+                throw $exception;
+            }
+
+            $disk = (string) ($attributes['disk'] ?? 'local');
+            $path = (string) ($attributes['path'] ?? '');
+            if ($path !== '' && $path !== $existing->path) {
+                Storage::disk($disk)->delete($path);
+            }
+
+            return $existing;
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $responsePayload
      */
     private function syncLog(
         WordpressIntegration $integration,

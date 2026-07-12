@@ -8,10 +8,6 @@ use App\Models\PrintJob;
 use App\Models\ShippingLabel;
 use App\Services\Audit\AuditLogService;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Storage;
-use RuntimeException;
-use Throwable;
 
 final class ShippingLabelPrintQueueService
 {
@@ -22,12 +18,11 @@ final class ShippingLabelPrintQueueService
     ) {}
 
     /**
-     * @param  array{code:string,name:string,printer_name:string,listener_url?:string,segment:string}|null  $station
+     * @param  array{code:string,name:string,printer_name:string,segment:string}|null  $station
      */
     public function enqueueForStation(ShippingLabel $label, ?array $station, string $source): ?PrintJob
     {
         $printerName = trim((string) ($station['printer_name'] ?? ''));
-        $listenerUrl = $this->normalizeListenerUrl((string) ($station['listener_url'] ?? ''));
 
         if ($printerName === '') {
             return null;
@@ -50,11 +45,25 @@ final class ShippingLabelPrintQueueService
             ->first();
 
         if ($existing instanceof PrintJob) {
-            if ($existing->status !== 'printed') {
-                return $this->sendToListenerIfConfigured($existing, $label, $listenerUrl);
+            $updates = [];
+
+            if ($existing->status === 'printing' && $existing->reserved_by === 'direct-listener') {
+                $updates = array_merge($updates, [
+                    'status' => 'pending',
+                    'reserved_by' => null,
+                    'reserved_at' => null,
+                    'next_attempt_at' => null,
+                    'attempts' => 0,
+                    'failed_at' => null,
+                    'last_error' => null,
+                ]);
             }
 
-            return $existing;
+            if ($updates !== []) {
+                $existing->forceFill($updates)->save();
+            }
+
+            return $existing->fresh();
         }
 
         $failed = PrintJob::query()
@@ -65,18 +74,17 @@ final class ShippingLabelPrintQueueService
             ->first();
 
         if ($failed instanceof PrintJob) {
-            $failed->update([
+            $failed->forceFill([
                 'status' => 'pending',
                 'source' => $source,
                 'station_code' => $stationCode,
-                'listener_url' => $listenerUrl !== '' ? $listenerUrl : null,
                 'attempts' => 0,
                 'next_attempt_at' => null,
                 'reserved_by' => null,
                 'reserved_at' => null,
                 'failed_at' => null,
                 'last_error' => null,
-            ]);
+            ])->save();
 
             return $failed->fresh();
         }
@@ -87,7 +95,6 @@ final class ShippingLabelPrintQueueService
             'source' => $source,
             'station_code' => $stationCode,
             'printer_name' => $printerName,
-            'listener_url' => $listenerUrl !== '' ? $listenerUrl : null,
             'format' => $this->formatForLabel($label),
             'metadata' => [
                 'station_name' => $station['name'] ?? null,
@@ -102,7 +109,7 @@ final class ShippingLabelPrintQueueService
             'source' => $source,
         ]);
 
-        return $this->sendToListenerIfConfigured($job, $label, $listenerUrl);
+        return $job->fresh();
     }
 
     public function claimNext(?string $stationCode, ?string $workerName): ?PrintJob
@@ -202,7 +209,6 @@ final class ShippingLabelPrintQueueService
             'status' => $job->status,
             'station_code' => $job->station_code,
             'printer_name' => $job->printer_name,
-            'listener_url' => $job->listener_url,
             'format' => $job->format,
             'attempts' => $job->attempts,
             'label' => [
@@ -229,65 +235,6 @@ final class ShippingLabelPrintQueueService
         }
 
         return 'pdf';
-    }
-
-    private function sendToListenerIfConfigured(PrintJob $job, ShippingLabel $label, string $listenerUrl): PrintJob
-    {
-        if ($listenerUrl === '') {
-            return $job;
-        }
-
-        $job->update([
-            'status' => 'printing',
-            'attempts' => $job->attempts + 1,
-            'reserved_by' => 'direct-listener',
-            'reserved_at' => now(),
-            'listener_url' => $listenerUrl,
-            'last_error' => null,
-        ]);
-
-        try {
-            if (! Storage::disk($label->disk)->exists($label->path)) {
-                throw new RuntimeException('Plik etykiety nie istnieje w storage.');
-            }
-
-            $label->loadMissing('order');
-            $response = Http::timeout(12)
-                ->acceptJson()
-                ->post($listenerUrl.'/print', [
-                    'printer_name' => $job->printer_name,
-                    'format' => $job->format,
-                    'filename' => $label->filename(),
-                    'mime_type' => $label->mime_type ?? 'application/pdf',
-                    'tracking_number' => $label->tracking_number,
-                    'order_number' => $label->order?->external_number,
-                    'content_base64' => base64_encode(Storage::disk($label->disk)->get($label->path)),
-                ]);
-
-            if ($response->failed()) {
-                throw new RuntimeException(
-                    'Aplikacja Windows zwróciła HTTP '.$response->status().': '.mb_substr($response->body(), 0, 500),
-                );
-            }
-
-            return $this->markPrinted($job->fresh(), 'direct-listener', [
-                'listener_url' => $listenerUrl,
-                'listener_response' => $response->json() ?? null,
-            ]);
-        } catch (Throwable $exception) {
-            return $this->markFailed($job->fresh(), $exception->getMessage(), 'direct-listener');
-        }
-    }
-
-    private function normalizeListenerUrl(string $url): string
-    {
-        $url = rtrim(trim($url), '/');
-
-        if ($url === '') {
-            return '';
-        }
-
-        return preg_match('#^https?://#i', $url) === 1 ? $url : '';
     }
 
     private function releaseStaleReservations(): void

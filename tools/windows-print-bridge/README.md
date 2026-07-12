@@ -1,5 +1,10 @@
 # Lemon ERP Windows Print Bridge
 
+> **Wycofane:** ten skrypt pozostaje wyłącznie jako materiał migracyjny. Nowe
+> wdrożenia muszą używać podpisanego **SempreERP-PrintListener-Setup.exe** z
+> katalogu **tools/windows-print-listener**. Instalator uruchamia natywną usługę outbound,
+> chroni token ACL i nie wymaga obchodzenia polityk wykonywania PowerShell.
+
 This bridge runs on a Windows computer that has the Zebra printer installed.
 It polls Lemon ERP for pending label print jobs and prints them on the Windows
 printer name stored in the packing station settings.
@@ -19,13 +24,13 @@ printer name stored in the packing station settings.
 5. Start the bridge:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\print-bridge.ps1 -ConfigPath .\config.json
+powershell.exe -NoProfile -File .\print-bridge.ps1 -ConfigPath .\config.json
 ```
 
 To start it automatically at user logon:
 
 ```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\install-scheduled-task.ps1 -ConfigPath .\config.json
+powershell.exe -NoProfile -File .\install-scheduled-task.ps1 -ConfigPath .\config.json
 ```
 
 ## Label formats

@@ -2,11 +2,14 @@
 
 use App\Models\Invoice;
 use App\Services\Integrations\WooCommerceImportQueueService;
+use App\Services\Inventory\StockSyncQueueService;
 use App\Services\Invoices\InvoiceSettingsService;
 use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Invoices\OrderInvoiceService;
-use App\Services\Inventory\StockSyncQueueService;
 use App\Services\Ksef\KsefSubmissionService;
+use App\Services\Packing\PackingLabelAutomationService;
+use App\Services\Shipping\CourierPickupTrackingService;
+use App\Services\Shipping\ShippedOrderWooSyncService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -109,7 +112,7 @@ Artisan::command('erp:refresh-invoice-template {--regenerate : Regenerate HTML/P
             $sellerStatus = $settings->sellerConfigurationStatus();
 
             if (! $sellerStatus['is_ready']) {
-                $this->error('Nie można zastosować danych sprzedawcy: ' . implode(' ', $sellerStatus['errors']));
+                $this->error('Nie można zastosować danych sprzedawcy: '.implode(' ', $sellerStatus['errors']));
 
                 return 1;
             }
@@ -161,7 +164,7 @@ Artisan::command('erp:refresh-invoice-template {--regenerate : Regenerate HTML/P
 
 Artisan::command('erp:track-courier-pickups {--limit=50 : Maximum number of shipments to check}', function (): int {
     $limit = max(1, (int) $this->option('limit'));
-    $result = app(\App\Services\Shipping\CourierPickupTrackingService::class)->trackPackedOrders($limit);
+    $result = app(CourierPickupTrackingService::class)->trackPackedOrders($limit);
 
     $this->info(sprintf(
         'Courier pickup tracking: checked %d, picked up %d, orders shipped %d.',
@@ -177,15 +180,51 @@ Artisan::command('erp:track-courier-pickups {--limit=50 : Maximum number of ship
     return 0;
 })->purpose('Check courier tracking for packed orders and mark physically picked up parcels as shipped.');
 
+Artisan::command('erp:generate-ready-packing-labels {--limit=25 : Maximum number of ready orders to reconcile}', function (): int {
+    $limit = max(1, (int) $this->option('limit'));
+    $result = app(PackingLabelAutomationService::class)->generateReadyOrders($limit);
+
+    $this->info(sprintf(
+        'Packing labels: checked %d, generated %d, existing %d, failed %d.',
+        $result['checked'],
+        $result['generated'],
+        $result['existing'],
+        $result['failed'],
+    ));
+
+    foreach ($result['warnings'] as $warning) {
+        $this->warn($warning);
+    }
+
+    return 0;
+})->purpose('Generate missing shipment labels after order collection and retry temporary failures.');
+
+Artisan::command('erp:retry-shipped-woo-sync {--limit=25 : Maximum number of shipped orders to retry}', function (): int {
+    $result = app(ShippedOrderWooSyncService::class)->retry(max(1, (int) $this->option('limit')));
+
+    $this->info(sprintf(
+        'Shipped Woo sync: checked %d, synced %d, failed %d.',
+        $result['checked'],
+        $result['synced'],
+        $result['failed'],
+    ));
+
+    foreach ($result['warnings'] as $warning) {
+        $this->warn($warning);
+    }
+
+    return 0;
+})->purpose('Retry WooCommerce shipped status after temporary API failures.');
+
 Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation check}', function (): int {
     $failures = 0;
     $runCheck = function (string $label, callable $callback) use (&$failures): void {
         try {
             $callback();
             $this->line("OK  {$label}");
-        } catch (\Throwable $exception) {
+        } catch (Throwable $exception) {
             $failures++;
-            $this->error("ERR {$label}: " . mb_substr($exception->getMessage(), 0, 240));
+            $this->error("ERR {$label}: ".mb_substr($exception->getMessage(), 0, 240));
         }
     };
 
@@ -197,10 +236,10 @@ Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation chec
         $directory = storage_path('app/preflight');
         File::ensureDirectoryExists($directory);
 
-        $path = $directory . '/' . uniqid('erp_preflight_', true) . '.tmp';
+        $path = $directory.'/'.uniqid('erp_preflight_', true).'.tmp';
 
         if (File::put($path, 'ok') === false || File::get($path) !== 'ok') {
-            throw new \RuntimeException('Nie można zapisać i odczytać pliku testowego w storage/app.');
+            throw new RuntimeException('Nie można zapisać i odczytać pliku testowego w storage/app.');
         }
 
         File::delete($path);
@@ -219,7 +258,7 @@ Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation chec
             File::ensureDirectoryExists($directory);
 
             if (! is_writable($directory)) {
-                throw new \RuntimeException("Katalog nie jest zapisywalny: {$directory}");
+                throw new RuntimeException("Katalog nie jest zapisywalny: {$directory}");
             }
         }
     });
@@ -238,7 +277,7 @@ Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation chec
 
         foreach ($routes as $route) {
             if (! Route::has($route)) {
-                throw new \RuntimeException("Brak trasy: {$route}");
+                throw new RuntimeException("Brak trasy: {$route}");
             }
         }
     });
@@ -251,7 +290,7 @@ Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation chec
 
         foreach ($assets as $asset) {
             if (! is_file($asset)) {
-                throw new \RuntimeException("Brak assetu: {$asset}");
+                throw new RuntimeException("Brak assetu: {$asset}");
             }
         }
     });
@@ -264,7 +303,7 @@ Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation chec
                 $output = trim(Artisan::output());
 
                 if ($exitCode !== 0) {
-                    throw new \RuntimeException($output !== '' ? $output : 'view:cache zwrócił kod ' . $exitCode);
+                    throw new RuntimeException($output !== '' ? $output : 'view:cache zwrócił kod '.$exitCode);
                 }
             } finally {
                 Artisan::call('view:clear');
@@ -304,6 +343,16 @@ Schedule::command('erp:refresh-ksef-submissions --limit=25 --minutes=2')
     ->runInBackground();
 
 Schedule::command('erp:track-courier-pickups --limit=50')
-    ->cron('*/15 * * * *')
+    ->cron('*/5 * * * *')
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:generate-ready-packing-labels --limit=25')
+    ->cron('*/5 * * * *')
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:retry-shipped-woo-sync --limit=25')
+    ->cron('*/5 * * * *')
     ->withoutOverlapping(10)
     ->runInBackground();

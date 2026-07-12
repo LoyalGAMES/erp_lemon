@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Shipping;
 
+use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\PackingTask;
 use App\Models\ShippingLabel;
@@ -19,39 +20,45 @@ final class CourierPickupTrackingService
     public function __construct(
         private readonly InPostTrackingService $tracking,
         private readonly BLPaczkaShipmentService $blpaczka,
+        private readonly ShippingProviderResolver $providers,
         private readonly PackingFulfillmentService $fulfillment,
-    ) {
-    }
+    ) {}
 
     /**
      * @return array{checked:int,picked_up:int,orders:int,warnings:list<string>}
      */
     public function trackPackedOrders(int $limit = 50): array
     {
-        $orderIds = PackingTask::query()
-            ->where('status', 'packed')
-            ->distinct()
-            ->pluck('external_order_id');
+        $orderIds = ExternalOrder::query()
+            ->whereHas('packingTasks', fn ($query) => $query->where('status', 'packed'))
+            ->whereDoesntHave('packingTasks', fn ($query) => $query->whereNotIn('status', ['packed', 'cancelled']))
+            ->pluck('id');
 
         $labels = ShippingLabel::query()
             ->with(['order', 'courierAccount'])
+            ->shipments()
             ->whereIn('external_order_id', $orderIds)
             ->where('status', 'generated')
+            ->where(function ($query): void {
+                $query->whereNull('next_tracking_check_at')
+                    ->orWhere('next_tracking_check_at', '<=', now());
+            })
             ->where(function ($query): void {
                 $query
                     ->where(function ($query): void {
                         $query->whereNotNull('tracking_number')->where('tracking_number', '!=', '');
                     })
                     ->orWhere(function ($query): void {
-                        $query->where('provider', 'blpaczka')
-                            ->whereNotNull('label_number')
+                        $query->whereNotNull('label_number')
                             ->where('label_number', '!=', '');
                     });
             })
+            ->orderByRaw('case when next_tracking_check_at is null then 0 else 1 end')
+            ->orderBy('next_tracking_check_at')
+            ->orderBy('tracking_checked_at')
             ->orderBy('generated_at')
             ->limit($limit)
             ->get()
-            ->unique('external_order_id')
             ->values();
 
         $checked = 0;
@@ -60,9 +67,47 @@ final class CourierPickupTrackingService
         $warnings = [];
 
         foreach ($labels as $label) {
+            $claimed = ShippingLabel::query()
+                ->whereKey($label->id)
+                ->where('status', 'generated')
+                ->where(function ($query): void {
+                    $query->whereNull('next_tracking_check_at')
+                        ->orWhere('next_tracking_check_at', '<=', now());
+                })
+                ->update(['next_tracking_check_at' => now()->addMinutes(10)]);
+
+            if ($claimed !== 1) {
+                continue;
+            }
+
+            $label->refresh();
+
+            if ($label->status !== 'generated') {
+                continue;
+            }
+
             $order = $label->order;
 
             if (! $order instanceof ExternalOrder) {
+                continue;
+            }
+
+            $provider = $this->providers->providerKey($label);
+
+            if (! in_array($provider, ['inpost', 'blpaczka'], true)) {
+                $message = sprintf(
+                    'Pominięto śledzenie przesyłki %s: przewoźnik %s nie ma skonfigurowanego adaptera.',
+                    $label->trackingIdentifier() ?? '#'.$label->id,
+                    $provider ?: 'nieustalony',
+                );
+                $label->update([
+                    'tracking_status' => 'unsupported_provider',
+                    'tracking_checked_at' => now(),
+                    'next_tracking_check_at' => now()->addDay(),
+                    'tracking_last_error' => $message,
+                ]);
+                $warnings[] = $message;
+
                 continue;
             }
 
@@ -70,17 +115,35 @@ final class CourierPickupTrackingService
                 $status = $this->statusForLabel($label);
             } catch (Throwable $exception) {
                 $warnings[] = $exception->getMessage();
+                $attempts = max(0, (int) $label->tracking_attempts) + 1;
+                $label->update([
+                    'tracking_checked_at' => now(),
+                    'next_tracking_check_at' => now()->addMinutes($this->retryDelayMinutes($attempts)),
+                    'tracking_attempts' => $attempts,
+                    'tracking_last_error' => $exception->getMessage(),
+                ]);
 
                 continue;
             }
 
             if ($status === null) {
+                $label->update([
+                    'tracking_checked_at' => now(),
+                    'next_tracking_check_at' => now()->addMinutes(30),
+                    'tracking_last_error' => 'Brak danych konta lub numeru potrzebnego do śledzenia przesyłki.',
+                ]);
+
                 continue;
             }
 
             $checked++;
 
             $label->update([
+                'tracking_status' => $status['status'],
+                'tracking_checked_at' => now(),
+                'next_tracking_check_at' => $status['picked_up'] ? null : now()->addMinutes(5),
+                'tracking_attempts' => 0,
+                'tracking_last_error' => null,
                 'response_payload' => array_merge((array) $label->response_payload, [
                     'tracking' => [
                         'status' => $status['status'],
@@ -94,14 +157,47 @@ final class CourierPickupTrackingService
             }
 
             $pickedUp++;
-            $label->update(['status' => 'picked_up']);
 
+            $pickedUpAt = $status['picked_up_at'] ?? now()->toISOString();
             $result = $this->fulfillment->markOrderPickedUpByCourier($order, [
-                'source' => $label->provider === 'blpaczka' ? 'blpaczka_tracking' : 'inpost_tracking',
+                'source' => $provider === 'blpaczka' ? 'blpaczka_tracking' : 'inpost_tracking',
                 'tracking_number' => $label->tracking_number ?: $label->label_number,
                 'tracking_status' => $status['status'],
-                'picked_up_at' => $status['picked_up_at'] ?? now()->toISOString(),
+                'picked_up_at' => $pickedUpAt,
             ]);
+
+            $stillWaitingForCourier = $result['tasks'] === 0
+                && PackingTask::query()
+                    ->where('external_order_id', $order->id)
+                    ->where('status', 'packed')
+                    ->exists();
+
+            if ($stillWaitingForCourier) {
+                $label->update([
+                    'status' => 'generated',
+                    'next_tracking_check_at' => now()->addMinutes(5),
+                    'tracking_last_error' => 'Status odbioru został potwierdzony, ale aktualizacja zamówienia jest jeszcze przetwarzana. Próba zostanie ponowiona.',
+                ]);
+                $warnings = array_merge($warnings, $result['warnings']);
+
+                continue;
+            }
+
+            $label->update([
+                'status' => 'picked_up',
+                'picked_up_at' => $pickedUpAt,
+            ]);
+
+            ShippingLabel::query()
+                ->shipments()
+                ->where('external_order_id', $order->id)
+                ->where('status', 'generated')
+                ->whereKeyNot($label->id)
+                ->update([
+                    'status' => 'superseded',
+                    'next_tracking_check_at' => null,
+                    'tracking_last_error' => 'Zduplikowana etykieta zastąpiona przesyłką odebraną przez kuriera.',
+                ]);
 
             if ($result['tasks'] > 0) {
                 $shippedOrders++;
@@ -123,8 +219,10 @@ final class CourierPickupTrackingService
      */
     private function statusForLabel(ShippingLabel $label): ?array
     {
-        if ($label->provider === 'blpaczka') {
-            $account = $label->courierAccount ?? \App\Models\CourierAccount::defaultFor('blpaczka');
+        $provider = $this->providers->providerKey($label);
+
+        if ($provider === 'blpaczka') {
+            $account = $label->courierAccount ?? CourierAccount::defaultFor('blpaczka');
 
             if ($account === null || filled($label->label_number) === false) {
                 return null;
@@ -133,6 +231,15 @@ final class CourierPickupTrackingService
             return $this->blpaczka->trackingStatus((string) $label->label_number, $account);
         }
 
-        return $this->tracking->trackingStatus((string) $label->tracking_number);
+        if ($provider === 'inpost') {
+            return $this->tracking->trackingStatus((string) $label->trackingIdentifier());
+        }
+
+        return null;
+    }
+
+    private function retryDelayMinutes(int $attempts): int
+    {
+        return min(360, 5 * (2 ** min(6, max(0, $attempts - 1))));
     }
 }

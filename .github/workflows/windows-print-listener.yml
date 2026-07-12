@@ -1,0 +1,139 @@
+name: Windows Print Listener
+
+on:
+  pull_request:
+    paths:
+      - "tools/windows-print-listener/**"
+      - ".github/workflows/windows-print-listener.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "tools/windows-print-listener/**"
+      - ".github/workflows/windows-print-listener.yml"
+  workflow_dispatch:
+    inputs:
+      signed_release:
+        description: "Zbuduj i udostępnij podpisane wydanie produkcyjne"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-print-listener-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: powershell
+
+jobs:
+  validate:
+    name: Test instalatora (bez publikacji)
+    runs-on: windows-2022
+    timeout-minutes: 25
+
+    steps:
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Ustaw Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/windows-print-listener/go.mod
+          cache-dependency-path: tools/windows-print-listener/go.sum
+
+      - name: Pobierz i zweryfikuj NSIS 3.12
+        run: .\tools\windows-print-listener\scripts\install-nsis.ps1
+
+      - name: Zbuduj niepublikowany artefakt testowy
+        run: .\tools\windows-print-listener\scripts\build.ps1
+
+      - name: Zweryfikuj manifest i sumy
+        run: .\tools\windows-print-listener\scripts\verify-artifacts.ps1
+
+      - name: Przetestuj instalację, usługę i deinstalację
+        run: >-
+          .\tools\windows-print-listener\scripts\smoke-installer.ps1
+          -InstallerPath .\tools\windows-print-listener\build\unsigned\SempreERP-PrintListener-Setup.exe
+
+      # Celowo brak upload-artifact. Ten job tworzy niepodpisany plik wyłącznie
+      # po to, aby przetestować instalator; plik nie jest wydaniem.
+
+  signed_release:
+    name: Podpisane wydanie produkcyjne
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_release }}
+    needs: validate
+    runs-on: windows-2022
+    timeout-minutes: 25
+    environment: windows-code-signing
+
+    env:
+      WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+      WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ secrets.WINDOWS_CODESIGN_TIMESTAMP_URL }}
+      WINDOWS_CODESIGN_SUBJECT: ${{ secrets.WINDOWS_CODESIGN_SUBJECT }}
+
+    steps:
+      - name: Pobierz kod
+        uses: actions/checkout@v4
+
+      - name: Ustaw Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/windows-print-listener/go.mod
+          cache-dependency-path: tools/windows-print-listener/go.sum
+
+      - name: Pobierz i zweryfikuj NSIS 3.12
+        run: .\tools\windows-print-listener\scripts\install-nsis.ps1
+
+      - name: Przygotuj tymczasowy PFX
+        env:
+          WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_BASE64)) {
+              throw 'Brak sekretu WINDOWS_CODESIGN_PFX_BASE64.'
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'sempre-erp-codesign.pfx'
+          [System.IO.File]::WriteAllBytes(
+              $pfxPath,
+              [Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64)
+          )
+          "WINDOWS_CODESIGN_PFX_PATH=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Zbuduj, podpisz i zweryfikuj wydanie
+        run: .\tools\windows-print-listener\scripts\release.ps1
+
+      - name: Usuń tymczasowy PFX
+        if: ${{ always() }}
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_PATH)) {
+              Remove-Item -LiteralPath $env:WINDOWS_CODESIGN_PFX_PATH -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Przetestuj podpisany instalator
+        run: >-
+          .\tools\windows-print-listener\scripts\smoke-installer.ps1
+          -InstallerPath .\tools\windows-print-listener\dist\SempreERP-PrintListener-Setup.exe
+          -RequireSignature
+
+      - name: Odczytaj wersję
+        id: release
+        run: |
+          $version = (Get-Content .\tools\windows-print-listener\VERSION -Raw).Trim()
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Udostępnij wyłącznie podpisane artefakty
+        uses: actions/upload-artifact@v4
+        with:
+          name: sempre-erp-print-listener-${{ steps.release.outputs.version }}-signed
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          path: |
+            tools/windows-print-listener/dist/SempreERP-PrintListener-Setup.exe
+            tools/windows-print-listener/dist/RELEASE-MANIFEST.json
+            tools/windows-print-listener/dist/SHA256SUMS.txt
+            tools/windows-print-listener/build/windows-amd64/lemon-print-listener.exe

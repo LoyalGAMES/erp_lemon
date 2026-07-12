@@ -4,6 +4,7 @@
     $currentStatus = (string) ($filters['status'] ?? '');
     $currentPerPage = (int) ($filters['per_page'] ?? 50);
     $thumbnailService = app(\App\Services\Products\ProductImageThumbnailService::class);
+    $shippingProviderResolver = app(\App\Services\Shipping\ShippingProviderResolver::class);
     $money = fn ($amount, $currency): string => number_format((float) $amount, 2, ',', ' ').' '.$currency;
     $qty = fn ($amount): string => rtrim(rtrim(number_format((float) $amount, 4, ',', ' '), '0'), ',');
     $asArray = fn ($value): array => is_array($value) ? $value : [];
@@ -13,7 +14,8 @@
         return match (true) {
             in_array($status, ['cancelled', 'failed', 'refunded'], true) => 'red',
             in_array($status, ['pending', 'on-hold', 'waiting'], true) => 'orange',
-            in_array($status, ['completed', 'processing', 'packed', 'posted', 'generated'], true) => 'blue',
+            in_array($status, ['completed', 'processing', 'packed', 'posted', 'generated', 'shipped'], true) => 'blue',
+            $status === 'awaiting_courier' => 'orange',
             default => '',
         };
     };
@@ -124,7 +126,8 @@
                         $customer = $customerName($order) ?: 'Klient bez nazwy';
                         $email = (string) ($billing['email'] ?? data_get($shipping, 'email', ''));
                         $phone = (string) ($billing['phone'] ?? data_get($shipping, 'phone', ''));
-                        $label = $order->shippingLabels->first();
+                        $label = $order->shipmentLabels->first();
+                        $trackingUrl = $label ? $shippingProviderResolver->trackingUrl($label) : null;
                         $activeReservations = (float) ($activeReservationSums[$order->sales_channel_id.'|'.$order->external_id] ?? 0);
                         $invoice = $order->invoices
                             ->reject(fn ($invoice): bool => $invoice->type === 'proforma')
@@ -181,7 +184,13 @@
                         <td class="order-delivery-cell">
                             <strong>{{ $deliveryName($order, $label) }}</strong>
                             @if ($label)
-                                <span>{{ $label->tracking_number ?: $label->label_number ?: 'etykieta bez numeru' }}</span>
+                                @if ($trackingUrl)
+                                    <a href="{{ $trackingUrl }}" target="_blank" rel="noopener noreferrer" aria-label="Śledź przesyłkę {{ $label->trackingIdentifier() }}">
+                                        {{ $label->trackingIdentifier() }}
+                                    </a>
+                                @else
+                                    <span>{{ $label->trackingIdentifier() ?: 'etykieta bez numeru' }}</span>
+                                @endif
                                 <span @class(['status', $statusTone($label->status)])>{{ $label->status }}</span>
                             @else
                                 <span class="muted">Brak etykiety</span>
@@ -189,6 +198,14 @@
                         </td>
                         <td>
                             <span @class(['status', $statusTone($order->status)])>{{ $order->status }}</span>
+                            @if ($order->fulfillment_status)
+                                <div class="order-meta">ERP: <span @class(['status', $statusTone($order->fulfillment_status)])>{{ match ($order->fulfillment_status) {
+                                    'awaiting_courier' => 'oczekuje na kuriera',
+                                    'ready_to_pack' => 'do pakowania',
+                                    'shipped' => 'wysłane',
+                                    default => $order->fulfillment_status,
+                                } }}</span></div>
+                            @endif
                             <div class="order-meta">Rezerwacje: {{ number_format($activeReservations, 0, ',', ' ') }}</div>
                         </td>
                         <td class="numeric order-total-cell">{{ $money($order->total_gross, $order->currency) }}</td>

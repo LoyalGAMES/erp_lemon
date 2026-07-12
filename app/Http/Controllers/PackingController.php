@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
+use App\Jobs\GeneratePackingLabelJob;
 use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\PackingTask;
@@ -13,8 +14,8 @@ use App\Services\Packing\PackingFulfillmentService;
 use App\Services\Packing\PackingSettingsService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
-use App\Services\Printing\ShippingLabelPrintQueueService;
 use App\Services\Shipping\ShippingLabelService;
+use App\Services\Shipping\ShippingProviderResolver;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -32,6 +33,7 @@ class PackingController extends Controller
         PackingTaskService $packing,
         PackingSettingsService $settings,
         ProductSegmentService $segments,
+        ShippingProviderResolver $providers,
     ): View {
         $sync = $packing->syncReadyOrders();
         $mode = (string) session('packing_mode', 'hybrid');
@@ -55,7 +57,7 @@ class PackingController extends Controller
         $packingHistoryDate = $this->historyDate((string) $request->query('date', now()->toDateString()));
 
         $tasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shippingLabels', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
             ->whereIn('status', ['open', 'picked'])
             ->orderByRaw("case when status = 'picked' then 1 else 0 end")
             ->orderBy('courier')
@@ -64,13 +66,13 @@ class PackingController extends Controller
             ->get();
 
         $problemTasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shippingLabels', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
             ->where('status', 'problem')
             ->orderBy('updated_at')
             ->get();
 
         $recentPickedTasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shippingLabels', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
             ->whereIn('status', ['picked', 'packed', 'shipped'])
             ->whereNotNull('picked_at')
             ->latest('picked_at')
@@ -78,8 +80,10 @@ class PackingController extends Controller
             ->get();
 
         $waitingCourierTasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shippingLabels', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
             ->where('status', 'packed')
+            ->whereHas('order', fn ($query) => $query
+                ->whereDoesntHave('packingTasks', fn ($tasks) => $tasks->whereNotIn('status', ['packed', 'cancelled'])))
             ->orderBy('courier')
             ->orderBy('packed_at')
             ->get();
@@ -135,14 +139,14 @@ class PackingController extends Controller
                     ->values(),
             'problemTasks' => $problemTasks,
             'recentPickedTasks' => $recentPickedTasks,
-            'waitingCourierGroups' => $this->waitingCourierGroups($waitingCourierTasks),
+            'waitingCourierGroups' => $this->waitingCourierGroups($waitingCourierTasks, $providers),
             'shippedOrders' => $packingView === 'shipped'
-                ? $this->shippedOrders()
+                ? $this->shippedOrders($providers)
                 : collect(),
             'shippedOrdersCount' => $shippedOrdersCount,
             'packingHistoryDate' => $packingHistoryDate->toDateString(),
             'packingHistoryOrders' => $packingView === 'history'
-                ? $this->packingHistoryOrders($packingHistoryDate)
+                ? $this->packingHistoryOrders($packingHistoryDate, $providers)
                 : collect(),
             'packingMode' => in_array($mode, ['manual', 'hybrid', 'scanner'], true) ? $mode : 'hybrid',
             'packingView' => $packingView,
@@ -194,8 +198,10 @@ class PackingController extends Controller
         };
     }
 
-    public function scan(Request $request, PackingTaskService $packing): RedirectResponse
-    {
+    public function scan(
+        Request $request,
+        PackingTaskService $packing,
+    ): RedirectResponse {
         $data = $request->validate([
             'code' => ['required', 'string', 'max:120'],
         ]);
@@ -206,21 +212,35 @@ class PackingController extends Controller
             return back()->withInput()->with('error', $exception->getMessage());
         }
 
-        return back()->with('status', sprintf(
+        $message = sprintf(
             'Zebrano %s: %s (%s/%s).',
             $task->sku ?: 'produkt',
             $task->product_name,
             number_format((float) $task->quantity_picked, 0, ',', ' '),
             number_format((float) $task->quantity_required, 0, ',', ' '),
-        ));
+        );
+
+        if ($this->orderIsReadyForAutomaticLabel($task->external_order_id)) {
+            GeneratePackingLabelJob::dispatch($task->external_order_id)->afterCommit();
+            $message .= ' Zlecono automatyczne generowanie etykiety.';
+        }
+
+        return back()->with('status', $message);
     }
 
-    public function pick(Request $request, PackingTaskService $packing): RedirectResponse
-    {
+    public function pick(
+        Request $request,
+        PackingTaskService $packing,
+    ): RedirectResponse {
         $data = $request->validate([
             'task_ids' => ['required', 'array', 'min:1'],
             'task_ids.*' => ['integer', 'exists:packing_tasks,id'],
         ]);
+
+        $orderIds = PackingTask::query()
+            ->whereIn('id', $data['task_ids'])
+            ->pluck('external_order_id')
+            ->unique();
 
         try {
             $count = $packing->markPickedMany($data['task_ids']);
@@ -228,7 +248,15 @@ class PackingController extends Controller
             return back()->with('error', $exception->getMessage());
         }
 
-        return back()->with('status', "Oznaczono {$count} pozycji jako zebrane. Zamówienia trafiły do kolejki pakowania.");
+        $message = "Oznaczono {$count} pozycji jako zebrane. Zamówienia trafiły do kolejki pakowania.";
+        foreach ($orderIds as $orderId) {
+            if ($this->orderIsReadyForAutomaticLabel((int) $orderId)) {
+                GeneratePackingLabelJob::dispatch((int) $orderId)->afterCommit();
+                $message .= ' Zlecono automatyczne generowanie etykiety.';
+            }
+        }
+
+        return back()->with('status', $message);
     }
 
     public function problem(Request $request, PackingTaskService $packing): RedirectResponse
@@ -313,15 +341,25 @@ class PackingController extends Controller
     {
         $data = $request->validate([
             'courier' => ['required', 'string', 'max:120'],
+            'order_ids' => ['required', 'array', 'min:1'],
+            'order_ids.*' => ['integer', 'exists:external_orders,id'],
+            'pickup_token' => ['required', 'string', 'size:64'],
         ]);
 
+        if (! hash_equals(
+            $this->courierPickupToken($data['courier'], $data['order_ids']),
+            $data['pickup_token'],
+        )) {
+            return back()->with('error', 'Lista paczek zmieniła się albo formularz odbioru jest nieprawidłowy. Odśwież widok i spróbuj ponownie.');
+        }
+
         try {
-            $result = $fulfillment->markCourierPickedUp($data['courier']);
+            $result = $fulfillment->markCourierPickedUp($data['courier'], $data['order_ids'] ?? []);
         } catch (RuntimeException $exception) {
             return back()->with('error', $exception->getMessage());
         }
 
-        $message = "Oznaczono odbiór kuriera {$data['courier']}: {$result['orders']} zamówień, {$result['tasks']} pozycji. Status w WooCommerce zmieniono na wysłano.";
+        $message = "Oznaczono odbiór kuriera {$data['courier']}: {$result['orders']} zamówień, {$result['tasks']} pozycji. W ERP zamówienia przeniesiono do wysłanych.";
 
         if ($result['warnings'] !== []) {
             $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
@@ -362,8 +400,6 @@ class PackingController extends Controller
         Request $request,
         ExternalOrder $order,
         ShippingLabelService $shippingLabels,
-        PackingSettingsService $settings,
-        ShippingLabelPrintQueueService $printQueue,
     ): RedirectResponse {
         $data = $request->validate([
             'courier_account_id' => ['nullable', 'integer', 'exists:courier_accounts,id'],
@@ -385,25 +421,15 @@ class PackingController extends Controller
             $message .= " Konto nadawcze: {$account->name}.";
         }
 
-        $station = $settings->station((string) session('packing_station', ''));
-
-        if ($station !== null) {
-            try {
-                $printJob = $printQueue->enqueueForStation($label, $station, 'packing.label.generated');
-
-                if ($printJob !== null) {
-                    $message .= $this->printJobMessage($printJob);
-                }
-            } catch (Throwable $exception) {
-                $message .= ' Nie udało się dodać wydruku do kolejki: '.$exception->getMessage();
-            }
-        }
-
         return back()->with('status', $message);
     }
 
     public function downloadLabel(ShippingLabel $label): StreamedResponse
     {
+        if ($label->purpose !== 'shipment' || $label->external_order_id === null) {
+            abort(404);
+        }
+
         if (! Storage::disk($label->disk)->exists($label->path)) {
             abort(404);
         }
@@ -415,15 +441,27 @@ class PackingController extends Controller
 
     private function printJobMessage(PrintJob $printJob): string
     {
-        if ($printJob->status === 'printed' && filled($printJob->listener_url)) {
-            return " Etykieta została wysłana do aplikacji Windows: {$printJob->printer_name}.";
+        if ($printJob->status === 'printed') {
+            return " Etykieta została wydrukowana przez most Windows: {$printJob->printer_name}.";
         }
 
         if (filled($printJob->last_error)) {
-            return " Nie udało się wysłać etykiety do aplikacji Windows ({$printJob->printer_name}): {$printJob->last_error}";
+            return " Most Windows nie wydrukował etykiety ({$printJob->printer_name}): {$printJob->last_error}";
         }
 
         return " Etykieta została dodana do kolejki wydruku: {$printJob->printer_name}.";
+    }
+
+    private function orderIsReadyForAutomaticLabel(int $orderId): bool
+    {
+        return PackingTask::query()
+            ->where('external_order_id', $orderId)
+            ->whereIn('status', ['picked', 'packed'])
+            ->exists()
+            && ! PackingTask::query()
+                ->where('external_order_id', $orderId)
+                ->whereIn('status', ['open', 'problem'])
+                ->exists();
     }
 
     /**
@@ -531,14 +569,20 @@ class PackingController extends Controller
      * @param  Collection<int, PackingTask>  $packedTasks
      * @return Collection<int, array<string, mixed>>
      */
-    private function waitingCourierGroups(Collection $packedTasks): Collection
+    private function waitingCourierGroups(Collection $packedTasks, ShippingProviderResolver $providers): Collection
     {
         return $packedTasks
-            ->groupBy(fn (PackingTask $task): string => $task->courier ?: 'Nieznany kurier')
-            ->map(function (Collection $group, string $courier): array {
+            ->groupBy(function (PackingTask $task) use ($providers): string {
+                $label = $task->order?->shipmentLabels?->firstWhere('status', 'generated');
+
+                return $label instanceof ShippingLabel
+                    ? $providers->courierName($label, $task->courier)
+                    : ($task->courier ?: 'Nieznany kurier');
+            })
+            ->map(function (Collection $group, string $courier) use ($providers): array {
                 $orders = $group
                     ->groupBy('external_order_id')
-                    ->map(function (Collection $orderTasks): ?array {
+                    ->map(function (Collection $orderTasks) use ($providers): ?array {
                         /** @var PackingTask|null $first */
                         $first = $orderTasks->sortBy('packed_at')->first();
                         $order = $first?->order;
@@ -547,12 +591,23 @@ class PackingController extends Controller
                             return null;
                         }
 
+                        $label = $order->shipmentLabels?->firstWhere('status', 'generated');
+
                         return [
                             'id' => $order->id,
                             'external_number' => $order->external_number,
                             'customer_name' => $first->customer_name ?: '-',
                             'tasks_count' => $orderTasks->count(),
                             'packed_at' => $first->packed_at,
+                            'label_id' => $label?->id,
+                            'label_number' => $label?->trackingIdentifier(),
+                            'tracking_url' => $label instanceof ShippingLabel ? $providers->trackingUrl($label) : null,
+                            'tracking_status' => $label?->tracking_status,
+                            'tracking_checked_at' => $label?->tracking_checked_at,
+                            'tracking_error' => $label?->tracking_last_error,
+                            'label_error' => data_get($first->metadata, 'label_automation.message')
+                                ?: collect((array) data_get($first->metadata, 'packing_completion.warnings', []))
+                                    ->first(fn ($warning): bool => str_starts_with((string) $warning, 'Etykieta:')),
                         ];
                     })
                     ->filter()
@@ -565,11 +620,27 @@ class PackingController extends Controller
                     'tasks_count' => $group->count(),
                     'order_numbers' => $orders->pluck('external_number')->filter()->values()->all(),
                     'orders' => $orders->all(),
+                    'pickup_token' => $this->courierPickupToken($courier, $orders->pluck('id')->all()),
                     'oldest_packed_at' => $group->sortBy('packed_at')->first()?->packed_at,
                 ];
             })
             ->sortBy('courier')
             ->values();
+    }
+
+    /**
+     * @param  array<int|string>  $orderIds
+     */
+    private function courierPickupToken(string $courier, array $orderIds): string
+    {
+        $ids = collect($orderIds)
+            ->map(fn ($id): int => (int) $id)
+            ->filter()
+            ->unique()
+            ->sort()
+            ->implode(',');
+
+        return hash_hmac('sha256', trim($courier).'|'.$ids, (string) config('app.key'));
     }
 
     private function historyDate(string $date): Carbon
@@ -584,41 +655,43 @@ class PackingController extends Controller
     /**
      * @return Collection<int, array<string, mixed>>
      */
-    private function packingHistoryOrders(Carbon $date): Collection
+    private function packingHistoryOrders(Carbon $date, ShippingProviderResolver $providers): Collection
     {
         $tasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shippingLabels', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
             ->whereIn('status', ['packed', 'shipped'])
             ->whereDate('packed_at', $date->toDateString())
             ->orderByDesc('packed_at')
             ->get();
 
-        return $this->completedOrders($tasks);
+        return $this->completedOrders($tasks, $providers);
     }
 
     /**
      * @return Collection<int, array<string, mixed>>
      */
-    private function shippedOrders(): Collection
+    private function shippedOrders(ShippingProviderResolver $providers): Collection
     {
         $tasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shippingLabels', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
             ->where('status', 'shipped')
             ->orderByDesc('packed_at')
             ->get();
 
-        return $this->completedOrders($tasks);
+        return $this->completedOrders($tasks, $providers)
+            ->sortByDesc(fn (array $order): int => $order['pickup_at']?->timestamp ?? $order['last_packed_at']?->timestamp ?? 0)
+            ->values();
     }
 
     /**
      * @param  Collection<int, PackingTask>  $tasks
      * @return Collection<int, array<string, mixed>>
      */
-    private function completedOrders(Collection $tasks): Collection
+    private function completedOrders(Collection $tasks, ShippingProviderResolver $providers): Collection
     {
         return $tasks
             ->groupBy('external_order_id')
-            ->map(function (Collection $group): ?array {
+            ->map(function (Collection $group) use ($providers): ?array {
                 /** @var PackingTask|null $first */
                 $first = $group->sortByDesc('packed_at')->first();
                 $order = $first?->order;
@@ -633,6 +706,10 @@ class PackingController extends Controller
                     ->sort()
                     ->last();
 
+                $label = $order instanceof ExternalOrder
+                    ? $order->shipmentLabels?->first()
+                    : null;
+
                 return [
                     'order_id' => $order instanceof ExternalOrder ? $order->id : null,
                     'order_number' => $order instanceof ExternalOrder ? $order->external_number : $first->order_number,
@@ -644,6 +721,10 @@ class PackingController extends Controller
                     'packed_at' => $group->sortBy('packed_at')->first()?->packed_at,
                     'last_packed_at' => $first->packed_at,
                     'pickup_at' => $pickupAt ? Carbon::parse($pickupAt) : null,
+                    'label_id' => $label?->id,
+                    'label_number' => $label?->trackingIdentifier(),
+                    'tracking_url' => $label instanceof ShippingLabel ? $providers->trackingUrl($label) : null,
+                    'tracking_status' => $label?->tracking_status,
                     'items' => $group
                         ->sortBy('product_name')
                         ->map(fn (PackingTask $task): array => [

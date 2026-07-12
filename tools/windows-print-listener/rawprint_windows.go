@@ -46,7 +46,7 @@ func rawPrint(printerName string, data []byte) error {
 	}
 	defer closePrinter.Call(uintptr(printerHandle))
 
-	docName, _ := syscall.UTF16PtrFromString("Lemon ERP label")
+	docName, _ := syscall.UTF16PtrFromString("Sempre ERP label")
 	dataType, _ := syscall.UTF16PtrFromString("RAW")
 	info := docInfo1{
 		docName:  docName,

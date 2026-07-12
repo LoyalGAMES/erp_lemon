@@ -8,16 +8,15 @@ use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\PackingTask;
 use App\Services\Orders\OrderStatusPolicyService;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 final class PackingTaskService
 {
     public function __construct(
         private readonly OrderStatusPolicyService $statusPolicy,
-    ) {
-    }
+    ) {}
 
     /**
      * @return array{created:int,updated:int,cancelled:int}
@@ -43,10 +42,13 @@ final class PackingTaskService
                 });
         });
 
-        $cancelled += PackingTask::query()
+        $cancelledQuery = PackingTask::query()
             ->whereIn('status', ['open', 'picked', 'problem'])
-            ->whereHas('order', fn ($query) => $query->whereNotIn('status', $this->statusPolicy->packingReadyStatuses()))
-            ->update(['status' => 'cancelled']);
+            ->whereHas('order', fn ($query) => $query->whereNotIn('status', $this->statusPolicy->packingReadyStatuses()));
+        $cancelledOrderIds = (clone $cancelledQuery)->pluck('external_order_id')->unique();
+        $cancelled += $cancelledQuery->update(['status' => 'cancelled']);
+
+        $cancelledOrderIds->each(fn ($orderId) => $this->syncOrderFulfillmentStatus((int) $orderId));
 
         return [
             'created' => $created,
@@ -67,10 +69,13 @@ final class PackingTaskService
                 ->findOrFail($order->id);
 
             if (! in_array($order->status, $this->statusPolicy->packingReadyStatuses(), true)) {
+                $cancelled = $this->cancelActiveTasksForOrder($order, collect());
+                $this->syncOrderFulfillmentStatus($order->id);
+
                 return [
                     'created' => 0,
                     'updated' => 0,
-                    'cancelled' => $this->cancelActiveTasksForOrder($order, collect()),
+                    'cancelled' => $cancelled,
                 ];
             }
 
@@ -92,7 +97,7 @@ final class PackingTaskService
                 continue;
             }
 
-            $externalLineId = $line->external_line_id ?: 'line-' . $line->id;
+            $externalLineId = $line->external_line_id ?: 'line-'.$line->id;
             $activeExternalLineIds->push($externalLineId);
 
             $task = PackingTask::query()->firstOrNew([
@@ -100,7 +105,7 @@ final class PackingTaskService
                 'external_line_id' => $externalLineId,
             ]);
 
-            if (in_array($task->status, ['packed', 'cancelled', 'problem'], true)) {
+            if (in_array($task->status, ['packed', 'shipped', 'cancelled', 'problem'], true)) {
                 continue;
             }
 
@@ -140,15 +145,18 @@ final class PackingTaskService
             $task->save();
         }
 
+        $cancelled = $this->cancelActiveTasksForOrder($order, $activeExternalLineIds);
+        $this->syncOrderFulfillmentStatus($order->id);
+
         return [
             'created' => $created,
             'updated' => $updated,
-            'cancelled' => $this->cancelActiveTasksForOrder($order, $activeExternalLineIds),
+            'cancelled' => $cancelled,
         ];
     }
 
     /**
-     * @param Collection<int, string> $activeExternalLineIds
+     * @param  Collection<int, string>  $activeExternalLineIds
      */
     private function cancelActiveTasksForOrder(ExternalOrder $order, Collection $activeExternalLineIds): int
     {
@@ -236,6 +244,8 @@ final class PackingTaskService
                 'picked_at' => $isComplete ? now() : $task->picked_at,
             ]);
 
+            $this->syncOrderFulfillmentStatus($task->external_order_id);
+
             return $task->refresh();
         });
     }
@@ -251,11 +261,13 @@ final class PackingTaskService
             'packed_at' => now(),
         ]);
 
+        $this->syncOrderFulfillmentStatus($task->external_order_id);
+
         return $task->refresh();
     }
 
     /**
-     * @param array<int|string> $taskIds
+     * @param  array<int|string>  $taskIds
      */
     public function markPickedMany(array $taskIds): int
     {
@@ -287,6 +299,10 @@ final class PackingTaskService
                     'picked_at' => now(),
                 ]);
             }
+
+            $tasks->pluck('external_order_id')->unique()->each(
+                fn ($orderId) => $this->syncOrderFulfillmentStatus((int) $orderId),
+            );
 
             return $tasks->count();
         });
@@ -322,12 +338,14 @@ final class PackingTaskService
                 ]);
             }
 
+            $this->syncOrderFulfillmentStatus($order->id);
+
             return $pickedTasks->count();
         });
     }
 
     /**
-     * @param array<int|string> $taskIds
+     * @param  array<int|string>  $taskIds
      */
     public function markProblemMany(array $taskIds, string $reason = 'Do wyjaśnienia'): int
     {
@@ -365,6 +383,10 @@ final class PackingTaskService
                 ]);
             }
 
+            $tasks->pluck('external_order_id')->unique()->each(
+                fn ($orderId) => $this->syncOrderFulfillmentStatus((int) $orderId),
+            );
+
             return $tasks->count();
         });
     }
@@ -399,12 +421,37 @@ final class PackingTaskService
             'metadata' => $metadata,
         ]);
 
+        $this->syncOrderFulfillmentStatus($task->external_order_id);
+
         return $task->refresh();
     }
 
     public function readyStatuses(): array
     {
         return $this->statusPolicy->packingReadyStatuses();
+    }
+
+    private function syncOrderFulfillmentStatus(int $orderId): void
+    {
+        $statuses = PackingTask::query()
+            ->where('external_order_id', $orderId)
+            ->where('status', '!=', 'cancelled')
+            ->pluck('status');
+
+        $status = match (true) {
+            $statuses->isEmpty() => null,
+            $statuses->contains('problem') => 'problem',
+            $statuses->every(fn (string $taskStatus): bool => $taskStatus === 'shipped') => 'shipped',
+            $statuses->every(fn (string $taskStatus): bool => in_array($taskStatus, ['packed', 'shipped'], true)) => 'awaiting_courier',
+            ! $statuses->contains('open')
+                && $statuses->every(fn (string $taskStatus): bool => $taskStatus === 'picked') => 'ready_to_pack',
+            $statuses->contains('open') => 'picking',
+            default => null,
+        };
+
+        ExternalOrder::query()
+            ->whereKey($orderId)
+            ->update(['fulfillment_status' => $status]);
     }
 
     private function customerName(ExternalOrder $order): string

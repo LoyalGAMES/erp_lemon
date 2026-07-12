@@ -29,6 +29,17 @@ final class InPostTrackingService
     ];
 
     /**
+     * Kod zdarzenia w nowszym Tracking API InPost: przesyłka odebrana przez kuriera.
+     */
+    private const PICKED_UP_EVENT_CODES = [
+        'FMD.1002',
+        'FMD.1003',
+        'FMD.1004',
+        'FMD.1005',
+        'FMD.1006',
+    ];
+
+    /**
      * @return array{status:string,picked_up:bool,picked_up_at:?string}
      */
     public function trackingStatus(string $trackingNumber): array
@@ -55,6 +66,12 @@ final class InPostTrackingService
         $data = (array) $response->json();
         $status = (string) ($data['status'] ?? '');
         $pickedUpAt = null;
+        $rootEventCode = (string) ($data['eventCode'] ?? $data['event_code'] ?? '');
+
+        if (in_array($rootEventCode, self::PICKED_UP_EVENT_CODES, true)) {
+            $pickedUpAt = (string) ($data['timestamp'] ?? $data['datetime'] ?? '') ?: null;
+            $status = $status !== '' ? $status : $rootEventCode;
+        }
 
         foreach ((array) ($data['tracking_details'] ?? []) as $event) {
             if (in_array((string) ($event['status'] ?? ''), self::PICKED_UP_STATUSES, true)) {
@@ -63,9 +80,34 @@ final class InPostTrackingService
             }
         }
 
+        foreach ((array) ($data['events'] ?? []) as $event) {
+            if (! is_array($event)) {
+                continue;
+            }
+
+            $eventCode = (string) (
+                $event['event_code']
+                ?? $event['eventCode']
+                ?? $event['code']
+                ?? ''
+            );
+
+            if (in_array($eventCode, self::PICKED_UP_EVENT_CODES, true)) {
+                $pickedUpAt = (string) (
+                    $event['datetime']
+                    ?? $event['timestamp']
+                    ?? $event['event_timestamp']
+                    ?? ''
+                ) ?: $pickedUpAt;
+                break;
+            }
+        }
+
         return [
             'status' => $status,
-            'picked_up' => in_array($status, self::PICKED_UP_STATUSES, true) || $pickedUpAt !== null,
+            'picked_up' => in_array($status, self::PICKED_UP_STATUSES, true)
+                || in_array($status, self::PICKED_UP_EVENT_CODES, true)
+                || $pickedUpAt !== null,
             'picked_up_at' => $pickedUpAt,
         ];
     }

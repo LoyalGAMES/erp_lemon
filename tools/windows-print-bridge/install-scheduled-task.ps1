@@ -19,7 +19,7 @@ if (-not $powershell) {
     $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
 }
 
-$arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -ConfigPath `"$ConfigPath`""
+$arguments = "-NoLogo -NoProfile -File `"$scriptPath`" -ConfigPath `"$ConfigPath`""
 $action = New-ScheduledTaskAction -Execute $powershell -Argument $arguments
 $trigger = New-ScheduledTaskTrigger -AtLogOn
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)

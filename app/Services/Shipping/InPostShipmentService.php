@@ -98,7 +98,7 @@ final class InPostShipmentService
                 continue;
             }
 
-            $matchesReference = str_contains((string) ($shipment['reference'] ?? ''), $reference);
+            $matchesReference = trim((string) ($shipment['reference'] ?? '')) === $reference;
             $matchesTracking = filled($shipment['tracking_number'] ?? null)
                 && in_array((string) $shipment['tracking_number'], $trackingNumbers, true);
 

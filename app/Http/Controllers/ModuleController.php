@@ -18,11 +18,13 @@ use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
+use Illuminate\Contracts\Pagination\Paginator;
 use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
-use Illuminate\Support\Collection;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
 
 class ModuleController extends Controller
@@ -43,7 +45,7 @@ class ModuleController extends Controller
                     ->map(fn (Product $product) => [
                         $product->sku,
                         $product->name,
-                        $product->vat_rate . '%',
+                        $product->vat_rate.'%',
                         number_format($product->stockBalances->sum(fn (StockBalance $balance) => (float) $balance->quantity_on_hand), 0, ',', ' '),
                         $product->is_active ? 'Aktywny' : 'Wylaczony',
                     ]),
@@ -131,7 +133,7 @@ class ModuleController extends Controller
                         $invoice->number,
                         $invoice->type,
                         $invoice->status,
-                        number_format((float) $invoice->gross_total, 2, ',', ' ') . ' ' . $invoice->currency,
+                        number_format((float) $invoice->gross_total, 2, ',', ' ').' '.$invoice->currency,
                         data_get($invoice->metadata, 'woocommerce_upload.status') === 'success' ? 'Wysłana' : '-',
                         $invoice->ksef_number ?? '-',
                         $invoice->issue_date?->format('Y-m-d') ?? '-',
@@ -194,14 +196,14 @@ class ModuleController extends Controller
                         $entry->direction,
                     ]),
             ],
-            default => throw new NotFoundHttpException(),
+            default => throw new NotFoundHttpException,
         };
 
         return view('module', $payload + ['module' => $module]);
     }
 
     /**
-     * @return array{title:string,subtitle:string,columns:list<string>,rows:\Illuminate\Contracts\Pagination\Paginator,html_last_column:bool}
+     * @return array{title:string,subtitle:string,columns:list<string>,rows:Paginator,html_last_column:bool}
      */
     private function ordersPayload(Request $request): array
     {
@@ -212,6 +214,7 @@ class ModuleController extends Controller
                 'external_id',
                 'external_number',
                 'status',
+                'fulfillment_status',
                 'currency',
                 'total_gross',
                 'billing_data',
@@ -227,7 +230,7 @@ class ModuleController extends Controller
                     ->select(['id', 'external_order_id', 'product_id', 'sku', 'name', 'quantity', 'raw_payload'])
                     ->orderBy('id'),
                 'lines.product:id,sku,name,attributes',
-                'shippingLabels' => fn ($query) => $query
+                'shipmentLabels' => fn ($query) => $query
                     ->select([
                         'id',
                         'external_order_id',
@@ -236,11 +239,13 @@ class ModuleController extends Controller
                         'status',
                         'label_number',
                         'tracking_number',
+                        'tracking_status',
+                        'tracking_checked_at',
                         'generated_at',
                     ])
                     ->latest('generated_at')
                     ->latest('id'),
-                'shippingLabels.courierAccount:id,provider,name',
+                'shipmentLabels.courierAccount:id,provider,name',
             ])
             ->tap(fn (Builder $query) => $this->applyOrderListFilters($query, $request))
             ->orderByDesc('external_created_at')
@@ -295,16 +300,22 @@ class ModuleController extends Controller
 
         $query->where(function (Builder $search) use ($needle, $phoneNeedle): void {
             $search
-                ->whereRaw("CAST(id AS CHAR) LIKE ?", ["%{$needle}%"])
+                ->whereRaw('CAST(id AS CHAR) LIKE ?', ["%{$needle}%"])
                 ->orWhereRaw("LOWER(COALESCE(external_number, '')) LIKE ?", ["%{$needle}%"])
                 ->orWhereRaw("LOWER(COALESCE(external_id, '')) LIKE ?", ["%{$needle}%"])
                 ->orWhereRaw("LOWER(COALESCE(status, '')) LIKE ?", ["%{$needle}%"])
+                ->orWhereRaw("LOWER(COALESCE(fulfillment_status, '')) LIKE ?", ["%{$needle}%"])
                 ->orWhereRaw("LOWER(COALESCE(CAST(billing_data AS CHAR), '')) LIKE ?", ["%{$needle}%"])
                 ->orWhereRaw("LOWER(COALESCE(CAST(shipping_data AS CHAR), '')) LIKE ?", ["%{$needle}%"])
                 ->orWhereHas('lines', function (Builder $lineQuery) use ($needle): void {
                     $lineQuery
                         ->whereRaw("LOWER(COALESCE(sku, '')) LIKE ?", ["%{$needle}%"])
                         ->orWhereRaw("LOWER(COALESCE(name, '')) LIKE ?", ["%{$needle}%"]);
+                })
+                ->orWhereHas('shipmentLabels', function (Builder $labelQuery) use ($needle): void {
+                    $labelQuery
+                        ->whereRaw("LOWER(COALESCE(tracking_number, '')) LIKE ?", ["%{$needle}%"])
+                        ->orWhereRaw("LOWER(COALESCE(label_number, '')) LIKE ?", ["%{$needle}%"]);
                 });
 
             if (strlen($phoneNeedle) >= 3) {
@@ -326,7 +337,7 @@ class ModuleController extends Controller
     }
 
     /**
-     * @param Collection<int, ExternalOrder> $orders
+     * @param  Collection<int, ExternalOrder>  $orders
      * @return array<string, float>
      */
     private function activeReservationSumsForOrders(Collection $orders): array
@@ -365,7 +376,7 @@ class ModuleController extends Controller
     }
 
     /**
-     * @param Collection<int, ExternalOrder> $orders
+     * @param  Collection<int, ExternalOrder>  $orders
      * @return array<int, WarehouseDocument>
      */
     private function latestWzDocumentsForOrders(Collection $orders): array
@@ -433,7 +444,7 @@ class ModuleController extends Controller
 
     private function reservationLookupKey(int|string|null $salesChannelId, string|int|null $externalOrderId): string
     {
-        return ((string) $salesChannelId) . '|' . ((string) $externalOrderId);
+        return ((string) $salesChannelId).'|'.((string) $externalOrderId);
     }
 
     /**
@@ -461,13 +472,13 @@ class ModuleController extends Controller
             [
                 'label' => 'Importy WooCommerce',
                 'value' => (string) $activeImports,
-                'caption' => "queued " . ($imports['queued'] ?? 0) . ' | running ' . ($imports['running'] ?? 0) . ' | failed ' . ($imports['failed'] ?? 0),
+                'caption' => 'queued '.($imports['queued'] ?? 0).' | running '.($imports['running'] ?? 0).' | failed '.($imports['failed'] ?? 0),
                 'tone' => ($imports['failed'] ?? 0) > 0 ? 'red' : ($activeImports > 0 ? 'blue' : 'green'),
             ],
             [
                 'label' => 'Eksport stanów',
                 'value' => (string) $activeStockExports,
-                'caption' => 'pending ' . ($stockExports['pending'] ?? 0) . ' | running ' . ($stockExports['running'] ?? 0) . ' | failed ' . ($stockExports['failed'] ?? 0),
+                'caption' => 'pending '.($stockExports['pending'] ?? 0).' | running '.($stockExports['running'] ?? 0).' | failed '.($stockExports['failed'] ?? 0),
                 'tone' => ($stockExports['failed'] ?? 0) > 0 ? 'red' : ($activeStockExports > 0 ? 'blue' : 'green'),
             ],
             [
@@ -526,7 +537,7 @@ class ModuleController extends Controller
     }
 
     /**
-     * @param \Illuminate\Database\Eloquent\Builder<\Illuminate\Database\Eloquent\Model> $query
+     * @param  Builder<Model>  $query
      * @return array<string, int>
      */
     private function statusCounts($query): array

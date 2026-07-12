@@ -18,7 +18,6 @@ class PrintJob extends Model
         'source',
         'station_code',
         'printer_name',
-        'listener_url',
         'format',
         'attempts',
         'next_attempt_at',

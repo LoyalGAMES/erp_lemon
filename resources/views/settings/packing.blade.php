@@ -13,7 +13,6 @@
                 'code' => 'station-' . $number,
                 'name' => '',
                 'printer_name' => '',
-                'listener_url' => '',
                 'segment' => 'all',
             ])
             : collect();
@@ -46,7 +45,6 @@
                             $rowCode = old("stations.{$index}.code", $station['code']);
                             $rowName = old("stations.{$index}.name", $station['name']);
                             $rowPrinter = old("stations.{$index}.printer_name", $station['printer_name']);
-                            $rowListener = old("stations.{$index}.listener_url", $station['listener_url']);
                             $rowSegment = old("stations.{$index}.segment", $station['segment']);
                         @endphp
                         <section class="packing-station-row" data-station-row>
@@ -55,24 +53,16 @@
                                 <span>{{ $hasStation ? ($segmentLabels[$station['segment']] ?? $station['segment']) : 'Opcjonalny wiersz' }}</span>
                             </div>
 
-                            <label>Kod
+                            <label>Kod stanowiska
                                 <input name="stations[{{ $index }}][code]" value="{{ $rowCode }}" maxlength="40" placeholder="station-{{ $index + 1 }}">
+                                <span class="muted">Ten sam kod wpisz w instalatorze Windows.</span>
                             </label>
                             <label>Nazwa
                                 <input name="stations[{{ $index }}][name]" value="{{ $rowName }}" maxlength="80" placeholder="np. Stanowisko odzież">
                             </label>
-                            <label>Aplikacja Windows
-                                <input name="stations[{{ $index }}][listener_url]" value="{{ $rowListener }}" maxlength="180" placeholder="http://192.168.1.25:17777" data-listener-url>
-                            </label>
                             <label>Drukarka etykiet
-                                <span class="printer-field" data-printer-picker>
-                                    <input name="stations[{{ $index }}][printer_name]" value="{{ $rowPrinter }}" maxlength="120" placeholder="np. Zebra ZD421" data-printer-name>
-                                    <select data-printer-select hidden>
-                                        <option value="">Wybierz drukarkę</option>
-                                    </select>
-                                    <button class="button secondary" type="button" data-load-printers>Pobierz</button>
-                                    <span class="printer-status" data-printer-status></span>
-                                </span>
+                                <input name="stations[{{ $index }}][printer_name]" value="{{ $rowPrinter }}" maxlength="120" placeholder="np. Zebra ZD421">
+                                <span class="muted">Wpisz ręcznie dokładną nazwę drukarki z Windows.</span>
                             </label>
                             <label>Asortyment
                                 <select name="stations[{{ $index }}][segment]">
@@ -100,16 +90,36 @@
                 <span>Zebra</span>
             </div>
             <div class="packing-help">
-                <p>Adres aplikacji Windows jest zapisywany per stanowisko. Po wpisaniu adresu użyj przycisku pobierania, żeby wybrać drukarkę z listy zwróconej przez aplikację nasłuchującą.</p>
-                <p>Etykiety wygenerowane podczas pakowania trafią do kolejki wydruku wybranego stanowiska i drukarki.</p>
+                <p>Aplikacja Windows łączy się wychodząco przez HTTPS i pobiera zadania przypisane do kodu stanowiska. ERP nie łączy się do prywatnego adresu komputera w magazynie.</p>
+                <p>Wpisz ręcznie dokładną nazwę drukarki z Windows. Podczas instalacji aplikacji podaj widoczny obok kod stanowiska oraz token mostu wydruku.</p>
+                <p>Etykiety trafią do kolejki i zostaną pobrane przez właściwy komputer magazynowy.</p>
+                <div class="print-bridge-credentials">
+                    <strong>Dane do instalatora</strong>
+                    <label>Adres ERP
+                        <input value="{{ $printBridge['erp_url'] }}" readonly autocomplete="off">
+                    </label>
+                    <label>Token mostu wydruku
+                        <span class="print-bridge-token-row">
+                            <input type="password" value="{{ $printBridge['token'] }}" readonly autocomplete="off" spellcheck="false" data-print-bridge-token>
+                            <button class="button secondary" type="button" data-print-bridge-token-show>Pokaż</button>
+                            <button class="button secondary" type="button" data-print-bridge-token-copy>Kopiuj</button>
+                        </span>
+                    </label>
+                    <small>
+                        Token jest dostępny wyłącznie w ustawieniach administratora
+                        {{ $printBridge['environment_override'] ? 'i pochodzi z konfiguracji serwera.' : 'oraz jest bezpiecznie wyprowadzony z klucza tej instalacji ERP.' }}
+                        Nie wysyłaj go osobom postronnym.
+                    </small>
+                    <span class="printer-status" data-print-bridge-token-status aria-live="polite"></span>
+                </div>
                 <div class="windows-listener-download">
-                    <strong>Aplikacja na Windows</strong>
-                    <span>Pobierz aktualną wersję mostu wydruku z tego serwera ERP.</span>
+                    <strong>Podpisany instalator Windows</strong>
+                    <span>Udostępniany jest wyłącznie zweryfikowany Setup.exe z podpisanego procesu wydawniczego.</span>
                     @if ($printListenerApp['available'])
                         <a class="button" href="{{ $printListenerApp['download_url'] }}">Pobierz {{ $printListenerApp['filename'] }}</a>
                         <small>Aktualizacja: {{ $printListenerApp['updated_at'] }} · {{ $printListenerApp['size_mb'] }}</small>
                     @else
-                        <span class="alert error">Brak pliku aplikacji na serwerze ERP.</span>
+                        <span class="alert error">Podpisany instalator nie został jeszcze opublikowany. Stary surowy plik EXE nie jest udostępniany.</span>
                     @endif
                 </div>
             </div>
@@ -125,7 +135,7 @@
         .packing-station-list { display: grid; gap: 10px; }
         .packing-station-row {
             display: grid;
-            grid-template-columns: minmax(150px, .85fr) minmax(110px, .55fr) minmax(170px, .9fr) minmax(190px, 1fr) minmax(180px, 1fr) minmax(130px, .65fr);
+            grid-template-columns: minmax(150px, .85fr) minmax(150px, .7fr) minmax(180px, .9fr) minmax(220px, 1.15fr) minmax(130px, .65fr);
             gap: 10px;
             align-items: end;
             padding: 12px;
@@ -135,13 +145,15 @@
         }
         .station-row-title { align-self: center; display: grid; gap: 3px; }
         .station-row-title span { color: var(--muted); font-size: 12px; font-weight: 720; }
-        .printer-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: end; }
-        .printer-field input, .printer-field select { grid-column: 1 / -1; }
-        .printer-field button { min-height: 38px; align-self: stretch; }
-        .printer-status { grid-column: 1 / -1; color: var(--muted); font-size: 12px; min-height: 18px; }
         .keywords-field { display: grid; gap: 6px; }
         .packing-help { padding: 16px; display: grid; gap: 10px; color: var(--muted); line-height: 1.45; }
         .packing-help p { margin: 0; }
+        .print-bridge-credentials { display: grid; gap: 9px; padding-top: 12px; border-top: 1px solid var(--border); }
+        .print-bridge-credentials strong { color: var(--text); }
+        .print-bridge-credentials label { display: grid; gap: 5px; color: var(--text); }
+        .print-bridge-token-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 6px; }
+        .print-bridge-token-row input { min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .printer-status { color: var(--muted); font-size: 12px; min-height: 18px; }
         .windows-listener-download { display: grid; gap: 8px; padding-top: 12px; border-top: 1px solid var(--border); color: var(--muted); }
         .windows-listener-download strong { color: var(--text); }
         .windows-listener-download .button { justify-self: start; text-decoration: none; }
@@ -153,6 +165,8 @@
         }
         @media (max-width: 680px) {
             .packing-station-row { grid-template-columns: 1fr; }
+            .print-bridge-token-row { grid-template-columns: 1fr 1fr; }
+            .print-bridge-token-row input { grid-column: 1 / -1; }
         }
     </style>
 @endpush
@@ -160,71 +174,29 @@
 @push('scripts')
     <script>
         (() => {
-            const endpoint = @json(route('settings.packing.listener.printers'));
-            const token = @json(csrf_token());
+            const tokenField = document.querySelector('[data-print-bridge-token]');
+            const showButton = document.querySelector('[data-print-bridge-token-show]');
+            const copyButton = document.querySelector('[data-print-bridge-token-copy]');
+            const status = document.querySelector('[data-print-bridge-token-status]');
 
-            document.querySelectorAll('[data-load-printers]').forEach((button) => {
-                button.addEventListener('click', async () => {
-                    const row = button.closest('[data-station-row]');
-                    const listenerInput = row?.querySelector('[data-listener-url]');
-                    const printerInput = row?.querySelector('[data-printer-name]');
-                    const printerSelect = row?.querySelector('[data-printer-select]');
-                    const status = row?.querySelector('[data-printer-status]');
-                    const listenerUrl = String(listenerInput?.value || '').trim();
+            showButton?.addEventListener('click', () => {
+                if (!tokenField) return;
+                const reveal = tokenField.type === 'password';
+                tokenField.type = reveal ? 'text' : 'password';
+                showButton.textContent = reveal ? 'Ukryj' : 'Pokaż';
+            });
 
-                    if (!listenerUrl) {
-                        if (status) status.textContent = 'Najpierw wpisz adres aplikacji Windows.';
-                        listenerInput?.focus();
-                        return;
-                    }
+            copyButton?.addEventListener('click', async () => {
+                if (!tokenField) return;
 
-                    button.disabled = true;
-                    if (status) status.textContent = 'Pobieranie listy drukarek...';
-
-                    try {
-                        const response = await fetch(endpoint, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Accept': 'application/json',
-                                'X-CSRF-TOKEN': token,
-                            },
-                            body: JSON.stringify({ listener_url: listenerUrl }),
-                        });
-                        const payload = await response.json();
-
-                        if (!response.ok || !payload.success) {
-                            throw new Error(payload.message || 'Nie udało się pobrać drukarek.');
-                        }
-
-                        const printers = Array.isArray(payload.printers) ? payload.printers : [];
-                        if (printerSelect) {
-                            printerSelect.innerHTML = '<option value="">Wybierz drukarkę</option>';
-
-                            printers.forEach((printer) => {
-                                const option = document.createElement('option');
-                                option.value = printer.name;
-                                option.textContent = `${printer.default ? 'Domyślna · ' : ''}${printer.name}${printer.driver ? ' · ' + printer.driver : ''}`;
-                                printerSelect.append(option);
-                            });
-
-                            printerSelect.hidden = printers.length === 0;
-                            printerSelect.onchange = () => {
-                                if (printerInput) printerInput.value = printerSelect.value;
-                            };
-                        }
-
-                        if (printers.length === 1 && printerInput) {
-                            printerInput.value = printers[0].name;
-                        }
-
-                        if (status) status.textContent = printers.length > 0 ? `Znaleziono drukarki: ${printers.length}.` : 'Aplikacja Windows nie zwróciła drukarek.';
-                    } catch (error) {
-                        if (status) status.textContent = error.message || 'Nie udało się pobrać drukarek.';
-                    } finally {
-                        button.disabled = false;
-                    }
-                });
+                try {
+                    await navigator.clipboard.writeText(tokenField.value);
+                    if (status) status.textContent = 'Token skopiowany do schowka.';
+                } catch (error) {
+                    tokenField.type = 'text';
+                    tokenField.select();
+                    if (status) status.textContent = 'Zaznaczony token skopiuj skrótem Ctrl+C.';
+                }
             });
         })();
     </script>

@@ -35,7 +35,7 @@ class ExternalOrderController extends Controller
             'invoices.files',
             'invoices.ksefSubmissions',
             'packingTasks',
-            'shippingLabels',
+            'shippingLabels.courierAccount',
             'customerMessages',
             'internalNotes',
             'customerPayments',
@@ -63,7 +63,7 @@ class ExternalOrderController extends Controller
             ->first();
 
         return view('orders.show', [
-            'title' => 'Zamówienie ' . ($order->external_number ?: $order->external_id),
+            'title' => 'Zamówienie '.($order->external_number ?: $order->external_id),
             'subtitle' => 'Szczegóły operacyjne zamówienia: pozycje, rezerwacje, WZ, faktury, pakowanie i notatki WooCommerce.',
             'module' => 'orders',
             'order' => $order,
@@ -177,7 +177,7 @@ class ExternalOrderController extends Controller
         try {
             $label = $shippingLabels->generateForOrder($order, $account);
         } catch (RuntimeException $exception) {
-            return back()->with('error', 'Nie udało się wygenerować przesyłki: ' . $exception->getMessage());
+            return back()->with('error', 'Nie udało się wygenerować przesyłki: '.$exception->getMessage());
         }
 
         $message = "Przesyłka dla zamówienia {$order->external_number} została wygenerowana: {$label->filename()}.";
@@ -193,8 +193,7 @@ class ExternalOrderController extends Controller
         Request $request,
         ExternalOrder $order,
         OrderSplitService $splitter,
-    ): RedirectResponse
-    {
+    ): RedirectResponse {
         $validated = $request->validate([
             'split_lines' => ['required', 'array'],
             'split_lines.*.quantity' => ['nullable', 'numeric', 'min:0'],

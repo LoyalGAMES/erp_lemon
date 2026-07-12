@@ -4,22 +4,20 @@ declare(strict_types=1);
 
 namespace App\Http\Middleware;
 
+use App\Services\Printing\PrintBridgeTokenService;
 use Closure;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\Response;
 
 class VerifyPrintBridgeToken
 {
+    public function __construct(
+        private readonly PrintBridgeTokenService $tokens,
+    ) {}
+
     public function handle(Request $request, Closure $next): Response
     {
-        $configured = trim((string) config('erp.print_bridge_token', ''));
-
-        if ($configured === '') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Most wydruku nie jest skonfigurowany. Ustaw PRINT_BRIDGE_TOKEN w .env ERP.',
-            ], 403);
-        }
+        $configured = $this->tokens->token();
 
         $provided = trim((string) ($request->bearerToken() ?? $request->header('X-API-Key', '')));
 

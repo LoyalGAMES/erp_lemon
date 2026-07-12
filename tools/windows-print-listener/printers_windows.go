@@ -25,7 +25,7 @@ func installedPrinters() ([]printerInfo, error) {
 	defer cancel()
 
 	command := "Get-CimInstance Win32_Printer | Select-Object Name,DriverName,PortName,Default | ConvertTo-Json -Compress"
-	output, err := exec.CommandContext(ctx, "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command).CombinedOutput()
+	output, err := exec.CommandContext(ctx, "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command).CombinedOutput()
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("printer listing timed out")
 	}

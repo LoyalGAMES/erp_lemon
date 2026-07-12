@@ -21,12 +21,16 @@ use App\Services\Printing\ShippingLabelPrintQueueService;
 use App\Services\Shipping\ShippingLabelService;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use App\Services\WooCommerce\WooCommerceOrderStatusService;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Throwable;
 
 final class PackingFulfillmentService
 {
+    private const ORDER_LOCK_SECONDS = 900;
+
     public function __construct(
         private readonly PackingTaskService $packingTasks,
         private readonly ShippingLabelService $shippingLabels,
@@ -43,19 +47,36 @@ final class PackingFulfillmentService
     ) {}
 
     /**
-     * @param  array{code:string,name:string,printer_name:string,listener_url?:string,segment:string}|null  $printStation
+     * @param  array{code:string,name:string,printer_name:string,segment:string}|null  $printStation
      * @return array{packed:int,label:?ShippingLabel,print_job:?PrintJob,wz:list<WarehouseDocument>,invoice:?Invoice,woo_status:?string,warnings:list<string>}
      */
     public function completePackedOrder(ExternalOrder $order, ?array $printStation = null): array
+    {
+        try {
+            return Cache::lock($this->orderLockKey($order), self::ORDER_LOCK_SECONDS)
+                ->block(15, fn (): array => $this->completePackedOrderWhileLocked($order, $printStation));
+        } catch (LockTimeoutException $exception) {
+            throw new RuntimeException(
+                'To zamówienie jest właśnie pakowane albo aktualizowane po odbiorze przez kuriera. Spróbuj ponownie za chwilę.',
+                previous: $exception,
+            );
+        }
+    }
+
+    /**
+     * @param  array{code:string,name:string,printer_name:string,segment:string}|null  $printStation
+     * @return array{packed:int,label:?ShippingLabel,print_job:?PrintJob,wz:list<WarehouseDocument>,invoice:?Invoice,woo_status:?string,warnings:list<string>}
+     */
+    private function completePackedOrderWhileLocked(ExternalOrder $order, ?array $printStation = null): array
     {
         $warnings = [];
         $createWzIfMissing = $this->automationSettings->actionEnabled('packing.order.packed', 'order.wz.create_if_missing');
         $postWz = $this->automationSettings->actionEnabled('packing.order.packed', 'order.wz.post');
         $issueInvoiceOnPack = $this->automationSettings->actionEnabled('packing.order.packed', 'order.invoice.create_upload');
         $packed = $this->packingTasks->markOrderPacked($order);
-        $order = ExternalOrder::query()->with(['shippingLabels', 'invoices'])->findOrFail($order->id);
+        $order = ExternalOrder::query()->with(['shipmentLabels', 'invoices'])->findOrFail($order->id);
 
-        $label = $order->shippingLabels->firstWhere('status', 'generated');
+        $label = $order->shipmentLabels->firstWhere('status', 'generated');
         if (! $label instanceof ShippingLabel) {
             try {
                 $label = $this->shippingLabels->generateForOrder($order);
@@ -112,9 +133,12 @@ final class PackingFulfillmentService
             $warnings[] = 'Status WooCommerce: '.$exception->getMessage();
         }
 
+        $order->update(['fulfillment_status' => 'awaiting_courier']);
+
         $this->markPackedTasksMetadata($order, [
             'label_id' => $label?->id,
             'print_job_id' => $printJob?->id,
+            'print_station' => $printStation,
             'wz_document_ids' => collect($wzDocuments)->pluck('id')->values()->all(),
             'invoice_id' => $invoice?->id,
             'woo_status' => $wooStatus,
@@ -150,7 +174,7 @@ final class PackingFulfillmentService
     /**
      * @return array{orders:int,tasks:int,warnings:list<string>}
      */
-    public function markCourierPickedUp(string $courier): array
+    public function markCourierPickedUp(string $courier, array $orderIds = []): array
     {
         $courier = trim($courier);
 
@@ -158,14 +182,28 @@ final class PackingFulfillmentService
             throw new RuntimeException('Nie wskazano kuriera.');
         }
 
-        $orders = ExternalOrder::query()
-            ->whereHas('packingTasks', fn ($query) => $query
-                ->where('status', 'packed')
-                ->where('courier', $courier))
-            ->with(['packingTasks' => fn ($query) => $query
-                ->where('status', 'packed')
-                ->where('courier', $courier)])
-            ->get();
+        $orderIds = collect($orderIds)
+            ->map(fn ($id): int => (int) $id)
+            ->filter()
+            ->unique()
+            ->values();
+
+        $ordersQuery = ExternalOrder::query()
+            ->when(
+                $orderIds->isNotEmpty(),
+                fn ($query) => $query->whereIn('id', $orderIds),
+                fn ($query) => $query->whereHas('packingTasks', fn ($query) => $query
+                    ->where('status', 'packed')
+                    ->where('courier', $courier)),
+            )
+            ->whereHas('packingTasks', fn ($query) => $query->where('status', 'packed'))
+            ->whereDoesntHave('packingTasks', fn ($query) => $query->whereNotIn('status', ['packed', 'cancelled']));
+
+        $orders = $ordersQuery->get();
+
+        if ($orderIds->isNotEmpty() && $orders->pluck('id')->sort()->values()->all() !== $orderIds->sort()->values()->all()) {
+            throw new RuntimeException('Nie wszystkie wskazane zamówienia są w całości spakowane i gotowe do odbioru przez kuriera. Odśwież listę.');
+        }
 
         if ($orders->isEmpty()) {
             throw new RuntimeException('Brak paczek oczekujących na tego kuriera.');
@@ -173,59 +211,46 @@ final class PackingFulfillmentService
 
         $warnings = [];
         $taskCount = 0;
-        $invoiceCount = 0;
+        $orderCount = 0;
+        $pickedUpAt = now();
 
         foreach ($orders as $order) {
-            try {
-                $this->orderStatuses->markShipped($order);
-            } catch (Throwable $exception) {
-                $warnings[] = "Zamówienie {$order->external_number}: {$exception->getMessage()}";
+            $result = $this->markOrderPickedUpByCourier($order, [
+                'courier' => $courier,
+                'picked_up_at' => $pickedUpAt->toISOString(),
+                'source' => 'manual_confirmation',
+            ]);
 
+            $taskCount += $result['tasks'];
+            $warnings = array_merge($warnings, $result['warnings']);
+
+            if ($result['tasks'] === 0) {
                 continue;
             }
 
-            if ($this->automationSettings->actionEnabled('packing.courier.picked_up', 'order.invoice.create_upload')) {
-                try {
-                    $invoice = $this->invoices->createForOrder($order);
-                    if (data_get($invoice->metadata, 'woocommerce_upload.status') !== 'success') {
-                        $this->invoiceUpload->upload($invoice);
-                    }
-                    $invoiceCount++;
-                } catch (Throwable $exception) {
-                    $warnings[] = "Faktura {$order->external_number}: {$exception->getMessage()}";
-                }
-            }
-
-            foreach ($order->packingTasks as $task) {
-                $metadata = (array) $task->metadata;
-                $metadata['courier_pickup'] = [
-                    'courier' => $courier,
-                    'picked_up_at' => now()->toISOString(),
-                ];
-
-                $task->update([
-                    'status' => 'shipped',
-                    'metadata' => $metadata,
+            $orderCount++;
+            ShippingLabel::query()
+                ->shipments()
+                ->where('external_order_id', $order->id)
+                ->where('status', 'generated')
+                ->update([
+                    'status' => 'picked_up',
+                    'tracking_status' => 'manual_confirmation',
+                    'tracking_checked_at' => $pickedUpAt,
+                    'next_tracking_check_at' => null,
+                    'picked_up_at' => $pickedUpAt,
                 ]);
-                $taskCount++;
-            }
-
-            $this->communication->sendOrderStatus($order, 'order_courier_picked_up', [
-                'courier' => $courier,
-                'tracking_number' => $this->latestTrackingNumber($order),
-            ]);
         }
 
         $this->audit->record('packing.courier_picked_up', null, null, [
             'courier' => $courier,
-            'orders' => $orders->count(),
+            'orders' => $orderCount,
             'tasks' => $taskCount,
-            'invoices' => $invoiceCount,
             'warnings' => $warnings,
         ]);
 
         return [
-            'orders' => $orders->count(),
+            'orders' => $orderCount,
             'tasks' => $taskCount,
             'warnings' => $warnings,
         ];
@@ -240,21 +265,67 @@ final class PackingFulfillmentService
      */
     public function markOrderPickedUpByCourier(ExternalOrder $order, array $context = []): array
     {
+        try {
+            return Cache::lock($this->orderLockKey($order), self::ORDER_LOCK_SECONDS)
+                ->block(5, fn (): array => $this->markOrderPickedUpWhileLocked($order, $context));
+        } catch (LockTimeoutException) {
+            return [
+                'tasks' => 0,
+                'warnings' => ["Zamówienie {$order->external_number}: obsługa odbioru przez kuriera już trwa."],
+            ];
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $context
+     * @return array{tasks:int,warnings:list<string>}
+     */
+    private function markOrderPickedUpWhileLocked(ExternalOrder $order, array $context): array
+    {
+        $order->refresh();
+
         $tasks = PackingTask::query()
             ->where('external_order_id', $order->id)
-            ->where('status', 'packed')
+            ->where('status', '!=', 'cancelled')
             ->get();
 
         if ($tasks->isEmpty()) {
             return ['tasks' => 0, 'warnings' => []];
         }
 
+        if ($tasks->contains(fn (PackingTask $task): bool => $task->status !== 'packed')) {
+            return [
+                'tasks' => 0,
+                'warnings' => ["Zamówienie {$order->external_number} nie jest jeszcze w całości spakowane."],
+            ];
+        }
+
         $warnings = [];
+        $pickedUpAt = (string) ($context['picked_up_at'] ?? now()->toISOString());
+        $wooSync = [
+            'woo_shipped_sync_status' => 'pending',
+            'woo_shipped_sync_attempts' => max(0, (int) $order->woo_shipped_sync_attempts),
+            'woo_shipped_sync_next_at' => now(),
+            'woo_shipped_sync_error' => null,
+        ];
 
         try {
-            $this->orderStatuses->markShipped($order);
+            $wooResult = $this->orderStatuses->markShipped($order);
+            $wooSync = [
+                'woo_shipped_sync_status' => ($wooResult['skipped'] ?? false) ? 'skipped' : 'success',
+                'woo_shipped_sync_attempts' => 0,
+                'woo_shipped_sync_next_at' => null,
+                'woo_shipped_sync_error' => null,
+            ];
         } catch (Throwable $exception) {
             $warnings[] = "Status WooCommerce {$order->external_number}: {$exception->getMessage()}";
+            $attempts = max(0, (int) $order->woo_shipped_sync_attempts) + 1;
+            $wooSync = [
+                'woo_shipped_sync_status' => 'failed',
+                'woo_shipped_sync_attempts' => $attempts,
+                'woo_shipped_sync_next_at' => now()->addMinutes(min(360, 5 * (2 ** min(6, $attempts - 1)))),
+                'woo_shipped_sync_error' => $exception->getMessage(),
+            ];
         }
 
         if ($this->automationSettings->actionEnabled('packing.courier.picked_up', 'order.invoice.create_upload')) {
@@ -272,7 +343,7 @@ final class PackingFulfillmentService
             $metadata = (array) $task->metadata;
             $metadata['courier_pickup'] = array_merge([
                 'courier' => $task->courier,
-                'picked_up_at' => now()->toISOString(),
+                'picked_up_at' => $pickedUpAt,
                 'source' => 'tracking',
             ], $context);
 
@@ -281,6 +352,8 @@ final class PackingFulfillmentService
                 'metadata' => $metadata,
             ]);
         }
+
+        $order->update(array_merge(['fulfillment_status' => 'shipped'], $wooSync));
 
         $this->communication->sendOrderStatus($order, 'order_courier_picked_up', [
             'courier' => $tasks->first()?->courier,
@@ -301,6 +374,22 @@ final class PackingFulfillmentService
      * @return array{tasks:int,woo_status:?string,warnings:list<string>}
      */
     public function undoPackedOrder(ExternalOrder $order, ?string $reason = null): array
+    {
+        try {
+            return Cache::lock($this->orderLockKey($order), self::ORDER_LOCK_SECONDS)
+                ->block(15, fn (): array => $this->undoPackedOrderWhileLocked($order, $reason));
+        } catch (LockTimeoutException $exception) {
+            throw new RuntimeException(
+                'To zamówienie jest właśnie pakowane albo aktualizowane po odbiorze przez kuriera. Spróbuj ponownie za chwilę.',
+                previous: $exception,
+            );
+        }
+    }
+
+    /**
+     * @return array{tasks:int,woo_status:?string,warnings:list<string>}
+     */
+    private function undoPackedOrderWhileLocked(ExternalOrder $order, ?string $reason = null): array
     {
         $reason = trim((string) $reason);
         $rolledBackAt = now();
@@ -332,6 +421,8 @@ final class PackingFulfillmentService
                     'metadata' => $metadata,
                 ]);
             }
+
+            $order->update(['fulfillment_status' => 'ready_to_pack']);
 
             return $tasks->count();
         });
@@ -374,6 +465,11 @@ final class PackingFulfillmentService
             'woo_status' => $wooStatus,
             'warnings' => $warnings,
         ];
+    }
+
+    private function orderLockKey(ExternalOrder $order): string
+    {
+        return 'packing-fulfillment-order-'.$order->id;
     }
 
     /**
@@ -435,6 +531,7 @@ final class PackingFulfillmentService
     private function latestTrackingNumber(ExternalOrder $order): ?string
     {
         $label = ShippingLabel::query()
+            ->shipments()
             ->where('external_order_id', $order->id)
             ->whereNotNull('tracking_number')
             ->latest('generated_at')

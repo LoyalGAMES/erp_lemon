@@ -84,6 +84,11 @@
         .label-account-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
         .label-account-form select { min-height: 42px; }
         .label-account-form .button { min-height: 42px; }
+        .shipment-label-panel { display: grid; gap: 7px; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--green-soft); }
+        .shipment-label-number { color: var(--green-dark); font-weight: 850; overflow-wrap: anywhere; }
+        .shipment-label-actions { display: flex; flex-wrap: wrap; gap: 7px; }
+        .shipment-label-actions .button { min-height: 42px; width: auto; font-size: 14px; }
+        .shipment-label-error { border: 1px solid #f0c3c3; border-radius: 8px; padding: 9px 11px; background: #fff5f5; color: var(--red); font-size: 13px; overflow-wrap: anywhere; }
         @media (max-width: 760px) {
             .packing-toolbar { display: grid; }
             .packing-settings-overlay { grid-template-columns: 1fr; }
@@ -121,6 +126,10 @@
         .courier-card .button { min-height: 52px; min-width: 140px; border-radius: 8px; font-size: 16px; }
         .courier-orders { display: grid; gap: 8px; }
         .courier-order-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: #fffdfb; }
+        .courier-order-main { display: grid; gap: 5px; min-width: 0; }
+        .courier-order-actions { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+        .courier-order-actions .button { min-width: 0; min-height: 42px; font-size: 14px; }
+        .tracking-state { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
         .order-rollback-form { display: flex; gap: 8px; align-items: center; }
         .order-rollback-form input { min-height: 46px; min-width: 210px; }
         .order-rollback-form .button { min-height: 46px; min-width: 104px; font-size: 15px; }
@@ -155,6 +164,8 @@
             .order-title { font-size: 28px; }
             .order-item { grid-template-columns: 50px minmax(0, 1fr); }
             .order-item strong { grid-column: 2; }
+            .shipment-label-actions, .courier-order-actions { display: grid; grid-template-columns: 1fr; }
+            .shipment-label-actions .button, .courier-order-actions .button { width: 100%; }
         }
     </style>
 @endpush
@@ -218,6 +229,7 @@
         $activeStationLabel = $activeStation !== null
             ? $activeStation['name'] . ($activeStation['printer_name'] !== '' ? ' · ' . $activeStation['printer_name'] : '')
             : 'Bez stanowiska';
+        $shippingProviderResolver = app(\App\Services\Shipping\ShippingProviderResolver::class);
         $workflowTabs = [
             'collect' => ['label' => 'Kompletacja', 'count' => $collectOrdersCount],
             'pack' => ['label' => 'Pakowanie', 'count' => $readyOrders->count()],
@@ -453,7 +465,10 @@
                     @php
                         $tasksForOrder = $order->packingTasks;
                         $firstTask = $tasksForOrder->first();
-                        $shippingLabel = $order->shippingLabels?->firstWhere('status', 'generated');
+                        $shippingLabel = $order->shipmentLabels?->firstWhere('status', 'generated');
+                        $shippingTrackingUrl = $shippingLabel
+                            ? $shippingProviderResolver->trackingUrl($shippingLabel)
+                            : null;
                         $customerNote = trim((string) data_get($firstTask?->metadata, 'customer_note', ''));
                         $orderNotes = collect(data_get($firstTask?->metadata, 'order_notes', []))
                             ->pluck('note')
@@ -465,6 +480,8 @@
                         $phone = data_get($shipping, 'phone') ?: data_get($billing, 'phone') ?: '-';
                         $email = data_get($billing, 'email') ?: '-';
                         $payment = data_get($firstTask?->metadata, 'payment_method') ?: '-';
+                        $labelAutomationStatus = data_get($firstTask?->metadata, 'label_automation.status');
+                        $labelAutomationMessage = trim((string) data_get($firstTask?->metadata, 'label_automation.message', ''));
                     @endphp
                     <article class="order-card">
                         <div class="order-card-header">
@@ -528,22 +545,39 @@
                             </div>
                         </details>
 
+                        @if (! $shippingLabel && $labelAutomationStatus === 'failed' && $labelAutomationMessage !== '')
+                            <div class="shipment-label-error">
+                                Automatyczne generowanie etykiety nie powiodło się. System ponowi próbę; możesz też użyć przycisku poniżej.<br>
+                                {{ $labelAutomationMessage }}
+                            </div>
+                        @endif
+
                         <div class="order-actions">
                             @if ($shippingLabel)
-                                <a class="button secondary" href="{{ route('packing.labels.download', $shippingLabel) }}">Pobierz etykietę</a>
-                            @elseif ($courierAccounts->isNotEmpty())
+                                <div class="shipment-label-panel">
+                                    <div class="shipment-label-number">
+                                        Nr etykiety: {{ $shippingLabel->trackingIdentifier() ?: '#'.$shippingLabel->id }}
+                                    </div>
+                                    <div class="shipment-label-actions">
+                                        <a class="button secondary" href="{{ route('packing.labels.download', $shippingLabel) }}">Pobierz etykietę</a>
+                                        @if ($shippingTrackingUrl)
+                                            <a class="button secondary" href="{{ $shippingTrackingUrl }}" target="_blank" rel="noopener noreferrer" aria-label="Śledź przesyłkę {{ $shippingLabel->trackingIdentifier() }}">Śledź paczkę</a>
+                                        @endif
+                                    </div>
+                                </div>
+                            @else
                                 <form class="label-account-form" method="POST" action="{{ route('packing.orders.label', $order) }}">
                                     @csrf
-                                    <select name="courier_account_id" aria-label="Konto nadawcze InPost">
-                                        <option value="">Etykieta ze sklepu</option>
-                                        @foreach ($courierAccounts as $courierAccount)
-                                            <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default && $courierAccount->provider === 'inpost')>{{ $courierAccount->provider === 'blpaczka' ? 'BLPaczka' : 'InPost' }}: {{ $courierAccount->name }}</option>
-                                        @endforeach
-                                    </select>
-                                    <button class="button secondary" type="submit">Etykieta</button>
+                                    @if ($courierAccounts->isNotEmpty())
+                                        <select name="courier_account_id" aria-label="Konto nadawcze InPost">
+                                            <option value="">Etykieta ze sklepu</option>
+                                            @foreach ($courierAccounts as $courierAccount)
+                                                <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default && $courierAccount->provider === 'inpost')>{{ $courierAccount->provider === 'blpaczka' ? 'BLPaczka' : 'InPost' }}: {{ $courierAccount->name }}</option>
+                                            @endforeach
+                                        </select>
+                                    @endif
+                                    <button class="button secondary" type="submit">Ponów etykietę</button>
                                 </form>
-                            @else
-                                <span class="button secondary" aria-disabled="true">Etykieta automatycznie</span>
                             @endif
                             <form class="order-problem-form" method="POST" action="{{ route('packing.orders.problem', $order) }}">
                                 @csrf
@@ -589,6 +623,10 @@
                                 <form method="POST" action="{{ route('packing.couriers.pickup') }}">
                                     @csrf
                                     <input type="hidden" name="courier" value="{{ $group['courier'] }}">
+                                    @foreach ($group['orders'] as $queuedOrder)
+                                        <input type="hidden" name="order_ids[]" value="{{ $queuedOrder['id'] }}">
+                                    @endforeach
+                                    <input type="hidden" name="pickup_token" value="{{ $group['pickup_token'] }}">
                                     <button class="button" type="submit">Odebrano</button>
                                 </form>
                             </div>
@@ -598,14 +636,43 @@
                                         $queuedPackedAt = $queuedOrder['packed_at'] ? \Illuminate\Support\Carbon::parse($queuedOrder['packed_at']) : null;
                                     @endphp
                                     <div class="courier-order-row">
-                                        <div>
-                                            <strong>Zamówienie {{ $queuedOrder['external_number'] }}</strong><br>
+                                        <div class="courier-order-main">
+                                            <div>
+                                                <strong><a href="{{ route('orders.show', $queuedOrder['id']) }}">Zamówienie {{ $queuedOrder['external_number'] }}</a></strong><br>
                                             <span class="muted">
                                                 {{ $queuedOrder['customer_name'] }} · {{ $queuedOrder['tasks_count'] }} poz.
                                                 @if ($queuedPackedAt)
                                                     · spakowane {{ $queuedPackedAt->format('Y-m-d H:i') }}
                                                 @endif
                                             </span>
+                                            </div>
+                                            <div class="tracking-state">
+                                                @if ($queuedOrder['label_number'])
+                                                    Etykieta: <strong>{{ $queuedOrder['label_number'] }}</strong>
+                                                    @if ($queuedOrder['tracking_status'])
+                                                        · status: {{ $queuedOrder['tracking_status'] }}
+                                                    @endif
+                                                    @if ($queuedOrder['tracking_checked_at'])
+                                                        · sprawdzono {{ $queuedOrder['tracking_checked_at']->format('Y-m-d H:i') }}
+                                                    @endif
+                                                    @if ($queuedOrder['tracking_error'])
+                                                        <br>Ostatni błąd: {{ $queuedOrder['tracking_error'] }}
+                                                    @endif
+                                                @else
+                                                    Brak numeru śledzenia — automat ponowi generowanie etykiety.
+                                                    @if ($queuedOrder['label_error'])
+                                                        <br>{{ $queuedOrder['label_error'] }}
+                                                    @endif
+                                                @endif
+                                            </div>
+                                            <div class="courier-order-actions">
+                                                @if ($queuedOrder['label_id'])
+                                                    <a class="button secondary" href="{{ route('packing.labels.download', $queuedOrder['label_id']) }}">Pobierz etykietę</a>
+                                                @endif
+                                                @if ($queuedOrder['tracking_url'])
+                                                    <a class="button secondary" href="{{ $queuedOrder['tracking_url'] }}" target="_blank" rel="noopener noreferrer">Śledź paczkę</a>
+                                                @endif
+                                            </div>
                                         </div>
                                         <form class="order-rollback-form" method="POST" action="{{ route('packing.orders.unpack', $queuedOrder['id']) }}">
                                             @csrf
@@ -688,6 +755,20 @@
                                 · odebrane przez kuriera: {{ $shippedOrder['pickup_at']->format('Y-m-d H:i') }}
                             @endif
                         </div>
+
+                        @if ($shippedOrder['label_number'])
+                            <div class="shipment-label-panel">
+                                <div class="shipment-label-number">Nr przesyłki: {{ $shippedOrder['label_number'] }}</div>
+                                <div class="shipment-label-actions">
+                                    @if ($shippedOrder['label_id'])
+                                        <a class="button secondary" href="{{ route('packing.labels.download', $shippedOrder['label_id']) }}">Pobierz etykietę</a>
+                                    @endif
+                                    @if ($shippedOrder['tracking_url'])
+                                        <a class="button secondary" href="{{ $shippedOrder['tracking_url'] }}" target="_blank" rel="noopener noreferrer">Śledź paczkę</a>
+                                    @endif
+                                </div>
+                            </div>
+                        @endif
 
                         <div class="order-items">
                             @foreach ($shippedOrder['items'] as $item)

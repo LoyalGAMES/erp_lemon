@@ -26,12 +26,20 @@
 
         return implode(', ', $parts) ?: '-';
     };
+    $shippingProviderResolver = app(\App\Services\Shipping\ShippingProviderResolver::class);
+    $shipmentLabels = $order->shippingLabels->where('purpose', 'shipment');
+    $fulfillmentStatusLabel = match ($order->fulfillment_status) {
+        'awaiting_courier' => 'Oczekuje na kuriera',
+        'ready_to_pack' => 'Do pakowania',
+        'shipped' => 'Wysłane',
+        default => $order->fulfillment_status ?: 'Nie rozpoczęto',
+    };
 @endphp
 
 @push('styles')
     <style>
         .order-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
-        .order-summary { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .order-summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 16px; }
         .order-summary-card { padding: 14px 16px; }
         .order-summary-card span { display: block; color: var(--muted); font-size: 12px; font-weight: 720; margin-bottom: 4px; }
         .order-summary-card strong { display: block; font-size: 20px; line-height: 1.15; }
@@ -40,6 +48,11 @@
         .order-section-body { padding: 16px; }
         .order-label-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
         .order-label-form select { min-height: 44px; min-width: 260px; }
+        .shipping-label-list { display: grid; gap: 9px; }
+        .shipping-label-card { border: 1px solid var(--border); border-radius: 8px; padding: 11px; background: #fffdfb; display: grid; gap: 6px; }
+        .shipping-label-card-header, .shipping-label-card-actions { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }
+        .shipping-label-number { font-weight: 850; overflow-wrap: anywhere; }
+        .shipping-label-meta { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
         .address-grid { display: grid; gap: 14px; }
         .address-box { border: 1px solid var(--border); border-radius: 8px; padding: 13px; }
         .address-box strong { display: block; margin-bottom: 6px; }
@@ -97,6 +110,10 @@
         <article class="card order-summary-card">
             <span>Status WooCommerce</span>
             <strong>{{ $order->status }}</strong>
+        </article>
+        <article class="card order-summary-card">
+            <span>Realizacja ERP</span>
+            <strong>{{ $fulfillmentStatusLabel }}</strong>
         </article>
         <article class="card order-summary-card">
             <span>Kwota brutto</span>
@@ -377,13 +394,46 @@
                 </table>
             </div>
             <div class="order-section-body">
-                @forelse ($order->shippingLabels as $label)
-                    <a class="button secondary" href="{{ route('packing.labels.download', $label) }}">Pobierz etykietę {{ $label->label_number ?: $label->id }}</a>
-                @empty
-                    <span class="muted">Brak wygenerowanej etykiety kurierskiej.</span>
-                @endforelse
+                <div class="shipping-label-list">
+                    @forelse ($order->shippingLabels as $label)
+                        @php
+                            $trackingUrl = $shippingProviderResolver->trackingUrl($label);
+                            $purposeLabel = match ($label->purpose) {
+                                'return' => 'Zwrot',
+                                'exchange' => 'Wymiana',
+                                default => 'Wysyłka do klienta',
+                            };
+                        @endphp
+                        <article class="shipping-label-card">
+                            <div class="shipping-label-card-header">
+                                <span class="status">{{ $purposeLabel }}</span>
+                                <span class="status">{{ $shippingProviderResolver->courierName($label) }}</span>
+                            </div>
+                            <div class="shipping-label-number">
+                                Nr etykiety / przesyłki: {{ $label->trackingIdentifier() ?: '#'.$label->id }}
+                            </div>
+                            <div class="shipping-label-meta">
+                                Status etykiety: {{ $label->status }}
+                                @if ($label->tracking_status)
+                                    · tracking: {{ $label->tracking_status }}
+                                @endif
+                                @if ($label->tracking_checked_at)
+                                    · sprawdzono {{ $label->tracking_checked_at->format('Y-m-d H:i') }}
+                                @endif
+                            </div>
+                            <div class="shipping-label-card-actions">
+                                <a class="button secondary" href="{{ $label->purpose === 'shipment' ? route('packing.labels.download', $label) : route('returns.labels.download', $label) }}">Pobierz etykietę</a>
+                                @if ($trackingUrl)
+                                    <a class="button" href="{{ $trackingUrl }}" target="_blank" rel="noopener noreferrer" aria-label="Śledź przesyłkę {{ $label->trackingIdentifier() }}">Śledź paczkę</a>
+                                @endif
+                            </div>
+                        </article>
+                    @empty
+                        <span class="muted">Brak wygenerowanej etykiety kurierskiej.</span>
+                    @endforelse
+                </div>
 
-                @if ($order->shippingLabels->where('status', 'generated')->isEmpty())
+                @if ($shipmentLabels->isEmpty())
                     <form class="order-label-form" method="POST" action="{{ route('orders.label.generate', $order) }}">
                         @csrf
                         <select name="courier_account_id" aria-label="Konto nadawcze">

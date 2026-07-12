@@ -18,6 +18,14 @@ class ExternalOrder extends Model
         'external_id',
         'external_number',
         'status',
+        'fulfillment_status',
+        'label_generation_attempts',
+        'label_generation_next_at',
+        'label_generation_last_error',
+        'woo_shipped_sync_status',
+        'woo_shipped_sync_attempts',
+        'woo_shipped_sync_next_at',
+        'woo_shipped_sync_error',
         'currency',
         'total_gross',
         'billing_data',
@@ -34,6 +42,10 @@ class ExternalOrder extends Model
         'raw_payload' => 'array',
         'external_created_at' => 'datetime',
         'external_updated_at' => 'datetime',
+        'label_generation_attempts' => 'integer',
+        'label_generation_next_at' => 'datetime',
+        'woo_shipped_sync_attempts' => 'integer',
+        'woo_shipped_sync_next_at' => 'datetime',
     ];
 
     public function salesChannel(): BelongsTo
@@ -59,6 +71,14 @@ class ExternalOrder extends Model
     public function shippingLabels(): HasMany
     {
         return $this->hasMany(ShippingLabel::class)->latest('generated_at');
+    }
+
+    public function shipmentLabels(): HasMany
+    {
+        return $this->hasMany(ShippingLabel::class)
+            ->shipments()
+            ->latest('generated_at')
+            ->latest('id');
     }
 
     public function customerMessages(): HasMany

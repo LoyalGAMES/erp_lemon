@@ -60,7 +60,6 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::get('/settings/packing/windows-listener/download', [SettingsController::class, 'downloadWindowsPrintListener'])->name('settings.packing.windows-listener.download');
         Route::put('/settings/packing', [SettingsController::class, 'updatePacking'])->name('settings.packing.update');
         Route::put('/settings/products', [SettingsController::class, 'updateProducts'])->name('settings.products.update');
-        Route::post('/settings/packing/listener/printers', [SettingsController::class, 'packingListenerPrinters'])->name('settings.packing.listener.printers');
     });
     Route::middleware(EnsureErpRole::class.':users')->group(function (): void {
         Route::get('/settings/users', [UserController::class, 'index'])->name('settings.users');

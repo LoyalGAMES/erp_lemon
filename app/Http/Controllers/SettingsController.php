@@ -15,19 +15,17 @@ use App\Services\Inventory\WarehouseDocumentSettingsService;
 use App\Services\Payments\MbankTransferBasketSettingsService;
 use App\Services\Payments\PayuRefundSettingsService;
 use App\Services\Packing\PackingSettingsService;
+use App\Services\Printing\PrintBridgeTokenService;
 use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Returns\ReturnSettingsService;
-use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Mail\Message;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 use Illuminate\View\View;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
-use Throwable;
 
 class SettingsController extends Controller
 {
@@ -105,14 +103,21 @@ class SettingsController extends Controller
         ]);
     }
 
-    public function packing(PackingSettingsService $packingSettings): View
-    {
+    public function packing(
+        PackingSettingsService $packingSettings,
+        PrintBridgeTokenService $printBridgeTokens,
+    ): View {
         return view('settings.packing', [
             'title' => 'Ustawienia pakowania',
             'subtitle' => 'Stanowiska pakowania, drukarki etykiet Zebra i podział asortymentu do kompletacji.',
             'module' => 'settings',
             'packingSettings' => $packingSettings->data(),
             'printListenerApp' => $this->windowsPrintListenerAppData(),
+            'printBridge' => [
+                'erp_url' => url('/'),
+                'token' => $printBridgeTokens->token(),
+                'environment_override' => $printBridgeTokens->usesEnvironmentOverride(),
+            ],
         ]);
     }
 
@@ -141,16 +146,17 @@ class SettingsController extends Controller
 
     public function downloadWindowsPrintListener(): BinaryFileResponse
     {
-        $path = $this->windowsPrintListenerPath();
+        $release = $this->windowsPrintListenerRelease();
 
-        if (! is_file($path)) {
-            abort(404, 'Aplikacja Windows do wydruku nie jest dostępna na serwerze ERP.');
+        if ($release === null) {
+            abort(404, 'Podpisany instalator Windows nie jest dostępny na serwerze ERP.');
         }
 
-        return response()->download($path, 'lemon-print-listener.exe', [
+        return response()->download($release['path'], $release['filename'], [
             'Content-Type' => 'application/vnd.microsoft.portable-executable',
             'Cache-Control' => 'no-store, max-age=0',
             'X-Content-Type-Options' => 'nosniff',
+            'X-Checksum-Sha256' => $release['sha256'],
         ]);
     }
 
@@ -158,61 +164,27 @@ class SettingsController extends Controller
     {
         $data = $request->validate([
             'stations' => ['required', 'array', 'min:1', 'max:6'],
+            'stations.*' => ['array'],
             'stations.*.code' => ['nullable', 'string', 'max:40'],
             'stations.*.name' => ['nullable', 'string', 'max:80'],
             'stations.*.printer_name' => ['nullable', 'string', 'max:120'],
-            'stations.*.listener_url' => ['nullable', 'url', 'max:180'],
             'stations.*.segment' => ['nullable', 'string', 'in:all,clothing,footwear'],
             'footwear_keywords' => ['nullable', 'string', 'max:2000'],
         ]);
 
+        $stations = array_map(static fn (array $station): array => [
+            'code' => $station['code'] ?? null,
+            'name' => $station['name'] ?? null,
+            'printer_name' => $station['printer_name'] ?? null,
+            'segment' => $station['segment'] ?? null,
+        ], $data['stations']);
+
         $packingSettings->update([
-            'stations' => $data['stations'],
+            'stations' => $stations,
             'footwear_keywords' => $data['footwear_keywords'] ?? null,
         ]);
 
         return back()->with('status', 'Ustawienia stanowisk pakowania i drukarek zostały zapisane.');
-    }
-
-    public function packingListenerPrinters(Request $request): JsonResponse
-    {
-        $data = $request->validate([
-            'listener_url' => ['required', 'url', 'max:180'],
-        ]);
-
-        $listenerUrl = rtrim((string) $data['listener_url'], '/');
-
-        try {
-            $response = Http::timeout(6)
-                ->acceptJson()
-                ->get($listenerUrl.'/printers');
-        } catch (Throwable $exception) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Nie udało się połączyć z aplikacją Windows: '.$exception->getMessage(),
-            ], 422);
-        }
-
-        if ($response->failed()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Aplikacja Windows zwróciła HTTP '.$response->status().': '.mb_substr($response->body(), 0, 500),
-            ], 422);
-        }
-
-        return response()->json([
-            'success' => true,
-            'printers' => collect((array) $response->json('printers', []))
-                ->map(fn (array $printer): array => [
-                    'name' => trim((string) ($printer['name'] ?? '')),
-                    'driver' => trim((string) ($printer['driver'] ?? '')),
-                    'port' => trim((string) ($printer['port'] ?? '')),
-                    'default' => (bool) ($printer['default'] ?? false),
-                ])
-                ->filter(fn (array $printer): bool => $printer['name'] !== '')
-                ->values()
-                ->all(),
-        ]);
     }
 
     /**
@@ -220,24 +192,163 @@ class SettingsController extends Controller
      */
     private function windowsPrintListenerAppData(): array
     {
-        $path = $this->windowsPrintListenerPath();
-        $mtime = is_file($path) ? filemtime($path) : false;
-        $size = is_file($path) ? filesize($path) : false;
+        $release = $this->windowsPrintListenerRelease();
+        $mtime = $release !== null ? filemtime($release['path']) : false;
 
         return [
-            'available' => is_file($path),
+            'available' => $release !== null,
             'download_url' => route('settings.packing.windows-listener.download', [
                 'v' => $mtime ?: now()->timestamp,
             ]),
-            'filename' => 'lemon-print-listener.exe',
-            'size_mb' => $size !== false ? number_format($size / 1048576, 1, ',', ' ') . ' MB' : null,
+            'filename' => 'SempreERP-PrintListener-Setup.exe',
+            'size_mb' => $release !== null ? number_format($release['size'] / 1048576, 1, ',', ' ') . ' MB' : null,
             'updated_at' => $mtime !== false ? date('Y-m-d H:i', $mtime) : null,
         ];
     }
 
-    private function windowsPrintListenerPath(): string
+    /**
+     * Only expose the Setup.exe emitted by the signed release workflow. The
+     * manifest gate prevents an unsigned validation build or the legacy raw
+     * executable from becoming a production download by accident.
+     *
+     * @return array{path:string,filename:string,size:int,sha256:string}|null
+     */
+    private function windowsPrintListenerRelease(): ?array
     {
-        return base_path('tools/windows-print-listener/dist/lemon-print-listener.exe');
+        $path = base_path('tools/windows-print-listener/dist/SempreERP-PrintListener-Setup.exe');
+        $manifestPath = base_path('tools/windows-print-listener/dist/RELEASE-MANIFEST.json');
+
+        if (! is_file($path) || ! is_readable($path) || ! is_file($manifestPath) || ! is_readable($manifestPath)) {
+            return null;
+        }
+
+        $rawManifest = file_get_contents($manifestPath);
+        if ($rawManifest === false) {
+            return null;
+        }
+
+        $rawManifest = preg_replace('/^\xEF\xBB\xBF/', '', $rawManifest) ?? $rawManifest;
+        $manifest = json_decode($rawManifest, true);
+
+        if (! is_array($manifest)
+            || ($manifest['product'] ?? null) !== 'Sempre ERP Print Listener'
+            || ($manifest['target'] ?? null) !== 'windows/amd64'
+            || ($manifest['signed'] ?? null) !== true
+            || ! is_array($manifest['artifacts'] ?? null)) {
+            return null;
+        }
+
+        $installer = collect($manifest['artifacts'])
+            ->first(fn (mixed $artifact): bool => is_array($artifact)
+                && ($artifact['name'] ?? null) === 'SempreERP-PrintListener-Setup.exe');
+
+        if (! is_array($installer)) {
+            return null;
+        }
+
+        $expectedHash = mb_strtolower(trim((string) ($installer['sha256'] ?? '')));
+        $size = filesize($path);
+        $actualHash = hash_file('sha256', $path);
+
+        if (preg_match('/^[a-f0-9]{64}$/', $expectedHash) !== 1
+            || $size === false
+            || (int) ($installer['size'] ?? -1) !== $size
+            || $actualHash === false
+            || ! hash_equals($expectedHash, $actualHash)
+            || ! $this->hasEmbeddedAuthenticodeSignature($path)) {
+            return null;
+        }
+
+        return [
+            'path' => $path,
+            'filename' => 'SempreERP-PrintListener-Setup.exe',
+            'size' => $size,
+            'sha256' => $actualHash,
+        ];
+    }
+
+    /**
+     * Confirm that the PE contains a WIN_CERTIFICATE Authenticode table. Trust,
+     * publisher and timestamp are verified by SignTool in the release workflow;
+     * this server-side check prevents a plain/renamed EXE from being served.
+     */
+    private function hasEmbeddedAuthenticodeSignature(string $path): bool
+    {
+        $handle = fopen($path, 'rb');
+        if ($handle === false) {
+            return false;
+        }
+
+        try {
+            $dosHeader = fread($handle, 64);
+            if ($dosHeader === false || strlen($dosHeader) !== 64 || substr($dosHeader, 0, 2) !== 'MZ') {
+                return false;
+            }
+
+            $peOffset = unpack('Voffset', substr($dosHeader, 60, 4))['offset'] ?? null;
+            if (! is_int($peOffset) || $peOffset < 64 || fseek($handle, $peOffset) !== 0) {
+                return false;
+            }
+
+            $peAndFileHeader = fread($handle, 24);
+            if ($peAndFileHeader === false
+                || strlen($peAndFileHeader) !== 24
+                || substr($peAndFileHeader, 0, 4) !== "PE\0\0") {
+                return false;
+            }
+
+            $optionalHeaderSize = unpack('vsize', substr($peAndFileHeader, 20, 2))['size'] ?? 0;
+            if (! is_int($optionalHeaderSize) || $optionalHeaderSize < 136) {
+                return false;
+            }
+
+            $optionalHeader = fread($handle, $optionalHeaderSize);
+            if ($optionalHeader === false || strlen($optionalHeader) !== $optionalHeaderSize) {
+                return false;
+            }
+
+            $magic = unpack('vmagic', substr($optionalHeader, 0, 2))['magic'] ?? 0;
+            $dataDirectoryOffset = match ($magic) {
+                0x10b => 96,
+                0x20b => 112,
+                default => 0,
+            };
+            $securityDirectoryOffset = $dataDirectoryOffset + (4 * 8);
+            if ($dataDirectoryOffset === 0 || $securityDirectoryOffset + 8 > $optionalHeaderSize) {
+                return false;
+            }
+
+            $securityDirectory = unpack(
+                'Vfile_offset/Vsize',
+                substr($optionalHeader, $securityDirectoryOffset, 8),
+            );
+            $certificateOffset = (int) ($securityDirectory['file_offset'] ?? 0);
+            $certificateSize = (int) ($securityDirectory['size'] ?? 0);
+            $fileSize = filesize($path);
+
+            if ($fileSize === false
+                || $certificateOffset <= 0
+                || $certificateSize < 8
+                || $certificateOffset + $certificateSize > $fileSize
+                || fseek($handle, $certificateOffset) !== 0) {
+                return false;
+            }
+
+            $certificateHeader = fread($handle, 8);
+            if ($certificateHeader === false || strlen($certificateHeader) !== 8) {
+                return false;
+            }
+            $certificate = unpack('Vlength/vrevision/vtype', $certificateHeader);
+            $length = (int) ($certificate['length'] ?? 0);
+
+            return $length >= 8
+                && $length <= $certificateSize
+                && $certificateOffset + $length <= $fileSize
+                && (int) ($certificate['revision'] ?? 0) === 0x0200
+                && (int) ($certificate['type'] ?? 0) === 0x0002;
+        } finally {
+            fclose($handle);
+        }
     }
 
     public function updatePayments(
