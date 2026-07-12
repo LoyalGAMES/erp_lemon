@@ -256,6 +256,124 @@ function Assert-InternalCertificateBundle {
     }
 }
 
+function Invoke-CertUtilCommand {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]] $Arguments,
+        [ValidateRange(5, 120)]
+        [int] $TimeoutSeconds = 30
+    )
+
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = 'certutil.exe'
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    foreach ($argument in $Arguments) {
+        [void] $startInfo.ArgumentList.Add($argument)
+    }
+
+    $process = [System.Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) {
+            throw 'Nie udało się uruchomić certutil.exe.'
+        }
+        $standardOutput = $process.StandardOutput.ReadToEndAsync()
+        $standardError = $process.StandardError.ReadToEndAsync()
+
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try {
+                $process.Kill($true)
+                $process.WaitForExit()
+            } catch {
+                # Preserve the timeout as the actionable failure.
+            }
+            throw "certutil.exe przekroczył limit $TimeoutSeconds sekund."
+        }
+
+        $output = $standardOutput.GetAwaiter().GetResult()
+        $errorOutput = $standardError.GetAwaiter().GetResult()
+        if (-not [string]::IsNullOrWhiteSpace($output)) {
+            Write-Host ($output.TrimEnd())
+        }
+        if (-not [string]::IsNullOrWhiteSpace($errorOutput)) {
+            Write-Host ($errorOutput.TrimEnd())
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "certutil.exe zakończył się kodem $($process.ExitCode)."
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Assert-MachineStoreCertificate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $StoreName,
+        [Parameter(Mandatory = $true)]
+        [System.Security.Cryptography.X509Certificates.X509Certificate2] $Certificate
+    )
+
+    $path = "Cert:\LocalMachine\$StoreName\$($Certificate.Thumbprint)"
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "Brak oczekiwanego certyfikatu po imporcie do LocalMachine\\$StoreName."
+    }
+    $stored = Get-Item -LiteralPath $path
+    if (-not [string]::Equals(
+        (Get-CertificateSha256 $stored),
+        (Get-CertificateSha256 $Certificate),
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "Magazyn LocalMachine\\$StoreName zawiera inny certyfikat pod oczekiwanym thumbprintem."
+    }
+}
+
+function Remove-ExactMachineStoreCertificate {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string] $StoreName,
+        [Parameter(Mandatory = $true)]
+        [string] $Thumbprint,
+        [Parameter(Mandatory = $true)]
+        [string] $ExpectedSha256
+    )
+
+    $store = [System.Security.Cryptography.X509Certificates.X509Store]::new(
+        $StoreName,
+        [System.Security.Cryptography.X509Certificates.StoreLocation]::LocalMachine
+    )
+    try {
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+        $matches = @(
+            $store.Certificates.Find(
+                [System.Security.Cryptography.X509Certificates.X509FindType]::FindByThumbprint,
+                $Thumbprint,
+                $false
+            )
+        )
+        foreach ($match in $matches) {
+            if (-not [string]::Equals(
+                (Get-CertificateSha256 $match),
+                $ExpectedSha256,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw "Odmowa usunięcia nieoczekiwanego certyfikatu z LocalMachine\\$StoreName."
+            }
+            $store.Remove($match)
+        }
+    } finally {
+        $store.Close()
+        $store.Dispose()
+    }
+
+    if (Test-Path -LiteralPath "Cert:\LocalMachine\$StoreName\$Thumbprint") {
+        throw "Certyfikat pozostał w LocalMachine\\$StoreName po cleanupie."
+    }
+}
+
 function Add-TemporaryInternalCertificateTrust {
     param(
         [Parameter(Mandatory = $true)]
@@ -268,31 +386,62 @@ function Add-TemporaryInternalCertificateTrust {
         [string] $LeafCertificatePath
     )
 
-    $rootStorePath = "Cert:\CurrentUser\Root\$($RootCertificate.Thumbprint)"
-    $publisherStorePath = "Cert:\CurrentUser\TrustedPublisher\$($LeafCertificate.Thumbprint)"
+    # Adding a private root to CurrentUser\Root can display the Windows
+    # "Security Warning" confirmation dialog. That dialog blocks forever on a
+    # headless GitHub runner. Release and smoke-test jobs already require an
+    # elevated process, so use certutil against the machine stores explicitly;
+    # certutil is non-interactive and its exit code can be enforced.
+    $rootStorePath = "Cert:\LocalMachine\Root\$($RootCertificate.Thumbprint)"
+    $publisherStorePath = "Cert:\LocalMachine\TrustedPublisher\$($LeafCertificate.Thumbprint)"
     $rootAdded = -not (Test-Path -LiteralPath $rootStorePath)
     $publisherAdded = -not (Test-Path -LiteralPath $publisherStorePath)
 
+    # A pre-existing entry is never overwritten blindly. SHA-1 thumbprints are
+    # only store locators here; the DER SHA-256 remains the trust decision.
+    if (-not $rootAdded) {
+        Assert-MachineStoreCertificate -StoreName Root -Certificate $RootCertificate
+    }
+    if (-not $publisherAdded) {
+        Assert-MachineStoreCertificate -StoreName TrustedPublisher -Certificate $LeafCertificate
+    }
+
     try {
         if ($rootAdded) {
-            Import-Certificate -FilePath $RootCertificatePath -CertStoreLocation 'Cert:\CurrentUser\Root' | Out-Null
+            Invoke-CertUtilCommand -Arguments @('-f', '-addstore', 'Root', $RootCertificatePath)
+            Assert-MachineStoreCertificate -StoreName Root -Certificate $RootCertificate
         }
         if ($publisherAdded) {
-            Import-Certificate -FilePath $LeafCertificatePath -CertStoreLocation 'Cert:\CurrentUser\TrustedPublisher' | Out-Null
+            Invoke-CertUtilCommand -Arguments @('-f', '-addstore', 'TrustedPublisher', $LeafCertificatePath)
+            Assert-MachineStoreCertificate -StoreName TrustedPublisher -Certificate $LeafCertificate
         }
     } catch {
-        if ($publisherAdded) {
-            Remove-Item -LiteralPath $publisherStorePath -Force -ErrorAction SilentlyContinue
+        $originalError = $_
+        try {
+            if ($publisherAdded) {
+                Remove-ExactMachineStoreCertificate `
+                    -StoreName TrustedPublisher `
+                    -Thumbprint $LeafCertificate.Thumbprint `
+                    -ExpectedSha256 (Get-CertificateSha256 $LeafCertificate)
+            }
+            if ($rootAdded) {
+                Remove-ExactMachineStoreCertificate `
+                    -StoreName Root `
+                    -Thumbprint $RootCertificate.Thumbprint `
+                    -ExpectedSha256 (Get-CertificateSha256 $RootCertificate)
+            }
+        } catch {
+            Write-Warning "Cleanup po nieudanym imporcie zaufania także się nie powiódł: $($_.Exception.Message)"
         }
-        if ($rootAdded) {
-            Remove-Item -LiteralPath $rootStorePath -Force -ErrorAction SilentlyContinue
-        }
-        throw
+        throw $originalError
     }
 
     return [pscustomobject]@{
         RootStorePath = $rootStorePath
         PublisherStorePath = $publisherStorePath
+        RootThumbprint = $RootCertificate.Thumbprint
+        PublisherThumbprint = $LeafCertificate.Thumbprint
+        RootSha256 = Get-CertificateSha256 $RootCertificate
+        PublisherSha256 = Get-CertificateSha256 $LeafCertificate
         RootAdded = $rootAdded
         PublisherAdded = $publisherAdded
     }
@@ -304,11 +453,31 @@ function Remove-TemporaryInternalCertificateTrust {
     if ($null -eq $State) {
         return
     }
+    $cleanupErrors = @()
     if ($State.PublisherAdded) {
-        Remove-Item -LiteralPath $State.PublisherStorePath -Force -ErrorAction SilentlyContinue
+        try {
+            Remove-ExactMachineStoreCertificate `
+                -StoreName TrustedPublisher `
+                -Thumbprint $State.PublisherThumbprint `
+                -ExpectedSha256 $State.PublisherSha256
+        } catch {
+            $cleanupErrors += "wydawcy z LocalMachine\TrustedPublisher: $($_.Exception.Message)"
+        }
     }
     if ($State.RootAdded) {
-        Remove-Item -LiteralPath $State.RootStorePath -Force -ErrorAction SilentlyContinue
+        try {
+            Remove-ExactMachineStoreCertificate `
+                -StoreName Root `
+                -Thumbprint $State.RootThumbprint `
+                -ExpectedSha256 $State.RootSha256
+        } catch {
+            $cleanupErrors += "root z LocalMachine\Root: $($_.Exception.Message)"
+        }
+    }
+    if ($cleanupErrors.Count -gt 0) {
+        # The hosted runner is destroyed after the job. Do not let a cleanup
+        # problem mask a more useful signing/build error or skip later cleanup.
+        Write-Warning "Nie udało się usunąć tymczasowych certyfikatów: $($cleanupErrors -join ', ')."
     }
 }
 

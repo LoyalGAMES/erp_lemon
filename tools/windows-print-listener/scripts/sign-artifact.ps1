@@ -39,12 +39,9 @@ $arguments = @(
     $absolutePath
 )
 
-& $signTool @arguments
-if ($LASTEXITCODE -ne 0) {
-    throw "signtool sign zakończył się kodem $LASTEXITCODE dla $absolutePath"
-}
+Invoke-SignTool -SignToolPath $signTool -Arguments $arguments -TimeoutSeconds 120
 
-& $signTool verify /pa /all /tw /v $absolutePath
-if ($LASTEXITCODE -ne 0) {
-    throw "Weryfikacja Authenticode zakończyła się kodem $LASTEXITCODE dla $absolutePath"
-}
+Invoke-SignTool `
+    -SignToolPath $signTool `
+    -Arguments @('verify', '/pa', '/all', '/tw', '/v', $absolutePath) `
+    -TimeoutSeconds 120

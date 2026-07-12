@@ -176,10 +176,10 @@ if ($RequireSignature) {
 
     foreach ($artifactPath in @($listenerPath, $installerPath)) {
         [void] (Assert-AuthenticodeSigner $artifactPath $expectedSubject $expectedLeafSha256)
-        & $signTool verify /pa /all /tw /v $artifactPath
-        if ($LASTEXITCODE -ne 0) {
-            throw "signtool verify nie powiódł się dla $artifactPath."
-        }
+        Invoke-SignTool `
+            -SignToolPath $signTool `
+            -Arguments @('verify', '/pa', '/all', '/tw', '/v', $artifactPath) `
+            -TimeoutSeconds 120
     }
 }
 

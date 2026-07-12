@@ -35,8 +35,11 @@ użytkownika, podpisuje artefakty po thumbprincie i usuwa certyfikat w bloku
 `finally`. Hasło PFX nie jest przekazywane w argumentach `signtool.exe`.
 W profilu `internal` pipeline waliduje CA/key usage root, CA=false, Digital
 Signature i EKU Code Signing wydawcy, RSA-3072+, ważność, dokładne SHA-256 oraz
-łańcuch. Root trafia tymczasowo do `CurrentUser\Root`, a wydawca do
-`CurrentUser\TrustedPublisher`; oba wpisy są usuwane w `finally`.
+łańcuch. Na podniesionym, jednorazowym runnerze root trafia przez bezinteraktywne
+`certutil.exe` tymczasowo do `LocalMachine\Root`, a wydawca do
+`LocalMachine\TrustedPublisher`; oba wpisy są usuwane w `finally`. Użycie
+magazynu maszyny omija blokujące okno potwierdzenia chronionego magazynu root
+bieżącego użytkownika.
 
 Instalator nigdy nie dodaje własnego certyfikatu do magazynów zaufania. Byłoby
 to kołowym „samozaufaniem”. Na stanowiskach magazynowych publiczny root należy

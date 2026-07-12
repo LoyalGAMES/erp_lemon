@@ -6,6 +6,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'certificate-utils.ps1')
+. (Join-Path $PSScriptRoot 'find-signtool.ps1')
 
 $root = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -46,6 +47,7 @@ $certificateBundle = $null
 $trustState = $null
 
 if ($profile -eq 'internal') {
+    Write-Host 'Waliduję wewnętrzny łańcuch certyfikatów...'
     $expectedRootSha256 = Normalize-CertificateSha256 `
         ([string] $env:WINDOWS_CODESIGN_ROOT_SHA256) `
         'WINDOWS_CODESIGN_ROOT_SHA256'
@@ -66,6 +68,7 @@ $previousEnvironment = @{
 }
 $securePassword = $null
 $importedCertificates = @()
+$newMyThumbprints = @()
 $certificate = $null
 $preexistingMyThumbprints = @(
     Get-ChildItem 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
@@ -73,6 +76,7 @@ $preexistingMyThumbprints = @(
 )
 
 try {
+    Write-Host 'Importuję roboczy certyfikat podpisujący jako nieeksportowalny...'
     $securePassword = ConvertTo-SecureString $pfxPassword -AsPlainText -Force
     $importedCertificates = @(
         Import-PfxCertificate `
@@ -80,6 +84,15 @@ try {
             -CertStoreLocation 'Cert:\CurrentUser\My' `
             -Password $securePassword `
             -Exportable:$false
+    )
+    # Import-PfxCertificate may also place public chain certificates from the
+    # PFX in CurrentUser\My while returning only the leaf with a private key.
+    # Capture the exact isolated-runner store delta immediately so every entry
+    # introduced by this import is removed in finally.
+    $newMyThumbprints = @(
+        Get-ChildItem 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
+            ForEach-Object { [string] $_.Thumbprint } |
+            Where-Object { $_ -notin $preexistingMyThumbprints }
     )
 
     # The PFX password is needed only for the import above. Remove it from this
@@ -113,6 +126,7 @@ try {
             throw 'Publiczny certyfikat wydawcy DER nie odpowiada kluczowi prywatnemu z PFX.'
         }
 
+        Write-Host 'Dodaję tymczasowe zaufanie w magazynach maszyny runnera...'
         $trustState = Add-TemporaryInternalCertificateTrust `
             -RootCertificate $certificateBundle.Root `
             -LeafCertificate $certificateBundle.Leaf `
@@ -126,17 +140,28 @@ try {
     $env:WINDOWS_CODESIGN_PUBLISHER_SHA256 = $expectedLeafSha256
     $env:WINDOWS_CODESIGN_MANIFEST_ROOT_SHA256 = if ($profile -eq 'internal') { $expectedRootSha256 } else { $null }
 
+    # Discover the SDK once. NSIS starts separate PowerShell processes for the
+    # uninstaller and installer signatures; inheriting this PATH prevents each
+    # process from recursively scanning the entire Windows SDK tree.
+    $signToolDirectory = Split-Path -Parent (Find-SignTool)
+    $env:PATH = "$signToolDirectory;$($env:PATH)"
+
+    Write-Host 'Buduję i podpisuję listener, deinstalator oraz instalator...'
     & (Join-Path $PSScriptRoot 'build.ps1') -Version $Version -OutputDirectory $OutputDirectory -Sign
+    Write-Host 'Weryfikuję podpisy, timestampy, manifest i sumy...'
     & (Join-Path $PSScriptRoot 'verify-artifacts.ps1') -Version $Version -OutputDirectory $OutputDirectory -RequireSignature
 } finally {
     $pfxPassword = $null
     $env:WINDOWS_CODESIGN_PFX_PASSWORD = $null
     Remove-TemporaryInternalCertificateTrust $trustState
 
-    foreach ($imported in $importedCertificates) {
-        if (-not [string]::IsNullOrWhiteSpace([string] $imported.Thumbprint) -and
-            $imported.Thumbprint -notin $preexistingMyThumbprints) {
-            Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($imported.Thumbprint)" -Force -ErrorAction SilentlyContinue
+    foreach ($thumbprint in $newMyThumbprints) {
+        if (-not [string]::IsNullOrWhiteSpace($thumbprint)) {
+            $storePath = "Cert:\CurrentUser\My\$thumbprint"
+            Remove-Item -LiteralPath $storePath -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $storePath) {
+                Write-Warning "Certyfikat $thumbprint pozostał w CurrentUser\\My po cleanupie."
+            }
         }
     }
 
@@ -153,5 +178,6 @@ try {
     }
     $certificate = $null
     $importedCertificates = @()
+    $newMyThumbprints = @()
     $securePassword = $null
 }
