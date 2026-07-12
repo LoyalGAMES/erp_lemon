@@ -150,7 +150,7 @@ func installService(manager *mgr.Mgr, cfg appConfig) error {
 		args = append(args, "-log-file", cfg.logFile)
 	}
 
-	service, err := manager.CreateService(executable, windowsServiceName, mgr.Config{
+	service, err := manager.CreateService(windowsServiceName, executable, mgr.Config{
 		DisplayName:      windowsServiceDisplayName,
 		Description:      "Securely polls Sempre ERP over outbound HTTPS and sends labels to Windows printers.",
 		StartType:        mgr.StartAutomatic,
