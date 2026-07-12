@@ -24,13 +24,16 @@ if ([string]::IsNullOrWhiteSpace($DestinationDirectory)) {
 
 $DestinationDirectory = [System.IO.Path]::GetFullPath($DestinationDirectory)
 $archivePath = "$DestinationDirectory.zip"
-$downloadUrl = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$Version/nsis-$Version.zip"
+$downloadUrl = "https://sourceforge.net/projects/nsis/files/NSIS%203/$Version/nsis-$Version.zip/download"
 
 Remove-Item -LiteralPath $DestinationDirectory, $archivePath -Recurse -Force -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $DestinationDirectory) | Out-Null
 
 try {
-    Invoke-WebRequest -UseBasicParsing -Uri $downloadUrl -OutFile $archivePath
+    & curl.exe --fail --location --silent --show-error --output $archivePath $downloadUrl
+    if ($LASTEXITCODE -ne 0) {
+        throw "Pobieranie oficjalnego archiwum NSIS zakończyło się kodem $LASTEXITCODE."
+    }
     $actualHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($actualHash -ne $ExpectedSha256.ToLowerInvariant()) {
         throw "Archiwum NSIS ma SHA-256 $actualHash zamiast $ExpectedSha256. Nie zostanie uruchomione."
