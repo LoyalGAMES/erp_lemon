@@ -108,6 +108,11 @@ try {
     }
     $install.Refresh()
     if ($install.ExitCode -ne 0) {
+        $listenerLog = Join-Path $configDirectory 'listener.log'
+        if (Test-Path -LiteralPath $listenerLog -PathType Leaf) {
+            Write-Host 'Dziennik instalatora/usługi:'
+            Get-Content -LiteralPath $listenerLog | Write-Host
+        }
         throw "Instalator zakończył się kodem $($install.ExitCode)."
     }
 
@@ -146,6 +151,9 @@ try {
     }
     if ($serviceConfig.PathName -notmatch '-config') {
         throw 'Usługa nie wskazuje chronionego pliku konfiguracji.'
+    }
+    if ($serviceConfig.StartName -ne 'LocalSystem') {
+        throw "Usługa działa na nieoczekiwanym koncie: $($serviceConfig.StartName)"
     }
 
     foreach ($path in @($configDirectory, $configPath)) {

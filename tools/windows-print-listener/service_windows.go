@@ -155,7 +155,6 @@ func installService(manager *mgr.Mgr, cfg appConfig) error {
 		Description:      "Securely polls Sempre ERP over outbound HTTPS and sends labels to Windows printers.",
 		StartType:        mgr.StartAutomatic,
 		ErrorControl:     mgr.ErrorNormal,
-		ServiceStartName: "LocalSystem",
 		Dependencies:     []string{"Spooler"},
 	}, args...)
 	if err != nil {
