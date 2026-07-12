@@ -12,9 +12,9 @@ use App\Services\Communication\CustomerEmailWorkflowSettingsService;
 use App\Services\Communication\EmailTemplateRenderer;
 use App\Services\Communication\MailSettingsService;
 use App\Services\Inventory\WarehouseDocumentSettingsService;
+use App\Services\Packing\PackingSettingsService;
 use App\Services\Payments\MbankTransferBasketSettingsService;
 use App\Services\Payments\PayuRefundSettingsService;
-use App\Services\Packing\PackingSettingsService;
 use App\Services\Printing\PrintBridgeTokenService;
 use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Returns\ReturnSettingsService;
@@ -72,8 +72,7 @@ class SettingsController extends Controller
         MailSettingsService $mailSettings,
         EmailTemplateRenderer $templateRenderer,
         CustomerEmailWorkflowSettingsService $mailWorkflow,
-    ): View
-    {
+    ): View {
         return view('settings.mail', [
             'title' => 'Ustawienia maili',
             'subtitle' => 'Konfiguracja SMTP oraz szablony ręcznej komunikacji z klientami.',
@@ -201,7 +200,7 @@ class SettingsController extends Controller
                 'v' => $mtime ?: now()->timestamp,
             ]),
             'filename' => 'SempreERP-PrintListener-Setup.exe',
-            'size_mb' => $release !== null ? number_format($release['size'] / 1048576, 1, ',', ' ') . ' MB' : null,
+            'size_mb' => $release !== null ? number_format($release['size'] / 1048576, 1, ',', ' ').' MB' : null,
             'updated_at' => $mtime !== false ? date('Y-m-d H:i', $mtime) : null,
         ];
     }
@@ -215,8 +214,15 @@ class SettingsController extends Controller
      */
     private function windowsPrintListenerRelease(): ?array
     {
-        $path = base_path('tools/windows-print-listener/dist/SempreERP-PrintListener-Setup.exe');
-        $manifestPath = base_path('tools/windows-print-listener/dist/RELEASE-MANIFEST.json');
+        $releaseDirectory = $this->windowsPrintListenerReleaseDirectory(
+            base_path('tools/windows-print-listener/dist'),
+        );
+        if ($releaseDirectory === null) {
+            return null;
+        }
+
+        $path = $releaseDirectory.'/SempreERP-PrintListener-Setup.exe';
+        $manifestPath = $releaseDirectory.'/RELEASE-MANIFEST.json';
 
         if (! is_file($path) || ! is_readable($path) || ! is_file($manifestPath) || ! is_readable($manifestPath)) {
             return null;
@@ -268,6 +274,40 @@ class SettingsController extends Controller
     }
 
     /**
+     * Resolve only the complete versioned release selected by the atomically
+     * replaced CURRENT pointer. A partial upload is never considered.
+     */
+    private function windowsPrintListenerReleaseDirectory(string $distPath): ?string
+    {
+        $pointerPath = $distPath.'/CURRENT';
+        $pointerSize = is_file($pointerPath) ? filesize($pointerPath) : false;
+        if ($pointerSize === false || $pointerSize < 1 || $pointerSize > 256) {
+            return null;
+        }
+
+        $releaseId = trim((string) file_get_contents($pointerPath));
+        if (preg_match('/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/', $releaseId) !== 1) {
+            return null;
+        }
+
+        $releasesRoot = realpath($distPath.'/releases');
+        if ($releasesRoot === false || ! is_dir($releasesRoot)) {
+            return null;
+        }
+
+        $releaseDirectory = realpath($releasesRoot.DIRECTORY_SEPARATOR.$releaseId);
+        $rootPrefix = rtrim($releasesRoot, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+
+        if ($releaseDirectory === false
+            || ! is_dir($releaseDirectory)
+            || ! str_starts_with($releaseDirectory.DIRECTORY_SEPARATOR, $rootPrefix)) {
+            return null;
+        }
+
+        return $releaseDirectory;
+    }
+
+    /**
      * Confirm that the PE contains a WIN_CERTIFICATE Authenticode table. Trust,
      * publisher and timestamp are verified by SignTool in the release workflow;
      * this server-side check prevents a plain/renamed EXE from being served.
@@ -309,8 +349,8 @@ class SettingsController extends Controller
 
             $magic = unpack('vmagic', substr($optionalHeader, 0, 2))['magic'] ?? 0;
             $dataDirectoryOffset = match ($magic) {
-                0x10b => 96,
-                0x20b => 112,
+                0x10B => 96,
+                0x20B => 112,
                 default => 0,
             };
             $securityDirectoryOffset = $dataDirectoryOffset + (4 * 8);

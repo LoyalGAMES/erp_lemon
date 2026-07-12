@@ -37,11 +37,15 @@ publikowany.
    wszystkie pliki, zweryfikuje timestamp oraz wykona test instalatora.
 5. Dopiero po przejściu wszystkich bramek podpisane pliki zostaną udostępnione
    jako artefakt workflow.
-6. Skopiuj zatwierdzone `SempreERP-PrintListener-Setup.exe`,
-   `RELEASE-MANIFEST.json` i `SHA256SUMS.txt` do katalogu
-   `tools/windows-print-listener/dist` wdrażanego razem z ERP. Endpoint pobierania
-   odrzuca brak manifestu, `signed: false`, niezgodny rozmiar lub SHA-256 i nigdy
-   nie udostępnia starszego surowego pliku EXE.
+6. Osobny job, który nie ma dostępu do certyfikatu, pobierze zatwierdzony artefakt,
+   ponownie sprawdzi SHA-256 instalatora i opublikuje komplet plików w
+   wersjonowanym katalogu `tools/windows-print-listener/dist/releases` na
+   produkcji. Dopiero po pełnym uploadzie pojedyncza atomowa operacja podmienia
+   wskaźnik `dist/CURRENT`, więc przerwane wydanie nie może zastąpić działającego.
+   Zwykły deploy ERP zachowuje całe `dist`. Job publikujący wymaga przypiętego
+   wpisu serwera w sekrecie `SSH_KNOWN_HOSTS` i nie ufa wynikowi `ssh-keyscan`.
+   Endpoint pobierania odrzuca brak wskaźnika lub manifestu, `signed: false`,
+   niezgodny rozmiar albo SHA-256 i nigdy nie udostępnia starszego surowego EXE.
 
 Nie należy publikować pliku utworzonego przez zwykłe `build.ps1`. Flaga `signed`
 w manifeście, hash i wynik Authenticode są sprawdzane niezależnie przed uploadem.

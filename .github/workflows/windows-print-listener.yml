@@ -20,6 +20,7 @@ on:
         default: false
 
 permissions:
+  actions: read
   contents: read
 
 concurrency:
@@ -70,6 +71,9 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 25
     environment: windows-code-signing
+
+    outputs:
+      version: ${{ steps.release.outputs.version }}
 
     env:
       WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
@@ -137,3 +141,95 @@ jobs:
             tools/windows-print-listener/dist/RELEASE-MANIFEST.json
             tools/windows-print-listener/dist/SHA256SUMS.txt
             tools/windows-print-listener/build/windows-amd64/lemon-print-listener.exe
+
+  deploy_signed_release:
+    name: Opublikuj podpisany instalator w ERP
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_release }}
+    needs: signed_release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Pobierz zweryfikowane podpisane artefakty
+        uses: actions/download-artifact@v4
+        with:
+          name: sempre-erp-print-listener-${{ needs.signed_release.outputs.version }}-signed
+          path: signed-release
+
+      - name: Odszukaj katalog wydania
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          installer="$(find signed-release -type f -name 'SempreERP-PrintListener-Setup.exe' -print -quit)"
+          if [[ -z "$installer" ]]; then
+            echo "Brak podpisanego instalatora w pobranym artefakcie." >&2
+            exit 1
+          fi
+          release_dir="$(dirname "$installer")"
+          test -f "$release_dir/RELEASE-MANIFEST.json"
+          test -f "$release_dir/SHA256SUMS.txt"
+          echo "directory=$release_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Skonfiguruj SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$SSH_PRIVATE_KEY" || -z "$SSH_KNOWN_HOSTS" ]]; then
+            echo "Brak klucza wdrożeniowego albo przypiętego SSH_KNOWN_HOSTS." >&2
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Opublikuj wydanie bezpiecznie z manifestem na końcu
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          RELEASE_DIR: ${{ steps.release.outputs.directory }}
+          RELEASE_VERSION: ${{ needs.signed_release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "$DEPLOY_PATH" || "$DEPLOY_PATH" != /* || "$DEPLOY_PATH" == "/" ||
+                "$DEPLOY_PATH" == *"'"* || "$DEPLOY_PATH" == *$'\n'* ]]; then
+            echo "DEPLOY_PATH musi być bezpieczną bezwzględną ścieżką inną niż /." >&2
+            exit 1
+          fi
+
+          release_id="$RELEASE_VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if [[ ! "$release_id" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
+            echo "Identyfikator wydania jest nieprawidłowy." >&2
+            exit 1
+          fi
+
+          remote_dist="$DEPLOY_PATH/tools/windows-print-listener/dist"
+          remote_release="$remote_dist/releases/$release_id"
+          remote_pointer="$remote_dist/.CURRENT-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          ssh_args=(-i ~/.ssh/deploy_key -p "$SSH_PORT")
+
+          ssh "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" \
+            "rm -rf '$remote_release' && mkdir -p '$remote_release'"
+          scp -i ~/.ssh/deploy_key -P "$SSH_PORT" \
+            "$RELEASE_DIR/SempreERP-PrintListener-Setup.exe" \
+            "$RELEASE_DIR/RELEASE-MANIFEST.json" \
+            "$RELEASE_DIR/SHA256SUMS.txt" \
+            "$SSH_USER@$SSH_HOST:$remote_release/"
+
+          ssh "${ssh_args[@]}" "$SSH_USER@$SSH_HOST" \
+            "set -eu; \
+             cd '$remote_release'; \
+             grep ' \*SempreERP-PrintListener-Setup.exe$' SHA256SUMS.txt | sha256sum -c -; \
+             chmod 0644 SempreERP-PrintListener-Setup.exe RELEASE-MANIFEST.json SHA256SUMS.txt; \
+             printf '%s\n' '$release_id' > '$remote_pointer'; \
+             chmod 0644 '$remote_pointer'; \
+             mv -f '$remote_pointer' '$remote_dist/CURRENT'"
