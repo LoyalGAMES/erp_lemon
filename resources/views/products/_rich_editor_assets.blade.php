@@ -22,6 +22,92 @@
         <script>
             (() => {
                 const editors = [];
+                const allowedTags = new Set([
+                    'A', 'B', 'BLOCKQUOTE', 'BR', 'CODE', 'DEL', 'DIV', 'EM', 'FIGCAPTION',
+                    'FIGURE', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR', 'I', 'IMG', 'LI',
+                    'MARK', 'OL', 'P', 'PRE', 'S', 'SPAN', 'STRONG', 'SUB', 'SUP', 'TABLE',
+                    'TBODY', 'TD', 'TFOOT', 'TH', 'THEAD', 'TR', 'U', 'UL',
+                ]);
+                const dropWithContents = new Set([
+                    'APPLET', 'AUDIO', 'BASE', 'BUTTON', 'CANVAS', 'EMBED', 'FORM', 'FRAME',
+                    'FRAMESET', 'IFRAME', 'INPUT', 'LINK', 'MATH', 'META', 'NOSCRIPT', 'OBJECT',
+                    'OPTION', 'SCRIPT', 'SELECT', 'SOURCE', 'STYLE', 'SVG', 'TEMPLATE', 'TEXTAREA',
+                    'TRACK', 'VIDEO',
+                ]);
+                const globalAttributes = new Set(['aria-label', 'class', 'dir', 'lang', 'title']);
+                const tagAttributes = {
+                    A: new Set(['href', 'rel', 'target', 'title']),
+                    IMG: new Set(['alt', 'height', 'loading', 'src', 'title', 'width']),
+                    OL: new Set(['start', 'type']),
+                    TD: new Set(['colspan', 'rowspan']),
+                    TH: new Set(['colspan', 'rowspan', 'scope']),
+                };
+
+                function isSafeUrl(value, image = false) {
+                    const url = String(value || '').trim();
+
+                    if (!url || /[\u0000-\u001f\u007f]/u.test(url)) {
+                        return false;
+                    }
+
+                    if (url.startsWith('#') || url.startsWith('/') || url.startsWith('./') || url.startsWith('../')) {
+                        return true;
+                    }
+
+                    try {
+                        const parsed = new URL(url, window.location.origin);
+                        const allowedProtocols = image
+                            ? new Set(['http:', 'https:'])
+                            : new Set(['http:', 'https:', 'mailto:', 'tel:']);
+
+                        return allowedProtocols.has(parsed.protocol);
+                    } catch (_error) {
+                        return false;
+                    }
+                }
+
+                function sanitizeRichHtml(value) {
+                    const template = document.createElement('template');
+                    template.innerHTML = String(value || '');
+                    const elements = Array.from(template.content.querySelectorAll('*'));
+
+                    elements.forEach((element) => {
+                        if (!element.parentNode) {
+                            return;
+                        }
+
+                        if (dropWithContents.has(element.tagName)) {
+                            element.remove();
+                            return;
+                        }
+
+                        if (!allowedTags.has(element.tagName)) {
+                            element.replaceWith(...Array.from(element.childNodes));
+                            return;
+                        }
+
+                        const allowed = tagAttributes[element.tagName] || new Set();
+
+                        Array.from(element.attributes).forEach((attribute) => {
+                            const name = attribute.name.toLowerCase();
+
+                            if (name.startsWith('on') || (!globalAttributes.has(name) && !allowed.has(name))) {
+                                element.removeAttribute(attribute.name);
+                                return;
+                            }
+
+                            if ((name === 'href' || name === 'src') && !isSafeUrl(attribute.value, name === 'src')) {
+                                element.removeAttribute(attribute.name);
+                            }
+                        });
+
+                        if (element.tagName === 'A' && element.getAttribute('target') === '_blank') {
+                            element.setAttribute('rel', 'noopener noreferrer');
+                        }
+                    });
+
+                    return template.innerHTML.trim();
+                }
 
                 function command(name, value = null) {
                     document.execCommand(name, false, value);
@@ -109,10 +195,12 @@
                         focusEditor();
                         const url = window.prompt('Adres linku');
 
-                        if (url) {
+                        if (url && isSafeUrl(url)) {
                             command('createLink', url);
                             saveSelection();
                             syncVisualToHtml();
+                        } else if (url) {
+                            window.alert('Dozwolone są wyłącznie bezpieczne adresy http, https, mailto, tel lub linki względne.');
                         }
                     });
 
@@ -125,7 +213,9 @@
                     editor.className = 'product-rich-editor';
                     editor.contentEditable = 'true';
                     editor.dataset.placeholder = 'Wpisz opis produktu...';
-                    editor.innerHTML = textarea.value || '';
+                    const initialHtml = sanitizeRichHtml(textarea.value);
+                    textarea.value = initialHtml;
+                    editor.innerHTML = initialHtml;
                     editor.addEventListener('mousedown', (event) => event.stopPropagation());
                     editor.addEventListener('click', (event) => event.stopPropagation());
                     editor.addEventListener('input', () => {
@@ -137,6 +227,24 @@
                     editor.addEventListener('keyup', saveSelection);
                     editor.addEventListener('mouseup', saveSelection);
                     editor.addEventListener('focus', saveSelection);
+                    editor.addEventListener('paste', (event) => {
+                        event.preventDefault();
+                        const clipboard = event.clipboardData;
+                        const html = clipboard?.getData('text/html');
+                        const text = clipboard?.getData('text/plain') || '';
+                        const safe = html
+                            ? sanitizeRichHtml(html)
+                            : String(text).replace(/[&<>"']/g, (character) => ({
+                                '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;',
+                            })[character]).replace(/\r?\n/g, '<br>');
+
+                        command('insertHTML', safe);
+                        saveSelection();
+                        syncVisualToHtml();
+                    });
+                    editor.addEventListener('drop', (event) => {
+                        event.preventDefault();
+                    });
                     visualPane.append(editor);
 
                     const htmlPane = document.createElement('div');
@@ -151,11 +259,13 @@
                     let mode = 'visual';
 
                     function syncVisualToHtml() {
-                        textarea.value = editor.innerHTML.trim();
+                        textarea.value = sanitizeRichHtml(editor.innerHTML);
                     }
 
                     function syncHtmlToVisual() {
-                        editor.innerHTML = textarea.value || '';
+                        const safe = sanitizeRichHtml(textarea.value);
+                        textarea.value = safe;
+                        editor.innerHTML = safe;
                     }
 
                     function setMode(nextMode) {

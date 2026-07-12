@@ -27,8 +27,8 @@ use App\Http\Middleware\RequireErpSessionAuth;
 use Illuminate\Support\Facades\Route;
 
 Route::get('/login', [AuthController::class, 'showLogin'])->name('login');
-Route::post('/login', [AuthController::class, 'login'])->name('login.attempt');
-Route::post('/login/setup', [AuthController::class, 'setupFirstAdmin'])->name('login.setup');
+Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:erp-login')->name('login.attempt');
+Route::post('/login/setup', [AuthController::class, 'setupFirstAdmin'])->middleware('throttle:erp-first-admin')->name('login.setup');
 
 Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
     Route::post('/logout', [AuthController::class, 'logout'])->name('logout');

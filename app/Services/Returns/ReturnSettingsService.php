@@ -6,10 +6,16 @@ namespace App\Services\Returns;
 
 use App\Models\AppSetting;
 use DateTimeInterface;
+use Illuminate\Contracts\Encryption\DecryptException;
+use Illuminate\Support\Facades\Crypt;
 
 final class ReturnSettingsService
 {
     private const KEY = 'return_settings';
+
+    private const API_TOKEN_KEY = 'store_api_token';
+
+    private const WEBHOOK_SECRET_KEY = 'store_webhook_secret';
 
     /**
      * @return array{
@@ -29,11 +35,9 @@ final class ReturnSettingsService
      */
     public function data(): array
     {
-        $stored = AppSetting::query()
-            ->where('key', self::KEY)
-            ->value('value');
+        $stored = $this->stored();
 
-        $data = array_merge($this->defaults(), is_array($stored) ? $stored : []);
+        $data = array_merge($this->defaults(), $stored);
         $conditions = $this->cleanOptions($data['conditions'] ?? null, $this->defaultConditions());
         $dispositions = $this->cleanDispositions(
             $data['dispositions'] ?? null,
@@ -55,17 +59,42 @@ final class ReturnSettingsService
             'conditions' => $conditions,
             'dispositions' => $dispositions,
             'disposition_warehouse_ids' => $this->dispositionWarehouseMap($dispositions),
-            'store_api_token' => $this->cleanToken((string) ($data['store_api_token'] ?? '')),
-            'store_webhook_secret' => $this->cleanToken((string) ($data['store_webhook_secret'] ?? '')),
+            'store_api_token' => $this->secret($stored, self::API_TOKEN_KEY),
+            'store_webhook_secret' => $this->secret($stored, self::WEBHOOK_SECRET_KEY),
         ];
     }
 
     /**
-     * @param array<string, mixed> $data
+     * Settings safe to render in an administrator's browser. Secret values
+     * are replaced with status flags and non-reversible hints.
+     *
+     * @return array<string, mixed>
+     */
+    public function publicData(): array
+    {
+        $data = $this->data();
+        $apiToken = (string) $data['store_api_token'];
+        $webhookSecret = (string) $data['store_webhook_secret'];
+
+        unset($data['store_api_token'], $data['store_webhook_secret']);
+
+        return $data + [
+            'store_api_token_configured' => $apiToken !== '',
+            'store_api_token_mask' => $this->secretMask($apiToken),
+            'store_webhook_secret_configured' => $webhookSecret !== '',
+            'store_webhook_secret_mask' => $this->secretMask($webhookSecret),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
      * @return array<string, mixed>
      */
     public function update(array $data): array
     {
+        $stored = $this->stored();
+        $currentApiToken = $this->secret($stored, self::API_TOKEN_KEY);
+        $currentWebhookSecret = $this->secret($stored, self::WEBHOOK_SECRET_KEY);
         $conditions = $this->cleanOptions($data['conditions'] ?? null, $this->defaultConditions());
         $dispositions = $this->cleanDispositions($data['dispositions'] ?? null);
         $conditionCodes = array_column($conditions, 'code');
@@ -84,8 +113,16 @@ final class ReturnSettingsService
             'conditions' => $conditions,
             'dispositions' => $dispositions,
             'disposition_warehouse_ids' => $this->dispositionWarehouseMap($dispositions),
-            'store_api_token' => $this->cleanToken((string) ($data['store_api_token'] ?? '')),
-            'store_webhook_secret' => $this->cleanToken((string) ($data['store_webhook_secret'] ?? '')),
+            'store_api_token_encrypted' => $this->encryptedSecretForUpdate(
+                $data,
+                self::API_TOKEN_KEY,
+                $currentApiToken,
+            ),
+            'store_webhook_secret_encrypted' => $this->encryptedSecretForUpdate(
+                $data,
+                self::WEBHOOK_SECRET_KEY,
+                $currentWebhookSecret,
+            ),
         ];
 
         AppSetting::query()->updateOrCreate(
@@ -93,7 +130,7 @@ final class ReturnSettingsService
             ['value' => $payload],
         );
 
-        return $payload;
+        return $this->data();
     }
 
     public function exampleNumber(): string
@@ -129,7 +166,7 @@ final class ReturnSettingsService
     }
 
     /**
-     * @param array{numbering_pattern:string,numbering_prefix:string,numbering_padding:int} $settings
+     * @param  array{numbering_pattern:string,numbering_prefix:string,numbering_padding:int}  $settings
      */
     public function renderNumber(int $sequence, DateTimeInterface $date, array $settings): string
     {
@@ -176,6 +213,77 @@ final class ReturnSettingsService
         $value = preg_replace('/[^\x21-\x7E]+/', '', $value) ?? '';
 
         return mb_substr($value, 0, 120);
+    }
+
+    /**
+     * Read encrypted settings and remain compatible with legacy plaintext
+     * rows until the security migration or the next settings write upgrades
+     * them.
+     *
+     * @param  array<string, mixed>  $stored
+     */
+    private function secret(array $stored, string $key): string
+    {
+        $encrypted = $stored[$key.'_encrypted'] ?? null;
+
+        if (is_string($encrypted) && trim($encrypted) !== '') {
+            try {
+                return $this->cleanToken(Crypt::decryptString($encrypted));
+            } catch (DecryptException) {
+                return '';
+            }
+        }
+
+        return $this->cleanToken((string) ($stored[$key] ?? ''));
+    }
+
+    /**
+     * @param  array<string, mixed>  $data
+     */
+    private function encryptedSecretForUpdate(array $data, string $key, string $current): ?string
+    {
+        if (! empty($data['clear_'.$key])) {
+            return null;
+        }
+
+        $submitted = trim((string) ($data[$key] ?? ''));
+        $next = $submitted === '' || $this->isSecretMask($submitted, $current)
+            ? $current
+            : $this->cleanToken($submitted);
+
+        return $next !== '' ? Crypt::encryptString($next) : null;
+    }
+
+    private function isSecretMask(string $value, string $current): bool
+    {
+        if ($current !== '' && hash_equals($this->secretMask($current), $value)) {
+            return true;
+        }
+
+        return preg_match('/^(?:\*|•|●){4,}$/u', $value) === 1;
+    }
+
+    private function secretMask(string $value): string
+    {
+        if ($value === '') {
+            return '';
+        }
+
+        $suffix = strlen($value) >= 12 ? substr($value, -4) : '';
+
+        return '••••••••'.$suffix;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function stored(): array
+    {
+        $stored = AppSetting::query()
+            ->where('key', self::KEY)
+            ->value('value');
+
+        return is_array($stored) ? $stored : [];
     }
 
     /**
@@ -229,7 +337,7 @@ final class ReturnSettingsService
         $value = preg_replace('/[^A-Za-z0-9_\/{}-]+/', '', $value) ?? '';
 
         if (! str_contains($value, '{SEQ}')) {
-            $value = rtrim($value, '/') . '/{SEQ}';
+            $value = rtrim($value, '/').'/{SEQ}';
         }
 
         return $value !== '' ? $value : '{PREFIX}/{YYYY}/{SEQ}';
@@ -249,7 +357,7 @@ final class ReturnSettingsService
     }
 
     /**
-     * @param list<string> $allowed
+     * @param  list<string>  $allowed
      */
     private function allowedValue(string $value, array $allowed, string $fallback): string
     {
@@ -257,8 +365,7 @@ final class ReturnSettingsService
     }
 
     /**
-     * @param mixed $items
-     * @param list<string> $fallback
+     * @param  list<string>  $fallback
      * @return list<string>
      */
     private function cleanStringList(mixed $items, array $fallback): array
@@ -278,8 +385,7 @@ final class ReturnSettingsService
     }
 
     /**
-     * @param mixed $items
-     * @param list<array{code:string,label:string}> $fallback
+     * @param  list<array{code:string,label:string}>  $fallback
      * @return list<array{code:string,label:string}>
      */
     private function cleanOptions(mixed $items, array $fallback): array
@@ -309,8 +415,7 @@ final class ReturnSettingsService
     }
 
     /**
-     * @param mixed $items
-     * @param array<string, mixed> $legacyWarehouses
+     * @param  array<string, mixed>  $legacyWarehouses
      * @return list<array{code:string,label:string,warehouse_id:?int}>
      */
     private function cleanDispositions(mixed $items, array $legacyWarehouses = []): array
@@ -350,7 +455,7 @@ final class ReturnSettingsService
     }
 
     /**
-     * @param list<array{code:string,label:string,warehouse_id:?int}> $dispositions
+     * @param  list<array{code:string,label:string,warehouse_id:?int}>  $dispositions
      * @return array<string, ?int>
      */
     private function dispositionWarehouseMap(array $dispositions): array

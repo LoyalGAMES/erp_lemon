@@ -10,6 +10,7 @@ use App\Models\StockReservation;
 use App\Models\WarehouseDocument;
 use App\Services\Orders\OrderFulfillmentStatusService;
 use App\Services\Orders\OrderStatusPolicyService;
+use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -48,9 +49,13 @@ final class StockReservationService
             if (! $this->shouldReserve($order->status) || $this->fulfillmentStatus->hasPostedWz($order)) {
                 $releasedPairs = $this->releaseReservations($openReservations);
             } else {
-                $warehouse = $this->warehouseResolver->resolve($order->sales_channel_id);
+                $routes = $this->warehouseResolver->allocationRoutes((int) $order->sales_channel_id);
+                $warehouseIds = $routes
+                    ->pluck('warehouse_id')
+                    ->map(fn (mixed $warehouseId): int => (int) $warehouseId)
+                    ->all();
 
-                if ($this->openReservationsMatchOrder($order, $openReservations, (int) $warehouse->id)) {
+                if ($this->openReservationsMatchOrder($order, $openReservations, $warehouseIds)) {
                     return [
                         'reserved' => 0,
                         'released' => 0,
@@ -66,33 +71,54 @@ final class StockReservationService
                     }
 
                     $quantity = (float) $line->quantity;
-                    $available = $this->availableQuantity((int) $warehouse->id, (int) $line->product_id);
-                    $activeQuantity = min($quantity, max(0, $available));
-                    $waitingQuantity = max(0, $quantity - $activeQuantity);
+                    $remainingQuantity = $quantity;
+                    $activeQuantity = 0.0;
 
-                    if ($activeQuantity > 0) {
+                    foreach ($routes as $route) {
+                        if ($remainingQuantity <= 0) {
+                            break;
+                        }
+
+                        $warehouseId = (int) $route->warehouse_id;
+                        $buffer = max(0, (float) $route->stock_buffer);
+                        $available = max(
+                            0,
+                            $this->availableQuantity($warehouseId, (int) $line->product_id) - $buffer,
+                        );
+                        $routeQuantity = min($remainingQuantity, $available);
+
+                        if ($routeQuantity <= 0) {
+                            continue;
+                        }
+
                         $this->createReservation(
-                            (int) $warehouse->id,
+                            $warehouseId,
                             (int) $line->product_id,
                             (int) $order->sales_channel_id,
                             (string) $order->external_id,
-                            $activeQuantity,
+                            $routeQuantity,
                             self::ACTIVE_STATUS,
                             [
                                 'external_order_number' => $order->external_number,
                                 'external_order_line_id' => $line->external_line_id,
                                 'source' => 'woocommerce_order_import',
+                                'route_priority' => (int) $route->priority,
+                                'route_stock_buffer' => $buffer,
                             ],
                         );
+                        $activeQuantity += $routeQuantity;
+                        $remainingQuantity -= $routeQuantity;
+                        $newPairs[] = [$warehouseId, (int) $line->product_id];
                     }
 
-                    if ($waitingQuantity > 0) {
+                    if ($remainingQuantity > 0) {
+                        $waitingWarehouseId = (int) $routes->first()->warehouse_id;
                         $this->createReservation(
-                            (int) $warehouse->id,
+                            $waitingWarehouseId,
                             (int) $line->product_id,
                             (int) $order->sales_channel_id,
                             (string) $order->external_id,
-                            $waitingQuantity,
+                            $remainingQuantity,
                             self::WAITING_STATUS,
                             [
                                 'external_order_number' => $order->external_number,
@@ -103,10 +129,10 @@ final class StockReservationService
                                 'active_quantity' => $activeQuantity,
                             ],
                         );
+                        $newPairs[] = [$waitingWarehouseId, (int) $line->product_id];
                     }
 
                     $reserved++;
-                    $newPairs[] = [$warehouse->id, (int) $line->product_id];
                 }
             }
 
@@ -123,29 +149,45 @@ final class StockReservationService
                 'released' => count($releasedPairs),
                 'skipped' => $skipped,
             ];
-        });
+        }, 3);
     }
 
     public function recalculateBalance(int $warehouseId, int $productId): void
     {
-        $reserved = $this->activeQuantity($warehouseId, $productId);
-
-        $balance = StockBalance::query()->firstOrCreate(
-            [
-                'warehouse_id' => $warehouseId,
-                'product_id' => $productId,
-            ],
-            [
-                'quantity_on_hand' => 0,
-                'quantity_reserved' => 0,
-                'quantity_available' => 0,
-            ],
+        $balance = $this->lockedBalance($warehouseId, $productId);
+        $reservations = StockReservation::query()
+            ->where('warehouse_id', $warehouseId)
+            ->where('product_id', $productId)
+            ->where('status', self::ACTIVE_STATUS)
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get();
+        $reserved = (float) $reservations->sum(
+            fn (StockReservation $reservation): float => (float) $reservation->quantity,
         );
-
         $onHand = (float) $balance->quantity_on_hand;
+
+        if ($balance->source_sales_channel_id !== null
+            && $balance->source_available_quantity !== null
+            && $balance->source_observed_at !== null
+        ) {
+            $reflectedOrderQuantities = $this->reconciledReflectedOrderQuantities(
+                $reservations,
+                (int) $balance->source_sales_channel_id,
+                $balance->source_observed_at,
+                (array) $balance->source_reflected_order_quantities,
+            );
+            $onHand = max(0, (float) $balance->source_available_quantity)
+                + array_sum($reflectedOrderQuantities);
+        } else {
+            $reflectedOrderQuantities = null;
+        }
+
         $balance->update([
+            'quantity_on_hand' => $onHand,
             'quantity_reserved' => $reserved,
             'quantity_available' => max(0, $onHand - $reserved),
+            'source_reflected_order_quantities' => $reflectedOrderQuantities,
             'recalculated_at' => now(),
         ]);
     }
@@ -157,6 +199,55 @@ final class StockReservationService
             ->where('product_id', $productId)
             ->where('status', self::ACTIVE_STATUS)
             ->sum('quantity');
+    }
+
+    public function applySourceAvailabilitySnapshot(
+        int $warehouseId,
+        int $productId,
+        int $salesChannelId,
+        float $availableQuantity,
+        CarbonInterface $observedAt,
+    ): void {
+        $balance = $this->lockedBalance($warehouseId, $productId);
+        $waitingReservations = StockReservation::query()
+            ->where('warehouse_id', $warehouseId)
+            ->where('product_id', $productId)
+            ->where('sales_channel_id', $salesChannelId)
+            ->where('status', self::WAITING_STATUS)
+            ->orderBy('reserved_at')
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get();
+        $orders = $this->ordersForReservations($waitingReservations, $salesChannelId);
+
+        foreach ($waitingReservations as $reservation) {
+            if (! $this->reservationWasReflected($reservation, $orders, $observedAt)) {
+                continue;
+            }
+
+            $reservation->update([
+                'status' => self::ACTIVE_STATUS,
+                'released_at' => null,
+                'metadata' => array_replace_recursive((array) $reservation->metadata, [
+                    'source_stock_snapshot' => [
+                        'promoted_from_waiting_at' => now()->toISOString(),
+                        'source_observed_at' => $observedAt->toISOString(),
+                    ],
+                ]),
+            ]);
+        }
+
+        $balance->update([
+            'source_sales_channel_id' => $salesChannelId,
+            'source_available_quantity' => max(0, $availableQuantity),
+            'source_observed_at' => $observedAt,
+            // A fresh Woo snapshot supersedes the previous baseline. The
+            // recalculation below rebuilds it from reservations that the
+            // snapshot already reflects.
+            'source_reflected_order_quantities' => [],
+        ]);
+
+        $this->recalculateBalance($warehouseId, $productId);
     }
 
     public function releaseForPostedDocument(WarehouseDocument $document): int
@@ -318,8 +409,9 @@ final class StockReservationService
 
     /**
      * @param  Collection<int, StockReservation>  $reservations
+     * @param  list<int>  $warehouseIds
      */
-    private function openReservationsMatchOrder(ExternalOrder $order, Collection $reservations, int $warehouseId): bool
+    private function openReservationsMatchOrder(ExternalOrder $order, Collection $reservations, array $warehouseIds): bool
     {
         $desired = $this->reservableLineQuantities($order);
 
@@ -330,7 +422,7 @@ final class StockReservationService
         $current = [];
 
         foreach ($reservations as $reservation) {
-            if ((int) $reservation->warehouse_id !== $warehouseId) {
+            if (! in_array((int) $reservation->warehouse_id, $warehouseIds, true)) {
                 return false;
             }
 
@@ -407,16 +499,120 @@ final class StockReservationService
 
     private function availableQuantity(int $warehouseId, int $productId): float
     {
-        $balance = StockBalance::query()
-            ->where('warehouse_id', $warehouseId)
-            ->where('product_id', $productId)
-            ->lockForUpdate()
-            ->first();
+        $balance = $this->lockedBalance($warehouseId, $productId);
 
-        $onHand = (float) ($balance?->quantity_on_hand ?? 0);
+        $onHand = (float) $balance->quantity_on_hand;
         $reserved = $this->activeQuantity($warehouseId, $productId);
 
         return max(0, $onHand - $reserved);
+    }
+
+    private function lockedBalance(int $warehouseId, int $productId): StockBalance
+    {
+        $now = now();
+
+        DB::table('stock_balances')->insertOrIgnore([
+            'warehouse_id' => $warehouseId,
+            'product_id' => $productId,
+            'quantity_on_hand' => 0,
+            'quantity_reserved' => 0,
+            'quantity_available' => 0,
+            'recalculated_at' => $now,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        return StockBalance::query()
+            ->where('warehouse_id', $warehouseId)
+            ->where('product_id', $productId)
+            ->lockForUpdate()
+            ->firstOrFail();
+    }
+
+    /**
+     * @param  Collection<int, StockReservation>  $reservations
+     */
+    private function reconciledReflectedOrderQuantities(
+        Collection $reservations,
+        int $salesChannelId,
+        CarbonInterface $observedAt,
+        array $existingQuantities,
+    ): array {
+        $quantities = collect($existingQuantities)
+            ->filter(fn (mixed $quantity): bool => is_numeric($quantity) && (float) $quantity > 0)
+            ->map(fn (mixed $quantity): float => (float) $quantity)
+            ->all();
+        $channelReservations = $reservations
+            ->filter(fn (StockReservation $reservation): bool => (int) $reservation->sales_channel_id === $salesChannelId)
+            ->values();
+
+        if ($channelReservations->isEmpty()) {
+            return $quantities;
+        }
+
+        $orders = $this->ordersForReservations($channelReservations, $salesChannelId);
+
+        $channelReservations
+            ->filter(fn (StockReservation $reservation): bool => $this->reservationWasReflected(
+                $reservation,
+                $orders,
+                $observedAt,
+            ))
+            ->groupBy(fn (StockReservation $reservation): string => (string) $reservation->external_order_id)
+            ->each(function (Collection $orderReservations, string|int $externalOrderId) use (&$quantities): void {
+                $key = (string) $externalOrderId;
+
+                // Freeze the quantity first reconciled into this source
+                // snapshot. Reimports and reservation releases must not add
+                // the same order twice or lower physical on-hand stock.
+                if (! array_key_exists($key, $quantities)) {
+                    $quantities[$key] = (float) $orderReservations->sum(
+                        fn (StockReservation $reservation): float => (float) $reservation->quantity,
+                    );
+                }
+            });
+
+        ksort($quantities, SORT_NATURAL);
+
+        return $quantities;
+    }
+
+    /**
+     * @param  Collection<int, StockReservation>  $reservations
+     * @return Collection<string, ExternalOrder>
+     */
+    private function ordersForReservations(Collection $reservations, int $salesChannelId): Collection
+    {
+        return ExternalOrder::query()
+            ->where('sales_channel_id', $salesChannelId)
+            ->whereIn('external_id', $reservations->pluck('external_order_id')->filter()->unique()->all())
+            ->get(['external_id', 'external_created_at'])
+            ->keyBy(fn (ExternalOrder $order): string => (string) $order->external_id);
+    }
+
+    /** @param  Collection<string, ExternalOrder>  $orders */
+    private function reservationWasReflected(
+        StockReservation $reservation,
+        Collection $orders,
+        CarbonInterface $observedAt,
+    ): bool {
+        $order = $orders->get((string) $reservation->external_order_id);
+        $eventAt = $order?->external_created_at;
+
+        if ($eventAt !== null) {
+            // Woo timestamps are normalized to a UTC database clock before
+            // Eloquent casts them, so compare the stored clock values.
+            return $eventAt->format('Y-m-d H:i:s') <= $observedAt->format('Y-m-d H:i:s');
+        }
+
+        if ($reservation->reserved_at === null) {
+            return false;
+        }
+
+        // Local ERP timestamps use the application timezone. Normalize the
+        // fallback to the same UTC clock used by the Woo observation.
+        return $reservation->reserved_at->copy()->utc()->format('Y-m-d H:i:s')
+            <= $observedAt->format('Y-m-d H:i:s');
     }
 
     /**

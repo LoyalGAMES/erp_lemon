@@ -30,8 +30,8 @@ final class CourierPickupTrackingService
     public function trackPackedOrders(int $limit = 50): array
     {
         $orderIds = ExternalOrder::query()
-            ->whereHas('packingTasks', fn ($query) => $query->where('status', 'packed'))
-            ->whereDoesntHave('packingTasks', fn ($query) => $query->whereNotIn('status', ['packed', 'cancelled']))
+            ->whereHas('packingTasks', fn ($query) => $query->whereIn('status', ['packed', 'shipped']))
+            ->whereDoesntHave('packingTasks', fn ($query) => $query->whereNotIn('status', ['packed', 'shipped', 'cancelled']))
             ->pluck('id');
 
         $labels = ShippingLabel::query()

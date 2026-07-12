@@ -5,13 +5,12 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Services\Products\ProductImageThumbnailService;
-use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class ProductImageThumbnailController extends Controller
 {
-    public function __invoke(Request $request, ProductImageThumbnailService $thumbnails): BinaryFileResponse|RedirectResponse
+    public function __invoke(Request $request, ProductImageThumbnailService $thumbnails): BinaryFileResponse
     {
         $encodedSource = (string) $request->query('src', '');
         $width = (int) $request->query('w', 116);
@@ -23,9 +22,7 @@ class ProductImageThumbnailController extends Controller
 
         $path = $thumbnails->cachedThumbnailPath($source, $width, $height);
 
-        if ($path === null) {
-            return redirect()->away($source);
-        }
+        abort_if($path === null, 404);
 
         return response()->file($path, [
             'Content-Type' => 'image/jpeg',

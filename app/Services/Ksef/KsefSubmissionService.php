@@ -8,6 +8,7 @@ use App\Models\Invoice;
 use App\Models\KsefSubmission;
 use App\Services\Invoices\InvoiceValidationService;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
 
@@ -54,6 +55,7 @@ final class KsefSubmissionService
                     'queued',
                     'running',
                     'submitted',
+                    'delivery_uncertain',
                 ], true));
 
             if ($active instanceof KsefSubmission) {
@@ -99,16 +101,12 @@ final class KsefSubmissionService
 
     public function submit(KsefSubmission $submission): KsefSubmission
     {
-        $submission = KsefSubmission::query()->with('invoice')->findOrFail($submission->id);
+        $processingToken = (string) Str::uuid();
+        [$submission, $claimed] = $this->claim($submission->id, $processingToken);
 
-        if (in_array($submission->status, ['submitted', 'accepted'], true)) {
+        if (! $claimed) {
             return $submission;
         }
-
-        $submission->update([
-            'status' => 'running',
-            'last_error' => null,
-        ]);
 
         try {
             $response = $this->client->send($submission);
@@ -116,41 +114,135 @@ final class KsefSubmissionService
             $referenceNumber = (string) data_get($response, 'referenceNumber', data_get($response, 'reference_number', ''));
             $ksefNumber = (string) data_get($response, 'ksefNumber', data_get($response, 'ksef_number', ''));
 
-            $submission->update([
-                'status' => $ksefNumber !== '' ? 'accepted' : 'submitted',
-                'reference_number' => $referenceNumber !== '' ? $referenceNumber : null,
-                'ksef_number' => $ksefNumber !== '' ? $ksefNumber : null,
-                'response_metadata' => $response,
-                'submitted_at' => now(),
-                'accepted_at' => $ksefNumber !== '' ? now() : null,
-            ]);
+            $submission = DB::transaction(function () use ($submission, $processingToken, $response, $referenceNumber, $ksefNumber): KsefSubmission {
+                $locked = KsefSubmission::query()->with('invoice')->lockForUpdate()->findOrFail($submission->id);
+
+                if ($locked->processing_token !== $processingToken
+                    && ! in_array($locked->status, ['submitted', 'accepted'], true)) {
+                    return $locked;
+                }
+
+                $locked->update([
+                    'status' => $ksefNumber !== '' ? 'accepted' : 'submitted',
+                    'reference_number' => $referenceNumber !== '' ? $referenceNumber : $locked->reference_number,
+                    'ksef_number' => $ksefNumber !== '' ? $ksefNumber : $locked->ksef_number,
+                    'response_metadata' => array_merge((array) $locked->response_metadata, $response),
+                    'submitted_at' => $locked->submitted_at ?? now(),
+                    'accepted_at' => $ksefNumber !== '' ? ($locked->accepted_at ?? now()) : $locked->accepted_at,
+                    'processing_token' => null,
+                    'processing_finished_at' => now(),
+                ]);
+
+                return $locked->refresh()->load('invoice');
+            });
 
             if ($ksefNumber !== '') {
-                $this->syncAcceptedInvoice($submission->refresh()->load('invoice'), $ksefNumber);
+                $this->syncAcceptedInvoice($submission, $ksefNumber);
             }
+        } catch (KsefDeliveryUncertainException $exception) {
+            $submission = $this->finishFailedClaim(
+                $submission->id,
+                $processingToken,
+                'delivery_uncertain',
+                $exception,
+            );
         } catch (RuntimeException $exception) {
             $status = $this->runtimeFailureStatus($exception);
+            $submission = $this->finishFailedClaim($submission->id, $processingToken, $status, $exception);
+        } catch (Throwable $exception) {
+            $submission = $this->finishFailedClaim($submission->id, $processingToken, 'failed', $exception);
+        }
+
+        return $submission->refresh();
+    }
+
+    /**
+     * @return array{0:KsefSubmission,1:bool}
+     */
+    private function claim(int $submissionId, string $processingToken): array
+    {
+        return DB::transaction(function () use ($submissionId, $processingToken): array {
+            $submission = KsefSubmission::query()
+                ->with('invoice')
+                ->lockForUpdate()
+                ->findOrFail($submissionId);
+
+            if (in_array($submission->status, ['submitted', 'accepted'], true)) {
+                return [$submission, false];
+            }
+
+            if ($submission->status === 'running') {
+                if (filled($submission->reference_number)) {
+                    $submission->update([
+                        'status' => 'submitted',
+                        'processing_token' => null,
+                        'processing_finished_at' => now(),
+                    ]);
+
+                    return [$submission->refresh()->load('invoice'), false];
+                }
+
+                if ($submission->processing_started_at?->isAfter(now()->subMinutes(15))) {
+                    return [$submission, false];
+                }
+
+                $submission->update([
+                    'status' => 'delivery_uncertain',
+                    'processing_token' => null,
+                    'processing_finished_at' => now(),
+                    'last_error' => 'Poprzedni worker przerwał wysyłkę bez numeru referencyjnego. Przed ponowieniem sprawdź KSeF ręcznie.',
+                ]);
+
+                return [$submission->refresh()->load('invoice'), false];
+            }
+
+            if ($submission->status !== 'queued') {
+                return [$submission, false];
+            }
+
+            $submission->update([
+                'status' => 'running',
+                'last_error' => null,
+                'processing_token' => $processingToken,
+                'processing_started_at' => now(),
+                'processing_finished_at' => null,
+                'attempts' => $submission->attempts + 1,
+            ]);
+
+            return [$submission->refresh()->load('invoice'), true];
+        });
+    }
+
+    private function finishFailedClaim(
+        int $submissionId,
+        string $processingToken,
+        string $status,
+        Throwable $exception,
+    ): KsefSubmission {
+        return DB::transaction(function () use ($submissionId, $processingToken, $status, $exception): KsefSubmission {
+            $submission = KsefSubmission::query()->with('invoice')->lockForUpdate()->findOrFail($submissionId);
+
+            if ($submission->status === 'delivery_uncertain') {
+                $status = 'delivery_uncertain';
+            } elseif (filled($submission->reference_number)) {
+                $status = 'submitted';
+            } elseif ($submission->processing_token !== $processingToken) {
+                return $submission;
+            }
 
             $submission->update([
                 'status' => $status,
                 'last_error' => $exception->getMessage(),
-                'response_metadata' => [
+                'response_metadata' => array_merge((array) $submission->response_metadata, [
                     'handled_as' => $status,
                     'message' => $exception->getMessage(),
-                ],
+                ]),
+                'processing_token' => null,
+                'processing_finished_at' => now(),
             ]);
-        } catch (Throwable $exception) {
-            $submission->update([
-                'status' => 'failed',
-                'last_error' => $exception->getMessage(),
-                'response_metadata' => [
-                    'handled_as' => 'failed',
-                    'message' => $exception->getMessage(),
-                ],
-            ]);
-        }
 
-        return $submission->refresh();
+            return $submission->refresh()->load('invoice');
+        });
     }
 
     public function retry(KsefSubmission $submission): KsefSubmission
@@ -169,6 +261,9 @@ final class KsefSubmissionService
             'status' => 'queued',
             'last_error' => null,
             'request_metadata' => $metadata,
+            'processing_token' => null,
+            'processing_started_at' => null,
+            'processing_finished_at' => null,
         ]);
 
         return $submission->refresh();

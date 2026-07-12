@@ -351,6 +351,7 @@ class IntegrationRetryWorkflowTest extends TestCase
         $output = Artisan::output();
 
         $this->assertStringContainsString('erp:queue-woocommerce-imports --orders', $output);
+        $this->assertStringContainsString('queue:work --stop-when-empty', $output);
         $this->assertStringContainsString('erp:release-stale-woocommerce-imports --minutes=60', $output);
     }
 

@@ -29,8 +29,25 @@
             .variant-stock-quick-action input { width: 92px; min-width: 92px; }
             .variant-stock-table .stock-adjust-error { min-height: 0; margin-top: 3px; }
             @media (max-width: 980px) {
-                .variant-stock-table .variant-stock-name { min-width: 170px; }
-                .variant-stock-table .variant-stock-adjust { min-width: 180px; }
+                .variant-stock-management > .table-scroll { overflow: visible; }
+                .variant-stock-table { display: block; min-width: 0 !important; border: 0; background: transparent; }
+                .variant-stock-table thead { display: none; }
+                .variant-stock-table tbody { display: grid; gap: 10px; }
+                .variant-stock-table tr[data-variant-stock-row] { display: block; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: #fff; box-shadow: 0 4px 12px rgba(67, 53, 43, .05); }
+                .variant-stock-table tr[data-variant-stock-row] > td { display: grid; grid-template-columns: minmax(92px, .42fr) minmax(0, 1fr); gap: 10px; align-items: center; width: 100%; min-width: 0; padding: 9px 11px; border: 0; border-bottom: 1px solid rgba(216, 206, 198, .72); text-align: left; white-space: normal; }
+                .variant-stock-table tr[data-variant-stock-row] > td:last-child { border-bottom: 0; }
+                .variant-stock-table tr[data-variant-stock-row] > td::before { content: attr(data-label); color: var(--muted); font-size: 11px; font-weight: 760; line-height: 1.25; }
+                .variant-stock-table .variant-stock-name,
+                .variant-stock-table .variant-stock-identifiers,
+                .variant-stock-table .variant-stock-warehouse,
+                .variant-stock-table .variant-stock-quantity,
+                .variant-stock-table .variant-stock-adjust { min-width: 0; }
+                .variant-stock-table .variant-stock-name { background: rgba(134, 115, 100, .06); }
+                .variant-stock-table .variant-stock-quantity { font-size: 15px; font-weight: 800; }
+                .variant-stock-table .variant-stock-adjust { align-items: start; }
+                .variant-stock-table .variant-stock-adjust > * { min-width: 0; }
+                .variant-stock-quick-action { align-items: stretch; }
+                .variant-stock-quick-action input { flex: 1 1 auto; width: 100%; min-width: 0; }
                 .variant-stock-table input { min-height: 42px; font-size: 16px; }
                 .variant-stock-table .button { min-height: 42px; }
             }

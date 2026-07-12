@@ -7,6 +7,7 @@ namespace App\Services\Payments;
 use App\Models\CustomerPayment;
 use App\Models\Invoice;
 use App\Models\ReturnCase;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
@@ -15,8 +16,7 @@ final class PayuRefundService
     public function __construct(
         private readonly PayuRefundSettingsService $settings,
         private readonly PaymentMethodClassifier $classifier,
-    ) {
-    }
+    ) {}
 
     public function attemptAutomaticRefund(ReturnCase $returnCase, Invoice $invoice): ?CustomerPayment
     {
@@ -48,7 +48,7 @@ final class PayuRefundService
             throw new RuntimeException('Uzupełnij client_id i client_secret PayU w ustawieniach płatności.');
         }
 
-        $returnCase->loadMissing(['externalOrder', 'correctionInvoice', 'customerPayments']);
+        $returnCase->loadMissing(['externalOrder', 'correctionInvoice']);
         $order = $returnCase->externalOrder;
 
         if ($order === null) {
@@ -69,34 +69,17 @@ final class PayuRefundService
         }
 
         $extRefundId = $this->extRefundId($returnCase, $invoice, $amountCents);
-        $existing = $returnCase->customerPayments
-            ->first(fn (CustomerPayment $payment): bool => $payment->method === 'payu'
-                && data_get($payment->metadata, 'payu.ext_refund_id') === $extRefundId
-                && $payment->status !== 'failed');
+        [$payment, $shouldSend] = $this->claimPayment(
+            $returnCase,
+            $invoice,
+            $payuOrderId,
+            $extRefundId,
+            $amountCents,
+        );
 
-        if ($existing instanceof CustomerPayment) {
-            return $existing;
+        if (! $shouldSend) {
+            return $payment;
         }
-
-        $payment = CustomerPayment::query()->create([
-            'external_order_id' => $order->id,
-            'return_case_id' => $returnCase->id,
-            'direction' => 'outgoing',
-            'method' => 'payu',
-            'status' => 'pending',
-            'amount' => round($amountCents / 100, 2),
-            'currency' => $invoice?->currency ?: $order->currency,
-            'reference' => $payuOrderId,
-            'description' => 'Refund PayU dla zwrotu '.$returnCase->number,
-            'booked_at' => now(),
-            'metadata' => [
-                'payu' => [
-                    'order_id' => $payuOrderId,
-                    'ext_refund_id' => $extRefundId,
-                    'amount_cents' => $amountCents,
-                ],
-            ],
-        ]);
 
         try {
             $token = $this->token($settings['client_id'], $secret);
@@ -153,6 +136,16 @@ final class PayuRefundService
                 ]),
             ]);
         } catch (RuntimeException $exception) {
+            $payment->update([
+                'status' => 'failed',
+                'metadata' => array_merge($payment->metadata ?? [], [
+                    'payu' => array_merge((array) data_get($payment->metadata, 'payu', []), [
+                        'error' => $exception->getMessage(),
+                        'failed_at' => now()->toISOString(),
+                    ]),
+                ]),
+            ]);
+
             throw $exception;
         } catch (\Throwable $exception) {
             $payment->update([
@@ -168,6 +161,71 @@ final class PayuRefundService
         }
 
         return $payment->refresh();
+    }
+
+    /**
+     * @return array{0:CustomerPayment,1:bool}
+     */
+    private function claimPayment(
+        ReturnCase $returnCase,
+        ?Invoice $invoice,
+        string $payuOrderId,
+        string $extRefundId,
+        int $amountCents,
+    ): array {
+        return DB::transaction(function () use ($returnCase, $invoice, $payuOrderId, $extRefundId, $amountCents): array {
+            ReturnCase::query()->lockForUpdate()->findOrFail($returnCase->id);
+
+            $payment = CustomerPayment::query()
+                ->where('return_case_id', $returnCase->id)
+                ->where('method', 'payu')
+                ->where('metadata->payu->ext_refund_id', $extRefundId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($payment instanceof CustomerPayment
+                && in_array($payment->status, ['processing', 'pending', 'paid'], true)) {
+                return [$payment, false];
+            }
+
+            if (! $payment instanceof CustomerPayment) {
+                $payment = CustomerPayment::query()->create([
+                    'external_order_id' => $returnCase->external_order_id,
+                    'return_case_id' => $returnCase->id,
+                    'direction' => 'outgoing',
+                    'method' => 'payu',
+                    'status' => 'processing',
+                    'amount' => round($amountCents / 100, 2),
+                    'currency' => $invoice?->currency ?: $returnCase->externalOrder?->currency ?: 'PLN',
+                    'reference' => $payuOrderId,
+                    'description' => 'Refund PayU dla zwrotu '.$returnCase->number,
+                    'booked_at' => now(),
+                    'metadata' => [
+                        'payu' => [
+                            'order_id' => $payuOrderId,
+                            'ext_refund_id' => $extRefundId,
+                            'amount_cents' => $amountCents,
+                            'attempts' => 1,
+                            'last_attempt_at' => now()->toISOString(),
+                        ],
+                    ],
+                ]);
+
+                return [$payment, true];
+            }
+
+            $payu = (array) data_get($payment->metadata, 'payu', []);
+            $payu['attempts'] = (int) ($payu['attempts'] ?? 0) + 1;
+            $payu['last_attempt_at'] = now()->toISOString();
+            unset($payu['error'], $payu['failed_at']);
+
+            $payment->update([
+                'status' => 'processing',
+                'metadata' => array_merge($payment->metadata ?? [], ['payu' => $payu]),
+            ]);
+
+            return [$payment->refresh(), true];
+        });
     }
 
     private function token(string $clientId, string $secret): string
@@ -204,7 +262,7 @@ final class PayuRefundService
     }
 
     /**
-     * @param array<string, mixed>|null $body
+     * @param  array<string, mixed>|null  $body
      */
     private function errorMessage(?array $body, string $fallback): string
     {

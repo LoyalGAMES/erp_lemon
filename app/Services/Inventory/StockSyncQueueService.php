@@ -8,25 +8,26 @@ use App\Jobs\ExportStockToWooCommerceJob;
 use App\Models\ProductChannelMapping;
 use App\Models\StockBalance;
 use App\Models\StockSyncQueueItem;
+use App\Models\StockSyncState;
 use App\Models\Warehouse;
 use App\Models\WarehouseChannelRoute;
 use App\Models\WordpressIntegration;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 final class StockSyncQueueService
 {
     public function __construct(
         private readonly ChannelStockAvailabilityService $channelStock,
-    ) {
-    }
+    ) {}
 
     /**
-     * @param list<array{warehouse_id:int,product_id:int}> $triggers
+     * @param  list<array{warehouse_id:int,product_id:int}>  $triggers
      */
     public function queueForTriggers(array $triggers, string $reason): int
     {
         $triggers = collect($triggers)
-            ->unique(fn (array $trigger): string => $trigger['warehouse_id'] . ':' . $trigger['product_id'])
+            ->unique(fn (array $trigger): string => $trigger['warehouse_id'].':'.$trigger['product_id'])
             ->values();
 
         if ($triggers->isEmpty()) {
@@ -44,7 +45,9 @@ final class StockSyncQueueService
             ->whereIn('warehouse_id', $triggers->pluck('warehouse_id')->unique()->values()->all())
             ->whereIn('sales_channel_id', $exportEnabledSalesChannelIds->all())
             ->where('push_stock', true)
+            ->whereHas('warehouse', fn ($query) => $query->where('is_active', true))
             ->orderBy('priority')
+            ->orderBy('warehouse_id')
             ->get()
             ->groupBy('warehouse_id');
 
@@ -55,7 +58,7 @@ final class StockSyncQueueService
             $routes = $routesByWarehouse->get($trigger['warehouse_id'], collect());
 
             foreach ($routes as $route) {
-                $key = $trigger['product_id'] . ':' . $route->sales_channel_id;
+                $key = $trigger['product_id'].':'.$route->sales_channel_id;
 
                 if (isset($queued[$key])) {
                     continue;
@@ -81,8 +84,8 @@ final class StockSyncQueueService
     }
 
     /**
-     * @param list<int> $beforeSalesChannelIds
-     * @param list<int> $afterSalesChannelIds
+     * @param  list<int>  $beforeSalesChannelIds
+     * @param  list<int>  $afterSalesChannelIds
      */
     public function queueForWarehouseRouteChange(
         Warehouse $warehouse,
@@ -146,7 +149,7 @@ final class StockSyncQueueService
         return $queued;
     }
 
-    private function exportEnabledSalesChannelIds(): \Illuminate\Support\Collection
+    private function exportEnabledSalesChannelIds(): Collection
     {
         return WordpressIntegration::query()
             ->where('stock_export_enabled', true)
@@ -184,7 +187,9 @@ final class StockSyncQueueService
             ->with('warehouse')
             ->whereIn('sales_channel_id', $salesChannelIds->all())
             ->where('push_stock', true)
+            ->whereHas('warehouse', fn ($query) => $query->where('is_active', true))
             ->orderBy('priority')
+            ->orderBy('warehouse_id')
             ->get()
             ->groupBy('sales_channel_id')
             ->map(fn ($routes) => $routes->first());
@@ -205,6 +210,7 @@ final class StockSyncQueueService
 
             if (! $route instanceof WarehouseChannelRoute) {
                 $skipped++;
+
                 continue;
             }
 
@@ -332,7 +338,7 @@ final class StockSyncQueueService
     }
 
     /**
-     * @param array<string, mixed> $metadata
+     * @param  array<string, mixed>  $metadata
      */
     private function queueItem(
         int $warehouseId,
@@ -349,14 +355,32 @@ final class StockSyncQueueService
             'breakdown' => $availability['breakdown'],
         ]);
 
-        $coalesced = DB::transaction(function () use (
+        [$queueItem, $shouldDispatch] = DB::transaction(function () use (
             $warehouseId,
             $productId,
             $salesChannelId,
             $reason,
             $quantityToPush,
             $payloadMetadata,
-        ): ?StockSyncQueueItem {
+        ): array {
+            $now = now();
+
+            DB::table('stock_sync_states')->insertOrIgnore([
+                'product_id' => $productId,
+                'sales_channel_id' => $salesChannelId,
+                'desired_version' => 0,
+                'desired_quantity' => 0,
+                'exported_version' => 0,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+
+            $state = StockSyncState::query()
+                ->where('product_id', $productId)
+                ->where('sales_channel_id', $salesChannelId)
+                ->lockForUpdate()
+                ->firstOrFail();
+            $version = (int) $state->desired_version + 1;
             $existing = StockSyncQueueItem::query()
                 ->where('product_id', $productId)
                 ->where('sales_channel_id', $salesChannelId)
@@ -365,46 +389,57 @@ final class StockSyncQueueService
                 ->lockForUpdate()
                 ->first();
 
-            if (! $existing instanceof StockSyncQueueItem) {
-                return null;
+            if ($existing instanceof StockSyncQueueItem) {
+                $previousMetadata = $existing->metadata ?? [];
+                $metadata = array_merge($previousMetadata, $payloadMetadata, [
+                    'previous_reason' => $previousMetadata['reason'] ?? null,
+                    'latest_reason' => $reason,
+                    'previous_quantity_to_push' => (float) $existing->quantity_to_push,
+                    'latest_quantity_to_push' => $quantityToPush,
+                    'previous_version' => (int) $existing->version,
+                    'latest_version' => $version,
+                    'coalesced_count' => (int) ($previousMetadata['coalesced_count'] ?? 0) + 1,
+                    'coalesced_at' => $now->toISOString(),
+                ]);
+
+                $existing->update([
+                    'warehouse_id' => $warehouseId,
+                    'version' => $version,
+                    'quantity_to_push' => $quantityToPush,
+                    'available_at' => $now,
+                    'last_error' => null,
+                    'metadata' => $metadata,
+                ]);
+                $queueItem = $existing->refresh();
+                $shouldDispatch = false;
+            } else {
+                $queueItem = StockSyncQueueItem::query()->create([
+                    'warehouse_id' => $warehouseId,
+                    'product_id' => $productId,
+                    'sales_channel_id' => $salesChannelId,
+                    'version' => $version,
+                    'status' => 'pending',
+                    'quantity_to_push' => $quantityToPush,
+                    'available_at' => $now,
+                    'metadata' => array_merge($payloadMetadata, [
+                        'latest_version' => $version,
+                    ]),
+                ]);
+                $shouldDispatch = true;
             }
 
-            $previousMetadata = $existing->metadata ?? [];
-            $metadata = array_merge($previousMetadata, $payloadMetadata, [
-                'previous_reason' => $previousMetadata['reason'] ?? null,
-                'latest_reason' => $reason,
-                'previous_quantity_to_push' => (float) $existing->quantity_to_push,
-                'latest_quantity_to_push' => $quantityToPush,
-                'coalesced_count' => (int) ($previousMetadata['coalesced_count'] ?? 0) + 1,
-                'coalesced_at' => now()->toISOString(),
+            $state->update([
+                'desired_version' => $version,
+                'desired_quantity' => $quantityToPush,
+                'queue_item_id' => $queueItem->id,
             ]);
 
-            $existing->update([
-                'warehouse_id' => $warehouseId,
-                'quantity_to_push' => $quantityToPush,
-                'available_at' => now(),
-                'last_error' => null,
-                'metadata' => $metadata,
-            ]);
+            return [$queueItem, $shouldDispatch];
+        }, 3);
 
-            return $existing->refresh();
-        });
-
-        if ($coalesced instanceof StockSyncQueueItem) {
-            return $coalesced;
+        if ($shouldDispatch) {
+            ExportStockToWooCommerceJob::dispatch($queueItem->id)->afterCommit();
         }
-
-        $queueItem = StockSyncQueueItem::query()->create([
-            'warehouse_id' => $warehouseId,
-            'product_id' => $productId,
-            'sales_channel_id' => $salesChannelId,
-            'status' => 'pending',
-            'quantity_to_push' => $quantityToPush,
-            'available_at' => now(),
-            'metadata' => $payloadMetadata,
-        ]);
-
-        ExportStockToWooCommerceJob::dispatch($queueItem->id)->afterCommit();
 
         return $queueItem;
     }

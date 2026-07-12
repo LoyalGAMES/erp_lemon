@@ -11,8 +11,8 @@ use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
 use App\Services\Printing\PrintBridgeTokenService;
 use App\Services\Printing\ShippingLabelPrintQueueService;
-use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -39,27 +39,50 @@ class PrintBridgeWorkflowTest extends TestCase
 
         $headers = ['Authorization' => 'Bearer bridge-secret'];
 
-        $this->getJson('/api/print-bridge/jobs/next?station=station-1&worker=PACK-PC-1', $headers)
+        $claim = $this->getJson('/api/print-bridge/jobs/next?station=station-1&worker=PACK-PC-1', $headers)
             ->assertOk()
             ->assertJsonPath('success', true)
             ->assertJsonPath('job.id', $job->id)
             ->assertJsonPath('job.printer_name', 'Zebra ZD421')
             ->assertJsonPath('job.label.order_number', '9001');
+        $leaseToken = (string) $claim->json('job.lease_token');
+        $this->assertSame(64, strlen($leaseToken));
 
         $this->assertDatabaseHas('print_jobs', [
             'id' => $job->id,
             'status' => 'printing',
             'attempts' => 1,
             'reserved_by' => 'PACK-PC-1',
+            'reserved_station' => 'station-1',
+            'lease_token' => $leaseToken,
         ]);
 
-        $this->get('/api/print-bridge/jobs/'.$job->id.'/file', $headers)
+        $leaseHeaders = array_merge($headers, [
+            'X-Print-Lease' => $leaseToken,
+            'X-Print-Worker' => 'PACK-PC-1',
+            'X-Print-Station' => 'station-1',
+        ]);
+
+        $this->get('/api/print-bridge/jobs/'.$job->id.'/file', $leaseHeaders)
             ->assertOk()
             ->assertHeader('Content-Type', 'application/pdf');
 
         $this->postJson('/api/print-bridge/jobs/'.$job->id.'/printed', [
             'worker' => 'PACK-PC-1',
+            'station' => 'station-1',
+            'lease_token' => $leaseToken,
             'message' => 'Printed by test bridge',
+        ], $headers)
+            ->assertOk()
+            ->assertJsonPath('job.status', 'printed');
+
+        // Lost HTTP responses are safe: the durable local journal can repeat
+        // the same acknowledgement without physically printing a second time.
+        $this->postJson('/api/print-bridge/jobs/'.$job->id.'/printed', [
+            'worker' => 'PACK-PC-1',
+            'station' => 'station-1',
+            'lease_token' => $leaseToken,
+            'message' => 'Repeated durable acknowledgement',
         ], $headers)
             ->assertOk()
             ->assertJsonPath('job.status', 'printed');
@@ -92,12 +115,55 @@ class PrintBridgeWorkflowTest extends TestCase
 
         $this->assertSame(64, strlen($token));
         $this->assertSame($token, app(PrintBridgeTokenService::class)->token());
-        $this->getJson('/api/print-bridge/jobs/next?station=station-1', [
+        $this->getJson('/api/print-bridge/jobs/next?station=station-1&worker=PACK-PC-1', [
             'Authorization' => 'Bearer '.$token,
         ])
             ->assertOk()
             ->assertJsonPath('success', true)
             ->assertJsonPath('job', null);
+    }
+
+    public function test_print_bridge_rejects_a_file_request_from_another_worker_or_lease(): void
+    {
+        config(['erp.print_bridge_token' => 'bridge-secret']);
+        $label = $this->createLabel();
+        $job = app(ShippingLabelPrintQueueService::class)->enqueueForStation($label, [
+            'code' => 'station-1',
+            'name' => 'Stanowisko pakowania',
+            'printer_name' => 'Zebra ZD421',
+            'segment' => 'all',
+        ], 'test');
+        $headers = ['Authorization' => 'Bearer bridge-secret'];
+        $claim = $this->getJson('/api/print-bridge/jobs/next?station=station-1&worker=PACK-PC-1', $headers)
+            ->assertOk();
+
+        $this->get('/api/print-bridge/jobs/'.$job->id.'/file', array_merge($headers, [
+            'X-Print-Lease' => str_repeat('a', 64),
+            'X-Print-Worker' => 'OTHER-PC',
+            'X-Print-Station' => 'station-1',
+        ]))->assertConflict();
+
+        $this->assertSame(64, strlen((string) $claim->json('job.lease_token')));
+        $this->assertDatabaseHas('print_jobs', ['id' => $job->id, 'status' => 'printing']);
+    }
+
+    public function test_enqueuing_the_same_label_is_idempotent(): void
+    {
+        $label = $this->createLabel();
+        $station = [
+            'code' => 'station-1',
+            'name' => 'Stanowisko pakowania',
+            'printer_name' => 'Zebra ZD421',
+            'segment' => 'all',
+        ];
+        $queue = app(ShippingLabelPrintQueueService::class);
+
+        $first = $queue->enqueueForStation($label, $station, 'test');
+        $second = $queue->enqueueForStation($label, $station, 'test-repeat');
+
+        $this->assertSame($first?->id, $second?->id);
+        $this->assertSame(1, PrintJob::query()->where('shipping_label_id', $label->id)->count());
+        $this->assertSame(64, strlen((string) $first?->deduplication_key));
     }
 
     public function test_legacy_listener_url_is_ignored_and_job_waits_for_outbound_bridge(): void
@@ -198,6 +264,51 @@ class PrintBridgeWorkflowTest extends TestCase
 
         $settings = AppSetting::query()->where('key', 'packing_settings')->firstOrFail()->value;
         $this->assertArrayNotHasKey('listener_url', $settings['stations'][0]);
+    }
+
+    public function test_lease_migration_consolidates_duplicates_and_quarantines_ambiguous_inflight_jobs(): void
+    {
+        $migration = require database_path('migrations/2026_07_12_000011_harden_print_bridge_leases.php');
+        $migration->down();
+
+        $label = $this->createLabel();
+        $printed = PrintJob::query()->create([
+            'shipping_label_id' => $label->id,
+            'status' => 'printed',
+            'source' => 'legacy',
+            'station_code' => 'station-1',
+            'printer_name' => 'Zebra ZD421',
+            'format' => 'pdf',
+            'printed_at' => now()->subMinute(),
+        ]);
+        $duplicatePending = PrintJob::query()->create([
+            'shipping_label_id' => $label->id,
+            'status' => 'pending',
+            'source' => 'legacy',
+            'station_code' => 'station-1',
+            'printer_name' => 'Zebra ZD421',
+            'format' => 'pdf',
+        ]);
+        $inflight = PrintJob::query()->create([
+            'shipping_label_id' => $label->id,
+            'status' => 'printing',
+            'source' => 'legacy',
+            'station_code' => 'station-1',
+            'printer_name' => 'Zebra ZD620',
+            'format' => 'pdf',
+            'reserved_by' => 'OLD-PC',
+            'reserved_at' => now(),
+        ]);
+
+        $migration->up();
+
+        $natural = hash('sha256', implode("\0", [$label->id, 'station-1', 'Zebra ZD421']));
+        $this->assertSame($natural, $printed->fresh()->deduplication_key);
+        $this->assertSame('failed', $duplicatePending->fresh()->status);
+        $this->assertStringContainsString('zduplikowany', (string) $duplicatePending->fresh()->last_error);
+        $this->assertSame('failed', $inflight->fresh()->status);
+        $this->assertNull($inflight->fresh()->reserved_by);
+        $this->assertStringContainsString('ręcznej weryfikacji', (string) $inflight->fresh()->last_error);
     }
 
     private function createLabel(): ShippingLabel

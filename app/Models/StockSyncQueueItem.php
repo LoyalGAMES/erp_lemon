@@ -16,6 +16,7 @@ class StockSyncQueueItem extends Model
         'warehouse_id',
         'product_id',
         'sales_channel_id',
+        'version',
         'status',
         'quantity_to_push',
         'available_at',
@@ -26,6 +27,7 @@ class StockSyncQueueItem extends Model
 
     protected $casts = [
         'quantity_to_push' => 'decimal:4',
+        'version' => 'integer',
         'available_at' => 'datetime',
         'processed_at' => 'datetime',
         'metadata' => 'array',

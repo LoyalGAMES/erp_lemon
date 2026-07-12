@@ -25,6 +25,10 @@ class KsefSubmission extends Model
         'last_error',
         'submitted_at',
         'accepted_at',
+        'processing_token',
+        'processing_started_at',
+        'processing_finished_at',
+        'attempts',
     ];
 
     protected $casts = [
@@ -32,6 +36,9 @@ class KsefSubmission extends Model
         'response_metadata' => 'array',
         'submitted_at' => 'datetime',
         'accepted_at' => 'datetime',
+        'processing_started_at' => 'datetime',
+        'processing_finished_at' => 'datetime',
+        'attempts' => 'integer',
     ];
 
     public function invoice(): BelongsTo

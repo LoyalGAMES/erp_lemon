@@ -8,6 +8,7 @@ use App\Jobs\ImportWooCommerceOrdersJob;
 use App\Jobs\ImportWooCommerceProductsJob;
 use App\Models\IntegrationSyncLog;
 use App\Models\WordpressIntegration;
+use Illuminate\Support\Facades\DB;
 use InvalidArgumentException;
 
 final class WooCommerceImportQueueService
@@ -71,46 +72,58 @@ final class WooCommerceImportQueueService
         ?IntegrationSyncLog $retryOf = null,
         string $source = 'erp_panel',
     ): IntegrationSyncLog {
-        $activeLog = IntegrationSyncLog::query()
-            ->where('wordpress_integration_id', $integration->id)
-            ->where('operation', $operation)
-            ->whereIn('status', ['queued', 'running'])
-            ->latest()
-            ->first();
-
-        if ($activeLog instanceof IntegrationSyncLog) {
-            if (! $this->releaseStaleRunningImport($activeLog)) {
-                return $activeLog;
-            }
+        if (! in_array($operation, ['import_products', 'import_orders'], true)) {
+            throw new InvalidArgumentException("Nieobsługiwany import: {$operation}");
         }
 
-        $requestPayload = $retryOf instanceof IntegrationSyncLog
-            ? [
-                'source' => $source,
-                'retry_of_log_id' => $retryOf->id,
-                'retry_of_operation' => $retryOf->operation,
-                'retry_requested_at' => now()->toDateTimeString(),
-            ]
-            : [
-                'source' => $source,
-                'queued_at' => now()->toDateTimeString(),
-            ];
+        $log = DB::transaction(function () use ($integration, $operation, $retryOf, $source): IntegrationSyncLog {
+            $lockedIntegration = WordpressIntegration::query()
+                ->lockForUpdate()
+                ->findOrFail($integration->id);
 
-        $log = IntegrationSyncLog::query()->create([
-            'sales_channel_id' => $integration->sales_channel_id,
-            'wordpress_integration_id' => $integration->id,
-            'direction' => 'in',
-            'operation' => $operation,
-            'status' => 'queued',
-            'request_payload' => $requestPayload,
-            'attempts' => 1,
-            'started_at' => now(),
-        ]);
+            $activeLog = IntegrationSyncLog::query()
+                ->where('wordpress_integration_id', $lockedIntegration->id)
+                ->where('operation', $operation)
+                ->whereIn('status', ['queued', 'running'])
+                ->latest()
+                ->first();
+
+            if ($activeLog instanceof IntegrationSyncLog
+                && ! $this->releaseStaleRunningImport($activeLog)) {
+                return $activeLog;
+            }
+
+            $requestPayload = $retryOf instanceof IntegrationSyncLog
+                ? [
+                    'source' => $source,
+                    'retry_of_log_id' => $retryOf->id,
+                    'retry_of_operation' => $retryOf->operation,
+                    'retry_requested_at' => now()->toDateTimeString(),
+                ]
+                : [
+                    'source' => $source,
+                    'queued_at' => now()->toDateTimeString(),
+                ];
+
+            return IntegrationSyncLog::query()->create([
+                'sales_channel_id' => $lockedIntegration->sales_channel_id,
+                'wordpress_integration_id' => $lockedIntegration->id,
+                'direction' => 'in',
+                'operation' => $operation,
+                'status' => 'queued',
+                'request_payload' => $requestPayload,
+                'attempts' => 1,
+                'started_at' => now(),
+            ]);
+        }, 3);
+
+        if (! $log->wasRecentlyCreated) {
+            return $log;
+        }
 
         match ($operation) {
             'import_products' => ImportWooCommerceProductsJob::dispatch($integration->id, $log->id),
             'import_orders' => ImportWooCommerceOrdersJob::dispatch($integration->id, $log->id),
-            default => throw new InvalidArgumentException("Nieobsługiwany import: {$operation}"),
         };
 
         return $log;
@@ -123,35 +136,45 @@ final class WooCommerceImportQueueService
         int $page,
         bool $backfill,
     ): IntegrationSyncLog {
-        $activeLog = IntegrationSyncLog::query()
-            ->where('wordpress_integration_id', $integration->id)
-            ->where('operation', 'import_orders')
-            ->whereIn('status', ['queued', 'running'])
-            ->whereKeyNot($parentLog->id)
-            ->latest()
-            ->first();
+        $log = DB::transaction(function () use ($integration, $parentLog, $backfill, $modifiedAfter, $page): IntegrationSyncLog {
+            $lockedIntegration = WordpressIntegration::query()
+                ->lockForUpdate()
+                ->findOrFail($integration->id);
 
-        if ($activeLog instanceof IntegrationSyncLog) {
-            return $activeLog;
+            $activeLog = IntegrationSyncLog::query()
+                ->where('wordpress_integration_id', $lockedIntegration->id)
+                ->where('operation', 'import_orders')
+                ->whereIn('status', ['queued', 'running'])
+                ->whereKeyNot($parentLog->id)
+                ->latest()
+                ->first();
+
+            if ($activeLog instanceof IntegrationSyncLog) {
+                return $activeLog;
+            }
+
+            return IntegrationSyncLog::query()->create([
+                'sales_channel_id' => $lockedIntegration->sales_channel_id,
+                'wordpress_integration_id' => $lockedIntegration->id,
+                'direction' => 'in',
+                'operation' => 'import_orders',
+                'status' => 'queued',
+                'request_payload' => [
+                    'source' => 'continuation',
+                    'parent_log_id' => $parentLog->id,
+                    'mode' => $backfill ? 'backfill' : 'incremental',
+                    'modified_after' => $modifiedAfter,
+                    'page' => max(1, $page),
+                    'queued_at' => now()->toDateTimeString(),
+                ],
+                'attempts' => 1,
+                'started_at' => now(),
+            ]);
+        }, 3);
+
+        if (! $log->wasRecentlyCreated) {
+            return $log;
         }
-
-        $log = IntegrationSyncLog::query()->create([
-            'sales_channel_id' => $integration->sales_channel_id,
-            'wordpress_integration_id' => $integration->id,
-            'direction' => 'in',
-            'operation' => 'import_orders',
-            'status' => 'queued',
-            'request_payload' => [
-                'source' => 'continuation',
-                'parent_log_id' => $parentLog->id,
-                'mode' => $backfill ? 'backfill' : 'incremental',
-                'modified_after' => $modifiedAfter,
-                'page' => max(1, $page),
-                'queued_at' => now()->toDateTimeString(),
-            ],
-            'attempts' => 1,
-            'started_at' => now(),
-        ]);
 
         ImportWooCommerceOrdersJob::dispatch(
             $integration->id,

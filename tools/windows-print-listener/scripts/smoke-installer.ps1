@@ -22,6 +22,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $installDirectory = Join-Path $env:ProgramFiles 'Sempre ERP\Print Listener'
 $listenerPath = Join-Path $installDirectory 'lemon-print-listener.exe'
+$rendererPath = Join-Path $installDirectory 'SumatraPDF.exe'
+$rendererLicensePath = Join-Path $installDirectory 'SumatraPDF-COPYING.txt'
 $uninstallerPath = Join-Path $installDirectory 'uninstall.exe'
 $configDirectory = Join-Path $env:ProgramData 'Sempre ERP\Print Listener'
 $configPath = Join-Path $configDirectory 'config.ini'
@@ -120,6 +122,22 @@ try {
     if ($service.Status -ne 'Running') {
         $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
     }
+    foreach ($path in @($rendererPath, $rendererLicensePath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Instalator nie umieścił wymaganego pliku: $path"
+        }
+    }
+    if ((Get-FileHash -LiteralPath $rendererPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+        '719f689b34f47be8ca105ce8484948474dafde0e106bab599e4a89326070c3d0') {
+        throw 'Zainstalowany renderer PDF ma nieoczekiwany SHA-256.'
+    }
+    if ((Get-AuthenticodeSignature -FilePath $rendererPath).Status -ne 'Valid') {
+        throw 'Zainstalowany renderer PDF nie ma prawidłowego podpisu Authenticode.'
+    }
+    & $listenerPath -validate-renderer
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Listener odrzucił zainstalowany renderer PDF.'
+    }
 
     $deadline = (Get-Date).AddSeconds(25)
     $health = $null
@@ -168,8 +186,42 @@ try {
         throw 'Instalator outbound pozostawił przychodzącą regułę Zapory Windows.'
     }
 
+    # A second silent run exercises the real in-place upgrade path: the service
+    # must be stopped, updated without DeleteService, restarted and usable.
+    $upgrade = Start-Process -FilePath $InstallerPath -ArgumentList '/S' -PassThru
+    if (-not $upgrade.WaitForExit(60000)) {
+        Stop-Process -Id $upgrade.Id -Force -ErrorAction SilentlyContinue
+        throw 'Aktualizacja instalatora nie zakończyła się w ciągu 60 sekund.'
+    }
+    $upgrade.Refresh()
+    if ($upgrade.ExitCode -ne 0) {
+        throw "Ponowne uruchomienie instalatora (upgrade) zakończyło się kodem $($upgrade.ExitCode)."
+    }
+    $service = Get-Service -Name $serviceName -ErrorAction Stop
+    if ($service.Status -ne 'Running') {
+        $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
+    }
+    $upgradeDeadline = (Get-Date).AddSeconds(25)
+    $upgradeHealth = $null
+    while ((Get-Date) -lt $upgradeDeadline) {
+        try {
+            $candidate = Invoke-RestMethod -Uri 'http://127.0.0.1:17778/health' -TimeoutSec 3
+            if ($candidate.connected -eq $true -and
+                -not [string]::IsNullOrWhiteSpace([string] $candidate.last_success_at)) {
+                $upgradeHealth = $candidate
+                break
+            }
+        } catch {
+            # The upgraded service may still be starting.
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    if ($null -eq $upgradeHealth) {
+        throw 'Usługa po aktualizacji nie odzyskała połączenia wychodzącego z ERP.'
+    }
+
     if ($RequireSignature) {
-        foreach ($path in @($InstallerPath, $listenerPath, $uninstallerPath)) {
+        foreach ($path in @($InstallerPath, $listenerPath, $uninstallerPath, $rendererPath)) {
             $signature = Get-AuthenticodeSignature -FilePath $path
             if ($signature.Status -ne 'Valid') {
                 throw "Plik $path nie ma prawidłowego podpisu Authenticode."
@@ -185,7 +237,7 @@ try {
         }
         $uninstall.Refresh()
         if ($uninstall.ExitCode -ne 0) {
-            Write-Warning "Uninstaller zakończył się kodem $($uninstall.ExitCode)."
+            throw "Uninstaller zakończył się kodem $($uninstall.ExitCode)."
         }
     }
     if ($null -ne $mockJob) {
@@ -194,7 +246,6 @@ try {
     }
 }
 
-Start-Sleep -Seconds 1
 if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
     throw 'Usługa pozostała po odinstalowaniu.'
 }

@@ -197,7 +197,7 @@ final class PackingFulfillmentService
                     ->where('courier', $courier)),
             )
             ->whereHas('packingTasks', fn ($query) => $query->where('status', 'packed'))
-            ->whereDoesntHave('packingTasks', fn ($query) => $query->whereNotIn('status', ['packed', 'cancelled']));
+            ->whereDoesntHave('packingTasks', fn ($query) => $query->whereNotIn('status', ['packed', 'shipped', 'cancelled']));
 
         $orders = $ordersQuery->get();
 
@@ -293,11 +293,16 @@ final class PackingFulfillmentService
             return ['tasks' => 0, 'warnings' => []];
         }
 
-        if ($tasks->contains(fn (PackingTask $task): bool => $task->status !== 'packed')) {
+        if ($tasks->contains(fn (PackingTask $task): bool => ! in_array($task->status, ['packed', 'shipped'], true))) {
             return [
                 'tasks' => 0,
                 'warnings' => ["Zamówienie {$order->external_number} nie jest jeszcze w całości spakowane."],
             ];
+        }
+
+        if ($tasks->every(fn (PackingTask $task): bool => $task->status === 'shipped')
+            && $order->fulfillment_status === 'shipped') {
+            return ['tasks' => 0, 'warnings' => []];
         }
 
         $warnings = [];
@@ -339,35 +344,68 @@ final class PackingFulfillmentService
             }
         }
 
-        foreach ($tasks as $task) {
-            $metadata = (array) $task->metadata;
-            $metadata['courier_pickup'] = array_merge([
-                'courier' => $task->courier,
-                'picked_up_at' => $pickedUpAt,
-                'source' => 'tracking',
-            ], $context);
+        $transition = DB::transaction(function () use ($order, $context, $pickedUpAt, $wooSync): array {
+            $lockedOrder = ExternalOrder::query()->lockForUpdate()->findOrFail($order->id);
+            $lockedTasks = PackingTask::query()
+                ->where('external_order_id', $lockedOrder->id)
+                ->where('status', '!=', 'cancelled')
+                ->lockForUpdate()
+                ->get();
 
-            $task->update([
-                'status' => 'shipped',
-                'metadata' => $metadata,
+            if ($lockedTasks->isEmpty()
+                || $lockedTasks->contains(fn (PackingTask $task): bool => ! in_array($task->status, ['packed', 'shipped'], true))) {
+                throw new RuntimeException("Zamówienie {$lockedOrder->external_number} zmieniło się podczas potwierdzania odbioru. Operacja zostanie ponowiona.");
+            }
+
+            $updated = 0;
+
+            foreach ($lockedTasks as $task) {
+                if ($task->status === 'shipped') {
+                    continue;
+                }
+
+                $metadata = (array) $task->metadata;
+                $metadata['courier_pickup'] = array_merge([
+                    'courier' => $task->courier,
+                    'picked_up_at' => $pickedUpAt,
+                    'source' => 'tracking',
+                ], $context);
+
+                $task->update([
+                    'status' => 'shipped',
+                    'metadata' => $metadata,
+                ]);
+                $updated++;
+            }
+
+            $lockedOrder->update(array_merge(['fulfillment_status' => 'shipped'], $wooSync));
+
+            return [
+                'tasks' => $updated,
+                'courier' => $lockedTasks->first()?->courier,
+                'order' => $lockedOrder,
+            ];
+        }, 3);
+
+        $order = $transition['order'];
+
+        try {
+            $this->communication->sendOrderStatus($order, 'order_courier_picked_up', [
+                'courier' => $transition['courier'],
+                'tracking_number' => $context['tracking_number'] ?? $this->latestTrackingNumber($order),
+                'source' => $context['source'] ?? 'tracking',
             ]);
+        } catch (Throwable $exception) {
+            $warnings[] = "Powiadomienie klienta {$order->external_number}: {$exception->getMessage()}";
         }
 
-        $order->update(array_merge(['fulfillment_status' => 'shipped'], $wooSync));
-
-        $this->communication->sendOrderStatus($order, 'order_courier_picked_up', [
-            'courier' => $tasks->first()?->courier,
-            'tracking_number' => $context['tracking_number'] ?? $this->latestTrackingNumber($order),
-            'source' => $context['source'] ?? 'tracking',
-        ]);
-
         $this->audit->record('packing.courier_picked_up_tracked', $order, null, [
-            'tasks' => $tasks->count(),
+            'tasks' => $transition['tasks'],
             'context' => $context,
             'warnings' => $warnings,
         ]);
 
-        return ['tasks' => $tasks->count(), 'warnings' => $warnings];
+        return ['tasks' => $transition['tasks'], 'warnings' => $warnings];
     }
 
     /**

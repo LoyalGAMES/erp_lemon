@@ -54,31 +54,28 @@
                         @php
                             $balanceByWarehouse = $variant->stockBalances->keyBy(fn ($balance) => (string) $balance->warehouse_id);
                             $displayVariantLabel = $variantLabel($variant);
-                            $warehouseRowspan = max(1, $stockWarehouses->count());
                         @endphp
                         @forelse ($stockWarehouses as $warehouse)
                             <tr data-variant-stock-row>
-                                @if ($loop->first)
-                                    <td class="variant-stock-name" rowspan="{{ $warehouseRowspan }}">
-                                        <strong>{{ $displayVariantLabel }}</strong>
-                                        @if ($displayVariantLabel !== $variant->name)
-                                            <small>{{ $variant->name }}</small>
-                                        @endif
-                                    </td>
-                                    <td class="variant-stock-identifiers" rowspan="{{ $warehouseRowspan }}">
-                                        <strong>{{ $variant->displaySku() ?: '-' }}</strong>
-                                        <small>EAN: {{ $variant->ean ?: '-' }}</small>
-                                    </td>
-                                @endif
+                                <td class="variant-stock-name" data-label="{{ $variantAttribute }}">
+                                    <strong>{{ $displayVariantLabel }}</strong>
+                                    @if ($displayVariantLabel !== $variant->name)
+                                        <small>{{ $variant->name }}</small>
+                                    @endif
+                                </td>
+                                <td class="variant-stock-identifiers" data-label="SKU / EAN">
+                                    <strong>{{ $variant->displaySku() ?: '-' }}</strong>
+                                    <small>EAN: {{ $variant->ean ?: '-' }}</small>
+                                </td>
                                 @php
                                     $balance = $balanceByWarehouse->get((string) $warehouse->id);
                                     $currentOnHand = (float) ($balance?->quantity_on_hand ?? 0);
                                 @endphp
-                                <td class="variant-stock-warehouse"><strong>{{ $warehouse->code }}</strong><small>{{ $warehouse->name }}</small></td>
-                                <td class="numeric variant-stock-quantity">{{ $stockQty($currentOnHand) }}</td>
-                                <td class="numeric variant-stock-quantity">{{ $stockQty($balance?->quantity_reserved ?? 0) }}</td>
-                                <td class="numeric variant-stock-quantity">{{ $stockQty($balance?->quantity_available ?? 0) }}</td>
-                                <td class="variant-stock-adjust" data-stock-adjust-row>
+                                <td class="variant-stock-warehouse" data-label="Magazyn"><strong>{{ $warehouse->code }}</strong><small>{{ $warehouse->name }}</small></td>
+                                <td class="numeric variant-stock-quantity" data-label="Stan">{{ $stockQty($currentOnHand) }}</td>
+                                <td class="numeric variant-stock-quantity" data-label="Rezerwacje">{{ $stockQty($balance?->quantity_reserved ?? 0) }}</td>
+                                <td class="numeric variant-stock-quantity" data-label="Dostępne">{{ $stockQty($balance?->quantity_available ?? 0) }}</td>
+                                <td class="variant-stock-adjust" data-label="Nowy stan ogółem" data-stock-adjust-row>
                                     <div class="variant-stock-quick-action">
                                         <input
                                             data-stock-adjust-quantity
@@ -101,24 +98,22 @@
                                     </div>
                                     <div class="stock-adjust-error" data-stock-adjust-error></div>
                                 </td>
-                                @if ($loop->first)
-                                    <td rowspan="{{ $warehouseRowspan }}"><a class="button secondary" href="{{ route('products.edit', $variant) }}">Edytuj</a></td>
-                                @endif
+                                <td data-label="Edycja"><a class="button secondary" href="{{ route('products.edit', $variant) }}">Edytuj</a></td>
                             </tr>
                         @empty
                             <tr data-variant-stock-row>
-                                <td class="variant-stock-name">
+                                <td class="variant-stock-name" data-label="{{ $variantAttribute }}">
                                     <strong>{{ $displayVariantLabel }}</strong>
                                     @if ($displayVariantLabel !== $variant->name)
                                         <small>{{ $variant->name }}</small>
                                     @endif
                                 </td>
-                                <td class="variant-stock-identifiers">
+                                <td class="variant-stock-identifiers" data-label="SKU / EAN">
                                     <strong>{{ $variant->displaySku() ?: '-' }}</strong>
                                     <small>EAN: {{ $variant->ean ?: '-' }}</small>
                                 </td>
-                                <td colspan="5" class="toolbar-note">Brak aktywnego magazynu do ręcznej korekty stanu.</td>
-                                <td><a class="button secondary" href="{{ route('products.edit', $variant) }}">Edytuj</a></td>
+                                <td colspan="5" class="toolbar-note" data-label="Magazyn">Brak aktywnego magazynu do ręcznej korekty stanu.</td>
+                                <td data-label="Edycja"><a class="button secondary" href="{{ route('products.edit', $variant) }}">Edytuj</a></td>
                             </tr>
                         @endforelse
                     @endforeach

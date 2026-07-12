@@ -9,8 +9,8 @@ use App\Models\Product;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Services\Audit\AuditLogService;
-use App\Services\Inventory\WarehouseDocumentSettingsService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
+use App\Services\Inventory\WarehouseDocumentSettingsService;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -25,7 +25,7 @@ class WarehouseDocumentController extends Controller
     {
         return view('documents.show', [
             'document' => $this->loadDocument($document),
-            'title' => 'Dokument ' . $document->number,
+            'title' => 'Dokument '.$document->number,
             'subtitle' => 'Szczegóły dokumentu magazynowego, pozycje i ruchy ledger po zaksięgowaniu.',
             'module' => 'documents',
         ]);
@@ -34,8 +34,7 @@ class WarehouseDocumentController extends Controller
     public function edit(
         WarehouseDocument $document,
         WarehouseDocumentSettingsService $settings,
-    ): View|RedirectResponse
-    {
+    ): View|RedirectResponse {
         if ($document->status !== 'draft') {
             return redirect()
                 ->route('documents.show', $document)
@@ -57,7 +56,7 @@ class WarehouseDocumentController extends Controller
             'sourceTypes' => WarehouseDocumentType::sourceWarehouseValues(),
             'destinationTypes' => WarehouseDocumentType::destinationWarehouseValues(),
             'locations' => $settings->locations(),
-            'title' => 'Edycja dokumentu ' . $document->number,
+            'title' => 'Edycja dokumentu '.$document->number,
             'subtitle' => 'Popraw magazyny, pozycje i notatki przed księgowaniem. Po zaksięgowaniu dokument nie będzie edytowalny.',
             'module' => 'documents',
         ]);
@@ -108,36 +107,51 @@ class WarehouseDocumentController extends Controller
             $validated['destination_warehouse_id'] = null;
         }
 
-        $beforeDocument = $document->load(['lines.product', 'sourceWarehouse', 'destinationWarehouse']);
-        $before = [
-            'number' => $beforeDocument->number,
-            'type' => $beforeDocument->type,
-            'source_warehouse' => $beforeDocument->sourceWarehouse?->code,
-            'destination_warehouse' => $beforeDocument->destinationWarehouse?->code,
-            'notes' => $beforeDocument->notes,
-            'lines' => $beforeDocument->lines->map(fn ($line): array => [
-                'sku' => $line->product?->sku,
-                'quantity' => (string) $line->quantity,
-                'unit_gross_price' => $line->unit_gross_price !== null ? (string) $line->unit_gross_price : null,
-                'location' => data_get($line->metadata, 'location'),
-            ])->values()->all(),
-        ];
         $documentDate = CarbonImmutable::parse((string) ($validated['document_date'] ?? $document->document_date?->toDateString() ?? now()->toDateString()))->startOfDay();
 
-        DB::transaction(function () use ($document, $validated, $lines, $documentDate): void {
-            $document->update([
-                'source_warehouse_id' => $validated['source_warehouse_id'] ?? null,
-                'destination_warehouse_id' => $validated['destination_warehouse_id'] ?? null,
-                'document_date' => $documentDate,
-                'notes' => $validated['notes'] ?? null,
-            ]);
+        try {
+            [$document, $before] = DB::transaction(function () use ($document, $validated, $lines, $documentDate): array {
+                $lockedDocument = WarehouseDocument::query()
+                    ->with(['lines.product', 'sourceWarehouse', 'destinationWarehouse'])
+                    ->lockForUpdate()
+                    ->findOrFail($document->id);
 
-            $document->lines()->delete();
+                if ($lockedDocument->status !== 'draft') {
+                    throw new RuntimeException('Edytować można tylko dokument w statusie szkic.');
+                }
 
-            foreach ($lines as $line) {
-                $document->lines()->create($line);
-            }
-        });
+                $before = [
+                    'number' => $lockedDocument->number,
+                    'type' => $lockedDocument->type,
+                    'source_warehouse' => $lockedDocument->sourceWarehouse?->code,
+                    'destination_warehouse' => $lockedDocument->destinationWarehouse?->code,
+                    'notes' => $lockedDocument->notes,
+                    'lines' => $lockedDocument->lines->map(fn ($line): array => [
+                        'sku' => $line->product?->sku,
+                        'quantity' => (string) $line->quantity,
+                        'unit_gross_price' => $line->unit_gross_price !== null ? (string) $line->unit_gross_price : null,
+                        'location' => data_get($line->metadata, 'location'),
+                    ])->values()->all(),
+                ];
+
+                $lockedDocument->update([
+                    'source_warehouse_id' => $validated['source_warehouse_id'] ?? null,
+                    'destination_warehouse_id' => $validated['destination_warehouse_id'] ?? null,
+                    'document_date' => $documentDate,
+                    'notes' => $validated['notes'] ?? null,
+                ]);
+
+                $lockedDocument->lines()->delete();
+
+                foreach ($lines as $line) {
+                    $lockedDocument->lines()->create($line);
+                }
+
+                return [$lockedDocument, $before];
+            }, 3);
+        } catch (RuntimeException $exception) {
+            return back()->withInput()->with('error', $exception->getMessage());
+        }
 
         $document->load(['lines.product', 'sourceWarehouse', 'destinationWarehouse']);
         $audit->record(
@@ -175,8 +189,7 @@ class WarehouseDocumentController extends Controller
         WarehouseDocument $document,
         WarehouseDocumentPostingService $postingService,
         AuditLogService $audit,
-    ): RedirectResponse
-    {
+    ): RedirectResponse {
         try {
             $postingService->post($document);
         } catch (RuntimeException $exception) {
@@ -198,8 +211,7 @@ class WarehouseDocumentController extends Controller
         WarehouseDocument $document,
         WarehouseDocumentPostingService $postingService,
         AuditLogService $audit,
-    ): RedirectResponse
-    {
+    ): RedirectResponse {
         try {
             $postingService->cancel($document);
         } catch (RuntimeException $exception) {
@@ -229,7 +241,7 @@ class WarehouseDocumentController extends Controller
     }
 
     /**
-     * @param array<string, mixed> $validated
+     * @param  array<string, mixed>  $validated
      * @return list<array{product_id:int,quantity:float,unit_gross_price:?float,notes:?string,metadata:?array<string,string>}>
      */
     private function documentLines(array $validated, WarehouseDocumentType $documentType): array
@@ -264,7 +276,7 @@ class WarehouseDocumentController extends Controller
     }
 
     /**
-     * @param Collection<int, Product> $products
+     * @param  Collection<int, Product>  $products
      * @return array<int, array<int, int>>
      */
     private function productStockPayload(Collection $products): array

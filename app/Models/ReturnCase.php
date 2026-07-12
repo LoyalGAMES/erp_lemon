@@ -18,6 +18,7 @@ class ReturnCase extends Model
 
     protected $fillable = [
         'number',
+        'store_return_reference',
         'external_order_id',
         'target_warehouse_id',
         'warehouse_document_id',

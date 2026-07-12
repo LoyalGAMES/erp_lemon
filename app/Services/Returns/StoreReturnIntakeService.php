@@ -9,21 +9,23 @@ use App\Models\ExternalOrderLine;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
 use App\Services\Communication\CustomerCommunicationService;
+use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 final class StoreReturnIntakeService
 {
     public const STATUS_PENDING = 'pending';
+
     public const STATUS_COMPLETED = 'completed';
+
     public const STATUS_REJECTED = 'rejected';
 
     public function __construct(
         private readonly ReturnNumberService $numbers,
         private readonly ReturnSettingsService $settings,
         private readonly CustomerCommunicationService $communication,
-    ) {
-    }
+    ) {}
 
     /**
      * Znajduje zamówienie po numerze oraz kontakcie klienta (e-mail lub telefon).
@@ -95,25 +97,20 @@ final class StoreReturnIntakeService
      * Tworzy zgłoszenie zwrotu ze sklepu jako ReturnCase w statusie pending.
      * Idempotentne po return_reference — ponowiona próba zwraca istniejące zgłoszenie.
      *
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      */
     public function createFromStorePayload(array $payload): ReturnCase
     {
         $returnReference = trim((string) ($payload['return_reference'] ?? ''));
 
-        if ($returnReference !== '') {
-            $existing = $this->findByReference($returnReference, null);
-
-            if ($existing instanceof ReturnCase) {
-                return $existing;
-            }
+        if ($returnReference === '') {
+            throw new RuntimeException('Brak identyfikatora zgłoszenia zwrotu ze sklepu.');
         }
 
         $order = $this->resolveOrderForPayload($payload);
-        $items = $this->matchItems($order, (array) ($payload['items'] ?? []));
 
-        if ($items === []) {
-            throw new RuntimeException('Zgłoszenie nie zawiera pozycji możliwych do zwrotu.');
+        if (! $order instanceof ExternalOrder) {
+            throw new RuntimeException('Nie znaleziono zamówienia wskazanego w zgłoszeniu zwrotu.');
         }
 
         $settings = $this->settings->data();
@@ -124,54 +121,94 @@ final class StoreReturnIntakeService
             $email = $contact;
         }
 
-        $returnCase = DB::transaction(function () use ($payload, $order, $items, $settings, $contact, $email, $returnReference): ReturnCase {
-            $returnCase = ReturnCase::query()->create([
-                'number' => $this->numbers->next(),
-                'external_order_id' => $order?->id,
-                'target_warehouse_id' => $settings['default_target_warehouse_id'],
-                'status' => self::STATUS_PENDING,
-                'reason' => $this->dominantReason($items),
-                'customer_email' => $email !== '' ? mb_substr($email, 0, 255) : null,
-                'notes' => filled($payload['customer_note'] ?? null)
-                    ? mb_substr(trim((string) $payload['customer_note']), 0, 2000)
-                    : null,
-                'metadata' => [
-                    'source' => 'store_form',
-                    'return_reference' => $returnReference !== '' ? $returnReference : null,
-                    'local_return_id' => $payload['local_return_id'] ?? null,
-                    'site_url' => filled($payload['site_url'] ?? null) ? (string) $payload['site_url'] : null,
-                    'return_method' => filled($payload['return_method'] ?? null) ? (string) $payload['return_method'] : null,
-                    'customer_contact' => $contact !== '' ? $contact : null,
-                    'customer_phone' => filled($payload['customer_phone'] ?? null) ? (string) $payload['customer_phone'] : null,
-                    'external_order_number' => (string) ($payload['order_number'] ?? $payload['order_reference'] ?? ''),
-                    'store_order_id' => filled($payload['order_id'] ?? null) ? (string) $payload['order_id'] : null,
-                ],
-            ]);
+        $created = false;
 
-            foreach ($items as $item) {
-                $returnCase->lines()->create([
-                    'product_id' => $item['order_line']?->product_id,
-                    'external_order_line_id' => $item['order_line']?->id,
-                    'quantity_expected' => $item['quantity'],
-                    'quantity_accepted' => $item['quantity'],
-                    'condition' => $settings['default_condition'],
-                    'disposition' => $settings['default_disposition'],
+        try {
+            $returnCase = DB::transaction(function () use ($payload, $order, $settings, $contact, $email, $returnReference, &$created): ReturnCase {
+                $order = ExternalOrder::query()
+                    ->with('lines.product')
+                    ->lockForUpdate()
+                    ->findOrFail($order->id);
+                $existing = ReturnCase::query()
+                    ->where('store_return_reference', $returnReference)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($existing instanceof ReturnCase) {
+                    return $existing;
+                }
+
+                $items = $this->matchItems($order, (array) ($payload['items'] ?? []));
+
+                if ($items === []) {
+                    throw new RuntimeException('Zgłoszenie nie zawiera pozycji możliwych do zwrotu.');
+                }
+
+                $returnCase = ReturnCase::query()->create([
+                    'number' => $this->numbers->next(),
+                    'store_return_reference' => $returnReference,
+                    'external_order_id' => $order->id,
                     'target_warehouse_id' => $settings['default_target_warehouse_id'],
-                    'notes' => $item['reason'] !== '' ? mb_substr('Powód klienta: '.$item['reason'], 0, 2000) : null,
+                    'status' => self::STATUS_PENDING,
+                    'reason' => $this->dominantReason($items),
+                    'customer_email' => $email !== '' ? mb_substr($email, 0, 255) : null,
+                    'notes' => filled($payload['customer_note'] ?? null)
+                        ? mb_substr(trim((string) $payload['customer_note']), 0, 2000)
+                        : null,
                     'metadata' => [
-                        'created_from' => 'store_form',
-                        'store_item_id' => $item['id'],
-                        'store_item_name' => $item['name'],
-                        'store_item_sku' => $item['sku'],
-                        'store_item_reason' => $item['reason'],
+                        'source' => 'store_form',
+                        'return_reference' => $returnReference,
+                        'local_return_id' => $payload['local_return_id'] ?? null,
+                        'site_url' => filled($payload['site_url'] ?? null) ? (string) $payload['site_url'] : null,
+                        'return_method' => filled($payload['return_method'] ?? null) ? (string) $payload['return_method'] : null,
+                        'customer_contact' => $contact !== '' ? $contact : null,
+                        'customer_phone' => filled($payload['customer_phone'] ?? null) ? (string) $payload['customer_phone'] : null,
+                        'external_order_number' => (string) ($payload['order_number'] ?? $payload['order_reference'] ?? ''),
+                        'store_order_id' => filled($payload['order_id'] ?? null) ? (string) $payload['order_id'] : null,
                     ],
                 ]);
+
+                foreach ($items as $item) {
+                    $returnCase->lines()->create([
+                        'product_id' => $item['order_line']?->product_id,
+                        'external_order_line_id' => $item['order_line']?->id,
+                        'quantity_expected' => $item['quantity'],
+                        'quantity_accepted' => $item['quantity'],
+                        'condition' => $settings['default_condition'],
+                        'disposition' => $settings['default_disposition'],
+                        'target_warehouse_id' => $settings['default_target_warehouse_id'],
+                        'notes' => $item['reason'] !== '' ? mb_substr('Powód klienta: '.$item['reason'], 0, 2000) : null,
+                        'metadata' => [
+                            'created_from' => 'store_form',
+                            'store_item_id' => $item['id'],
+                            'store_item_name' => $item['name'],
+                            'store_item_sku' => $item['sku'],
+                            'store_item_reason' => $item['reason'],
+                        ],
+                    ]);
+                }
+
+                $created = true;
+
+                return $returnCase;
+            });
+        } catch (QueryException $exception) {
+            $sqlState = (string) ($exception->errorInfo[0] ?? $exception->getCode());
+
+            if (! in_array($sqlState, ['19', '23000', '23505'], true)) {
+                throw $exception;
             }
 
-            return $returnCase;
-        });
+            $returnCase = ReturnCase::query()->where('store_return_reference', $returnReference)->first();
 
-        $this->communication->sendReturnStatus($returnCase, 'return_waiting_for_package');
+            if (! $returnCase instanceof ReturnCase) {
+                throw $exception;
+            }
+        }
+
+        if ($created) {
+            $this->communication->sendReturnStatus($returnCase, 'return_waiting_for_package');
+        }
 
         return $returnCase;
     }
@@ -183,7 +220,8 @@ final class StoreReturnIntakeService
 
         if ($returnReference !== '') {
             $byReference = ReturnCase::query()
-                ->where('metadata->return_reference', $returnReference)
+                ->where('store_return_reference', $returnReference)
+                ->orWhere('metadata->return_reference', $returnReference)
                 ->first();
 
             if ($byReference instanceof ReturnCase) {
@@ -245,7 +283,7 @@ final class StoreReturnIntakeService
     }
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      */
     private function resolveOrderForPayload(array $payload): ?ExternalOrder
     {
@@ -274,7 +312,7 @@ final class StoreReturnIntakeService
      * Dopasowuje pozycje zgłoszenia do linii zamówienia i przycina ilości
      * do wartości pozostałych do zwrotu.
      *
-     * @param array<int, mixed> $items
+     * @param  array<int, mixed>  $items
      * @return list<array{id:string,name:string,sku:string,reason:string,quantity:float,order_line:?ExternalOrderLine}>
      */
     private function matchItems(?ExternalOrder $order, array $items): array
@@ -344,7 +382,7 @@ final class StoreReturnIntakeService
     }
 
     /**
-     * @param list<array{reason:string}> $items
+     * @param  list<array{reason:string}>  $items
      */
     private function dominantReason(array $items): ?string
     {
@@ -390,7 +428,7 @@ final class StoreReturnIntakeService
     }
 
     /**
-     * @param array<string, float> $returned
+     * @param  array<string, float>  $returned
      */
     private function returnedQuantityForLine(ExternalOrderLine $line, array $returned): float
     {

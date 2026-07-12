@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -27,8 +28,10 @@ var (
 )
 
 const (
-	defaultRunMode      = "bridge"
-	defaultLegacyListen = "127.0.0.1:17777"
+	defaultRunMode        = "bridge"
+	defaultLegacyListen   = "127.0.0.1:17777"
+	bundledSumatraVersion = "3.6.1"
+	bundledSumatraSHA256  = "719f689b34f47be8ca105ce8484948474dafde0e106bab599e4a89326070c3d0"
 )
 
 type appConfig struct {
@@ -71,16 +74,18 @@ func main() {
 	var protectDirectory string
 	var protectFile string
 	var validateBridgeConfig bool
+	var validateRenderer bool
 	flag.StringVar(&cfg.mode, "mode", defaultRunMode, "Run mode: bridge (outbound ERP polling) or listener (legacy inbound HTTP)")
 	flag.StringVar(&cfg.configPath, "config", defaultBridgeConfigPath(), "Path to the ACL-protected outbound bridge configuration")
 	flag.StringVar(&cfg.listen, "listen", defaultLegacyListen, "Legacy HTTP listen address; non-loopback requires -token")
-	flag.StringVar(&cfg.sumatraPath, "sumatra", "", "Optional path to SumatraPDF.exe for PDF/image labels")
+	flag.StringVar(&cfg.sumatraPath, "sumatra", "", "Override path to the pinned SumatraPDF.exe renderer (exact SHA-256 required)")
 	flag.StringVar(&cfg.token, "token", "", "Optional shared token required in Authorization: Bearer ... or X-Print-Token")
 	flag.StringVar(&cfg.logFile, "log-file", "", "Optional append-only log file path (recommended for the Windows service)")
-	flag.StringVar(&serviceAction, "service", "", "Windows service action: install, uninstall, start, or stop")
+	flag.StringVar(&serviceAction, "service", "", "Windows service action: install, update, uninstall, start, or stop")
 	flag.StringVar(&protectDirectory, "protect-config-directory", "", "Apply the restricted SYSTEM/Administrators ACL to a config directory")
 	flag.StringVar(&protectFile, "protect-config-file", "", "Apply the restricted SYSTEM/Administrators ACL to a config file")
 	flag.BoolVar(&validateBridgeConfig, "validate-config", false, "Validate the outbound bridge config and its Windows ACL, then exit")
+	flag.BoolVar(&validateRenderer, "validate-renderer", false, "Validate the pinned bundled PDF renderer, then exit")
 	flag.BoolVar(&showVersion, "version", false, "Print version and source commit, then exit")
 	flag.Parse()
 
@@ -125,6 +130,14 @@ func main() {
 		fmt.Printf("Outbound bridge configuration is valid (station=%s, worker=%s)\n", bridgeConfig.Station, bridgeConfig.WorkerName)
 		return
 	}
+	if validateRenderer {
+		path, err := cfg.resolveSumatra()
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Printf("Pinned SumatraPDF %s renderer is valid: %s\n", bundledSumatraVersion, path)
+		return
+	}
 
 	cfg.mode = strings.ToLower(strings.TrimSpace(cfg.mode))
 	var runner applicationRunner
@@ -137,7 +150,10 @@ func main() {
 		}
 		printerConfig := cfg
 		printerConfig.sumatraPath = bridgeConfig.SumatraPath
-		bridge := newPrintBridge(bridgeConfig, printerConfig)
+		bridge, err := newPrintBridge(bridgeConfig, printerConfig, filepath.Join(filepath.Dir(cfg.configPath), "print-journal.json"))
+		if err != nil {
+			log.Fatalf("Cannot open durable print acknowledgement journal: %v", err)
+		}
 		log.Printf(
 			"Sempre ERP Print Listener %s (%s) starting in outbound bridge mode for station %s as %s",
 			version,
@@ -325,7 +341,7 @@ func (cfg appConfig) printWithSumatra(req printRequest, data []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, sumatra, "-print-to", req.PrinterName, "-silent", "-exit-on-print", temp.Name())
+	cmd := exec.CommandContext(ctx, sumatra, "-print-to", req.PrinterName, "-silent", temp.Name())
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		return fmt.Errorf("printing timed out")
@@ -339,14 +355,14 @@ func (cfg appConfig) printWithSumatra(req printRequest, data []byte) error {
 
 func (cfg appConfig) resolveSumatra() (string, error) {
 	candidates := []string{}
+	if exe, err := os.Executable(); err == nil {
+		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "SumatraPDF.exe"))
+	}
 	if cfg.sumatraPath != "" {
 		candidates = append(candidates, cfg.sumatraPath)
 	}
 	if env := strings.TrimSpace(os.Getenv("SUMATRA_PATH")); env != "" {
 		candidates = append(candidates, env)
-	}
-	if exe, err := os.Executable(); err == nil {
-		candidates = append(candidates, filepath.Join(filepath.Dir(exe), "SumatraPDF.exe"))
 	}
 	if programFiles := os.Getenv("ProgramFiles"); programFiles != "" {
 		candidates = append(candidates, filepath.Join(programFiles, "SumatraPDF", "SumatraPDF.exe"))
@@ -363,11 +379,30 @@ func (cfg appConfig) resolveSumatra() (string, error) {
 			continue
 		}
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate, nil
+			if err := validateSumatraBinary(candidate); err == nil {
+				return candidate, nil
+			}
 		}
 	}
 
-	return "", errors.New("PDF/image labels require SumatraPDF.exe next to the listener, installed in Program Files, or passed with -sumatra")
+	return "", errors.New("PDF/image labels require the pinned SumatraPDF 3.6.1 renderer (SHA-256 mismatch or file missing); reinstall the signed Sempre ERP Print Listener")
+}
+
+func validateSumatraBinary(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, io.LimitReader(file, 100<<20)); err != nil {
+		return err
+	}
+	actual := fmt.Sprintf("%x", hash.Sum(nil))
+	if !secureTokenEqual(actual, bundledSumatraSHA256) {
+		return fmt.Errorf("SumatraPDF SHA-256 is %s, expected %s", actual, bundledSumatraSHA256)
+	}
+	return nil
 }
 
 func detectFormat(req printRequest, data []byte) string {
@@ -447,7 +482,7 @@ func configureLogging(path string) error {
 		return err
 	}
 
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o640)
+	file, err := newRotatingLogWriter(path, defaultLogMaxBytes, defaultLogBackups)
 	if err != nil {
 		return err
 	}

@@ -168,6 +168,7 @@ final class ProductImportIssueService
             ->where('sales_channel_id', $salesChannelId)
             ->whereNotNull('external_sku')
             ->where('external_sku', '!=', '')
+            ->orderBy('id')
             ->get([
                 'id',
                 'product_id',

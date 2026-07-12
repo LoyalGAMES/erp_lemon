@@ -10,6 +10,7 @@ use App\Models\ProductCategory;
 use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\WordpressIntegration;
+use App\Services\Products\ProductDescriptionSanitizer;
 use Illuminate\Support\Collection;
 use RuntimeException;
 
@@ -20,6 +21,7 @@ final class ProductDataExportService
 
     public function __construct(
         private readonly WooCommerceClient $client,
+        private readonly ProductDescriptionSanitizer $descriptionSanitizer,
     ) {}
 
     /**
@@ -611,10 +613,14 @@ final class ProductDataExportService
         $salePriceStartsAt = data_get($master, 'prices.sale_price_starts_at');
         $salePriceEndsAt = data_get($master, 'prices.sale_price_ends_at');
         $publicationDate = $this->dateTimeString(data_get($master, 'publication_date'));
-        $description = data_get($master, "content.{$language}.description")
-            ?? data_get($master, 'content.pl.description');
-        $shortDescription = data_get($master, "content.{$language}.additional_description")
-            ?? data_get($master, 'content.pl.additional_description');
+        $description = $this->descriptionSanitizer->sanitize(
+            data_get($master, "content.{$language}.description")
+                ?? data_get($master, 'content.pl.description'),
+        );
+        $shortDescription = $this->descriptionSanitizer->sanitize(
+            data_get($master, "content.{$language}.additional_description")
+                ?? data_get($master, 'content.pl.additional_description'),
+        );
         $hasLanguageContent = $language === 'pl' || is_array(data_get($master, "content.{$language}"));
         $images = $this->images($product);
         $manageStock = (bool) data_get($master, 'inventory.manage_stock', true);
@@ -863,8 +869,12 @@ final class ProductDataExportService
             '_sempre_erp_developed' => data_get($master, 'developed') ? '1' : '0',
             '_sempre_erp_location' => data_get($master, 'stock.location'),
             '_sempre_erp_name_en' => data_get($master, 'content.en.name'),
-            '_sempre_erp_description_en' => data_get($master, 'content.en.description'),
-            '_sempre_erp_short_description_en' => data_get($master, 'content.en.additional_description'),
+            '_sempre_erp_description_en' => $this->descriptionSanitizer->sanitize(
+                data_get($master, 'content.en.description'),
+            ),
+            '_sempre_erp_short_description_en' => $this->descriptionSanitizer->sanitize(
+                data_get($master, 'content.en.additional_description'),
+            ),
             '_sempre_erp_upsell_skus' => implode(', ', (array) data_get($master, 'related_products.upsell_skus', [])),
             '_sempre_erp_cross_sell_skus' => implode(', ', (array) data_get($master, 'related_products.cross_sell_skus', [])),
             '_sempre_erp_product_type' => data_get($master, 'product_type'),

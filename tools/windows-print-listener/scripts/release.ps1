@@ -27,6 +27,9 @@ if ([string]::IsNullOrWhiteSpace($pfxPassword)) {
 if ([string]::IsNullOrWhiteSpace([string] $env:WINDOWS_CODESIGN_TIMESTAMP_URL)) {
     throw 'WINDOWS_CODESIGN_TIMESTAMP_URL nie jest ustawiony.'
 }
+if ([string]::IsNullOrWhiteSpace($expectedSubject)) {
+    throw 'WINDOWS_CODESIGN_SUBJECT nie jest ustawiony; wydanie musi przypinać oczekiwanego wydawcę certyfikatu.'
+}
 
 $previousThumbprint = $env:WINDOWS_CODESIGN_THUMBPRINT
 $securePassword = $null
@@ -60,9 +63,8 @@ try {
     if ($certificate.NotBefore -gt (Get-Date) -or $certificate.NotAfter -le (Get-Date)) {
         throw 'Certyfikat Authenticode nie jest obecnie ważny.'
     }
-    if (-not [string]::IsNullOrWhiteSpace($expectedSubject) -and
-        $certificate.Subject.IndexOf($expectedSubject, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
-        throw "Podmiot certyfikatu '$($certificate.Subject)' nie zawiera oczekiwanej wartości '$expectedSubject'."
+    if (-not [string]::Equals($certificate.Subject, $expectedSubject, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Podmiot certyfikatu '$($certificate.Subject)' nie jest dokładnie oczekiwanym '$expectedSubject'."
     }
 
     $env:WINDOWS_CODESIGN_THUMBPRINT = $certificate.Thumbprint

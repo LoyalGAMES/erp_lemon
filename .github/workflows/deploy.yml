@@ -5,88 +5,172 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
 concurrency:
   group: erp-semprelove-production
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
+  verify:
+    name: Testy i kontrola dostaw
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
 
     steps:
-      - name: Pobierz kod
-        uses: actions/checkout@v4
+      - name: Pobierz dokładny commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
-      - name: Skonfiguruj SSH
+      - name: Sprawdź workflowy i skrypty wdrożeniowe
+        shell: bash
+        run: |
+          set -euo pipefail
+          find scripts -type f -name '*.sh' -print0 | xargs -0 -n 1 bash -n
+          bash scripts/deploy/test-deploy-scripts.sh
+          go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7 -color
+
+      - name: Sprawdź pliki PHP
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' file; do
+            php -l "$file" >/dev/null
+          done < <(find app bootstrap config database routes tests scripts/deploy -type f -name '*.php' -print0)
+
+      - name: Zweryfikuj lock i znane podatności produkcyjne
+        shell: bash
+        run: |
+          set -euo pipefail
+          composer validate --strict --no-interaction
+          composer audit --locked --no-dev --no-interaction
+
+      - name: Zainstaluj zależności dokładnie z locka
+        shell: bash
+        run: >-
+          composer install
+          --no-interaction
+          --no-progress
+          --prefer-dist
+          --optimize-autoloader
+
+      - name: Ustaw przypiętą wersję Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Zweryfikuj i zbuduj zasoby frontendowe z locka
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts
+          npm audit --audit-level=high
+          npm run build
+
+      - name: Uruchom testy aplikacji
+        shell: bash
+        run: php -d memory_limit=512M artisan test --compact
+
+  deploy:
+    name: Atomowe wdrożenie produkcyjne
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment:
+      name: production
+
+    steps:
+      - name: Pobierz zweryfikowany commit
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Zweryfikuj cel i skonfiguruj przypięte SSH
         env:
           SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
           SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
           SSH_PORT: ${{ secrets.SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        shell: bash
         run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
+          set -euo pipefail
+          release_id="${GITHUB_SHA:0:12}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          export RELEASE_ID="$release_id"
 
+          install -d -m 0700 ~/.ssh
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0600 ~/.ssh/deploy_key ~/.ssh/known_hosts
 
-          ssh-keyscan -p "$SSH_PORT" -H "$SSH_HOST" >> ~/.ssh/known_hosts
-          chmod 600 ~/.ssh/known_hosts
+          export KNOWN_HOSTS_FILE="$HOME/.ssh/known_hosts"
+          bash scripts/deploy/validate-target.sh
+          ssh-keygen -y -P '' -f ~/.ssh/deploy_key >/dev/null
 
-      - name: Wyślij pliki na serwer
+          {
+            printf 'Host production-erp\n'
+            printf '  HostName %s\n' "$SSH_HOST"
+            printf '  User %s\n' "$SSH_USER"
+            printf '  Port %s\n' "$SSH_PORT"
+            printf '  IdentityFile %s/.ssh/deploy_key\n' "$HOME"
+            printf '  UserKnownHostsFile %s/.ssh/known_hosts\n' "$HOME"
+            printf '  IdentitiesOnly yes\n'
+            printf '  BatchMode yes\n'
+            printf '  StrictHostKeyChecking yes\n'
+            printf '  ConnectTimeout 10\n'
+            printf '  ServerAliveInterval 15\n'
+            printf '  ServerAliveCountMax 3\n'
+            printf '  LogLevel ERROR\n'
+          } > ~/.ssh/config
+          chmod 0600 ~/.ssh/config
+
+          printf 'RELEASE_ID=%s\n' "$release_id" >> "$GITHUB_ENV"
+          ssh production-erp true
+
+      - name: Utwórz pusty katalog nowego wydania
         env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        shell: bash
         run: |
+          set -euo pipefail
+          ssh production-erp \
+            "bash -s -- '$DEPLOY_PATH' '$RELEASE_ID'" \
+            < scripts/deploy/initialize-release.sh
+
+      - name: Wyślij wyłącznie kod do nowego wydania
+        env:
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          remote_release="${DEPLOY_PATH}.deploy/releases/${RELEASE_ID}"
           rsync -az \
-            --delete \
-            --exclude=".git/" \
-            --exclude=".github/" \
-            --exclude=".env" \
-            --exclude="vendor/" \
-            --exclude="node_modules/" \
-            --exclude="tools/windows-print-listener/dist/" \
-            --exclude="storage/logs/*" \
-            --exclude="storage/framework/cache/*" \
-            --exclude="storage/framework/sessions/*" \
-            --exclude="storage/framework/views/*" \
-            --exclude="public/uploads/*" \
-            -e "ssh -i ~/.ssh/deploy_key -p $SSH_PORT" \
-            ./ "$SSH_USER@$SSH_HOST:$DEPLOY_PATH/"
+            --exclude='/.git/***' \
+            --exclude='/.github/***' \
+            --exclude='/.env' \
+            --exclude='/vendor/***' \
+            --exclude='/node_modules/***' \
+            --exclude='/storage/***' \
+            --exclude='/database/*.sqlite*' \
+            --exclude='/public/uploads/***' \
+            --exclude='/tools/windows-print-listener/dist/***' \
+            ./ "production-erp:${remote_release}/"
 
-      - name: Uruchom komendy Laravel
+      - name: Backup, migracja, preflight i atomowe przełączenie CURRENT
         env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        shell: bash
         run: |
-          ssh \
-            -i ~/.ssh/deploy_key \
-            -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "cd '$DEPLOY_PATH' && \
-             composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader && \
-             php artisan migrate --force && \
-             php artisan optimize:clear && \
-             php artisan config:cache && \
-             php artisan route:cache && \
-             php artisan view:cache && \
-             php artisan queue:restart && \
-             bash scripts/install-laravel-scheduler.sh '$DEPLOY_PATH' && \
-             php artisan schedule:list && \
-             php artisan erp:preflight"
+          set -euo pipefail
+          remote_script="${DEPLOY_PATH}.deploy/releases/${RELEASE_ID}/scripts/deploy/remote-release.sh"
+          ssh production-erp \
+            "bash '$remote_script' deploy '$DEPLOY_PATH' '$RELEASE_ID'"
 
-      - name: Ustaw uprawnienia Laravel
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-        run: |
-          ssh \
-            -i ~/.ssh/deploy_key \
-            -p "$SSH_PORT" \
-            "$SSH_USER@$SSH_HOST" \
-            "chmod -R 775 '$DEPLOY_PATH/storage' '$DEPLOY_PATH/bootstrap/cache'"
+      - name: Usuń lokalny materiał SSH
+        if: ${{ always() }}
+        shell: bash
+        run: rm -f ~/.ssh/deploy_key ~/.ssh/known_hosts ~/.ssh/config

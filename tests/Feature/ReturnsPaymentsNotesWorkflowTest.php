@@ -305,8 +305,62 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
         });
     }
 
+    public function test_payu_refund_can_retry_the_same_payment_after_oauth_failure(): void
+    {
+        Mail::fake();
+
+        app(PayuRefundSettingsService::class)->update([
+            'enabled' => true,
+            'auto_refund_enabled' => false,
+            'environment' => 'sandbox',
+            'client_id' => '300746',
+            'client_secret' => 'secret',
+            'refund_type' => 'REFUND_PAYMENT_STANDARD',
+        ]);
+
+        $order = $this->createOrder([
+            'payment_method' => 'payu',
+            'payment_method_title' => 'PayU',
+            'payu_order_id' => 'PAYU123',
+        ]);
+        $returnCase = $this->createReturnCase($order, ['status' => 'corrected']);
+        $invoice = $this->createCorrectionInvoice($order, -123.45);
+        $returnCase->update(['correction_invoice_id' => $invoice->id]);
+
+        Http::fake([
+            'https://secure.snd.payu.com/pl/standard/user/oauth/authorize' => Http::sequence()
+                ->push(['error' => 'temporarily_unavailable'], 503)
+                ->push(['access_token' => 'token-123']),
+            'https://secure.snd.payu.com/api/v2_1/orders/PAYU123/refunds' => Http::response([
+                'refund' => [
+                    'refundId' => 'REF-RETRY',
+                    'status' => 'PENDING',
+                ],
+                'status' => ['statusCode' => 'SUCCESS'],
+            ]),
+        ]);
+
+        $this->post(route('returns.payu-refund', $returnCase))
+            ->assertRedirect()
+            ->assertSessionHas('error');
+
+        $payment = CustomerPayment::query()->firstOrFail();
+        $this->assertSame('failed', $payment->status);
+        $this->assertStringContainsString('temporarily_unavailable', (string) data_get($payment->metadata, 'payu.error'));
+
+        $this->post(route('returns.payu-refund', $returnCase))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $payment->refresh();
+        $this->assertSame(1, CustomerPayment::query()->count());
+        $this->assertSame('pending', $payment->status);
+        $this->assertSame('REF-RETRY', $payment->reference);
+        $this->assertSame(2, data_get($payment->metadata, 'payu.attempts'));
+    }
+
     /**
-     * @param array<string, mixed> $rawPayload
+     * @param  array<string, mixed>  $rawPayload
      */
     private function createOrder(array $rawPayload = []): ExternalOrder
     {
@@ -367,7 +421,7 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
     }
 
     /**
-     * @param array<string, mixed> $attributes
+     * @param  array<string, mixed>  $attributes
      */
     private function createReturnCase(ExternalOrder $order, array $attributes = []): ReturnCase
     {

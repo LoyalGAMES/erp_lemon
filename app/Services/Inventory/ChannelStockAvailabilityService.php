@@ -18,7 +18,9 @@ final class ChannelStockAvailabilityService
             ->with('warehouse')
             ->where('sales_channel_id', $salesChannelId)
             ->where('push_stock', true)
+            ->whereHas('warehouse', fn ($query) => $query->where('is_active', true))
             ->orderBy('priority')
+            ->orderBy('warehouse_id')
             ->get();
 
         $warehouseIds = $routes->pluck('warehouse_id')->values()->all();

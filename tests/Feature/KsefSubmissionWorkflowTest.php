@@ -13,6 +13,7 @@ use App\Services\Ksef\KsefSettingsService;
 use App\Services\Ksef\KsefSubmissionService;
 use App\Services\Ksef\KsefXmlBuilder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -223,6 +224,8 @@ class KsefSubmissionWorkflowTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://ksef-gateway.test/submit'
             && $request->hasHeader('Authorization', 'Bearer test-token')
+            && $request->hasHeader('Idempotency-Key', (string) $request['idempotency_key'])
+            && $request['submission_id'] === $submission->id
             && str_contains((string) $request['invoice_xml'], '<P_2>FV/2026/000001</P_2>')
             && $request['public_key_id'] === KsefSettingsService::TEST_PUBLIC_KEY_ID
             && $request['public_key_sha256'] === KsefSettingsService::TEST_PUBLIC_KEY_SHA256
@@ -327,6 +330,129 @@ class KsefSubmissionWorkflowTest extends TestCase
 
         Http::assertSent(fn ($request): bool => $request->url() === $baseUrl.'/sessions/online/SESSION-REF/close'
             && $request->hasHeader('Authorization', 'Bearer ACCESS-TOKEN'));
+    }
+
+    public function test_close_session_failure_does_not_resubmit_an_acknowledged_invoice(): void
+    {
+        $baseUrl = 'https://api-test.ksef.local/v2';
+        $tokenPublicKeyId = $this->publicKeyId('token');
+        $sessionPublicKeyId = $this->publicKeyId('session');
+
+        config([
+            'services.ksef.access_token' => 'native-ksef-token',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.status_url' => '',
+            'services.ksef.base_url' => $baseUrl,
+            'services.ksef.environment' => 'test',
+            'services.ksef.auth_status_delay_ms' => 0,
+        ]);
+
+        Http::fake([
+            $baseUrl.'/security/public-key-certificates' => Http::response($this->publicKeyCertificates($tokenPublicKeyId, $sessionPublicKeyId)),
+            $baseUrl.'/auth/challenge' => Http::response([
+                'challenge' => 'AUTH-CHALLENGE',
+                'timestampMs' => 1752236636015,
+            ]),
+            $baseUrl.'/auth/ksef-token' => Http::response([
+                'referenceNumber' => 'AUTH-REF',
+                'authenticationToken' => [
+                    'token' => 'AUTH-TOKEN',
+                    'validUntil' => '2026-06-14T12:00:00+00:00',
+                ],
+            ], 202),
+            $baseUrl.'/auth/AUTH-REF' => Http::response([
+                'status' => ['code' => 200, 'description' => 'Sukces'],
+            ]),
+            $baseUrl.'/auth/token/redeem' => Http::response([
+                'accessToken' => ['token' => 'ACCESS-TOKEN'],
+                'refreshToken' => ['token' => 'REFRESH-TOKEN'],
+            ]),
+            $baseUrl.'/sessions/online' => Http::response([
+                'referenceNumber' => 'SESSION-REF',
+                'validUntil' => '2026-06-14T23:59:00+00:00',
+            ], 202),
+            $baseUrl.'/sessions/online/SESSION-REF/invoices' => Http::response([
+                'referenceNumber' => 'INVOICE-REF',
+            ], 202),
+            $baseUrl.'/sessions/online/SESSION-REF/close' => Http::response([
+                'title' => 'Temporary failure',
+            ], 503),
+        ]);
+
+        $service = app(KsefSubmissionService::class);
+        $submission = $service->prepare($this->createInvoice());
+        $submission = $service->submit($submission);
+
+        $this->assertSame('submitted', $submission->status);
+        $this->assertSame('INVOICE-REF', $submission->reference_number);
+        $this->assertSame('failed', data_get($submission->response_metadata, 'sessionClose.status'));
+        $this->assertStringContainsString('Faktura została wysłana', (string) $submission->last_error);
+        $this->assertNull($submission->processing_token);
+        $this->assertSame(1, $submission->attempts);
+
+        $service->submit($submission);
+
+        $invoicePosts = Http::recorded(fn ($request): bool => $request->url() === $baseUrl.'/sessions/online/SESSION-REF/invoices');
+        $this->assertCount(1, $invoicePosts);
+    }
+
+    public function test_native_invoice_post_connection_loss_requires_manual_verification(): void
+    {
+        $baseUrl = 'https://api-test.ksef.local/v2';
+        $tokenPublicKeyId = $this->publicKeyId('token');
+        $sessionPublicKeyId = $this->publicKeyId('session');
+        $invoicePosts = 0;
+
+        config([
+            'services.ksef.access_token' => 'native-ksef-token',
+            'services.ksef.gateway_url' => '',
+            'services.ksef.status_url' => '',
+            'services.ksef.base_url' => $baseUrl,
+            'services.ksef.environment' => 'test',
+            'services.ksef.auth_status_delay_ms' => 0,
+        ]);
+
+        Http::fake([
+            $baseUrl.'/security/public-key-certificates' => Http::response($this->publicKeyCertificates($tokenPublicKeyId, $sessionPublicKeyId)),
+            $baseUrl.'/auth/challenge' => Http::response([
+                'challenge' => 'AUTH-CHALLENGE',
+                'timestampMs' => 1752236636015,
+            ]),
+            $baseUrl.'/auth/ksef-token' => Http::response([
+                'referenceNumber' => 'AUTH-REF',
+                'authenticationToken' => ['token' => 'AUTH-TOKEN'],
+            ], 202),
+            $baseUrl.'/auth/AUTH-REF' => Http::response([
+                'status' => ['code' => 200, 'description' => 'Sukces'],
+            ]),
+            $baseUrl.'/auth/token/redeem' => Http::response([
+                'accessToken' => ['token' => 'ACCESS-TOKEN'],
+                'refreshToken' => ['token' => 'REFRESH-TOKEN'],
+            ]),
+            $baseUrl.'/sessions/online' => Http::response([
+                'referenceNumber' => 'SESSION-REF',
+                'validUntil' => '2026-06-14T23:59:00+00:00',
+            ], 202),
+            $baseUrl.'/sessions/online/SESSION-REF/invoices' => function () use (&$invoicePosts) {
+                $invoicePosts++;
+
+                throw new ConnectionException('Connection reset after invoice POST');
+            },
+        ]);
+
+        $service = app(KsefSubmissionService::class);
+        $submission = $service->prepare($this->createInvoice());
+        $submission = $service->submit($submission);
+
+        $this->assertSame('delivery_uncertain', $submission->status);
+        $this->assertSame(1, $submission->attempts);
+        $this->assertNull($submission->reference_number);
+        $this->assertStringContainsString('Nie ponawiaj automatycznie', (string) $submission->last_error);
+
+        $service->submit($submission);
+
+        $this->assertSame(1, $invoicePosts);
+        $this->assertSame(1, $submission->refresh()->attempts);
     }
 
     public function test_native_ksef_status_refresh_accepts_invoice_and_updates_invoice_number(): void
@@ -591,6 +717,37 @@ class KsefSubmissionWorkflowTest extends TestCase
         $this->post(route('ksef.submissions.retry', $submission))
             ->assertRedirect()
             ->assertSessionHas('error', 'Tego zgłoszenia KSeF nie można ponowić.');
+    }
+
+    public function test_lost_gateway_connection_is_not_automatically_resubmitted(): void
+    {
+        config([
+            'services.ksef.access_token' => 'test-token',
+            'services.ksef.gateway_url' => 'https://ksef-gateway.test/submit',
+            'services.ksef.environment' => 'test',
+        ]);
+
+        $calls = 0;
+        Http::fake(function () use (&$calls) {
+            $calls++;
+
+            throw new ConnectionException('Connection reset after send');
+        });
+
+        $service = app(KsefSubmissionService::class);
+        $submission = $service->prepare($this->createInvoice());
+        $submission = $service->submit($submission);
+
+        $this->assertSame('delivery_uncertain', $submission->status);
+        $this->assertSame(1, $submission->attempts);
+        $this->assertNull($submission->reference_number);
+        $this->assertFalse($service->canRetry($submission));
+        $this->assertStringContainsString('Nie ponawiaj automatycznie', (string) $submission->last_error);
+
+        $service->submit($submission);
+
+        $this->assertSame(1, $submission->refresh()->attempts);
+        $this->assertSame(1, $calls);
     }
 
     public function test_operator_can_store_ksef_configuration_and_use_it_for_submission(): void

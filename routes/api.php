@@ -6,7 +6,7 @@ use App\Http\Middleware\VerifyPrintBridgeToken;
 use App\Http\Middleware\VerifyStoreReturnsToken;
 use Illuminate\Support\Facades\Route;
 
-Route::middleware(VerifyPrintBridgeToken::class)
+Route::middleware(['throttle:print-bridge', VerifyPrintBridgeToken::class])
     ->prefix('print-bridge')
     ->name('api.print-bridge.')
     ->group(function (): void {
@@ -16,7 +16,7 @@ Route::middleware(VerifyPrintBridgeToken::class)
         Route::post('/jobs/{job}/failed', [PrintBridgeController::class, 'failed'])->name('jobs.failed');
     });
 
-Route::middleware(VerifyStoreReturnsToken::class)
+Route::middleware(['throttle:store-returns', VerifyStoreReturnsToken::class])
     ->prefix('store-returns')
     ->group(function (): void {
         Route::post('/lookup-order', [StoreReturnsController::class, 'lookupOrder'])->name('api.store-returns.lookup');

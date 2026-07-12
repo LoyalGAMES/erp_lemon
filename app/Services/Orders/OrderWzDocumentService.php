@@ -15,8 +15,7 @@ final class OrderWzDocumentService
     public function __construct(
         private readonly WarehouseDocumentNumberService $documentNumbers,
         private readonly OrderFulfillmentStatusService $fulfillmentStatus,
-    ) {
-    }
+    ) {}
 
     /**
      * @return list<WarehouseDocument>
@@ -26,66 +25,96 @@ final class OrderWzDocumentService
         string $source = 'external_order',
         ?string $notes = null,
     ): array {
-        $existing = $this->fulfillmentStatus->latestWz($order);
-
-        if ($existing instanceof WarehouseDocument) {
-            return [$existing];
-        }
-
-        return $this->createDrafts($order, $source, $notes);
-    }
-
-    /**
-     * @return list<WarehouseDocument>
-     */
-    private function createDrafts(ExternalOrder $order, string $source, ?string $notes): array
-    {
         return DB::transaction(function () use ($order, $source, $notes): array {
+            $order = ExternalOrder::query()
+                ->lockForUpdate()
+                ->findOrFail($order->id);
+            $existingDocuments = $this->fulfillmentStatus
+                ->wzDocumentsForOrder($order)
+                ->lockForUpdate()
+                ->get();
+            $legacyDocuments = $existingDocuments
+                ->filter(fn (WarehouseDocument $document): bool => blank($document->order_fulfillment_key))
+                ->values();
+
             $reservations = StockReservation::query()
                 ->with(['product', 'warehouse'])
                 ->where('sales_channel_id', $order->sales_channel_id)
                 ->where('external_order_id', $order->external_id)
                 ->where('status', 'active')
+                ->orderBy('warehouse_id')
+                ->orderBy('product_id')
+                ->lockForUpdate()
                 ->get();
 
             if ($reservations->isEmpty()) {
-                return [];
+                return $existingDocuments->values()->all();
             }
 
             $documents = [];
 
             foreach ($reservations->groupBy('warehouse_id') as $warehouseId => $warehouseReservations) {
-                $document = WarehouseDocument::query()->create([
-                    'number' => $this->documentNumbers->next('WZ'),
-                    'type' => 'WZ',
-                    'status' => 'draft',
-                    'source_warehouse_id' => (int) $warehouseId,
-                    'document_date' => now(),
-                    'external_reference' => $order->external_number,
-                    'notes' => $notes ?: 'WZ z zamówienia WooCommerce ' . $order->external_number,
-                    'metadata' => [
-                        'source' => $source,
-                        'external_order_id' => $order->external_id,
-                        'external_order_number' => $order->external_number,
-                        'sales_channel_id' => $order->sales_channel_id,
-                    ],
-                ]);
+                $fulfillmentKey = $this->fulfillmentKey($order, (int) $warehouseId);
+                $document = $existingDocuments->firstWhere('order_fulfillment_key', $fulfillmentKey)
+                    ?? $legacyDocuments
+                        ->where('source_warehouse_id', (int) $warehouseId)
+                        ->sortByDesc(fn (WarehouseDocument $legacyDocument): int => match ($legacyDocument->status) {
+                            'posted' => 2,
+                            'draft' => 1,
+                            default => 0,
+                        })
+                        ->first()
+                    ?? WarehouseDocument::query()
+                        ->where('order_fulfillment_key', $fulfillmentKey)
+                        ->lockForUpdate()
+                        ->first();
 
-                foreach ($warehouseReservations->groupBy('product_id') as $productId => $productReservations) {
-                    $document->lines()->create([
-                        'product_id' => (int) $productId,
-                        'quantity' => $productReservations->sum(fn (StockReservation $reservation): float => (float) $reservation->quantity),
+                if (! $document instanceof WarehouseDocument) {
+                    $document = WarehouseDocument::query()->create([
+                        'number' => $this->documentNumbers->next('WZ'),
+                        'type' => 'WZ',
+                        'status' => 'draft',
+                        'source_warehouse_id' => (int) $warehouseId,
+                        'document_date' => now(),
+                        'external_reference' => $order->external_number,
+                        'order_fulfillment_key' => $fulfillmentKey,
+                        'notes' => $notes ?: 'WZ z zamówienia WooCommerce '.$order->external_number,
                         'metadata' => [
-                            'source' => 'stock_reservation',
-                            'reservation_ids' => $productReservations->pluck('id')->values()->all(),
+                            'source' => $source,
+                            'external_order_id' => $order->external_id,
+                            'external_order_number' => $order->external_number,
+                            'sales_channel_id' => $order->sales_channel_id,
                         ],
                     ]);
+
+                    foreach ($warehouseReservations->groupBy('product_id') as $productId => $productReservations) {
+                        $document->lines()->create([
+                            'product_id' => (int) $productId,
+                            'quantity' => $productReservations->sum(fn (StockReservation $reservation): float => (float) $reservation->quantity),
+                            'metadata' => [
+                                'source' => 'stock_reservation',
+                                'reservation_ids' => $productReservations->pluck('id')->values()->all(),
+                            ],
+                        ]);
+                    }
                 }
 
                 $documents[] = $document;
             }
 
             return $documents;
-        });
+        }, 3);
+    }
+
+    private function fulfillmentKey(ExternalOrder $order, int $warehouseId): string
+    {
+        return 'order-wz:'.hash(
+            'sha256',
+            implode('|', [
+                (int) $order->sales_channel_id,
+                (string) $order->external_id,
+                $warehouseId,
+            ]),
+        );
     }
 }

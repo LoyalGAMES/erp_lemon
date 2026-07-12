@@ -8,7 +8,11 @@ use App\Models\IntegrationSyncLog;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\StockSyncQueueItem;
+use App\Models\StockSyncState;
 use App\Models\WordpressIntegration;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\DB;
 use RuntimeException;
 use Throwable;
 
@@ -26,6 +30,32 @@ final class StockSyncExportService
         $item = StockSyncQueueItem::query()
             ->with(['product', 'salesChannel'])
             ->findOrFail($item->id);
+
+        if ($item->sales_channel_id === null) {
+            throw new RuntimeException('Eksport stanu nie ma przypisanego kanału sprzedaży.');
+        }
+
+        try {
+            return Cache::lock($this->exportLockKey($item), 180)
+                ->block(30, fn (): array => $this->exportWhileLocked($item));
+        } catch (LockTimeoutException $exception) {
+            throw new RuntimeException(
+                'Inny eksport stanu tego produktu jest nadal przetwarzany.',
+                previous: $exception,
+            );
+        }
+    }
+
+    /** @return array<string, mixed> */
+    private function exportWhileLocked(StockSyncQueueItem $item): array
+    {
+        $item = $this->claimForExport($item);
+
+        if (! $item instanceof StockSyncQueueItem) {
+            return ['skipped' => true, 'reason' => 'already_processed_or_superseded'];
+        }
+
+        $item->loadMissing(['product', 'salesChannel']);
 
         $integration = WordpressIntegration::query()
             ->where('sales_channel_id', $item->sales_channel_id)
@@ -82,18 +112,14 @@ final class StockSyncExportService
             });
         $response = (array) data_get($responses->first(), 'response', []);
 
-        $item->update([
-            'status' => 'success',
-            'processed_at' => now(),
-            'last_error' => null,
-            'metadata' => array_merge($item->metadata ?? [], [
-                'woocommerce_stock_quantity' => $stockQuantity,
-                'woocommerce_stock_status' => $stockQuantity > 0 ? 'instock' : 'outofstock',
-                'woocommerce_targets_updated' => $responses->count(),
-                'woocommerce_translation_targets' => $responses->skip(1)->values()->all(),
-                'processed_by' => 'ExportStockToWooCommerceJob',
-            ]),
+        $metadata = array_merge($item->metadata ?? [], [
+            'woocommerce_stock_quantity' => $stockQuantity,
+            'woocommerce_stock_status' => $stockQuantity > 0 ? 'instock' : 'outofstock',
+            'woocommerce_targets_updated' => $responses->count(),
+            'woocommerce_translation_targets' => $responses->skip(1)->values()->all(),
+            'processed_by' => 'ExportStockToWooCommerceJob',
         ]);
+        $finalStatus = $this->finalizeSuccessfulExport($item, $metadata);
 
         IntegrationSyncLog::query()->create([
             'sales_channel_id' => $item->sales_channel_id,
@@ -114,6 +140,8 @@ final class StockSyncExportService
                 'stock_quantity' => $response['stock_quantity'] ?? null,
                 'stock_status' => $response['stock_status'] ?? null,
                 'targets' => $responses->all(),
+                'queue_item_status' => $finalStatus,
+                'queue_item_version' => (int) $item->version,
             ],
             'attempts' => 1,
             'started_at' => $item->updated_at ?? now(),
@@ -125,10 +153,31 @@ final class StockSyncExportService
 
     public function markFailed(StockSyncQueueItem $item, Throwable $exception): void
     {
-        $item->update([
-            'status' => 'failed',
-            'last_error' => $exception->getMessage(),
-        ]);
+        $failed = DB::transaction(function () use ($item, $exception): bool {
+            $state = $this->stateForItem($item, true);
+            $item = StockSyncQueueItem::query()->lockForUpdate()->find($item->id);
+
+            if (! $item instanceof StockSyncQueueItem || in_array($item->status, ['success', 'superseded'], true)) {
+                return false;
+            }
+
+            if ((int) $item->version < (int) $state->desired_version) {
+                $this->markSuperseded($item, $state, 'failed_after_newer_version');
+
+                return false;
+            }
+
+            $item->update([
+                'status' => 'failed',
+                'last_error' => $exception->getMessage(),
+            ]);
+
+            return true;
+        }, 3);
+
+        if (! $failed) {
+            return;
+        }
 
         IntegrationSyncLog::query()->create([
             'sales_channel_id' => $item->sales_channel_id,
@@ -142,5 +191,118 @@ final class StockSyncExportService
             'started_at' => $item->updated_at ?? now(),
             'finished_at' => now(),
         ]);
+    }
+
+    private function claimForExport(StockSyncQueueItem $item): ?StockSyncQueueItem
+    {
+        return DB::transaction(function () use ($item): ?StockSyncQueueItem {
+            $state = $this->stateForItem($item, true);
+            $item = StockSyncQueueItem::query()->lockForUpdate()->findOrFail($item->id);
+
+            if (in_array($item->status, ['success', 'superseded', 'running'], true)) {
+                return null;
+            }
+
+            if ((int) $item->version < (int) $state->desired_version) {
+                $this->markSuperseded($item, $state, 'newer_version_queued');
+
+                return null;
+            }
+
+            if ((int) $item->version > (int) $state->desired_version) {
+                $state->update([
+                    'desired_version' => (int) $item->version,
+                    'desired_quantity' => (float) $item->quantity_to_push,
+                    'queue_item_id' => $item->id,
+                ]);
+            }
+
+            $item->update([
+                'status' => 'running',
+                'last_error' => null,
+            ]);
+
+            return $item->refresh();
+        }, 3);
+    }
+
+    /** @param  array<string, mixed>  $metadata */
+    private function finalizeSuccessfulExport(StockSyncQueueItem $item, array $metadata): string
+    {
+        return DB::transaction(function () use ($item, $metadata): string {
+            $state = $this->stateForItem($item, true);
+            $item = StockSyncQueueItem::query()->lockForUpdate()->findOrFail($item->id);
+
+            if ((int) $item->version < (int) $state->desired_version) {
+                $item->update([
+                    'status' => 'superseded',
+                    'processed_at' => now(),
+                    'last_error' => null,
+                    'metadata' => array_merge($metadata, [
+                        'superseded_reason' => 'newer_version_queued_during_export',
+                        'desired_version_after_export' => (int) $state->desired_version,
+                    ]),
+                ]);
+
+                return 'superseded';
+            }
+
+            $item->update([
+                'status' => 'success',
+                'processed_at' => now(),
+                'last_error' => null,
+                'metadata' => $metadata,
+            ]);
+            $state->update([
+                'exported_version' => max((int) $state->exported_version, (int) $item->version),
+                'queue_item_id' => $item->id,
+            ]);
+
+            return 'success';
+        }, 3);
+    }
+
+    private function stateForItem(StockSyncQueueItem $item, bool $lock): StockSyncState
+    {
+        if ($item->sales_channel_id === null) {
+            throw new RuntimeException('Eksport stanu nie ma przypisanego kanału sprzedaży.');
+        }
+
+        $now = now();
+        DB::table('stock_sync_states')->insertOrIgnore([
+            'product_id' => $item->product_id,
+            'sales_channel_id' => $item->sales_channel_id,
+            'desired_version' => (int) $item->version,
+            'desired_quantity' => (float) $item->quantity_to_push,
+            'exported_version' => 0,
+            'queue_item_id' => $item->id,
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        return StockSyncState::query()
+            ->where('product_id', $item->product_id)
+            ->where('sales_channel_id', $item->sales_channel_id)
+            ->when($lock, fn ($query) => $query->lockForUpdate())
+            ->firstOrFail();
+    }
+
+    private function markSuperseded(StockSyncQueueItem $item, StockSyncState $state, string $reason): void
+    {
+        $item->update([
+            'status' => 'superseded',
+            'processed_at' => now(),
+            'last_error' => null,
+            'metadata' => array_merge($item->metadata ?? [], [
+                'superseded_reason' => $reason,
+                'item_version' => (int) $item->version,
+                'desired_version' => (int) $state->desired_version,
+            ]),
+        ]);
+    }
+
+    private function exportLockKey(StockSyncQueueItem $item): string
+    {
+        return 'stock-sync-export:'.$item->sales_channel_id.':'.$item->product_id;
     }
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ const (
 
 type bridgeJob struct {
 	ID          int64  `json:"id"`
+	LeaseToken  string `json:"lease_token"`
 	PrinterName string `json:"printer_name"`
 	Format      string `json:"format"`
 	Label       struct {
@@ -44,6 +46,8 @@ type printBridge struct {
 	print     func(printRequest, []byte) error
 	state     *bridgeState
 	healthNow func() time.Time
+	journal   *printJournal
+	retryWait func(context.Context, time.Duration) error
 }
 
 type bridgeHealthResponse struct {
@@ -59,16 +63,29 @@ type bridgeHealthResponse struct {
 	LastError     string `json:"last_error,omitempty"`
 }
 
-func newPrintBridge(config bridgeConfig, printerConfig appConfig) *printBridge {
-	return &printBridge{
+func newPrintBridge(config bridgeConfig, printerConfig appConfig, journalPath string) (*printBridge, error) {
+	journal, err := openPrintJournal(journalPath)
+	if err != nil {
+		return nil, err
+	}
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	bridge := &printBridge{
 		config: config,
 		client: &http.Client{
-			Timeout: 45 * time.Second,
+			Timeout:   45 * time.Second,
+			Transport: transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 		print:     printerConfig.print,
 		state:     &bridgeState{},
 		healthNow: time.Now,
+		journal:   journal,
+		retryWait: waitForRetry,
 	}
+	return bridge, nil
 }
 
 func (bridge *printBridge) Run(ctx context.Context) error {
@@ -122,6 +139,9 @@ func (bridge *printBridge) Run(ctx context.Context) error {
 }
 
 func (bridge *printBridge) pollOnce(ctx context.Context) error {
+	if err := bridge.flushAcknowledgements(ctx); err != nil {
+		return err
+	}
 	query := url.Values{}
 	query.Set("worker", bridge.config.WorkerName)
 	query.Set("station", bridge.config.Station)
@@ -140,11 +160,11 @@ func (bridge *printBridge) pollOnce(ctx context.Context) error {
 		return nil
 	}
 	job := response.Job
-	if job.ID <= 0 || strings.TrimSpace(job.PrinterName) == "" {
+	if job.ID <= 0 || strings.TrimSpace(job.PrinterName) == "" || strings.TrimSpace(job.LeaseToken) == "" {
 		return fmt.Errorf("ERP returned an invalid print job")
 	}
 
-	data, mimeType, err := bridge.downloadLabel(ctx, job.ID)
+	data, mimeType, err := bridge.downloadLabel(ctx, job)
 	if err == nil {
 		err = bridge.print(printRequest{
 			PrinterName: strings.TrimSpace(job.PrinterName),
@@ -155,8 +175,10 @@ func (bridge *printBridge) pollOnce(ctx context.Context) error {
 	}
 	if err != nil {
 		reportErr := bridge.postWithRetry(ctx, "/api/print-bridge/jobs/"+strconv.FormatInt(job.ID, 10)+"/failed", map[string]string{
-			"worker": bridge.config.WorkerName,
-			"error":  truncateMessage(bridge.redact(err.Error()), 2000),
+			"worker":      bridge.config.WorkerName,
+			"station":     bridge.config.Station,
+			"lease_token": job.LeaseToken,
+			"error":       truncateMessage(bridge.redact(err.Error()), 2000),
 		})
 		if reportErr != nil {
 			return fmt.Errorf("print job %d failed: %v; reporting failure also failed: %w", job.ID, err, reportErr)
@@ -164,27 +186,32 @@ func (bridge *printBridge) pollOnce(ctx context.Context) error {
 		return fmt.Errorf("print job %d failed and was reported to ERP: %w", job.ID, err)
 	}
 
-	if err := bridge.postWithRetry(ctx, "/api/print-bridge/jobs/"+strconv.FormatInt(job.ID, 10)+"/printed", map[string]string{
-		"worker":  bridge.config.WorkerName,
-		"message": "Printed by Sempre ERP Print Listener " + version,
-	}); err != nil {
+	record := printJournalRecord{JobID: job.ID, LeaseToken: job.LeaseToken, Worker: bridge.config.WorkerName, Station: bridge.config.Station, PrintedAt: time.Now().UTC()}
+	if err := bridge.journal.record(record); err != nil {
+		return fmt.Errorf("print job %d was spooled but its durable acknowledgement journal could not be written: %w", job.ID, err)
+	}
+	if err := bridge.acknowledgePrinted(ctx, record); err != nil {
 		return fmt.Errorf("print job %d was printed but acknowledgement failed: %w", job.ID, err)
+	}
+	if err := bridge.journal.remove(job.ID); err != nil {
+		return fmt.Errorf("print job %d was acknowledged but journal cleanup failed: %w", job.ID, err)
 	}
 
 	log.Printf("Printed outbound job %d on %s", job.ID, job.PrinterName)
 	return nil
 }
 
-func (bridge *printBridge) downloadLabel(ctx context.Context, jobID int64) ([]byte, string, error) {
+func (bridge *printBridge) downloadLabel(ctx context.Context, job *bridgeJob) ([]byte, string, error) {
 	request, err := bridge.newRequest(
 		ctx,
 		http.MethodGet,
-		"/api/print-bridge/jobs/"+strconv.FormatInt(jobID, 10)+"/file",
+		"/api/print-bridge/jobs/"+strconv.FormatInt(job.ID, 10)+"/file",
 		nil,
 	)
 	if err != nil {
 		return nil, "", err
 	}
+	bridge.addLeaseHeaders(request, job.LeaseToken, bridge.config.WorkerName, bridge.config.Station)
 	response, err := bridge.client.Do(request)
 	if err != nil {
 		return nil, "", err
@@ -207,15 +234,34 @@ func (bridge *printBridge) downloadLabel(ctx context.Context, jobID int64) ([]by
 	return data, strings.TrimSpace(response.Header.Get("Content-Type")), nil
 }
 
+func (bridge *printBridge) flushAcknowledgements(ctx context.Context) error {
+	for _, record := range bridge.journal.pending() {
+		if err := bridge.acknowledgePrinted(ctx, record); err != nil {
+			return fmt.Errorf("retry acknowledgement for already printed job %d: %w", record.JobID, err)
+		}
+		if err := bridge.journal.remove(record.JobID); err != nil {
+			return fmt.Errorf("remove acknowledged job %d from journal: %w", record.JobID, err)
+		}
+	}
+	return nil
+}
+
+func (bridge *printBridge) acknowledgePrinted(ctx context.Context, record printJournalRecord) error {
+	return bridge.postWithRetry(ctx, "/api/print-bridge/jobs/"+strconv.FormatInt(record.JobID, 10)+"/printed", map[string]string{
+		"worker":      record.Worker,
+		"station":     record.Station,
+		"lease_token": record.LeaseToken,
+		"message":     "Printed by Sempre ERP Print Listener " + version,
+	})
+}
+
 func (bridge *printBridge) postWithRetry(ctx context.Context, path string, payload any) error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if attempt > 0 {
 			delay := time.Duration(1<<(attempt-1)) * time.Second
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(delay):
+			if err := bridge.retryWait(ctx, delay); err != nil {
+				return err
 			}
 		}
 		var response struct {
@@ -232,6 +278,23 @@ func (bridge *printBridge) postWithRetry(ctx context.Context, path string, paylo
 		return nil
 	}
 	return lastErr
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (bridge *printBridge) addLeaseHeaders(request *http.Request, lease, worker, station string) {
+	request.Header.Set("X-Print-Lease", lease)
+	request.Header.Set("X-Print-Worker", worker)
+	request.Header.Set("X-Print-Station", station)
 }
 
 func (bridge *printBridge) doJSON(ctx context.Context, method, path string, payload any, destination any) error {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Ksef;
 
 use App\Models\KsefSubmission;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
@@ -88,7 +89,7 @@ final class KsefClient
 
     public function environment(): string
     {
-        $environment = strtolower($this->setting('environment', 'KSEF_ENVIRONMENT', 'test'));
+        $environment = strtolower($this->setting('environment', 'test'));
 
         return in_array($environment, ['production', 'prod', 'demo', 'test'], true)
             ? $environment
@@ -97,12 +98,12 @@ final class KsefClient
 
     public function apiVersion(): string
     {
-        return $this->setting('api_version', 'KSEF_API_VERSION', '2.6.0');
+        return $this->setting('api_version', '2.6.0');
     }
 
     public function baseUrl(?string $environment = null): string
     {
-        $configured = $this->setting('base_url', 'KSEF_BASE_URL', '');
+        $configured = $this->setting('base_url', '');
         if ($configured !== '') {
             return rtrim($configured, '/');
         }
@@ -119,20 +120,32 @@ final class KsefClient
      */
     private function sendViaGateway(KsefSubmission $submission, string $token, string $gatewayUrl): array
     {
-        $response = Http::withToken($token)
-            ->acceptJson()
-            ->asJson()
-            ->timeout(60)
-            ->post($gatewayUrl, [
-                'environment' => $submission->environment,
-                'api_version' => $submission->api_version,
-                'invoice_id' => $submission->invoice_id,
-                'invoice_xml' => $submission->xml_payload,
-                'invoice_hash_sha256' => base64_encode(hash('sha256', (string) $submission->xml_payload, true)),
-                'invoice_size' => strlen((string) $submission->xml_payload),
-                'public_key_id' => $this->publicKeyId($submission->environment),
-                'public_key_sha256' => $this->publicKeySha256($submission->environment),
-            ]);
+        $idempotencyKey = 'sempre-ksef-'.$submission->id.'-'.hash('sha256', (string) $submission->xml_payload);
+
+        try {
+            $response = Http::withToken($token)
+                ->acceptJson()
+                ->asJson()
+                ->withHeaders(['Idempotency-Key' => $idempotencyKey])
+                ->timeout(60)
+                ->post($gatewayUrl, [
+                    'environment' => $submission->environment,
+                    'api_version' => $submission->api_version,
+                    'invoice_id' => $submission->invoice_id,
+                    'submission_id' => $submission->id,
+                    'idempotency_key' => $idempotencyKey,
+                    'invoice_xml' => $submission->xml_payload,
+                    'invoice_hash_sha256' => base64_encode(hash('sha256', (string) $submission->xml_payload, true)),
+                    'invoice_size' => strlen((string) $submission->xml_payload),
+                    'public_key_id' => $this->publicKeyId($submission->environment),
+                    'public_key_sha256' => $this->publicKeySha256($submission->environment),
+                ]);
+        } catch (ConnectionException $exception) {
+            throw new KsefDeliveryUncertainException(
+                'Połączenie z bramką KSeF zostało przerwane podczas wysyłki faktury. Nie ponawiaj automatycznie; sprawdź zgłoszenie w bramce lub KSeF.',
+                previous: $exception,
+            );
+        }
 
         if ($response->failed()) {
             throw new RuntimeException("Bramka KSeF zwróciła HTTP {$response->status()}.");
@@ -170,9 +183,8 @@ final class KsefClient
         }
 
         $invoice = $this->sendOnlineSessionInvoice($baseUrl, $accessToken, $sessionReferenceNumber, (string) $submission->xml_payload, $encryptionData);
-        $this->closeOnlineSession($baseUrl, $accessToken, $sessionReferenceNumber);
-
-        return [
+        $invoiceReferenceNumber = (string) data_get($invoice, 'referenceNumber', '');
+        $response = [
             'mode' => 'native',
             'environment' => $submission->environment,
             'api_version' => $submission->api_version,
@@ -186,6 +198,41 @@ final class KsefClient
             'invoice' => $invoice,
             'session' => $session,
         ];
+
+        if ($invoiceReferenceNumber === '') {
+            $submission->update([
+                'status' => 'delivery_uncertain',
+                'response_metadata' => array_merge((array) $submission->response_metadata, $response),
+                'last_error' => 'KSeF przyjął żądanie wysyłki, ale nie zwrócił numeru referencyjnego faktury.',
+            ]);
+
+            throw new RuntimeException('KSeF nie zwrócił numeru referencyjnego wysłanej faktury. Nie ponawiaj automatycznie wysyłki.');
+        }
+
+        // Persist the external acknowledgement before closing the online session.
+        // A close failure must never make the invoice eligible for another POST.
+        $submission->update([
+            'status' => 'submitted',
+            'reference_number' => $invoiceReferenceNumber,
+            'response_metadata' => array_merge((array) $submission->response_metadata, $response),
+            'submitted_at' => now(),
+        ]);
+
+        try {
+            $this->closeOnlineSession($baseUrl, $accessToken, $sessionReferenceNumber);
+            $response['sessionClose'] = ['status' => 'success'];
+        } catch (RuntimeException $exception) {
+            $response['sessionClose'] = [
+                'status' => 'failed',
+                'message' => $exception->getMessage(),
+            ];
+            $submission->update([
+                'response_metadata' => array_merge((array) $submission->response_metadata, $response),
+                'last_error' => 'Faktura została wysłana, ale zamknięcie sesji KSeF nie powiodło się: '.$exception->getMessage(),
+            ]);
+        }
+
+        return $response;
     }
 
     /**
@@ -255,7 +302,6 @@ final class KsefClient
     {
         return $this->setting(
             'public_key_id',
-            'KSEF_PUBLIC_KEY_ID',
             $this->defaultPublicKeyId($environment ?? $this->environment()),
         );
     }
@@ -264,16 +310,13 @@ final class KsefClient
     {
         return strtolower($this->setting(
             'public_key_sha256',
-            'KSEF_PUBLIC_KEY_SHA256',
             $this->defaultPublicKeySha256($environment ?? $this->environment()),
         ));
     }
 
     private function ksefToken(): string
     {
-        $token = $this->normalizeKsefToken($this->setting('access_token', 'KSEF_TOKEN', ''));
-
-        return $token !== '' ? $token : $this->normalizeKsefToken($this->setting('access_token', 'KSEF_ACCESS_TOKEN', ''));
+        return $this->normalizeKsefToken($this->setting('access_token', ''));
     }
 
     private function normalizeKsefToken(string $token): string
@@ -285,12 +328,12 @@ final class KsefClient
 
     private function gatewayUrl(): string
     {
-        return $this->setting('gateway_url', 'KSEF_GATEWAY_URL', '');
+        return $this->setting('gateway_url', '');
     }
 
     private function statusUrl(?KsefSubmission $submission = null): string
     {
-        $stored = $this->setting('status_url', 'KSEF_STATUS_URL', '');
+        $stored = $this->setting('status_url', '');
         if ($stored !== '') {
             return $stored;
         }
@@ -320,8 +363,8 @@ final class KsefClient
      */
     private function contextIdentifier(KsefSubmission $submission): array
     {
-        $type = $this->setting('context_identifier_type', 'KSEF_CONTEXT_IDENTIFIER_TYPE', 'Nip');
-        $value = $this->setting('context_identifier_value', 'KSEF_CONTEXT_IDENTIFIER_VALUE', '');
+        $type = $this->setting('context_identifier_type', 'Nip');
+        $value = $this->setting('context_identifier_value', '');
 
         if ($value === '') {
             $submission->loadMissing('invoice');
@@ -457,6 +500,7 @@ final class KsefClient
                 'offlineMode' => false,
             ],
             'wysłanie faktury do sesji online KSeF',
+            deliveryMayBeUncertain: true,
         );
     }
 
@@ -543,8 +587,13 @@ final class KsefClient
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
-    private function postJson(string $url, ?string $bearerToken, array $payload, string $operation): array
-    {
+    private function postJson(
+        string $url,
+        ?string $bearerToken,
+        array $payload,
+        string $operation,
+        bool $deliveryMayBeUncertain = false,
+    ): array {
         $request = Http::acceptJson()
             ->asJson()
             ->withHeaders(['X-Error-Format' => 'problem-details'])
@@ -554,9 +603,26 @@ final class KsefClient
             $request = $request->withToken($bearerToken);
         }
 
-        $response = $request->post($url, $payload);
+        try {
+            $response = $request->post($url, $payload);
+        } catch (ConnectionException $exception) {
+            if ($deliveryMayBeUncertain) {
+                throw new KsefDeliveryUncertainException(
+                    'Połączenie z KSeF zostało przerwane podczas wysyłki faktury do sesji. Nie ponawiaj automatycznie; sprawdź fakturę w KSeF.',
+                    previous: $exception,
+                );
+            }
+
+            throw $exception;
+        }
 
         if ($response->failed()) {
+            if ($deliveryMayBeUncertain && $response->serverError()) {
+                throw new KsefDeliveryUncertainException(
+                    $this->httpErrorMessage($response, $operation).' Wynik przyjęcia faktury jest niepewny; nie ponawiaj automatycznie.',
+                );
+            }
+
             throw new RuntimeException($this->httpErrorMessage($response, $operation));
         }
 
@@ -647,7 +713,7 @@ final class KsefClient
         return $environment === 'test' ? KsefSettingsService::TEST_PUBLIC_KEY_SHA256 : '';
     }
 
-    private function setting(string $configKey, string $envKey, string $default): string
+    private function setting(string $configKey, string $default): string
     {
         $configValue = config("services.ksef.{$configKey}");
 
@@ -661,10 +727,6 @@ final class KsefClient
             return $settingsValue;
         }
 
-        $envValue = env($envKey);
-
-        return is_string($envValue) && trim($envValue) !== ''
-            ? trim($envValue)
-            : $default;
+        return $default;
     }
 }

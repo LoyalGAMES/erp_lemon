@@ -12,6 +12,8 @@ class AuthWorkflowTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected bool $authenticateByDefault = false;
+
     public function test_first_admin_can_be_created_from_login_screen(): void
     {
         $this->get(route('login'))
@@ -111,5 +113,59 @@ class AuthWorkflowTest extends TestCase
         ])->assertRedirect(route('dashboard'));
 
         $this->assertAuthenticatedAs($user);
+    }
+
+    public function test_guest_is_redirected_from_a_protected_erp_route(): void
+    {
+        $this->get(route('dashboard'))
+            ->assertRedirect(route('login'));
+    }
+
+    public function test_role_middleware_rejects_an_authenticated_user_without_access(): void
+    {
+        $user = User::query()->create([
+            'name' => 'Pakowanie',
+            'email' => 'packer@example.test',
+            'password' => 'secret-password',
+            'role' => User::ROLE_PACKER,
+            'is_active' => true,
+        ]);
+
+        $this->actingAs($user)
+            ->get(route('settings.index'))
+            ->assertForbidden();
+    }
+
+    public function test_login_attempts_are_rate_limited_per_identifier_and_ip(): void
+    {
+        User::query()->create([
+            'name' => 'Operator ERP',
+            'email' => 'limited@example.test',
+            'password' => 'correct-password',
+            'role' => User::ROLE_OPERATOR,
+            'is_active' => true,
+        ]);
+
+        for ($attempt = 0; $attempt < 5; $attempt++) {
+            $this->post(route('login.attempt'), [
+                'email' => 'limited@example.test',
+                'password' => 'wrong-password',
+            ])->assertSessionHasErrors('email');
+        }
+
+        $this->post(route('login.attempt'), [
+            'email' => 'limited@example.test',
+            'password' => 'wrong-password',
+        ])->assertTooManyRequests();
+    }
+
+    public function test_security_headers_are_added_to_web_responses(): void
+    {
+        $this->get(route('login'))
+            ->assertOk()
+            ->assertHeader('X-Content-Type-Options', 'nosniff')
+            ->assertHeader('X-Frame-Options', 'DENY')
+            ->assertHeader('Referrer-Policy', 'same-origin')
+            ->assertHeader('Content-Security-Policy');
     }
 }

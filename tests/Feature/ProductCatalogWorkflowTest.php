@@ -473,7 +473,7 @@ class ProductCatalogWorkflowTest extends TestCase
     {
         $remoteImage = UploadedFile::fake()->image('remote-product.jpg', 600, 800);
         Http::fake([
-            'cdn.test/*' => Http::response((string) file_get_contents($remoteImage->getRealPath()), 200, [
+            '1.1.1.1/*' => Http::response((string) file_get_contents($remoteImage->getRealPath()), 200, [
                 'Content-Type' => 'image/jpeg',
             ]),
         ]);
@@ -487,7 +487,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'is_active' => true,
             'attributes' => [
                 'woocommerce_image' => [
-                    'src' => 'https://cdn.test/products/remote-product.jpg',
+                    'src' => 'https://1.1.1.1/products/remote-product.jpg',
                     'alt' => 'Produkt z CDN',
                 ],
             ],
@@ -507,6 +507,33 @@ class ProductCatalogWorkflowTest extends TestCase
         Http::assertSentCount(1);
 
         File::deleteDirectory(public_path('uploads/testing-product-thumbnails'));
+    }
+
+    public function test_product_thumbnail_route_never_redirects_the_browser_to_a_rejected_source(): void
+    {
+        Http::preventStrayRequests();
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-PRIVATE-IMAGE',
+            'name' => 'Produkt z niedozwolonym źródłem',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'woocommerce_image' => [
+                    'src' => 'http://127.0.0.1/private-image.jpg',
+                    'alt' => 'Niedozwolone źródło',
+                ],
+            ],
+        ]);
+
+        $thumbnailUrl = $product->thumbnailUrl(116, 144);
+
+        $this->assertIsString($thumbnailUrl);
+        $response = $this->get($thumbnailUrl)->assertNotFound();
+        $this->assertFalse($response->headers->has('Location'));
+        Http::assertNothingSent();
     }
 
     public function test_operator_can_adjust_product_stock_from_product_card_per_warehouse(): void

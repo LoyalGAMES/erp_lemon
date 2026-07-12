@@ -56,13 +56,12 @@ Var BaseUrlField
 Var TokenField
 Var StationField
 Var WorkerField
-Var SumatraField
 Var BaseUrl
 Var BridgeToken
 Var Station
 Var Worker
-Var SumatraPath
 Var WriteConfig
+Var ServiceExisted
 
 !define MUI_ABORTWARNING
 !define MUI_FINISHPAGE_NOAUTOCLOSE
@@ -104,7 +103,6 @@ Function ConfigPageCreate
   ReadINIStr $BridgeToken "${CONFIG_FILE}" "bridge" "token"
   ReadINIStr $Station "${CONFIG_FILE}" "bridge" "station"
   ReadINIStr $Worker "${CONFIG_FILE}" "bridge" "worker_name"
-  ReadINIStr $SumatraPath "${CONFIG_FILE}" "bridge" "sumatra_path"
   ${If} $BaseUrl == ""
     StrCpy $BaseUrl "https://"
   ${EndIf}
@@ -141,12 +139,7 @@ Function ConfigPageCreate
   ${NSD_CreateText} 32% 88u 68% 14u "$Worker"
   Pop $WorkerField
 
-  ${NSD_CreateLabel} 0 114u 30% 20u "SumatraPDF.exe (opcjonalnie)"
-  Pop $0
-  ${NSD_CreateText} 32% 111u 68% 14u "$SumatraPath"
-  Pop $SumatraField
-
-  ${NSD_CreateLabel} 0 137u 100% 30u "Token zostanie zapisany w ProgramData z dostępem wyłącznie dla SYSTEM i Administratorów. Nie trafia do argumentów usługi ani do rejestru."
+  ${NSD_CreateLabel} 0 114u 100% 42u "Token zostanie zapisany w ProgramData z dostępem wyłącznie dla SYSTEM i Administratorów. Renderer PDF jest dołączony do instalatora i przed uruchomieniem weryfikowany kryptograficznie."
   Pop $0
 
   nsDialogs::Show
@@ -159,7 +152,6 @@ Function ConfigPageLeave
   ${NSD_GetText} $TokenField $BridgeToken
   ${NSD_GetText} $StationField $Station
   ${NSD_GetText} $WorkerField $Worker
-  ${NSD_GetText} $SumatraField $SumatraPath
 
   StrCpy $0 $BaseUrl 8
   ${If} $0 != "https://"
@@ -191,20 +183,46 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   SetShellVarContext all
   SetRegView 64
 
-  ; Stop a previous service before replacing its binary. Missing services are
-  ; expected on first install and do not weaken the installation result.
-  IfFileExists "$INSTDIR\${APP_EXE}" 0 listener_not_installed
+  ; Preserve the existing service registration during upgrades. This avoids
+  ; DeleteService races and keeps recovery/security settings intact.
+  StrCpy $ServiceExisted "0"
+  nsExec::ExecToLog '"$SYSDIR\sc.exe" query "${SERVICE_NAME}"'
+  Pop $0
+  ${If} $0 == 0
+    StrCpy $ServiceExisted "1"
+  ${EndIf}
+  ${If} $ServiceExisted == "1"
+    IfFileExists "$INSTDIR\${APP_EXE}" existing_listener_present existing_listener_missing
+  existing_listener_present:
     nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service stop'
     Pop $0
-    nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service uninstall'
-    Pop $0
-    Sleep 1000
-  listener_not_installed:
+    ${If} $0 != 0
+      MessageBox MB_ICONSTOP|MB_OK "Nie udało się bezpiecznie zatrzymać istniejącej usługi. Pliki nie zostały zastąpione." /SD IDOK
+      SetErrorLevel 5
+      Abort
+    ${EndIf}
+    Goto service_prepared
+  existing_listener_missing:
+    MessageBox MB_ICONSTOP|MB_OK "Usługa ${SERVICE_NAME} istnieje, ale brakuje jej pliku wykonywalnego. Najpierw usuń uszkodzoną usługę poleceniem sc.exe delete ${SERVICE_NAME}." /SD IDOK
+    SetErrorLevel 5
+    Abort
+  service_prepared:
+  ${EndIf}
 
   SetOutPath "$INSTDIR"
   File /oname=${APP_EXE} "${BUILD_DIR}\${APP_EXE}"
+  File /oname=SumatraPDF.exe "${BUILD_DIR}\SumatraPDF.exe"
+  File /oname=SumatraPDF-COPYING.txt "${BUILD_DIR}\SumatraPDF-COPYING.txt"
   File /oname=README.txt "${BUILD_DIR}\README.txt"
   WriteUninstaller "$INSTDIR\uninstall.exe"
+
+  nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -validate-renderer'
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP|MB_OK "Dołączony renderer PDF nie przeszedł weryfikacji integralności. Instalacja została przerwana." /SD IDOK
+    SetErrorLevel 7
+    Abort
+  ${EndIf}
 
   ; The application applies an exact protected DACL, instead of relying on
   ; localized account names or inherited ProgramData permissions.
@@ -227,7 +245,7 @@ Section "Sempre ERP Print Listener" SEC_MAIN
     WriteINIStr "${CONFIG_FILE}" "bridge" "station" "$Station"
     WriteINIStr "${CONFIG_FILE}" "bridge" "worker_name" "$Worker"
     WriteINIStr "${CONFIG_FILE}" "bridge" "poll_seconds" "2"
-    WriteINIStr "${CONFIG_FILE}" "bridge" "sumatra_path" "$SumatraPath"
+    WriteINIStr "${CONFIG_FILE}" "bridge" "sumatra_path" ""
     IfErrors config_write_failed
     SetDetailsPrint both
     StrCpy $BridgeToken ""
@@ -270,33 +288,55 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="${LEGACY_FIREWALL_RULE}"'
   Pop $0
 
-  nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -mode bridge -config "${CONFIG_FILE}" -log-file "${CONFIG_DIR}\listener.log" -service install'
+  ${If} $ServiceExisted == "1"
+    nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -mode bridge -config "${CONFIG_FILE}" -log-file "${CONFIG_DIR}\listener.log" -service update'
+  ${Else}
+    nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -mode bridge -config "${CONFIG_FILE}" -log-file "${CONFIG_DIR}\listener.log" -service install'
+  ${EndIf}
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zainstalować usługi Windows (${SERVICE_NAME}). Instalacja zostanie przerwana." /SD IDOK
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zainstalować lub zaktualizować usługi Windows (${SERVICE_NAME}). Instalacja zostanie przerwana." /SD IDOK
     SetErrorLevel 5
-    Delete "$INSTDIR\uninstall.exe"
-    Delete "$INSTDIR\README.txt"
-    Delete "$INSTDIR\${APP_EXE}"
-    RMDir "$INSTDIR"
+    ${If} $ServiceExisted != "1"
+      Delete "$INSTDIR\uninstall.exe"
+      Delete "$INSTDIR\README.txt"
+      Delete "$INSTDIR\SumatraPDF.exe"
+      Delete "$INSTDIR\SumatraPDF-COPYING.txt"
+      Delete "$INSTDIR\${APP_EXE}"
+      RMDir "$INSTDIR"
+    ${EndIf}
     Abort
   ${EndIf}
 
   nsExec::ExecToLog '"$SYSDIR\sc.exe" failure "${SERVICE_NAME}" reset= 86400 actions= restart/5000/restart/15000/none/0'
   Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się ustawić polityki odzyskiwania usługi Windows." /SD IDOK
+    SetErrorLevel 5
+    Abort
+  ${EndIf}
   nsExec::ExecToLog '"$SYSDIR\sc.exe" failureflag "${SERVICE_NAME}" 1'
   Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się włączyć polityki odzyskiwania usługi Windows." /SD IDOK
+    SetErrorLevel 5
+    Abort
+  ${EndIf}
   nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service start'
   Pop $0
   ${If} $0 != 0
     MessageBox MB_ICONSTOP|MB_OK "Usługa została zainstalowana, ale nie połączyła się poprawnie. Sprawdź konfigurację i dziennik w ProgramData\Sempre ERP\Print Listener." /SD IDOK
     SetErrorLevel 6
-    nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service uninstall'
-    Pop $1
-    Delete "$INSTDIR\uninstall.exe"
-    Delete "$INSTDIR\README.txt"
-    Delete "$INSTDIR\${APP_EXE}"
-    RMDir "$INSTDIR"
+    ${If} $ServiceExisted != "1"
+      nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service uninstall'
+      Pop $1
+      Delete "$INSTDIR\uninstall.exe"
+      Delete "$INSTDIR\README.txt"
+      Delete "$INSTDIR\SumatraPDF.exe"
+      Delete "$INSTDIR\SumatraPDF-COPYING.txt"
+      Delete "$INSTDIR\${APP_EXE}"
+      RMDir "$INSTDIR"
+    ${EndIf}
     Abort
   ${EndIf}
 
@@ -322,11 +362,13 @@ Section "Uninstall"
   SetRegView 64
 
   IfFileExists "$INSTDIR\${APP_EXE}" 0 service_file_missing
-    nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service stop'
-    Pop $0
     nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service uninstall'
     Pop $0
-    Sleep 1000
+    ${If} $0 != 0
+      MessageBox MB_ICONSTOP|MB_OK "Nie udało się zatrzymać i usunąć usługi ${SERVICE_NAME}. Pliki programu pozostają na dysku." /SD IDOK
+      SetErrorLevel 8
+      Abort
+    ${EndIf}
   service_file_missing:
 
   nsExec::ExecToLog '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="${LEGACY_FIREWALL_RULE}"'
@@ -337,12 +379,18 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\Sempre ERP Print Listener"
 
   Delete "$INSTDIR\${APP_EXE}"
+  Delete "$INSTDIR\SumatraPDF.exe"
+  Delete "$INSTDIR\SumatraPDF-COPYING.txt"
   Delete "$INSTDIR\README.txt"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
   Delete "${CONFIG_DIR}\config.ini"
   Delete "${CONFIG_DIR}\listener.log"
+  Delete "${CONFIG_DIR}\listener.log.1"
+  Delete "${CONFIG_DIR}\listener.log.2"
+  Delete "${CONFIG_DIR}\listener.log.3"
+  Delete "${CONFIG_DIR}\print-journal.json"
   RMDir "${CONFIG_DIR}"
   RMDir "$APPDATA\Sempre ERP"
 

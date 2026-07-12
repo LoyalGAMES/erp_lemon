@@ -28,6 +28,7 @@ class WarehouseDocument extends Model
         'posted_at',
         'cancelled_at',
         'external_reference',
+        'order_fulfillment_key',
         'notes',
         'metadata',
     ];

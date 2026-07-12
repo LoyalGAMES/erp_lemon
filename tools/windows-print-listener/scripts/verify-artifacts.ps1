@@ -21,14 +21,28 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 }
 
 $listenerPath = Join-Path $root 'build\windows-amd64\lemon-print-listener.exe'
+$rendererPath = Join-Path $root 'build\windows-amd64\SumatraPDF.exe'
+$rendererLicensePath = Join-Path $root 'build\windows-amd64\SumatraPDF-COPYING.txt'
 $installerPath = Join-Path $OutputDirectory 'SempreERP-PrintListener-Setup.exe'
 $manifestPath = Join-Path $OutputDirectory 'RELEASE-MANIFEST.json'
 $checksumPath = Join-Path $OutputDirectory 'SHA256SUMS.txt'
 
-foreach ($path in @($listenerPath, $installerPath, $manifestPath, $checksumPath)) {
+foreach ($path in @($listenerPath, $rendererPath, $rendererLicensePath, $installerPath, $manifestPath, $checksumPath)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "Brak oczekiwanego artefaktu: $path"
     }
+}
+
+$expectedRendererHash = '719f689b34f47be8ca105ce8484948474dafde0e106bab599e4a89326070c3d0'
+if ((Get-FileHash -LiteralPath $rendererPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expectedRendererHash) {
+    throw 'Renderer PDF ma nieoczekiwany SHA-256.'
+}
+if ((Get-AuthenticodeSignature -FilePath $rendererPath).Status -ne 'Valid') {
+    throw 'Oficjalny renderer PDF nie ma prawidłowego podpisu Authenticode.'
+}
+& $listenerPath -validate-renderer
+if ($LASTEXITCODE -ne 0) {
+    throw 'Listener odrzucił dołączony renderer PDF.'
 }
 
 $versionOutput = (& $listenerPath --version).Trim()
@@ -73,6 +87,9 @@ if ($installerVersion -notlike "$Version*") {
 
 if ($RequireSignature) {
     $expectedSubject = [string] $env:WINDOWS_CODESIGN_SUBJECT
+    if ([string]::IsNullOrWhiteSpace($expectedSubject)) {
+        throw 'WINDOWS_CODESIGN_SUBJECT jest wymagany przy weryfikacji podpisanego wydania.'
+    }
     $signTool = Find-SignTool
 
     foreach ($artifactPath in @($listenerPath, $installerPath)) {
@@ -80,8 +97,11 @@ if ($RequireSignature) {
         if ($signature.Status -ne 'Valid') {
             throw "Podpis Authenticode $artifactPath ma status $($signature.Status): $($signature.StatusMessage)"
         }
-        if (-not [string]::IsNullOrWhiteSpace($expectedSubject) -and
-            $signature.SignerCertificate.Subject.IndexOf($expectedSubject, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        if (-not [string]::Equals(
+            $signature.SignerCertificate.Subject,
+            $expectedSubject,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
             throw "Podpis $artifactPath ma nieoczekiwany podmiot '$($signature.SignerCertificate.Subject)'."
         }
 

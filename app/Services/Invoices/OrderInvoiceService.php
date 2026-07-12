@@ -76,6 +76,7 @@ final class OrderInvoiceService
 
             $linePayloads = $order->lines
                 ->map(fn (ExternalOrderLine $line): array => $this->linePayload($line, $order))
+                ->concat($this->supplementalLinePayloads($order))
                 ->values();
             $template = $this->templates->defaultTemplate();
 
@@ -237,6 +238,69 @@ final class OrderInvoiceService
                 'external_line_id' => $line->external_line_id,
             ],
         ];
+    }
+
+    /**
+     * Add WooCommerce shipping and fee lines without turning them into
+     * warehouse/reservation lines.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function supplementalLinePayloads(ExternalOrder $order): array
+    {
+        $raw = (array) $order->raw_payload;
+        $rows = [];
+
+        foreach (['shipping_lines' => 'shipping', 'fee_lines' => 'fee'] as $key => $type) {
+            foreach ((array) ($raw[$key] ?? []) as $line) {
+                if (! is_array($line)) {
+                    continue;
+                }
+
+                $netTotal = is_numeric($line['total'] ?? null) ? (float) $line['total'] : 0.0;
+                $hasTax = array_key_exists('total_tax', $line) && is_numeric($line['total_tax']);
+                $vatTotal = $hasTax ? (float) $line['total_tax'] : 0.0;
+                $fallbackVatRate = (float) ($this->ossVatRates->rateForOrder($order) ?? 23.0);
+
+                if (! $hasTax && abs($netTotal) > 0.0001) {
+                    $vatTotal = round($netTotal * ($fallbackVatRate / 100), 2);
+                }
+
+                $netTotal = round($netTotal, 2);
+                $vatTotal = round($vatTotal, 2);
+                $grossTotal = round($netTotal + $vatTotal, 2);
+
+                if (abs($grossTotal) < 0.0001) {
+                    continue;
+                }
+
+                $vatRate = abs($netTotal) > 0.0001
+                    ? round(($vatTotal / $netTotal) * 100, 2)
+                    : $fallbackVatRate;
+                $name = trim((string) ($line['name'] ?? $line['method_title'] ?? ''));
+
+                $rows[] = [
+                    'product_id' => null,
+                    'name' => mb_substr($name !== '' ? $name : ($type === 'shipping' ? 'Dostawa' : 'Opłata'), 0, 255),
+                    'sku' => null,
+                    'unit' => 'usł.',
+                    'quantity' => 1,
+                    'unit_net_price' => $netTotal,
+                    'net_total' => $netTotal,
+                    'vat_rate' => $vatRate,
+                    'vat_total' => $vatTotal,
+                    'gross_total' => $grossTotal,
+                    'metadata' => [
+                        'source' => 'woocommerce',
+                        'line_type' => $type,
+                        'external_line_id' => isset($line['id']) ? (string) $line['id'] : null,
+                        'method_id' => $line['method_id'] ?? null,
+                    ],
+                ];
+            }
+        }
+
+        return $rows;
     }
 
     private function shouldApplyOssVatRate(float $netTotal, float $vatTotal, float $ossVatRate): bool

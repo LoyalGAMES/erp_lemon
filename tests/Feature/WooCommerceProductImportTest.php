@@ -265,7 +265,7 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('2.0000', (string) $balance->quantity_available);
     }
 
-    public function test_imported_woo_stock_does_not_override_balance_with_waiting_reservation(): void
+    public function test_imported_woo_stock_promotes_waiting_reservation_and_reconstructs_physical_stock(): void
     {
         Http::fake(function ($request) {
             $url = $request->url();
@@ -358,12 +358,12 @@ class WooCommerceProductImportTest extends TestCase
         $stats = app(WooCommerceImportService::class)->importProducts($integration);
 
         $balance = $product->stockBalances()->where('warehouse_id', $warehouse->id)->firstOrFail();
-        $this->assertSame(0, $stats['stock_updated']);
-        $this->assertSame(1, $stats['stock_skipped_waiting_reservations']);
-        $this->assertSame('0.0000', (string) $balance->quantity_on_hand);
-        $this->assertSame('0.0000', (string) $balance->quantity_reserved);
-        $this->assertSame('0.0000', (string) $balance->quantity_available);
-        $this->assertSame('waiting', $reservation->fresh()->status);
+        $this->assertSame(1, $stats['stock_updated']);
+        $this->assertSame(0, $stats['stock_skipped_waiting_reservations']);
+        $this->assertSame('4.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('2.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('2.0000', (string) $balance->quantity_available);
+        $this->assertSame('active', $reservation->fresh()->status);
     }
 
     public function test_imported_woo_stock_does_not_override_balance_while_export_is_pending(): void

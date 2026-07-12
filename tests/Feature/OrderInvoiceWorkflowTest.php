@@ -16,6 +16,7 @@ use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Invoices\InvoiceSettingsService;
+use App\Services\Invoices\OrderInvoiceService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -137,6 +138,51 @@ class OrderInvoiceWorkflowTest extends TestCase
         $this->assertSame(0, Invoice::query()->count());
 
         Http::assertNothingSent();
+    }
+
+    public function test_invoice_contains_woocommerce_shipping_and_fee_lines(): void
+    {
+        [$order] = $this->createFulfilledOrder();
+        $order->update([
+            'total_gross' => 141.45,
+            'raw_payload' => [
+                'payment_method_title' => 'Przelew',
+                'shipping_lines' => [[
+                    'id' => 41,
+                    'method_title' => 'Kurier InPost',
+                    'method_id' => 'inpost_courier',
+                    'total' => '10.00',
+                    'total_tax' => '2.30',
+                ]],
+                'fee_lines' => [[
+                    'id' => 51,
+                    'name' => 'Pakowanie prezentowe',
+                    'total' => '5.00',
+                    'total_tax' => '1.15',
+                ]],
+            ],
+        ]);
+
+        app(InvoiceSettingsService::class)->updateSellerData([
+            'name' => 'Sempre Love sp. z o.o.',
+            'tax_id' => '5261040828',
+            'address_1' => 'Testowa 1',
+            'postcode' => '00-001',
+            'city' => 'Warszawa',
+            'country' => 'PL',
+            'email' => 'biuro@example.test',
+            'phone' => '+48123123123',
+            'bank_account' => 'PL00111122223333444455556666',
+        ]);
+
+        $invoice = app(OrderInvoiceService::class)->createForOrder($order)->load('lines');
+
+        $this->assertSame('115.00', (string) $invoice->net_total);
+        $this->assertSame('26.45', (string) $invoice->vat_total);
+        $this->assertSame('141.45', (string) $invoice->gross_total);
+        $this->assertCount(3, $invoice->lines);
+        $this->assertSame('shipping', data_get($invoice->lines->firstWhere('name', 'Kurier InPost')?->metadata, 'line_type'));
+        $this->assertSame('fee', data_get($invoice->lines->firstWhere('name', 'Pakowanie prezentowe')?->metadata, 'line_type'));
     }
 
     public function test_invoice_remains_created_when_lemon_plugin_is_missing_in_woocommerce(): void

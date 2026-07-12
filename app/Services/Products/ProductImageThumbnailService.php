@@ -4,8 +4,12 @@ declare(strict_types=1);
 
 namespace App\Services\Products;
 
+use GuzzleHttp\Psr7\Uri;
+use GuzzleHttp\Psr7\UriResolver;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
+use Psr\Http\Message\ResponseInterface;
+use RuntimeException;
 use Throwable;
 
 class ProductImageThumbnailService
@@ -15,6 +19,14 @@ class ProductImageThumbnailService
     private const MAX_DIMENSION = 600;
 
     private const MAX_SOURCE_BYTES = 12582912;
+
+    private const MAX_SOURCE_PIXELS = 25000000;
+
+    private const MAX_REDIRECTS = 3;
+
+    public function __construct(
+        private readonly RemoteImageSourceGuard $remoteSources,
+    ) {}
 
     public function thumbnailUrl(?string $source, int $width, int $height): ?string
     {
@@ -34,7 +46,7 @@ class ProductImageThumbnailService
         }
 
         if (! $this->isRemoteSource($source)) {
-            return $source;
+            return null;
         }
 
         $encodedSource = $this->encodeSource($source);
@@ -103,7 +115,12 @@ class ProductImageThumbnailService
     private function isLocalSource(string $source): bool
     {
         if (str_starts_with($source, '/')) {
-            return true;
+            return preg_match('/^\/[\\\\\/]/', $source) !== 1
+                && ! str_contains($source, '\\');
+        }
+
+        if (! $this->isRemoteSource($source)) {
+            return false;
         }
 
         $sourceHost = parse_url($source, PHP_URL_HOST);
@@ -121,7 +138,7 @@ class ProductImageThumbnailService
 
     private function isRemoteSource(string $source): bool
     {
-        return in_array(parse_url($source, PHP_URL_SCHEME), ['http', 'https'], true);
+        return in_array(strtolower((string) parse_url($source, PHP_URL_SCHEME)), ['http', 'https'], true);
     }
 
     private function localSourceContents(string $source): ?string
@@ -160,34 +177,119 @@ class ProductImageThumbnailService
 
     private function remoteSourceContents(string $source): ?string
     {
-        if (! $this->isRemoteSource($source)) {
+        if (! $this->isRemoteSource($source) || ! defined('CURLOPT_RESOLVE')) {
             return null;
         }
 
-        try {
-            $response = Http::timeout(6)
-                ->withHeaders(['Accept' => 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'])
-                ->get($source);
-        } catch (Throwable) {
-            return null;
+        $current = $source;
+
+        for ($redirect = 0; $redirect <= self::MAX_REDIRECTS; $redirect++) {
+            $target = $this->remoteSources->target($current);
+
+            if ($target === null) {
+                return null;
+            }
+
+            $stream = tmpfile();
+
+            if (! is_resource($stream)) {
+                return null;
+            }
+
+            $pinnedAddress = str_contains($target['address'], ':')
+                ? '['.$target['address'].']'
+                : $target['address'];
+
+            try {
+                $response = Http::connectTimeout(3)
+                    ->timeout(8)
+                    ->withHeaders(['Accept' => 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'])
+                    ->withOptions([
+                        'allow_redirects' => false,
+                        'http_errors' => false,
+                        'sink' => $stream,
+                        'on_headers' => function (ResponseInterface $response): void {
+                            $contentLength = (int) $response->getHeaderLine('Content-Length');
+
+                            if ($contentLength > self::MAX_SOURCE_BYTES) {
+                                throw new RuntimeException('Remote image exceeds the permitted size.');
+                            }
+                        },
+                        'progress' => function (
+                            $downloadTotal,
+                            $downloaded,
+                            $uploadTotal,
+                            $uploaded,
+                        ): void {
+                            unset($uploadTotal, $uploaded);
+
+                            if ($downloadTotal > self::MAX_SOURCE_BYTES || $downloaded > self::MAX_SOURCE_BYTES) {
+                                throw new RuntimeException('Remote image exceeds the permitted size.');
+                            }
+                        },
+                        'curl' => [
+                            CURLOPT_RESOLVE => [
+                                $target['host'].':'.$target['port'].':'.$pinnedAddress,
+                            ],
+                            CURLOPT_PROTOCOLS => CURLPROTO_HTTP | CURLPROTO_HTTPS,
+                        ],
+                    ])
+                    ->get($target['url']);
+            } catch (Throwable) {
+                fclose($stream);
+
+                return null;
+            }
+
+            if (in_array($response->status(), [301, 302, 303, 307, 308], true)) {
+                $location = trim((string) $response->header('Location'));
+                fclose($stream);
+
+                if ($location === '' || $redirect === self::MAX_REDIRECTS) {
+                    return null;
+                }
+
+                try {
+                    $current = (string) UriResolver::resolve(new Uri($target['url']), new Uri($location));
+                } catch (Throwable) {
+                    return null;
+                }
+
+                continue;
+            }
+
+            if (! $response->successful()) {
+                fclose($stream);
+
+                return null;
+            }
+
+            rewind($stream);
+            $contents = stream_get_contents($stream);
+            fclose($stream);
+
+            if (! is_string($contents) || $contents === '') {
+                $contents = $response->body();
+            }
+
+            if ($contents === '' || strlen($contents) > self::MAX_SOURCE_BYTES) {
+                return null;
+            }
+
+            return $contents;
         }
 
-        if (! $response->successful()) {
-            return null;
-        }
-
-        $contents = $response->body();
-
-        if ($contents === '' || strlen($contents) > self::MAX_SOURCE_BYTES) {
-            return null;
-        }
-
-        return $contents;
+        return null;
     }
 
     private function writeThumbnail(string $contents, string $cachePath, int $width, int $height): bool
     {
-        if (@getimagesizefromstring($contents) === false) {
+        $imageInfo = @getimagesizefromstring($contents);
+
+        if ($imageInfo === false
+            || (int) ($imageInfo[0] ?? 0) <= 0
+            || (int) ($imageInfo[1] ?? 0) <= 0
+            || (int) $imageInfo[0] * (int) $imageInfo[1] > self::MAX_SOURCE_PIXELS) {
             return false;
         }
 

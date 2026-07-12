@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -28,6 +30,30 @@ func TestHealthEndpointReportsVersion(t *testing.T) {
 	}
 	if !payload.Success || payload.Message != "ready" || payload.Version != "1.2.3-test" {
 		t.Fatalf("unexpected health payload: %#v", payload)
+	}
+}
+
+func TestRotatingLogWriterBoundsActiveLogAndKeepsBackup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "listener.log")
+	writer, err := newRotatingLogWriter(path, 16, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("first-log-entry\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Write([]byte("second-log-entry\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("rotated backup missing: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() > 32 {
+		t.Fatalf("active log too large: %d", info.Size())
 	}
 }
 

@@ -7,8 +7,8 @@
         $settingDispositions = old('dispositions', $returnSettings['dispositions'] ?? []);
         $defaultCondition = old('default_condition', $returnSettings['default_condition'] ?? 'unchecked');
         $defaultDisposition = old('default_disposition', $returnSettings['default_disposition'] ?? 'restock');
-        $storeApiConfigured = filled(old('store_api_token', $returnSettings['store_api_token'] ?? ''));
-        $storeWebhookConfigured = filled(old('store_webhook_secret', $returnSettings['store_webhook_secret'] ?? ''));
+        $storeApiConfigured = (bool) ($returnSettings['store_api_token_configured'] ?? false);
+        $storeWebhookConfigured = (bool) ($returnSettings['store_webhook_secret_configured'] ?? false);
     @endphp
 
     <div class="page-toolbar">
@@ -150,15 +150,29 @@
                 <div class="settings-fields store-integration-fields">
                     <label>Token API (Bearer / X-API-Key)
                         <span class="token-field">
-                            <input name="store_api_token" value="{{ old('store_api_token', $returnSettings['store_api_token']) }}" maxlength="120" autocomplete="off" spellcheck="false">
+                            <input name="store_api_token" type="password" value="" maxlength="120" autocomplete="new-password" spellcheck="false" placeholder="{{ $storeApiConfigured ? 'Zostaw puste, aby zachować zapisany token' : 'Wygeneruj lub wpisz token API' }}">
                             <button class="button secondary" type="button" data-token-generate="store_api_token">Generuj token API</button>
                         </span>
+                        @if ($storeApiConfigured)
+                            <small>Zapisany token: {{ $returnSettings['store_api_token_mask'] }}. Pole pozostaw puste, aby go nie zmieniać.</small>
+                            <span class="check-row">
+                                <input name="clear_store_api_token" type="checkbox" value="1" @checked(old('clear_store_api_token'))>
+                                Usuń zapisany token API
+                            </span>
+                        @endif
                     </label>
                     <label>Sekret webhooka (X-Lemon-Returns-Token)
                         <span class="token-field">
-                            <input name="store_webhook_secret" value="{{ old('store_webhook_secret', $returnSettings['store_webhook_secret']) }}" maxlength="120" autocomplete="off" spellcheck="false">
+                            <input name="store_webhook_secret" type="password" value="" maxlength="120" autocomplete="new-password" spellcheck="false" placeholder="{{ $storeWebhookConfigured ? 'Zostaw puste, aby zachować zapisany sekret' : 'Wygeneruj lub wpisz sekret webhooka' }}">
                             <button class="button secondary" type="button" data-token-generate="store_webhook_secret">Generuj sekret</button>
                         </span>
+                        @if ($storeWebhookConfigured)
+                            <small>Zapisany sekret: {{ $returnSettings['store_webhook_secret_mask'] }}. Pole pozostaw puste, aby go nie zmieniać.</small>
+                            <span class="check-row">
+                                <input name="clear_store_webhook_secret" type="checkbox" value="1" @checked(old('clear_store_webhook_secret'))>
+                                Usuń zapisany sekret webhooka
+                            </span>
+                        @endif
                     </label>
                 </div>
                 <p class="muted">
@@ -246,15 +260,13 @@
     <script>
         function generateReturnToken(length = 48) {
             const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789_-';
-            const values = new Uint32Array(length);
 
-            if (window.crypto?.getRandomValues) {
-                window.crypto.getRandomValues(values);
-            } else {
-                for (let index = 0; index < length; index += 1) {
-                    values[index] = Math.floor(Math.random() * chars.length);
-                }
+            if (!window.crypto?.getRandomValues) {
+                return null;
             }
+
+            const values = new Uint32Array(length);
+            window.crypto.getRandomValues(values);
 
             return Array.from(values, (value) => chars[value % chars.length]).join('');
         }
@@ -266,7 +278,16 @@
                 const target = document.querySelector(`[name="${tokenButton.dataset.tokenGenerate}"]`);
 
                 if (target) {
-                    target.value = generateReturnToken();
+                    const generated = generateReturnToken();
+
+                    if (!generated) {
+                        window.alert('Ta przeglądarka nie udostępnia bezpiecznego generatora kryptograficznego. Wpisz token wygenerowany przez menedżer haseł.');
+                        return;
+                    }
+
+                    target.value = generated;
+                    const clearField = document.querySelector(`[name="clear_${target.name}"]`);
+                    if (clearField) clearField.checked = false;
                     target.dispatchEvent(new Event('input', { bubbles: true }));
                     target.focus();
                 }
@@ -291,6 +312,15 @@
             const index = Number(list.dataset.nextIndex || 0);
             list.insertAdjacentHTML('beforeend', template.innerHTML.replaceAll('__INDEX__', String(index)));
             list.dataset.nextIndex = String(index + 1);
+        });
+
+        document.addEventListener('input', (event) => {
+            if (!['store_api_token', 'store_webhook_secret'].includes(event.target?.name) || !event.target.value) {
+                return;
+            }
+
+            const clearField = document.querySelector(`[name="clear_${event.target.name}"]`);
+            if (clearField) clearField.checked = false;
         });
     </script>
 @endpush

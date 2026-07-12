@@ -11,6 +11,7 @@ use App\Models\ReturnCase;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
 use App\Models\Warehouse;
+use App\Services\Shipping\ShippingLabelService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -49,6 +50,15 @@ class ShipmentGenerationTest extends TestCase
         $this->assertSame($order->id, $label->external_order_id);
         $this->assertSame('inpost', $label->provider);
         $this->assertSame($account->id, $label->courier_account_id);
+
+        Http::assertSent(function ($request): bool {
+            if (! str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/shipments') || $request->method() !== 'POST') {
+                return true;
+            }
+
+            return data_get($request->data(), 'receiver.address.street') === 'ul. Krzywa'
+                && data_get($request->data(), 'receiver.address.building_number') === '2';
+        });
 
         $this->get(route('orders.show', $order))
             ->assertOk()
@@ -127,7 +137,7 @@ class ShipmentGenerationTest extends TestCase
         $order->update(['raw_payload' => ['shipping_lines' => [['method_title' => 'InPost Paczkomaty 24/7']]]]);
         $account = $this->createAccount();
 
-        $label = app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order->fresh());
+        $label = app(ShippingLabelService::class)->generateForOrder($order->fresh());
 
         $this->assertSame('inpost', $label->provider);
         $this->assertSame($account->id, $label->courier_account_id);
@@ -142,7 +152,7 @@ class ShipmentGenerationTest extends TestCase
 
         $this->expectExceptionMessage('Brak konfiguracji etykiet');
 
-        app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order->fresh());
+        app(ShippingLabelService::class)->generateForOrder($order->fresh());
 
         $this->assertSame(0, ShippingLabel::query()->count());
     }
@@ -153,7 +163,7 @@ class ShipmentGenerationTest extends TestCase
 
         $this->expectExceptionMessage('Włącz etykiety kurierskie w Integracjach');
 
-        app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order);
+        app(ShippingLabelService::class)->generateForOrder($order);
     }
 
     public function test_locker_shipment_detects_official_inpost_plugin_meta_keys(): void
@@ -177,7 +187,7 @@ class ShipmentGenerationTest extends TestCase
 
         $account = $this->createAccount();
 
-        app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order->fresh(), $account);
+        app(ShippingLabelService::class)->generateForOrder($order->fresh(), $account);
 
         Http::assertSent(function ($request): bool {
             if (! str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/shipments') || $request->method() !== 'POST') {
@@ -211,7 +221,7 @@ class ShipmentGenerationTest extends TestCase
         $order = $this->createOrder();
         $account = $this->createAccount();
 
-        $label = app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order, $account);
+        $label = app(ShippingLabelService::class)->generateForOrder($order, $account);
 
         $this->assertSame('SHIP-PLUGIN', $label->label_number);
         $this->assertSame('520000444444444444444444', $label->tracking_number);
@@ -241,7 +251,7 @@ class ShipmentGenerationTest extends TestCase
 
         $account = $this->createAccount();
 
-        $label = app(\App\Services\Shipping\ShippingLabelService::class)->generateForOrder($order->fresh(), $account);
+        $label = app(ShippingLabelService::class)->generateForOrder($order->fresh(), $account);
 
         $this->assertSame('987654', $label->label_number);
         $this->assertSame('520000333333333333333333', $label->tracking_number);

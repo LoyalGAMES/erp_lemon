@@ -13,6 +13,7 @@ use App\Models\StockReservation;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Services\Inventory\StockReservationService;
+use App\Services\Orders\OrderWzDocumentService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -94,6 +95,12 @@ class WarehouseOrderFulfillmentTest extends TestCase
         $this->assertSame($channel->id, $document->metadata['sales_channel_id']);
         $this->assertCount(1, $document->lines);
         $this->assertSame('2.0000', (string) $document->lines->first()->quantity);
+        $this->assertNotNull($document->order_fulfillment_key);
+
+        $secondPass = app(OrderWzDocumentService::class)->ensureDrafts($order);
+        $this->assertCount(1, $secondPass);
+        $this->assertSame($document->id, $secondPass[0]->id);
+        $this->assertSame(1, WarehouseDocument::query()->count());
 
         $this->post(route('documents.post', $document))
             ->assertRedirect()

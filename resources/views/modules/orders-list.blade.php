@@ -141,19 +141,19 @@
                         $hiddenLinesCount = max(0, $order->lines->count() - $visibleLines->count());
                     @endphp
                     <tr>
-                        <td class="order-main-cell">
+                        <td class="order-main-cell" data-label="Zamówienie">
                             <a class="order-number-link" href="{{ route('orders.show', $order) }}">
                                 {{ $order->external_number ?: $order->external_id }}
                             </a>
                             <div class="order-meta">ID Woo: {{ $order->external_id }}</div>
                             <div class="order-meta">ERP: #{{ $order->id }} · {{ $order->salesChannel?->code ?? '-' }}</div>
                         </td>
-                        <td class="order-customer-cell">
+                        <td class="order-customer-cell" data-label="Klient">
                             <strong>{{ $customer }}</strong>
                             <span>{{ $email !== '' ? $email : 'brak e-maila' }}</span>
                             <span>{{ $phone !== '' ? $phone : 'brak telefonu' }}</span>
                         </td>
-                        <td class="order-items-cell">
+                        <td class="order-items-cell" data-label="Przedmioty">
                             <div class="order-items-stack">
                                 @forelse ($visibleLines as $line)
                                     @php
@@ -181,7 +181,7 @@
                                 @endif
                             </div>
                         </td>
-                        <td class="order-delivery-cell">
+                        <td class="order-delivery-cell" data-label="Dostawa">
                             <strong>{{ $deliveryName($order, $label) }}</strong>
                             @if ($label)
                                 @if ($trackingUrl)
@@ -196,7 +196,7 @@
                                 <span class="muted">Brak etykiety</span>
                             @endif
                         </td>
-                        <td>
+                        <td data-label="Status">
                             <span @class(['status', $statusTone($order->status)])>{{ $order->status }}</span>
                             @if ($order->fulfillment_status)
                                 <div class="order-meta">ERP: <span @class(['status', $statusTone($order->fulfillment_status)])>{{ match ($order->fulfillment_status) {
@@ -208,12 +208,12 @@
                             @endif
                             <div class="order-meta">Rezerwacje: {{ number_format($activeReservations, 0, ',', ' ') }}</div>
                         </td>
-                        <td class="numeric order-total-cell">{{ $money($order->total_gross, $order->currency) }}</td>
-                        <td class="order-date-cell">
+                        <td class="numeric order-total-cell" data-label="Kwota">{{ $money($order->total_gross, $order->currency) }}</td>
+                        <td class="order-date-cell" data-label="Utworzone">
                             {{ $order->external_created_at?->format('Y-m-d') ?? $order->created_at?->format('Y-m-d') ?? '-' }}
                             <span>{{ $order->external_created_at?->format('H:i') ?? $order->created_at?->format('H:i') ?? '' }}</span>
                         </td>
-                        <td class="order-actions-cell">
+                        <td class="order-actions-cell" data-label="Akcje">
                             {!! view('partials.order-actions', [
                                 'order' => $order,
                                 'wzDocument' => $latestWzDocuments[$order->id] ?? null,
@@ -224,7 +224,7 @@
                         </td>
                     </tr>
                 @empty
-                    <tr>
+                    <tr class="orders-empty-row">
                         <td colspan="8">Brak zamówień dla wybranych filtrów.</td>
                     </tr>
                 @endforelse

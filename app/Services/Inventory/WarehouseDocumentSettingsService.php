@@ -9,6 +9,7 @@ use App\Models\AppSetting;
 final class WarehouseDocumentSettingsService
 {
     private const NUMBERING_KEY = 'warehouse_document_numbering';
+
     private const LOCATIONS_KEY = 'warehouse_locations';
 
     /**
@@ -29,7 +30,7 @@ final class WarehouseDocumentSettingsService
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      * @return array{pattern:string,padding:int}
      */
     public function updateNumberingData(array $data): array
@@ -67,7 +68,7 @@ final class WarehouseDocumentSettingsService
     }
 
     /**
-     * @param list<string> $locations
+     * @param  list<string>  $locations
      * @return list<string>
      */
     public function updateLocations(array $locations): array
@@ -94,7 +95,7 @@ final class WarehouseDocumentSettingsService
     }
 
     /**
-     * @param array{pattern:string,padding:int} $numbering
+     * @param  array{pattern:string,padding:int}  $numbering
      */
     public function renderNumber(string $type, int $sequence, \DateTimeInterface $date, array $numbering): string
     {
@@ -114,9 +115,11 @@ final class WarehouseDocumentSettingsService
      */
     private function defaultNumberingData(): array
     {
+        $numbering = (array) config('erp.warehouse_documents.numbering', []);
+
         return [
-            'pattern' => env('WAREHOUSE_DOCUMENT_NUMBER_PATTERN', '{TYPE}/{YYYY}/{SEQ}'),
-            'padding' => (int) env('WAREHOUSE_DOCUMENT_NUMBER_PADDING', 6),
+            'pattern' => (string) ($numbering['pattern'] ?? '{TYPE}/{YYYY}/{SEQ}'),
+            'padding' => (int) ($numbering['padding'] ?? 6),
         ];
     }
 
@@ -131,7 +134,7 @@ final class WarehouseDocumentSettingsService
         $pattern = preg_replace('/[^A-Za-z0-9_\/{}-]+/', '', $pattern) ?? '';
 
         if (! str_contains($pattern, '{SEQ}')) {
-            $pattern = rtrim($pattern, '/') . '/{SEQ}';
+            $pattern = rtrim($pattern, '/').'/{SEQ}';
         }
 
         return $pattern !== '' ? $pattern : '{TYPE}/{YYYY}/{SEQ}';

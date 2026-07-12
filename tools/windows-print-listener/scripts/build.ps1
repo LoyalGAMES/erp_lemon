@@ -65,6 +65,8 @@ try {
 
     Copy-Item -LiteralPath (Join-Path $root 'README.md') -Destination $readmePath -Force
 
+    & (Join-Path $PSScriptRoot 'prepare-sumatra.ps1') -DestinationPath (Join-Path $buildDirectory 'SumatraPDF.exe')
+
     if ($Sign) {
         & (Join-Path $PSScriptRoot 'sign-artifact.ps1') $listenerPath
     }

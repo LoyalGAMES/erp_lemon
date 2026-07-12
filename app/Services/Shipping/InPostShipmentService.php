@@ -7,8 +7,8 @@ namespace App\Services\Shipping;
 use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\ReturnCase;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Http\Client\PendingRequest;
+use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
 /**
@@ -23,8 +23,14 @@ final class InPostShipmentService
      * także dla przesyłek już nadanych/doręczanych (reużytych z wtyczki sklepu).
      */
     private const LABEL_PENDING_STATUSES = ['created', 'offers_prepared', 'offer_selected', 'unconfirmed'];
+
     private const LABEL_POLL_ATTEMPTS = 10;
+
     private const LABEL_POLL_DELAY_MS = 800;
+
+    public function __construct(
+        private readonly ShippingAddressParser $addressParser,
+    ) {}
 
     /**
      * Tworzy przesyłkę i pobiera etykietę PDF. Jeśli przesyłka dla zamówienia
@@ -221,7 +227,7 @@ final class InPostShipmentService
     }
 
     /**
-     * @param array<string, mixed> $payload
+     * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
     private function postShipment(CourierAccount $account, array $payload): array
@@ -318,7 +324,7 @@ final class InPostShipmentService
             ],
             'service' => $targetPoint !== null ? 'inpost_locker_standard' : 'inpost_courier_standard',
             'reference' => (string) ($order->external_number ?: $order->external_id),
-            'comments' => 'Zamówienie ' . ($order->external_number ?: $order->external_id),
+            'comments' => 'Zamówienie '.($order->external_number ?: $order->external_id),
         ];
 
         if ($targetPoint !== null) {
@@ -327,9 +333,14 @@ final class InPostShipmentService
                 'sending_method' => $account->sending_method ?: 'dispatch_order',
             ];
         } else {
+            $usesShippingAddress = filled(data_get($shipping, 'address_1'));
+            $addressLine1 = (string) data_get($usesShippingAddress ? $shipping : $billing, 'address_1', '');
+            $addressLine2 = (string) data_get($usesShippingAddress ? $shipping : $billing, 'address_2', '');
+            $address = $this->addressParser->parse($addressLine1, $addressLine2);
+
             $payload['receiver']['address'] = [
-                'street' => (string) (data_get($shipping, 'address_1') ?: data_get($billing, 'address_1', '')),
-                'building_number' => (string) (data_get($shipping, 'address_2') ?: '1'),
+                'street' => $address['street'],
+                'building_number' => $this->addressParser->combinedBuildingNumber($address),
                 'city' => (string) (data_get($shipping, 'city') ?: data_get($billing, 'city', '')),
                 'post_code' => (string) (data_get($shipping, 'postcode') ?: data_get($billing, 'postcode', '')),
                 'country_code' => (string) (data_get($shipping, 'country') ?: data_get($billing, 'country', 'PL')),
@@ -370,8 +381,8 @@ final class InPostShipmentService
                 ['template' => $account->default_parcel_template ?: 'small'],
             ],
             'service' => $targetPoint !== '' ? 'inpost_locker_standard' : 'inpost_courier_standard',
-            'reference' => 'ZWROT ' . $returnCase->number,
-            'comments' => 'Zwrot ' . $returnCase->number,
+            'reference' => 'ZWROT '.$returnCase->number,
+            'comments' => 'Zwrot '.$returnCase->number,
             'custom_attributes' => [
                 'sending_method' => 'parcel_locker',
             ],
@@ -381,6 +392,7 @@ final class InPostShipmentService
             $payload['custom_attributes']['target_point'] = $targetPoint;
         } else {
             $street = trim((string) ($returnAddress['street'] ?? ''));
+            $buildingNumber = trim((string) ($returnAddress['building_number'] ?? ''));
             $city = trim((string) ($returnAddress['city'] ?? ''));
             $postCode = trim((string) ($returnAddress['post_code'] ?? ''));
 
@@ -388,9 +400,13 @@ final class InPostShipmentService
                 throw new RuntimeException("Konto {$account->name} nie ma Paczkomatu zwrotów ani pełnego adresu magazynu. Uzupełnij konfigurację w Ustawienia → Wysyłki.");
             }
 
+            $address = $buildingNumber !== ''
+                ? ['street' => $street, 'building_number' => $buildingNumber, 'apartment_number' => null]
+                : $this->addressParser->parse($street);
+
             $payload['receiver']['address'] = [
-                'street' => $street,
-                'building_number' => trim((string) ($returnAddress['building_number'] ?? '')) ?: '1',
+                'street' => $address['street'],
+                'building_number' => $this->addressParser->combinedBuildingNumber($address),
                 'city' => $city,
                 'post_code' => $postCode,
                 'country_code' => trim((string) ($returnAddress['country_code'] ?? '')) ?: 'PL',
@@ -462,12 +478,12 @@ final class InPostShipmentService
     }
 
     /**
-     * @param array<string, mixed>|null $body
+     * @param  array<string, mixed>|null  $body
      */
     private function errorMessage(?array $body, string $fallback): string
     {
         $details = collect((array) data_get($body, 'details', []))
-            ->map(fn ($messages, $field): string => $field . ': ' . json_encode($messages, JSON_UNESCAPED_UNICODE))
+            ->map(fn ($messages, $field): string => $field.': '.json_encode($messages, JSON_UNESCAPED_UNICODE))
             ->implode('; ');
 
         $message = trim(implode(' ', array_filter([

@@ -25,8 +25,7 @@ komputera magazynu. To komputer magazynowy inicjuje każde połączenie do endpo
    - publiczny adres ERP rozpoczynający się od `https://`;
    - token zgodny z `PRINT_BRIDGE_TOKEN`;
    - kod stanowiska z ustawień pakowania;
-   - nazwę workera/komputera;
-   - opcjonalną ścieżkę do `SumatraPDF.exe`.
+   - nazwę workera/komputera.
 4. Instalator tworzy automatyczną usługę `SempreERPPrintListener`.
 
 Token jest zapisany w
@@ -57,12 +56,18 @@ LAN. Wymagany jest wyłącznie ruch wychodzący HTTPS z komputera do ERP.
 ## Drukowanie ZPL, PDF i obrazów
 
 ZPL jest wysyłany bezpośrednio do spoolera Windows jako RAW. PDF i obrazy
-wymagają `SumatraPDF.exe`; aplikacja szuka go w ścieżce z konfiguracji, obok
-własnego pliku, w `Program Files\SumatraPDF` oraz w `PATH`.
+wymagają przypiętego renderera `SumatraPDF.exe` 3.6.1. Instalator dołącza
+oficjalnie podpisany plik i licencję, a listener przed każdym użyciem sprawdza
+jego SHA-256. Kod źródłowy tej wersji jest dostępny w tagu
+`3.6.1rel`: https://github.com/sumatrapdfreader/sumatrapdf/tree/3.6.1rel.
 
 Usługa działa jako `LocalSystem`, dlatego drukarka musi być zainstalowana dla
 całego komputera. Drukarki mapowane wyłącznie w profilu konkretnego użytkownika
-mogą nie być widoczne dla usługi.
+mogą nie być widoczne dla usługi. To świadomy kompromis zgodności ze spoolerem
+i drukarkami sieciowymi: konto nie zostało automatycznie zmienione na
+`LocalService`, bo mogłoby utracić dostęp do części drukarek. Powierzchnia
+renderera jest ograniczona przez przypięcie dokładnego, podpisanego pliku,
+prywatny plik tymczasowy, limit czasu procesu i brak przychodzącego portu.
 
 ## Starszy tryb przychodzący
 

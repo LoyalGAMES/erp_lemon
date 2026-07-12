@@ -21,6 +21,7 @@ use App\Services\Gs1\Gs1SettingsService;
 use App\Services\Inventory\StockSyncQueueService;
 use App\Services\Inventory\WarehouseDocumentNumberService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
+use App\Services\Products\ProductDescriptionSanitizer;
 use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Products\ProductIdentifierService;
 use App\Services\Products\ProductImportIssueService;
@@ -106,8 +107,7 @@ class ProductController extends Controller
         Product $product,
         Gs1SettingsService $gs1Settings,
         ProductEditFieldSettingsService $productEditFields,
-    ): View
-    {
+    ): View {
         $product->load([
             'stockBalances.warehouse',
             'channelMappings.salesChannel',
@@ -140,9 +140,13 @@ class ProductController extends Controller
         ]);
     }
 
-    public function store(Request $request, ProductIdentifierService $identifiers): RedirectResponse
-    {
+    public function store(
+        Request $request,
+        ProductIdentifierService $identifiers,
+        ProductDescriptionSanitizer $descriptionSanitizer,
+    ): RedirectResponse {
         $validated = $request->validate($this->productValidationRules());
+        $validated = $this->sanitizeProductDescriptions($validated, $descriptionSanitizer);
         $this->validateProductTypeSelection($request, $validated);
         $requestedSku = $this->nullableString($validated['sku'] ?? null);
         $uploadedMedia = [];
@@ -215,9 +219,11 @@ class ProductController extends Controller
         AuditLogService $audit,
         ProductIdentifierService $identifiers,
         ProductEditFieldSettingsService $productEditFields,
+        ProductDescriptionSanitizer $descriptionSanitizer,
     ): RedirectResponse {
         $this->preserveHiddenProductFields($request, $product, $productEditFields->visibleFields());
         $validated = $request->validate($this->productValidationRules($product));
+        $validated = $this->sanitizeProductDescriptions($validated, $descriptionSanitizer);
         $this->validateProductTypeSelection($request, $validated);
 
         $before = [
@@ -473,15 +479,105 @@ class ProductController extends Controller
             ->whereKey((int) $validated['warehouse_id'])
             ->where('is_active', true)
             ->firstOrFail();
-        $balance = StockBalance::query()
-            ->where('product_id', $product->id)
-            ->where('warehouse_id', $warehouse->id)
-            ->first();
-        $current = round((float) ($balance?->quantity_on_hand ?? 0), 4);
         $target = round((float) $validated['new_quantity'], 4);
-        $delta = round($target - $current, 4);
+        $current = null;
+        $delta = null;
+        $document = null;
 
-        if (abs($delta) < 0.0001) {
+        try {
+            $result = DB::transaction(function () use (
+                $product,
+                $warehouse,
+                $validated,
+                $numbers,
+                $posting,
+                $target,
+                &$current,
+                &$delta,
+                &$document,
+            ): array {
+                $now = now();
+
+                DB::table('stock_balances')->insertOrIgnore([
+                    'warehouse_id' => $warehouse->id,
+                    'product_id' => $product->id,
+                    'quantity_on_hand' => 0,
+                    'quantity_reserved' => 0,
+                    'quantity_available' => 0,
+                    'recalculated_at' => $now,
+                    'created_at' => $now,
+                    'updated_at' => $now,
+                ]);
+
+                $balance = StockBalance::query()
+                    ->where('product_id', $product->id)
+                    ->where('warehouse_id', $warehouse->id)
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                $current = round((float) $balance->quantity_on_hand, 4);
+                $delta = round($target - $current, 4);
+
+                if (abs($delta) < 0.0001) {
+                    return ['balance' => $balance, 'document' => null];
+                }
+
+                $document = WarehouseDocument::query()->create([
+                    'number' => $numbers->next('KOR'),
+                    'type' => 'KOR',
+                    'status' => 'draft',
+                    'destination_warehouse_id' => $warehouse->id,
+                    'document_date' => $now,
+                    'external_reference' => $product->sku,
+                    'notes' => $this->nullableString($validated['notes'] ?? null)
+                        ?? "Ręczna korekta stanu SKU {$product->sku} z karty produktu.",
+                    'metadata' => [
+                        'source' => 'product_stock_adjustment',
+                        'product_id' => $product->id,
+                        'product_sku' => $product->sku,
+                        'warehouse_id' => $warehouse->id,
+                        'warehouse_code' => $warehouse->code,
+                        'previous_quantity_on_hand' => $current,
+                        'target_quantity_on_hand' => $target,
+                        'delta_quantity' => $delta,
+                    ],
+                ]);
+
+                $document->lines()->create([
+                    'product_id' => $product->id,
+                    'quantity' => $delta,
+                    'notes' => "Stan {$current} -> {$target}",
+                    'metadata' => [
+                        'source' => 'product_stock_adjustment',
+                        'previous_quantity_on_hand' => $current,
+                        'target_quantity_on_hand' => $target,
+                    ],
+                ]);
+
+                $posting->post($document);
+
+                return ['balance' => $balance->refresh(), 'document' => $document->refresh()];
+            }, 3);
+        } catch (RuntimeException $exception) {
+            $audit->record('product.stock_adjust_failed', $product, null, null, [
+                'warehouse_id' => $warehouse->id,
+                'warehouse_code' => $warehouse->code,
+                'document_id' => $document?->id,
+                'current_quantity' => $current,
+                'target_quantity' => $target,
+                'delta_quantity' => $delta,
+                'error' => $exception->getMessage(),
+            ]);
+
+            return $this->redirectAfterStockAdjustment($request, $product)
+                ->with('error', 'Nie zaksięgowano korekty stanu: '.$exception->getMessage());
+        }
+
+        /** @var StockBalance $balance */
+        $balance = $result['balance'];
+        /** @var WarehouseDocument|null $document */
+        $document = $result['document'];
+
+        if (! $document instanceof WarehouseDocument) {
             $queued = $stockSyncQueue->queueForTriggers([
                 [
                     'warehouse_id' => (int) $warehouse->id,
@@ -504,59 +600,6 @@ class ProductController extends Controller
 
             return $this->redirectAfterStockAdjustment($request, $product)
                 ->with('status', "Stan ogółem SKU {$product->sku} w magazynie {$warehouse->code} już wynosi {$this->formatQuantity($target)}.{$syncMessage}");
-        }
-
-        $document = DB::transaction(function () use ($product, $warehouse, $validated, $numbers, $current, $target, $delta): WarehouseDocument {
-            $document = WarehouseDocument::query()->create([
-                'number' => $numbers->next('KOR'),
-                'type' => 'KOR',
-                'status' => 'draft',
-                'destination_warehouse_id' => $warehouse->id,
-                'document_date' => now(),
-                'external_reference' => $product->sku,
-                'notes' => $this->nullableString($validated['notes'] ?? null)
-                    ?? "Ręczna korekta stanu SKU {$product->sku} z karty produktu.",
-                'metadata' => [
-                    'source' => 'product_stock_adjustment',
-                    'product_id' => $product->id,
-                    'product_sku' => $product->sku,
-                    'warehouse_id' => $warehouse->id,
-                    'warehouse_code' => $warehouse->code,
-                    'previous_quantity_on_hand' => $current,
-                    'target_quantity_on_hand' => $target,
-                    'delta_quantity' => $delta,
-                ],
-            ]);
-
-            $document->lines()->create([
-                'product_id' => $product->id,
-                'quantity' => $delta,
-                'notes' => "Stan {$current} -> {$target}",
-                'metadata' => [
-                    'source' => 'product_stock_adjustment',
-                    'previous_quantity_on_hand' => $current,
-                    'target_quantity_on_hand' => $target,
-                ],
-            ]);
-
-            return $document;
-        });
-
-        try {
-            $posting->post($document);
-        } catch (RuntimeException $exception) {
-            $audit->record('product.stock_adjust_failed', $product, null, null, [
-                'warehouse_id' => $warehouse->id,
-                'warehouse_code' => $warehouse->code,
-                'document_id' => $document->id,
-                'current_quantity' => $current,
-                'target_quantity' => $target,
-                'delta_quantity' => $delta,
-                'error' => $exception->getMessage(),
-            ]);
-
-            return $this->redirectAfterStockAdjustment($request, $product)
-                ->with('error', 'Nie zaksięgowano korekty stanu: '.$exception->getMessage());
         }
 
         $audit->record('product.stock_adjusted', $product, [
@@ -1019,6 +1062,31 @@ class ProductController extends Controller
                 : array_values((array) data_get($existingMaster, 'suppliers', [])),
             'gs1' => (array) data_get($existingMaster, 'gs1', []),
         ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function sanitizeProductDescriptions(
+        array $validated,
+        ProductDescriptionSanitizer $sanitizer,
+    ): array {
+        foreach ([
+            'description_pl',
+            'description_en',
+            'short_description_pl',
+            'short_description_en',
+            'additional_description_pl',
+        ] as $field) {
+            if (array_key_exists($field, $validated)) {
+                $validated[$field] = $sanitizer->sanitize(
+                    is_string($validated[$field]) ? $validated[$field] : null,
+                );
+            }
+        }
+
+        return $validated;
     }
 
     /**

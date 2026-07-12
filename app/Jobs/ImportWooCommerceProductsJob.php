@@ -8,13 +8,14 @@ use App\Models\IntegrationSyncLog;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\WooCommerceImportService;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Throwable;
 
-final class ImportWooCommerceProductsJob implements ShouldQueue
+final class ImportWooCommerceProductsJob implements ShouldBeUnique, ShouldQueue
 {
     use Dispatchable;
     use InteractsWithQueue;
@@ -25,10 +26,16 @@ final class ImportWooCommerceProductsJob implements ShouldQueue
 
     public int $timeout = 900;
 
+    public int $uniqueFor = 1200;
+
     public function __construct(
         private readonly int $integrationId,
         private readonly int $syncLogId,
-    ) {
+    ) {}
+
+    public function uniqueId(): string
+    {
+        return 'woocommerce-products-log:'.$this->syncLogId;
     }
 
     public function handle(WooCommerceImportService $importer): void

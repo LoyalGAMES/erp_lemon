@@ -356,3 +356,12 @@ Schedule::command('erp:retry-shipped-woo-sync --limit=25')
     ->cron('*/5 * * * *')
     ->withoutOverlapping(10)
     ->runInBackground();
+
+// Production uses the database queue by default. Drain it from the same
+// scheduler installed during deploy so imports, KSeF and stock jobs do not
+// silently wait forever when a separate Supervisor worker is unavailable.
+// The database queue remains safe when a dedicated worker is running too.
+Schedule::command('queue:work --stop-when-empty --sleep=1 --tries=2 --timeout=900 --max-time=3300')
+    ->everyMinute()
+    ->withoutOverlapping(60)
+    ->runInBackground();

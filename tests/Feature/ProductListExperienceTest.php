@@ -74,6 +74,10 @@ class ProductListExperienceTest extends TestCase
             ->assertSee('data-stock-modal-open', false);
 
         $html = $response->getContent();
+        $this->assertMatchesRegularExpression(
+            '/@media\s*\(max-width:\s*900px\)\s*\{\s*\.product-mobile-filter-trigger/s',
+            $html,
+        );
         $this->assertMatchesRegularExpression('/<article\b(?=[^>]*\bdata-product-list(?:\s|=|>))[^>]*>/s', $html);
         $this->assertMatchesRegularExpression('/<div\b(?=[^>]*\bdata-product-list-scroll(?:\s|=|>))[^>]*>/s', $html);
         $this->assertMatchesRegularExpression('/<table\b(?=[^>]*\bdata-product-list-table(?:\s|=|>))[^>]*>/s', $html);

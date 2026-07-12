@@ -17,8 +17,8 @@ class PrintBridgeController extends Controller
     public function next(Request $request, ShippingLabelPrintQueueService $queue): JsonResponse
     {
         $data = $request->validate([
-            'station' => ['nullable', 'string', 'max:40'],
-            'worker' => ['nullable', 'string', 'max:120'],
+            'station' => ['required', 'string', 'max:40'],
+            'worker' => ['required', 'string', 'max:120'],
         ]);
 
         $job = $queue->claimNext(
@@ -32,8 +32,14 @@ class PrintBridgeController extends Controller
         ]);
     }
 
-    public function file(PrintJob $job): StreamedResponse
+    public function file(Request $request, PrintJob $job, ShippingLabelPrintQueueService $queue): StreamedResponse
     {
+        $queue->assertLease(
+            $job,
+            (string) $request->header('X-Print-Lease', ''),
+            (string) $request->header('X-Print-Worker', ''),
+            (string) $request->header('X-Print-Station', ''),
+        );
         $label = $job->shippingLabel;
 
         if ($label === null || ! Storage::disk($label->disk)->exists($label->path)) {
@@ -48,10 +54,13 @@ class PrintBridgeController extends Controller
     public function printed(Request $request, PrintJob $job, ShippingLabelPrintQueueService $queue): JsonResponse
     {
         $data = $request->validate([
-            'worker' => ['nullable', 'string', 'max:120'],
+            'worker' => ['required', 'string', 'max:120'],
+            'station' => ['required', 'string', 'max:40'],
+            'lease_token' => ['required', 'string', 'size:64'],
             'message' => ['nullable', 'string', 'max:500'],
         ]);
 
+        $queue->assertLease($job, $data['lease_token'], (string) ($data['worker'] ?? ''), $data['station'], ['printing', 'printed']);
         $job = $queue->markPrinted($job, $data['worker'] ?? null, [
             'bridge_message' => $data['message'] ?? null,
         ]);
@@ -65,10 +74,13 @@ class PrintBridgeController extends Controller
     public function failed(Request $request, PrintJob $job, ShippingLabelPrintQueueService $queue): JsonResponse
     {
         $data = $request->validate([
-            'worker' => ['nullable', 'string', 'max:120'],
+            'worker' => ['required', 'string', 'max:120'],
+            'station' => ['required', 'string', 'max:40'],
+            'lease_token' => ['required', 'string', 'size:64'],
             'error' => ['required', 'string', 'max:2000'],
         ]);
 
+        $queue->assertLease($job, $data['lease_token'], (string) ($data['worker'] ?? ''), $data['station'], ['printing', 'pending', 'failed']);
         $job = $queue->markFailed($job, $data['error'], $data['worker'] ?? null);
 
         return response()->json([

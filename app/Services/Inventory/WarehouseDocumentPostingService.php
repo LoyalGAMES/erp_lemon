@@ -73,16 +73,10 @@ final class WarehouseDocumentPostingService
 
             foreach ($document->lines as $line) {
                 foreach ($this->movementRows($document, (float) $line->quantity) as [$warehouseId, $quantityChange]) {
-                    $balance = StockBalance::query()->firstOrCreate(
-                        [
-                            'warehouse_id' => $warehouseId,
-                            'product_id' => $line->product_id,
-                        ],
-                        [
-                            'quantity_on_hand' => 0,
-                            'quantity_reserved' => 0,
-                            'quantity_available' => 0,
-                        ],
+                    $balance = $this->lockedBalance(
+                        (int) $warehouseId,
+                        (int) $line->product_id,
+                        $postedAt,
                     );
 
                     $newOnHand = (float) $balance->quantity_on_hand + $quantityChange;
@@ -96,6 +90,10 @@ final class WarehouseDocumentPostingService
                     $balance->update([
                         'quantity_on_hand' => $newOnHand,
                         'quantity_available' => max(0, $newOnHand - $reserved),
+                        'source_sales_channel_id' => null,
+                        'source_available_quantity' => null,
+                        'source_observed_at' => null,
+                        'source_reflected_order_quantities' => null,
                         'recalculated_at' => $postedAt,
                     ]);
 
@@ -162,7 +160,7 @@ final class WarehouseDocumentPostingService
                     'allocated_waiting_reservations' => $allocatedWaitingReservations,
                 ],
             );
-        });
+        }, 3);
 
         $this->notifyReturnReceivedAfterPosting($completedReturnCaseIds);
         $this->issueReturnCorrectionsAfterPosting($completedReturnCaseIds);
@@ -209,16 +207,10 @@ final class WarehouseDocumentPostingService
                 foreach ($document->lines as $line) {
                     foreach ($this->movementRows($document, (float) $line->quantity) as [$warehouseId, $originalQuantityChange]) {
                         $quantityChange = -$originalQuantityChange;
-                        $balance = StockBalance::query()->firstOrCreate(
-                            [
-                                'warehouse_id' => $warehouseId,
-                                'product_id' => $line->product_id,
-                            ],
-                            [
-                                'quantity_on_hand' => 0,
-                                'quantity_reserved' => 0,
-                                'quantity_available' => 0,
-                            ],
+                        $balance = $this->lockedBalance(
+                            (int) $warehouseId,
+                            (int) $line->product_id,
+                            $cancelledAt,
                         );
 
                         $previousOnHand = (float) $balance->quantity_on_hand;
@@ -232,6 +224,10 @@ final class WarehouseDocumentPostingService
                         $balance->update([
                             'quantity_on_hand' => $newOnHand,
                             'quantity_available' => max(0, $newOnHand - $reserved),
+                            'source_sales_channel_id' => null,
+                            'source_available_quantity' => null,
+                            'source_observed_at' => null,
+                            'source_reflected_order_quantities' => null,
                             'recalculated_at' => $cancelledAt,
                         ]);
 
@@ -293,7 +289,27 @@ final class WarehouseDocumentPostingService
                     'reversal_required' => $before['status'] === 'posted',
                 ],
             );
-        });
+        }, 3);
+    }
+
+    private function lockedBalance(int $warehouseId, int $productId, mixed $timestamp): StockBalance
+    {
+        DB::table('stock_balances')->insertOrIgnore([
+            'warehouse_id' => $warehouseId,
+            'product_id' => $productId,
+            'quantity_on_hand' => 0,
+            'quantity_reserved' => 0,
+            'quantity_available' => 0,
+            'recalculated_at' => $timestamp,
+            'created_at' => $timestamp,
+            'updated_at' => $timestamp,
+        ]);
+
+        return StockBalance::query()
+            ->where('warehouse_id', $warehouseId)
+            ->where('product_id', $productId)
+            ->lockForUpdate()
+            ->firstOrFail();
     }
 
     /**

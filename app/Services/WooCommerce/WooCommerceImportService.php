@@ -12,7 +12,6 @@ use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\ProductRelation;
 use App\Models\StockBalance;
-use App\Models\StockReservation;
 use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
 use App\Models\WarehouseChannelRoute;
@@ -24,6 +23,7 @@ use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderStatusPolicyService;
 use App\Services\Orders\OrderWzDocumentService;
 use App\Services\Products\ProductCategoryTranslationMergeService;
+use App\Services\Products\ProductDescriptionSanitizer;
 use App\Services\Products\ProductParameterTranslationService;
 use App\Services\Products\ProductTranslationMergeService;
 use Carbon\CarbonImmutable;
@@ -45,6 +45,7 @@ final class WooCommerceImportService
         private readonly ProductTranslationMergeService $translationMerge,
         private readonly ProductCategoryTranslationMergeService $categoryTranslationMerge,
         private readonly ProductParameterTranslationService $parameterTranslations,
+        private readonly ProductDescriptionSanitizer $descriptionSanitizer,
     ) {}
 
     /**
@@ -253,6 +254,7 @@ final class WooCommerceImportService
                     $integration,
                     Product::query()->findOrFail($erpProductId),
                     (float) $item['stock_quantity'],
+                    CarbonImmutable::now('UTC'),
                 );
 
                 if ($stockSkipReason === null) {
@@ -981,15 +983,19 @@ final class WooCommerceImportService
             ->all();
     }
 
-    private function syncImportedStock(WordpressIntegration $integration, Product $product, float $quantity): ?string
-    {
+    private function syncImportedStock(
+        WordpressIntegration $integration,
+        Product $product,
+        float $quantity,
+        CarbonImmutable $observedAt,
+    ): ?string {
         $warehouse = $this->stockImportWarehouse($integration);
 
         if (! $this->stockImportIsUnambiguous($integration, $warehouse)) {
             return 'stock_skipped_ambiguous_routes';
         }
 
-        return DB::transaction(function () use ($integration, $product, $quantity, $warehouse): ?string {
+        return DB::transaction(function () use ($integration, $product, $quantity, $warehouse, $observedAt): ?string {
             $now = now();
 
             DB::table('stock_balances')->insertOrIgnore([
@@ -1028,32 +1034,18 @@ final class WooCommerceImportService
                 return 'stock_skipped_pending_export';
             }
 
-            if (StockReservation::query()
-                ->where('warehouse_id', $warehouse->id)
-                ->where('product_id', $product->id)
-                ->where('status', 'waiting')
-                ->exists()
-            ) {
-                return 'stock_skipped_waiting_reservations';
-            }
+            $remoteAvailable = max(0, $quantity);
 
-            $reserved = $this->reservationService->activeQuantity(
+            // The Woo value is an availability snapshot, not physical stock.
+            // Reservations for orders created before this observation have
+            // already been deducted by Woo and must be added back to on_hand.
+            $this->reservationService->applySourceAvailabilitySnapshot(
                 (int) $warehouse->id,
                 (int) $product->id,
+                (int) $integration->sales_channel_id,
+                $remoteAvailable,
+                $observedAt,
             );
-
-            // WooCommerce exposes stock_quantity as the quantity still available
-            // to buy. ERP keeps physical stock separately, so active reservations
-            // must be added back when reconstructing quantity_on_hand.
-            $remoteAvailable = max(0, $quantity);
-            $onHand = $remoteAvailable + $reserved;
-
-            $balance->update([
-                'quantity_on_hand' => $onHand,
-                'quantity_reserved' => $reserved,
-                'quantity_available' => $remoteAvailable,
-                'recalculated_at' => $now,
-            ]);
 
             return null;
         }, 3);
@@ -1068,6 +1060,7 @@ final class WooCommerceImportService
         $routes = WarehouseChannelRoute::query()
             ->where('sales_channel_id', $integration->sales_channel_id)
             ->where('push_stock', true)
+            ->whereHas('warehouse', fn ($query) => $query->where('is_active', true))
             ->get(['warehouse_id', 'stock_buffer']);
 
         if ($routes->count() !== 1) {
@@ -1486,8 +1479,12 @@ final class WooCommerceImportService
             'woocommerce_upsell_ids' => $item['upsell_ids'] ?? null,
             'woocommerce_cross_sell_ids' => $item['cross_sell_ids'] ?? null,
             'woocommerce_translations' => $this->translationReferences($item),
-            'woocommerce_description' => $this->nullableString($item['description'] ?? null),
-            'woocommerce_short_description' => $this->nullableString($item['short_description'] ?? null),
+            'woocommerce_description' => $this->descriptionSanitizer->sanitize(
+                $this->nullableString($item['description'] ?? null),
+            ),
+            'woocommerce_short_description' => $this->descriptionSanitizer->sanitize(
+                $this->nullableString($item['short_description'] ?? null),
+            ),
             'woocommerce_image' => $this->primaryImage($item),
             'woocommerce_images' => $this->imageList($item['images'] ?? []),
             'woocommerce_parent_image' => $this->cleanImage($item['parent_image'] ?? null),
@@ -1656,8 +1653,12 @@ final class WooCommerceImportService
     {
         return [
             'name' => (string) ($item['name'] ?? ''),
-            'description' => $this->nullableString($item['description'] ?? null),
-            'additional_description' => $this->nullableString($item['short_description'] ?? null),
+            'description' => $this->descriptionSanitizer->sanitize(
+                $this->nullableString($item['description'] ?? null),
+            ),
+            'additional_description' => $this->descriptionSanitizer->sanitize(
+                $this->nullableString($item['short_description'] ?? null),
+            ),
         ];
     }
 

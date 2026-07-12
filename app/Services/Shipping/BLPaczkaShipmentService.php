@@ -39,6 +39,10 @@ final class BLPaczkaShipmentService
         'delivered',
     ];
 
+    public function __construct(
+        private readonly ShippingAddressParser $addressParser,
+    ) {}
+
     /**
      * Tworzy nową przesyłkę BLPaczka dla zamówienia: wycena → automatyczny
      * wybór oferty kuriera wg metody wysyłki z koszyka (fallback: najtańsza)
@@ -124,7 +128,7 @@ final class BLPaczkaShipmentService
      * Dopasowuje ofertę z wyceny do metody wysyłki wybranej przez klienta.
      * Gdy nic nie pasuje — wybiera najtańszą ofertę.
      *
-     * @param list<array<string, mixed>> $offers
+     * @param  list<array<string, mixed>>  $offers
      * @return array<string, mixed>
      */
     private function pickOffer(array $offers, ExternalOrder $order, bool $needsPoint): array
@@ -224,11 +228,18 @@ final class BLPaczkaShipmentService
 
         $name = trim($value('first_name').' '.$value('last_name'));
         $company = $value('company');
+        $usesShippingAddress = filled(data_get($shipping, 'address_1'));
+        $addressSource = $usesShippingAddress ? $shipping : $billing;
+        $address = $this->addressParser->parse(
+            (string) data_get($addressSource, 'address_1', ''),
+            (string) data_get($addressSource, 'address_2', ''),
+        );
 
         return array_filter([
             'taker_name' => $company !== '' ? $company : $name,
-            'taker_street' => $value('address_1'),
-            'taker_house_no' => $value('address_2') !== '' ? $value('address_2') : '1',
+            'taker_street' => $address['street'],
+            'taker_house_no' => $address['building_number'],
+            'taker_locum_no' => $address['apartment_number'] ?? '',
             'taker_postal' => $value('postcode'),
             'taker_city' => $value('city'),
             'taker_phone' => mb_substr(preg_replace('/\D+/', '', $value('phone')) ?? '', -9),
@@ -402,7 +413,7 @@ final class BLPaczkaShipmentService
     }
 
     /**
-     * @param array<string, mixed> $params
+     * @param  array<string, mixed>  $params
      * @return array<string, mixed>
      */
     private function post(CourierAccount $account, string $endpoint, array $params): array

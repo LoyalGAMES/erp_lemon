@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -89,7 +91,7 @@ func TestBridgePollWithoutJobUsesBearerTokenAndStation(t *testing.T) {
 	}))
 	defer server.Close()
 
-	bridge := testBridge(server.URL)
+	bridge := testBridge(t, server.URL)
 	if err := bridge.pollOnce(context.Background()); err != nil {
 		t.Fatalf("poll: %v", err)
 	}
@@ -100,8 +102,11 @@ func TestBridgeDownloadsPrintsAndAcknowledgesJob(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api/print-bridge/jobs/next":
-			_, _ = io.WriteString(writer, `{"success":true,"job":{"id":42,"printer_name":"Zebra ZD421","format":"zpl","label":{"filename":"label.zpl"}}}`)
+			_, _ = io.WriteString(writer, `{"success":true,"job":{"id":42,"lease_token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","printer_name":"Zebra ZD421","format":"zpl","label":{"filename":"label.zpl"}}}`)
 		case "/api/print-bridge/jobs/42/file":
+			if request.Header.Get("X-Print-Lease") == "" {
+				t.Fatal("missing print lease header")
+			}
 			writer.Header().Set("Content-Type", "application/zpl")
 			_, _ = io.WriteString(writer, "^XA^FO20,20^FDTest^FS^XZ")
 		case "/api/print-bridge/jobs/42/printed":
@@ -116,7 +121,7 @@ func TestBridgeDownloadsPrintsAndAcknowledgesJob(t *testing.T) {
 	}))
 	defer server.Close()
 
-	bridge := testBridge(server.URL)
+	bridge := testBridge(t, server.URL)
 	var printedRequest printRequest
 	var printedData string
 	bridge.print = func(request printRequest, data []byte) error {
@@ -141,7 +146,7 @@ func TestBridgeReportsPrintingFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/api/print-bridge/jobs/next":
-			_, _ = io.WriteString(writer, `{"success":true,"job":{"id":7,"printer_name":"Missing printer","format":"zpl","label":{"filename":"label.zpl"}}}`)
+			_, _ = io.WriteString(writer, `{"success":true,"job":{"id":7,"lease_token":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","printer_name":"Missing printer","format":"zpl","label":{"filename":"label.zpl"}}}`)
 		case "/api/print-bridge/jobs/7/file":
 			_, _ = io.WriteString(writer, "^XA^XZ")
 		case "/api/print-bridge/jobs/7/failed":
@@ -153,7 +158,7 @@ func TestBridgeReportsPrintingFailure(t *testing.T) {
 	}))
 	defer server.Close()
 
-	bridge := testBridge(server.URL)
+	bridge := testBridge(t, server.URL)
 	bridge.print = func(printRequest, []byte) error {
 		return errors.New("printer is unavailable")
 	}
@@ -167,7 +172,7 @@ func TestBridgeReportsPrintingFailure(t *testing.T) {
 }
 
 func TestBridgeHealthDoesNotExposeToken(t *testing.T) {
-	bridge := testBridge("https://erp.example.test")
+	bridge := testBridge(t, "https://erp.example.test")
 	bridge.healthNow = func() time.Time { return time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC) }
 	bridge.recordPoll(nil)
 
@@ -183,12 +188,99 @@ func TestBridgeHealthDoesNotExposeToken(t *testing.T) {
 	}
 }
 
-func testBridge(baseURL string) *printBridge {
-	return newPrintBridge(bridgeConfig{
+func TestBridgeDoesNotFollowERPRedirects(t *testing.T) {
+	redirectTargetReached := false
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirectTargetReached = true
+	}))
+	defer target.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Location", target.URL)
+		writer.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+
+	err := testBridge(t, server.URL).pollOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "HTTP 307") {
+		t.Fatalf("expected redirect rejection, got %v", err)
+	}
+	if redirectTargetReached {
+		t.Fatal("bridge followed an ERP redirect and risked leaking credentials")
+	}
+}
+
+func TestPrintedJobIsNotPrintedAgainWhenAcknowledgementWasTemporarilyUnavailable(t *testing.T) {
+	var acknowledgementsAvailable atomic.Bool
+	claimed := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/print-bridge/jobs/next":
+			claimed++
+			if claimed == 1 {
+				_, _ = io.WriteString(writer, `{"success":true,"job":{"id":99,"lease_token":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","printer_name":"Zebra","format":"zpl","label":{"filename":"label.zpl"}}}`)
+			} else {
+				_, _ = io.WriteString(writer, `{"success":true,"job":null}`)
+			}
+		case "/api/print-bridge/jobs/99/file":
+			_, _ = io.WriteString(writer, "^XA^XZ")
+		case "/api/print-bridge/jobs/99/printed":
+			if !acknowledgementsAvailable.Load() {
+				http.Error(writer, "offline", http.StatusServiceUnavailable)
+				return
+			}
+			_, _ = io.WriteString(writer, `{"success":true}`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	journalPath := filepath.Join(t.TempDir(), "print-journal.json")
+	bridge, err := newPrintBridge(bridgeConfig{BaseURL: server.URL, Token: "bridge-secret", Station: "station-1", WorkerName: "PACK-PC-1", PollSeconds: 2}, appConfig{}, journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.retryWait = func(context.Context, time.Duration) error { return nil }
+	prints := 0
+	bridge.print = func(printRequest, []byte) error { prints++; return nil }
+	if err := bridge.pollOnce(context.Background()); err == nil {
+		t.Fatal("expected acknowledgement failure")
+	}
+	if prints != 1 || len(bridge.journal.pending()) != 1 {
+		t.Fatalf("prints=%d journal=%d", prints, len(bridge.journal.pending()))
+	}
+
+	acknowledgementsAvailable.Store(true)
+	restarted, err := newPrintBridge(bridge.config, appConfig{}, journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted.retryWait = func(context.Context, time.Duration) error { return nil }
+	restarted.print = func(printRequest, []byte) error { prints++; return nil }
+	if err := restarted.pollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if prints != 1 {
+		t.Fatalf("already spooled job was printed %d times", prints)
+	}
+	if len(restarted.journal.pending()) != 0 {
+		t.Fatal("acknowledged journal entry remained")
+	}
+}
+
+func testBridge(t *testing.T, baseURL string) *printBridge {
+	t.Helper()
+	journalPath := filepath.Join(t.TempDir(), "print-journal.json")
+	bridge, err := newPrintBridge(bridgeConfig{
 		BaseURL:     baseURL,
 		Token:       "bridge-secret",
 		Station:     "station-1",
 		WorkerName:  "PACK-PC-1",
 		PollSeconds: 2,
-	}, appConfig{})
+	}, appConfig{}, journalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.retryWait = func(context.Context, time.Duration) error { return nil }
+	return bridge
 }

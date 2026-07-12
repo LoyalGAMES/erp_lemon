@@ -10,13 +10,14 @@ use App\Services\Integrations\WooCommerceImportQueueService;
 use App\Services\WooCommerce\WooCommerceImportService;
 use Carbon\CarbonImmutable;
 use Illuminate\Bus\Queueable;
+use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Throwable;
 
-final class ImportWooCommerceOrdersJob implements ShouldQueue
+final class ImportWooCommerceOrdersJob implements ShouldBeUnique, ShouldQueue
 {
     use Dispatchable;
     use InteractsWithQueue;
@@ -27,6 +28,8 @@ final class ImportWooCommerceOrdersJob implements ShouldQueue
 
     public int $timeout = 900;
 
+    public int $uniqueFor = 1200;
+
     public function __construct(
         private readonly int $integrationId,
         private readonly int $syncLogId,
@@ -34,6 +37,11 @@ final class ImportWooCommerceOrdersJob implements ShouldQueue
         private readonly int $page = 1,
         private readonly bool $backfill = false,
     ) {}
+
+    public function uniqueId(): string
+    {
+        return 'woocommerce-orders-log:'.$this->syncLogId;
+    }
 
     public function handle(
         WooCommerceImportService $importer,

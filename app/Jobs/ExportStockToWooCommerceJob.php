@@ -26,21 +26,15 @@ final class ExportStockToWooCommerceJob implements ShouldQueue
 
     public function __construct(
         private readonly int $stockSyncQueueItemId,
-    ) {
-    }
+    ) {}
 
     public function handle(StockSyncExportService $exporter): void
     {
         $item = StockSyncQueueItem::query()->findOrFail($this->stockSyncQueueItemId);
 
-        if ($item->status === 'success') {
+        if (in_array($item->status, ['success', 'superseded'], true)) {
             return;
         }
-
-        $item->update([
-            'status' => 'running',
-            'last_error' => null,
-        ]);
 
         try {
             $exporter->export($item);

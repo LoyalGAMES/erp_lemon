@@ -745,6 +745,9 @@ class WooCommerceProductDataExportTest extends TestCase
             ->assertRedirect()
             ->assertSessionHas('error');
 
+        $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en')->count());
+
         $mapping = ProductChannelMapping::query()->where('product_id', $product->id)->firstOrFail();
         $this->assertSame('123', $mapping->external_product_id);
         $this->assertSame('creating', data_get($mapping->metadata, 'creation_state'));

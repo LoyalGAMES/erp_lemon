@@ -14,10 +14,6 @@ class RequireErpSessionAuth
 {
     public function handle(Request $request, Closure $next): Response
     {
-        if (app()->runningUnitTests()) {
-            return $next($request);
-        }
-
         $user = Auth::user();
 
         if (! $user instanceof User) {

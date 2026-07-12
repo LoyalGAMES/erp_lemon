@@ -28,6 +28,12 @@ return new class extends Migration
             return;
         }
 
+        if (Schema::hasIndex('shipping_labels', ['purpose'])) {
+            Schema::table('shipping_labels', function (Blueprint $table): void {
+                $table->dropIndex(['purpose']);
+            });
+        }
+
         Schema::table('shipping_labels', function (Blueprint $table): void {
             $table->dropColumn('purpose');
         });

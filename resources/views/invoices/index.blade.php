@@ -6,6 +6,7 @@
         'running' => 'Przetwarzanie',
         'missing_configuration' => 'Brak konfiguracji',
         'requires_configuration' => 'Wymaga konfiguracji',
+        'delivery_uncertain' => 'Wymaga ręcznej weryfikacji',
         'submitted' => 'W weryfikacji KSeF',
         'accepted' => 'Przyjęta',
         'rejected' => 'Odrzucona',
@@ -341,7 +342,7 @@
                                     <span class="status">Nr KSeF</span>
                                     <div class="muted">{{ $invoice->ksef_number }}</div>
                                 @elseif ($latestKsef)
-                                    <span @class(['status', 'red' => in_array($latestKsef->status, ['failed', 'rejected'], true), 'orange' => in_array($latestKsef->status, ['missing_configuration', 'requires_configuration'], true)])>{{ $ksefStatusLabel[$latestKsef->status] ?? $latestKsef->status }}</span>
+                                    <span @class(['status', 'red' => in_array($latestKsef->status, ['failed', 'rejected', 'delivery_uncertain'], true), 'orange' => in_array($latestKsef->status, ['missing_configuration', 'requires_configuration'], true)])>{{ $ksefStatusLabel[$latestKsef->status] ?? $latestKsef->status }}</span>
                                 @else
                                     <span @class(['status', 'orange' => $ksefTone === 'orange', 'red' => $ksefTone === 'red', 'blue' => $ksefTone === 'blue']) title="{{ $ksefState['reason'] ?? '' }}">{{ $ksefState['label'] ?? '-' }}</span>
                                 @endif

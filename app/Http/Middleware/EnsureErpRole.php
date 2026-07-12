@@ -21,7 +21,7 @@ class EnsureErpRole
         $user = $request->attributes->get('erp_user') ?: Auth::user();
 
         if (! $user instanceof User) {
-            return $next($request);
+            abort(401, 'Unauthenticated.');
         }
 
         if (! $user->canAccessArea($area)) {

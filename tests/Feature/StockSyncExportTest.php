@@ -12,9 +12,11 @@ use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
 use App\Models\StockSyncQueueItem;
+use App\Models\StockSyncState;
 use App\Models\Warehouse;
 use App\Models\WarehouseChannelRoute;
 use App\Models\WordpressIntegration;
+use App\Services\Inventory\StockSyncQueueService;
 use App\Services\WooCommerce\StockSyncExportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
@@ -178,6 +180,105 @@ class StockSyncExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/456'
             && $request['stock_quantity'] === 3);
+    }
+
+    public function test_older_queue_version_cannot_overwrite_newer_export(): void
+    {
+        Queue::fake();
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => fn ($request) => Http::response([
+                'id' => 123,
+                'sku' => 'SKU-MONOTONIC',
+                'stock_quantity' => $request['stock_quantity'],
+                'stock_status' => $request['stock_status'],
+            ]),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'stock_export_enabled' => true,
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Main',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $warehouse->routes()->create([
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 100,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-MONOTONIC',
+            'name' => 'Monotonic stock',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $balance = StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 4,
+            'quantity_reserved' => 0,
+            'quantity_available' => 4,
+        ]);
+        $queue = app(StockSyncQueueService::class);
+
+        $queue->queueForTriggers([[
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+        ]], 'first');
+        $older = StockSyncQueueItem::query()->firstOrFail();
+        $older->update(['status' => 'running']);
+
+        $balance->update([
+            'quantity_on_hand' => 2,
+            'quantity_available' => 2,
+        ]);
+        $queue->queueForTriggers([[
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+        ]], 'second');
+
+        $newer = StockSyncQueueItem::query()->latest('id')->firstOrFail();
+        $this->assertNotSame($older->id, $newer->id);
+        $this->assertSame(1, $older->version);
+        $this->assertSame(2, $newer->version);
+        $this->assertSame('2.0000', (string) $newer->quantity_to_push);
+        $this->assertSame(2, StockSyncState::query()->firstOrFail()->desired_version);
+
+        app(StockSyncExportService::class)->export($newer);
+        $older->update(['status' => 'pending']);
+        $result = app(StockSyncExportService::class)->export($older);
+
+        $this->assertTrue($result['skipped']);
+        $this->assertSame('superseded', $older->fresh()->status);
+        $this->assertSame('success', $newer->fresh()->status);
+        Http::assertSentCount(1);
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
+            && $request['stock_quantity'] === 2);
     }
 
     public function test_failed_stock_export_can_be_retried_from_sync_module(): void
@@ -361,6 +462,13 @@ class StockSyncExportTest extends TestCase
             'is_active' => true,
         ]);
 
+        $inactive = Warehouse::query()->create([
+            'code' => 'OLD',
+            'name' => 'Inactive legacy warehouse',
+            'type' => 'physical',
+            'is_active' => false,
+        ]);
+
         WarehouseChannelRoute::query()->create([
             'warehouse_id' => $main->id,
             'sales_channel_id' => $b2c->id,
@@ -377,6 +485,15 @@ class StockSyncExportTest extends TestCase
             'allocation_strategy' => 'warehouse_balance',
             'stock_buffer' => 0,
             'priority' => 10,
+        ]);
+
+        WarehouseChannelRoute::query()->create([
+            'warehouse_id' => $inactive->id,
+            'sales_channel_id' => $b2c->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 1,
         ]);
 
         $product = Product::query()->create([
@@ -429,6 +546,14 @@ class StockSyncExportTest extends TestCase
             'quantity_on_hand' => 5,
             'quantity_reserved' => 0,
             'quantity_available' => 5,
+        ]);
+
+        StockBalance::query()->create([
+            'warehouse_id' => $inactive->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 99,
+            'quantity_reserved' => 0,
+            'quantity_available' => 99,
         ]);
 
         $this->get(route('modules.show', 'sync'))

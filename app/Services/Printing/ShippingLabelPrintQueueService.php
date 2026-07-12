@@ -7,7 +7,9 @@ namespace App\Services\Printing;
 use App\Models\PrintJob;
 use App\Models\ShippingLabel;
 use App\Services\Audit\AuditLogService;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
+use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
 
 final class ShippingLabelPrintQueueService
 {
@@ -28,30 +30,66 @@ final class ShippingLabelPrintQueueService
             return null;
         }
 
-        $stationCode = filled($station['code'] ?? null) ? (string) $station['code'] : null;
+        $stationCode = filled($station['code'] ?? null) ? trim((string) $station['code']) : null;
+        $stationCode = $stationCode !== '' ? $stationCode : null;
 
-        $existing = PrintJob::query()
-            ->where('shipping_label_id', $label->id)
-            ->where('printer_name', $printerName)
-            ->where(function ($query) use ($stationCode): void {
-                if ($stationCode === null) {
-                    $query->whereNull('station_code');
-                } else {
-                    $query->where('station_code', $stationCode);
+        $deduplicationKey = hash('sha256', implode("\0", [$label->id, $stationCode ?? '', $printerName]));
+
+        $existing = PrintJob::query()->where('deduplication_key', $deduplicationKey)->first();
+        if (! $existing instanceof PrintJob) {
+            $legacy = PrintJob::query()
+                ->where('shipping_label_id', $label->id)
+                ->where('printer_name', $printerName)
+                ->where(function ($query) use ($stationCode): void {
+                    if ($stationCode === null) {
+                        $query->whereNull('station_code');
+                    } else {
+                        $query->where('station_code', $stationCode);
+                    }
+                })
+                ->whereNull('deduplication_key')
+                ->latest('id')
+                ->first();
+
+            if ($legacy instanceof PrintJob) {
+                try {
+                    $legacy->forceFill(['deduplication_key' => $deduplicationKey])->save();
+                    $existing = $legacy;
+                } catch (UniqueConstraintViolationException) {
+                    // Another request atomically assigned/created the same
+                    // logical job; use its canonical row below.
+                    $existing = PrintJob::query()->where('deduplication_key', $deduplicationKey)->firstOrFail();
                 }
-            })
-            ->whereIn('status', ['pending', 'printing', 'printed'])
-            ->latest('id')
-            ->first();
+            }
+        }
 
-        if ($existing instanceof PrintJob) {
+        if (! $existing instanceof PrintJob) {
+            $existing = PrintJob::query()->firstOrCreate([
+                'deduplication_key' => $deduplicationKey,
+            ], [
+                'shipping_label_id' => $label->id,
+                'status' => 'pending',
+                'source' => $source,
+                'station_code' => $stationCode,
+                'printer_name' => $printerName,
+                'format' => $this->formatForLabel($label),
+                'metadata' => [
+                    'station_name' => $station['name'] ?? null,
+                    'label_filename' => $label->filename(),
+                ],
+            ]);
+        }
+
+        if (! $existing->wasRecentlyCreated) {
             $updates = [];
 
             if ($existing->status === 'printing' && $existing->reserved_by === 'direct-listener') {
                 $updates = array_merge($updates, [
                     'status' => 'pending',
                     'reserved_by' => null,
+                    'reserved_station' => null,
                     'reserved_at' => null,
+                    'lease_token' => null,
                     'next_attempt_at' => null,
                     'attempts' => 0,
                     'failed_at' => null,
@@ -59,6 +97,13 @@ final class ShippingLabelPrintQueueService
                 ]);
             }
 
+            if ($existing->status === 'failed') {
+                $updates = array_merge($updates, [
+                    'status' => 'pending', 'source' => $source, 'attempts' => 0,
+                    'next_attempt_at' => null, 'reserved_by' => null, 'reserved_station' => null,
+                    'reserved_at' => null, 'lease_token' => null, 'failed_at' => null, 'last_error' => null,
+                ]);
+            }
             if ($updates !== []) {
                 $existing->forceFill($updates)->save();
             }
@@ -66,41 +111,7 @@ final class ShippingLabelPrintQueueService
             return $existing->fresh();
         }
 
-        $failed = PrintJob::query()
-            ->where('shipping_label_id', $label->id)
-            ->where('printer_name', $printerName)
-            ->where('status', 'failed')
-            ->latest('id')
-            ->first();
-
-        if ($failed instanceof PrintJob) {
-            $failed->forceFill([
-                'status' => 'pending',
-                'source' => $source,
-                'station_code' => $stationCode,
-                'attempts' => 0,
-                'next_attempt_at' => null,
-                'reserved_by' => null,
-                'reserved_at' => null,
-                'failed_at' => null,
-                'last_error' => null,
-            ])->save();
-
-            return $failed->fresh();
-        }
-
-        $job = PrintJob::query()->create([
-            'shipping_label_id' => $label->id,
-            'status' => 'pending',
-            'source' => $source,
-            'station_code' => $stationCode,
-            'printer_name' => $printerName,
-            'format' => $this->formatForLabel($label),
-            'metadata' => [
-                'station_name' => $station['name'] ?? null,
-                'label_filename' => $label->filename(),
-            ],
-        ]);
+        $job = $existing;
 
         $this->audit->record('print_job.queued', $job, null, [
             'shipping_label_id' => $label->id,
@@ -115,6 +126,18 @@ final class ShippingLabelPrintQueueService
     public function claimNext(?string $stationCode, ?string $workerName): ?PrintJob
     {
         return DB::transaction(function () use ($stationCode, $workerName): ?PrintJob {
+            $existingLease = PrintJob::query()
+                ->where('status', 'printing')
+                ->where('reserved_by', $workerName)
+                ->where('reserved_station', $stationCode)
+                ->whereNotNull('lease_token')
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->first();
+            if ($existingLease instanceof PrintJob) {
+                return $existingLease->fresh(['shippingLabel.order']);
+            }
+
             $this->releaseStaleReservations();
 
             $query = PrintJob::query()
@@ -141,7 +164,9 @@ final class ShippingLabelPrintQueueService
                 'status' => 'printing',
                 'attempts' => $job->attempts + 1,
                 'reserved_by' => $workerName,
+                'reserved_station' => $stationCode,
                 'reserved_at' => now(),
+                'lease_token' => bin2hex(random_bytes(32)),
                 'last_error' => null,
             ]);
 
@@ -154,6 +179,9 @@ final class ShippingLabelPrintQueueService
      */
     public function markPrinted(PrintJob $job, ?string $workerName = null, array $metadata = []): PrintJob
     {
+        if ($job->status === 'printed') {
+            return $job->fresh();
+        }
         $job->update([
             'status' => 'printed',
             'reserved_by' => $workerName ?: $job->reserved_by,
@@ -174,6 +202,9 @@ final class ShippingLabelPrintQueueService
 
     public function markFailed(PrintJob $job, string $error, ?string $workerName = null): PrintJob
     {
+        if ($job->status !== 'printing') {
+            return $job->fresh();
+        }
         $retry = $job->attempts < self::MAX_ATTEMPTS;
 
         $job->update([
@@ -196,6 +227,18 @@ final class ShippingLabelPrintQueueService
         return $job->fresh();
     }
 
+    public function assertLease(PrintJob $job, string $leaseToken, string $workerName, string $stationCode, array $allowedStatuses = ['printing']): void
+    {
+        $matches = $job->lease_token !== null
+            && hash_equals((string) $job->lease_token, $leaseToken)
+            && hash_equals((string) $job->reserved_by, $workerName)
+            && hash_equals((string) $job->reserved_station, $stationCode)
+            && in_array($job->status, $allowedStatuses, true);
+        if (! $matches) {
+            throw new ConflictHttpException('Wygasła albo nieprawidłowa dzierżawa zadania wydruku.');
+        }
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -211,6 +254,7 @@ final class ShippingLabelPrintQueueService
             'printer_name' => $job->printer_name,
             'format' => $job->format,
             'attempts' => $job->attempts,
+            'lease_token' => $job->status === 'printing' ? $job->lease_token : null,
             'label' => [
                 'id' => $label?->id,
                 'filename' => $label?->filename(),
@@ -242,13 +286,15 @@ final class ShippingLabelPrintQueueService
         PrintJob::query()
             ->where('status', 'printing')
             ->whereNotNull('reserved_at')
-            ->where('reserved_at', '<', now()->subMinutes(10))
+            ->where('reserved_at', '<', now()->subDay())
             ->update([
                 'status' => 'pending',
                 'reserved_by' => null,
+                'reserved_station' => null,
                 'reserved_at' => null,
+                'lease_token' => null,
                 'next_attempt_at' => null,
-                'last_error' => 'Most wydruku nie potwierdził zadania w czasie 10 minut.',
+                'last_error' => 'Most wydruku nie potwierdził zadania w czasie 24 godzin.',
             ]);
     }
 }

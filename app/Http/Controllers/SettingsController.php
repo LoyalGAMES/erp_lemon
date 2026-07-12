@@ -705,7 +705,7 @@ class SettingsController extends Controller
             'title' => 'Ustawienia zwrotów',
             'subtitle' => 'Domyślne ustawienia przyjęć zwrotów, numeracji i docelowego magazynu.',
             'module' => 'settings',
-            'returnSettings' => $returnSettings->data(),
+            'returnSettings' => $returnSettings->publicData(),
             'returnNumberExample' => $returnSettings->exampleNumber(),
             'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
         ]);
@@ -770,6 +770,8 @@ class SettingsController extends Controller
             'dispositions.*.warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
             'store_api_token' => ['nullable', 'string', 'max:120'],
             'store_webhook_secret' => ['nullable', 'string', 'max:120'],
+            'clear_store_api_token' => ['nullable', 'boolean'],
+            'clear_store_webhook_secret' => ['nullable', 'boolean'],
         ]);
 
         $returnSettings->update($validated);

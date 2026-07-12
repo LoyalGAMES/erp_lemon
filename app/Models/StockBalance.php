@@ -18,6 +18,10 @@ class StockBalance extends Model
         'quantity_on_hand',
         'quantity_reserved',
         'quantity_available',
+        'source_sales_channel_id',
+        'source_available_quantity',
+        'source_observed_at',
+        'source_reflected_order_quantities',
         'recalculated_at',
     ];
 
@@ -25,6 +29,9 @@ class StockBalance extends Model
         'quantity_on_hand' => 'decimal:4',
         'quantity_reserved' => 'decimal:4',
         'quantity_available' => 'decimal:4',
+        'source_available_quantity' => 'decimal:4',
+        'source_observed_at' => 'datetime',
+        'source_reflected_order_quantities' => 'array',
         'recalculated_at' => 'datetime',
     ];
 
@@ -38,4 +45,3 @@ class StockBalance extends Model
         return $this->belongsTo(Product::class);
     }
 }
-

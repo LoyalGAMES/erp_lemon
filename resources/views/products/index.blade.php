@@ -156,7 +156,7 @@
             .products-table [data-product-card-section="actions"] .inline-actions .button { width: 100%; min-width: 0; min-height: 44px; padding-inline: 6px; }
             .product-import-issue-items { min-width: 0; }
         }
-        @media (max-width: 720px) {
+        @media (max-width: 900px) {
             .product-mobile-filter-trigger { display: inline-flex; margin-bottom: 12px; }
             .product-mobile-filter-backdrop { position: fixed; inset: 0; z-index: 80; background: rgba(37, 31, 26, .42); }
             .product-filter-panel { padding: 0; border: 0; background: transparent; box-shadow: none; }

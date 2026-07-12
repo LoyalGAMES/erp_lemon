@@ -413,6 +413,40 @@ class PackingShipmentAutomationTest extends TestCase
         $this->assertSame('completed', $order->fresh()->status);
     }
 
+    public function test_tracking_recovers_an_order_left_with_mixed_packed_and_shipped_tasks(): void
+    {
+        $channel = $this->createChannel();
+        $this->createIntegration($channel);
+        [$order, $packedTask] = $this->createOrderWithTask($channel, 'packed', 'InPost');
+        $shippedTask = $this->addTaskToOrder($order, $channel, 'shipped', 'InPost');
+        $trackingNumber = '520000000000000000004242';
+        $label = $this->createLabel($order, [
+            'provider' => 'inpost',
+            'tracking_number' => $trackingNumber,
+        ]);
+
+        Http::fake([
+            "*/v1/tracking/{$trackingNumber}" => Http::response([
+                'tracking_number' => $trackingNumber,
+                'status' => 'collected_from_sender',
+                'tracking_details' => [[
+                    'status' => 'collected_from_sender',
+                    'datetime' => now()->toISOString(),
+                ]],
+            ], 200),
+            'https://shop.test/wp-json/wc/v3/orders/*' => Http::response(['status' => 'completed'], 200),
+        ]);
+
+        $result = app(CourierPickupTrackingService::class)->trackPackedOrders();
+
+        $this->assertSame(1, $result['picked_up']);
+        $this->assertSame(1, $result['orders']);
+        $this->assertSame('picked_up', $label->fresh()->status);
+        $this->assertSame('shipped', $packedTask->fresh()->status);
+        $this->assertSame('shipped', $shippedTask->fresh()->status);
+        $this->assertSame('shipped', $order->fresh()->fulfillment_status);
+    }
+
     public function test_delayed_label_retry_preserves_print_intent_from_pack(): void
     {
         Storage::fake('local');

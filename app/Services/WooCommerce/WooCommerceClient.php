@@ -52,7 +52,7 @@ final class WooCommerceClient
             throw new RuntimeException('Nie znaleziono pliku faktury do uploadu.');
         }
 
-        $response = $this->wordpressRequest($integration)
+        $response = $this->wordpressRequest($integration, retry: false)
             ->withHeaders([
                 'Content-Disposition' => 'attachment; filename="'.addslashes($filename).'"',
                 'Content-Type' => $mimeType,
@@ -417,7 +417,7 @@ final class WooCommerceClient
      */
     public function createProduct(WordpressIntegration $integration, array $payload): array
     {
-        $response = $this->request($integration)
+        $response = $this->request($integration, retry: false)
             ->post($this->endpoint($integration, '/products'), $payload);
 
         if (! $response->successful()) {
@@ -436,7 +436,7 @@ final class WooCommerceClient
     public function createProductForLanguage(WordpressIntegration $integration, array $payload, string $language): array
     {
         $url = $this->endpoint($integration, '/products').'?lang='.rawurlencode($language);
-        $response = $this->request($integration)->post($url, $payload);
+        $response = $this->request($integration, retry: false)->post($url, $payload);
 
         if (! $response->successful()) {
             throw new RuntimeException("Utworzenie produktu {$language} w WooCommerce zwróciło HTTP {$response->status()}.");
@@ -453,7 +453,7 @@ final class WooCommerceClient
      */
     public function createProductVariation(WordpressIntegration $integration, string $externalProductId, array $payload): array
     {
-        $response = $this->request($integration)
+        $response = $this->request($integration, retry: false)
             ->post($this->endpoint($integration, "/products/{$externalProductId}/variations"), $payload);
 
         if (! $response->successful()) {
@@ -500,7 +500,7 @@ final class WooCommerceClient
             $url .= '?lang='.rawurlencode((string) $language);
         }
 
-        $response = $this->request($integration)->post($url, $payload);
+        $response = $this->request($integration, retry: false)->post($url, $payload);
 
         if (! $response->successful()) {
             throw new RuntimeException("Utworzenie kategorii produktu w WooCommerce zwróciło HTTP {$response->status()}.");
@@ -522,7 +522,7 @@ final class WooCommerceClient
         }
 
         try {
-            $response = $this->wordpressRequest($integration)->post(
+            $response = $this->wordpressRequest($integration, retry: false)->post(
                 $this->wordpressRestEndpoint($integration, '/lemon-erp/v1/catalog/categories/translations'),
                 ['translations' => $translations],
             );
@@ -745,7 +745,7 @@ final class WooCommerceClient
         ]);
 
         try {
-            $response = $this->wordpressRequest($integration)
+            $response = $this->wordpressRequest($integration, retry: false)
                 ->acceptJson()
                 ->asJson()
                 ->post($this->wordpressRestEndpoint($integration, "/lemon-erp/v1/orders/{$orderId}/invoice"), $payload);
@@ -780,7 +780,7 @@ final class WooCommerceClient
      */
     public function createOrderNote(WordpressIntegration $integration, string $orderId, string $note): array
     {
-        $response = $this->request($integration)
+        $response = $this->request($integration, retry: false)
             ->post($this->endpoint($integration, "/orders/{$orderId}/notes"), [
                 'note' => $note,
                 'customer_note' => false,
@@ -1246,15 +1246,16 @@ final class WooCommerceClient
         return trim((string) ($variation['name'] ?? $variation['sku'] ?? 'Wariant'));
     }
 
-    private function request(WordpressIntegration $integration): PendingRequest
+    private function request(WordpressIntegration $integration, bool $retry = true): PendingRequest
     {
-        return Http::timeout(30)
-            ->retry(2, 300)
+        $request = Http::timeout(30)
             ->acceptJson()
             ->withBasicAuth(
                 Crypt::decryptString($integration->consumer_key_encrypted),
                 Crypt::decryptString($integration->consumer_secret_encrypted),
             );
+
+        return $retry ? $request->retry(2, 300) : $request;
     }
 
     private function orderNotesRequest(WordpressIntegration $integration): PendingRequest
@@ -1267,15 +1268,16 @@ final class WooCommerceClient
             );
     }
 
-    private function wordpressRequest(WordpressIntegration $integration): PendingRequest
+    private function wordpressRequest(WordpressIntegration $integration, bool $retry = true): PendingRequest
     {
-        return Http::timeout(60)
-            ->retry(2, 300)
+        $request = Http::timeout(60)
             ->acceptJson()
             ->withBasicAuth(
                 (string) $integration->wp_api_username,
                 $integration->wordpressApiPassword(),
             );
+
+        return $retry ? $request->retry(2, 300) : $request;
     }
 
     /**
@@ -1285,8 +1287,7 @@ final class WooCommerceClient
         WordpressIntegration $integration,
         array $settings,
         bool $retry = true,
-    ): PendingRequest
-    {
+    ): PendingRequest {
         $request = Http::timeout(60)
             ->withHeaders([
                 'Accept' => 'application/pdf, image/png, application/json;q=0.9, */*;q=0.8',

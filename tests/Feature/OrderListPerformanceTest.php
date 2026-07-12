@@ -39,7 +39,7 @@ class OrderListPerformanceTest extends TestCase
             ]);
         }
 
-        $this->get(route('modules.show', 'orders'))
+        $response = $this->get(route('modules.show', 'orders'))
             ->assertOk()
             ->assertSee('Filtry i wyszukiwanie')
             ->assertSee('orders-mobile-filter-toggle', false)
@@ -47,6 +47,15 @@ class OrderListPerformanceTest extends TestCase
             ->assertSee('9011')
             ->assertDontSee('9010')
             ->assertDontSee('9001');
+
+        $html = $response->getContent();
+        $this->assertMatchesRegularExpression(
+            '/@media\s*\(max-width:\s*900px\)\s*\{\s*\.orders-mobile-filter-trigger/s',
+            $html,
+        );
+        foreach (['Zamówienie', 'Klient', 'Przedmioty', 'Dostawa', 'Status', 'Kwota', 'Utworzone', 'Akcje'] as $label) {
+            $this->assertStringContainsString('data-label="'.$label.'"', $html);
+        }
     }
 
     public function test_orders_module_searches_customer_fields_and_displays_order_context(): void

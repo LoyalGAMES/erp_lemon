@@ -14,6 +14,7 @@ class PrintJob extends Model
 
     protected $fillable = [
         'shipping_label_id',
+        'deduplication_key',
         'status',
         'source',
         'station_code',
@@ -22,7 +23,9 @@ class PrintJob extends Model
         'attempts',
         'next_attempt_at',
         'reserved_by',
+        'reserved_station',
         'reserved_at',
+        'lease_token',
         'printed_at',
         'failed_at',
         'last_error',

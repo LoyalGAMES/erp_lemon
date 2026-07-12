@@ -10,6 +10,7 @@ use App\Models\PackingTask;
 use App\Models\Product;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
+use App\Services\Packing\PackingTaskService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippingLabelService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -73,7 +74,7 @@ class BLPaczkaIntegrationTest extends TestCase
         $order = $this->createOrderWithBLPaczkaMeta();
         $account = $this->createBLPaczkaAccount();
 
-        app(\App\Services\Packing\PackingTaskService::class)->syncReadyOrders();
+        app(PackingTaskService::class)->syncReadyOrders();
         PackingTask::query()
             ->where('external_order_id', $order->id)
             ->update(['status' => 'packed', 'packed_at' => now()]);
@@ -121,7 +122,7 @@ class BLPaczkaIntegrationTest extends TestCase
         $order = $this->createOrderWithBLPaczkaMeta();
         $account = $this->createBLPaczkaAccount();
 
-        app(\App\Services\Packing\PackingTaskService::class)->syncReadyOrders();
+        app(PackingTaskService::class)->syncReadyOrders();
         PackingTask::query()
             ->where('external_order_id', $order->id)
             ->update(['status' => 'packed', 'packed_at' => now()]);
@@ -223,6 +224,8 @@ class BLPaczkaIntegrationTest extends TestCase
 
             return data_get($request->data(), 'CourierSearch.courier_code') === 'dpd_classic'
                 && data_get($request->data(), 'Cart.0.Order.name') === 'Sempre Sp. z o.o.'
+                && data_get($request->data(), 'Cart.0.Order.taker_street') === 'ul. Krzywa'
+                && data_get($request->data(), 'Cart.0.Order.taker_house_no') === '2'
                 && data_get($request->data(), 'Cart.0.Order.taker_city') === 'Kraków'
                 && data_get($request->data(), 'CartOrder.payment') === 'bank'
                 && data_get($request->data(), 'CourierSearch.weight') === 2.0;
