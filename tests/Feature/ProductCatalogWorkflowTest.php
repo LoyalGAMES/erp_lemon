@@ -546,11 +546,32 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertDontSee('<th>Powód</th>', false)
             ->assertSee('data-stock-adjust-submit', false);
 
-        $this->get(route('products.index'))
+        $listResponse = $this->get(route('products.index'))
             ->assertOk()
             ->assertSee('Magazyny i korekta')
             ->assertSee('Ręczna zmiana tworzy dokument KOR')
-            ->assertSee('data-stock-adjust-submit', false);
+            ->assertSee('data-stock-adjust-submit', false)
+            ->assertSee('data-stock-modal-card', false)
+            ->assertSee('data-stock-modal-body', false)
+            ->assertSee('data-stock-label="Nowy stan ogółem"', false);
+
+        $listHtml = $listResponse->getContent();
+        $this->assertMatchesRegularExpression(
+            '/<button\b(?=[^>]*\bdata-stock-modal-open="stock-modal-'.$product->id.'")(?=[^>]*\baria-haspopup="dialog")(?=[^>]*\baria-controls="stock-modal-'.$product->id.'")(?=[^>]*\baria-expanded="false")[^>]*>/s',
+            $listHtml,
+        );
+        $this->assertMatchesRegularExpression(
+            '/<tr\b(?=[^>]*\bdata-stock-adjust-row)(?=[^>]*\bdata-stock-adjust-state="idle")(?=[^>]*\bdata-warehouse-id="'.$warehouse->id.'")[^>]*>/s',
+            $listHtml,
+        );
+        $this->assertMatchesRegularExpression(
+            '/<td\b(?=[^>]*\bdata-stock-label="Nowy stan ogółem")[^>]*>\s*<input\b(?=[^>]*\bdata-stock-adjust-quantity)(?=[^>]*\binputmode="decimal")(?=[^>]*\benterkeyhint="done")(?=[^>]*\baria-describedby="[^"]+-error")[^>]*>/s',
+            $listHtml,
+        );
+        $this->assertMatchesRegularExpression(
+            '/<div\b(?=[^>]*\bdata-stock-adjust-error)(?=[^>]*\brole="alert")(?=[^>]*\baria-live="polite")[^>]*><\/div>/s',
+            $listHtml,
+        );
 
         $this->post(route('products.stock.adjust', $product), [
             'warehouse_id' => $warehouse->id,

@@ -48,10 +48,14 @@
         .warehouse-modal-trigger { width: max-content; border: 0; padding: 0; background: transparent; color: var(--green-dark); font: inherit; font-size: 12px; font-weight: 760; cursor: pointer; }
         .stock-modal { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 24px; background: rgba(37, 31, 26, .62); }
         .stock-modal[hidden] { display: none; }
-        .stock-modal-card { width: min(1060px, 96vw); max-height: 90vh; overflow: auto; border-radius: 9px; background: var(--surface); box-shadow: 0 24px 70px rgba(0, 0, 0, .32); }
-        .stock-modal-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid var(--border); font-size: 16px; font-weight: 820; }
+        html.stock-modal-open, html.stock-modal-open body { overflow: hidden; }
+        .stock-modal-card { width: min(1060px, 96vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; border-radius: 9px; background: var(--surface); box-shadow: 0 24px 70px rgba(0, 0, 0, .32); white-space: normal; }
+        .stock-modal-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
+        .stock-modal-title { min-width: 0; display: grid; gap: 2px; }
+        .stock-modal-title span { font-size: 16px; font-weight: 820; }
+        .stock-modal-title small { overflow-wrap: anywhere; color: var(--muted); font-size: 12px; font-weight: 650; }
         .stock-modal-close { width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--muted); font: inherit; font-size: 22px; cursor: pointer; }
-        .stock-modal-body { padding: 16px; }
+        .stock-modal-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 16px; }
         .warehouse-tile-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 7px; margin-top: 8px; }
         .warehouse-tile { border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: #fff; display: grid; gap: 4px; color: var(--muted); font-size: 12px; }
         .warehouse-tile strong { color: var(--text); font-size: 13px; }
@@ -115,12 +119,35 @@
             #product-mobile-filter-toggle:checked ~ .product-filter-panel .product-filter-drawer { transform: translateX(0); }
             .drawer-form-grid, .drawer-form-grid.three { grid-template-columns: 1fr; }
             .drawer-step-actions { align-items: stretch; flex-direction: column; }
-            .stock-modal { padding: 0; align-items: end; }
-            .stock-modal-card { width: 100vw; max-height: 94dvh; border-radius: 14px 14px 0 0; }
-            .stock-modal-header { align-items: flex-start; padding: 12px; }
-            .stock-modal-body { padding: 12px; }
-            .stock-modal-body .stock-readonly-panel { padding: 10px; }
-            .stock-modal-body .stock-adjust-table { min-width: 620px; }
+            .stock-modal { align-items: end; padding: max(8px, env(safe-area-inset-top)) 0 0; }
+            .stock-modal-card { width: 100%; max-height: calc(100dvh - 8px); border-radius: 14px 14px 0 0; }
+            .stock-modal-header { align-items: flex-start; padding: 12px 12px 10px 14px; }
+            .stock-modal-title span { font-size: 15px; }
+            .stock-modal-title small { font-size: 13px; }
+            .stock-modal-close { width: 44px; height: 44px; flex: 0 0 44px; margin-top: -2px; font-size: 25px; }
+            .stock-modal-body { overflow-x: hidden; padding: 12px 12px max(16px, env(safe-area-inset-bottom)); }
+            .stock-modal-body .toolbar-note { margin-bottom: 10px; }
+            .stock-modal-body .stock-readonly-panel { gap: 10px; padding: 0; border: 0; background: transparent; }
+            .stock-modal-body .stock-readonly-summary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+            .stock-modal-body .stock-readonly-summary .stock-pill { min-width: 0; display: grid; align-content: center; gap: 2px; padding: 7px 4px; text-align: center; line-height: 1.2; }
+            .stock-modal-body .stock-readonly-summary .stock-pill strong { margin-left: 0; font-size: 16px; }
+            .stock-modal-body .stock-readonly-note { padding: 9px 10px; border-radius: 8px; background: var(--green-soft); font-size: 12px; line-height: 1.45; }
+            .stock-modal-body .stock-adjust-table-scroll { width: 100%; overflow: visible; }
+            .stock-modal-body .stock-adjust-table { width: 100%; min-width: 0; display: block; }
+            .stock-modal-body .stock-adjust-table thead { display: none; }
+            .stock-modal-body .stock-adjust-table tbody { display: grid; gap: 10px; }
+            .stock-modal-body .stock-adjust-table tr { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #fffdfb; }
+            .stock-modal-body .stock-adjust-table td { min-width: 0; display: block; padding: 0; border: 0; text-align: left; white-space: normal; }
+            .stock-modal-body .stock-adjust-table td::before { content: attr(data-stock-label); display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1.2; }
+            .stock-modal-body .stock-adjust-table td[colspan] { grid-column: 1 / -1; }
+            .stock-modal-body .stock-adjust-warehouse { grid-column: 1 / -1; padding-bottom: 10px !important; border-bottom: 1px solid var(--border) !important; }
+            .stock-modal-body .stock-adjust-warehouse strong { display: block; margin-bottom: 2px; font-size: 14px; }
+            .stock-modal-body .stock-adjust-metric { font-size: 16px; font-weight: 820; }
+            .stock-modal-body .stock-adjust-field { grid-column: 1 / -1; }
+            .stock-modal-body .stock-adjust-field input { width: 100%; min-width: 0; min-height: 48px; font-size: 16px; }
+            .stock-modal-body .stock-adjust-field .stock-adjust-error { min-height: 0; margin-top: 4px; }
+            .stock-modal-body .stock-adjust-action { grid-column: 1 / -1; }
+            .stock-modal-body .stock-adjust-action .button { width: 100%; min-height: 48px; font-size: 14px; }
         }
     </style>
 @endpush
@@ -704,14 +731,17 @@
                                         <span class="stock-pill">Rezerwacje <strong>{{ $qty($stock['reserved'], $product) }}</strong></span>
                                         <span class="stock-pill available">Dostępne <strong>{{ $qty($stock['available'], $product) }}</strong></span>
                                     </div>
-                                    <button class="warehouse-modal-trigger" type="button" data-stock-modal-open="stock-modal-{{ $product->id }}">Magazyny i korekta</button>
+                                    <button class="warehouse-modal-trigger" type="button" data-stock-modal-open="stock-modal-{{ $product->id }}" aria-haspopup="dialog" aria-controls="stock-modal-{{ $product->id }}" aria-expanded="false">Magazyny i korekta</button>
                                     <div class="stock-modal" id="stock-modal-{{ $product->id }}" data-stock-modal hidden aria-hidden="true">
-                                        <div class="stock-modal-card" role="dialog" aria-modal="true" aria-labelledby="stock-modal-title-{{ $product->id }}">
+                                        <div class="stock-modal-card" data-stock-modal-card role="dialog" aria-modal="true" aria-labelledby="stock-modal-title-{{ $product->id }}">
                                             <div class="stock-modal-header">
-                                                <span id="stock-modal-title-{{ $product->id }}">Magazyny i korekta — {{ $product->name }}</span>
+                                                <div class="stock-modal-title" id="stock-modal-title-{{ $product->id }}">
+                                                    <span>Magazyny i korekta</span>
+                                                    <small>{{ $product->name }}</small>
+                                                </div>
                                                 <button class="stock-modal-close" type="button" data-stock-modal-close aria-label="Zamknij">&times;</button>
                                             </div>
-                                            <div class="stock-modal-body">
+                                            <div class="stock-modal-body" data-stock-modal-body>
                                         @if ($variants->isNotEmpty())
                                             <div class="toolbar-note">Stan ogółem obejmuje warianty. Korektę konkretnego wariantu wykonaj po rozwinięciu wariantów.</div>
                                         @endif
@@ -826,14 +856,17 @@
                                             <span class="stock-pill">Rezerwacje <strong>{{ $qty($variantStock['reserved'], $variant) }}</strong></span>
                                             <span class="stock-pill available">Dostępne <strong>{{ $qty($variantStock['available'], $variant) }}</strong></span>
                                         </div>
-                                        <button class="warehouse-modal-trigger" type="button" data-stock-modal-open="stock-modal-{{ $variant->id }}">Magazyny i korekta</button>
+                                        <button class="warehouse-modal-trigger" type="button" data-stock-modal-open="stock-modal-{{ $variant->id }}" aria-haspopup="dialog" aria-controls="stock-modal-{{ $variant->id }}" aria-expanded="false">Magazyny i korekta</button>
                                         <div class="stock-modal" id="stock-modal-{{ $variant->id }}" data-stock-modal hidden aria-hidden="true">
-                                            <div class="stock-modal-card" role="dialog" aria-modal="true" aria-labelledby="stock-modal-title-{{ $variant->id }}">
+                                            <div class="stock-modal-card" data-stock-modal-card role="dialog" aria-modal="true" aria-labelledby="stock-modal-title-{{ $variant->id }}">
                                                 <div class="stock-modal-header">
-                                                    <span id="stock-modal-title-{{ $variant->id }}">Magazyny i korekta — {{ $variant->name }}</span>
+                                                    <div class="stock-modal-title" id="stock-modal-title-{{ $variant->id }}">
+                                                        <span>Magazyny i korekta</span>
+                                                        <small>{{ $variant->name }}</small>
+                                                    </div>
                                                     <button class="stock-modal-close" type="button" data-stock-modal-close aria-label="Zamknij">&times;</button>
                                                 </div>
-                                                <div class="stock-modal-body">
+                                                <div class="stock-modal-body" data-stock-modal-body>
                                             @include('products._stock_readonly_panel', [
                                                 'stockProduct' => $variant,
                                                 'stockWarehouses' => $warehouseOptions,
@@ -1040,19 +1073,38 @@
             });
         });
 
-        function closeStockModal(modal) {
-            if (!modal) return;
+        const stockModalFocusableSelector = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])';
+
+        function syncStockModalLock() {
+            document.documentElement.classList.toggle('stock-modal-open', Boolean(document.querySelector('[data-stock-modal]:not([hidden])')));
+        }
+
+        function closeStockModal(modal, restoreFocus = true) {
+            if (!modal || modal.hidden) return;
+
             modal.hidden = true;
             modal.setAttribute('aria-hidden', 'true');
+            const trigger = modal._stockModalTrigger;
+            trigger?.setAttribute('aria-expanded', 'false');
+            syncStockModalLock();
+
+            if (restoreFocus) {
+                trigger?.focus({ preventScroll: true });
+            }
         }
 
         document.querySelectorAll('[data-stock-modal-open]').forEach((button) => {
             button.addEventListener('click', () => {
                 const modal = document.getElementById(button.dataset.stockModalOpen || '');
                 if (!modal) return;
+
+                document.querySelectorAll('[data-stock-modal]:not([hidden])').forEach((openModal) => closeStockModal(openModal, false));
+                modal._stockModalTrigger = button;
                 modal.hidden = false;
                 modal.setAttribute('aria-hidden', 'false');
-                modal.querySelector('[data-stock-modal-close]')?.focus();
+                button.setAttribute('aria-expanded', 'true');
+                syncStockModalLock();
+                modal.querySelector('[data-stock-modal-close]')?.focus({ preventScroll: true });
             });
         });
 
@@ -1105,8 +1157,35 @@
         });
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') {
-                document.querySelectorAll('[data-stock-modal]').forEach(closeStockModal);
+                const modal = document.querySelector('[data-stock-modal]:not([hidden])');
+                closeStockModal(modal);
                 closeProductImageModal();
+                return;
+            }
+
+            if (event.key === 'Tab') {
+                const modal = document.querySelector('[data-stock-modal]:not([hidden])');
+
+                if (!modal) return;
+
+                const focusable = Array.from(modal.querySelectorAll(stockModalFocusableSelector))
+                    .filter((element) => element.getClientRects().length > 0);
+
+                if (focusable.length === 0) return;
+
+                const first = focusable[0];
+                const last = focusable[focusable.length - 1];
+
+                if (!modal.contains(document.activeElement)) {
+                    event.preventDefault();
+                    first.focus();
+                } else if (event.shiftKey && document.activeElement === first) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
             }
         });
     </script>

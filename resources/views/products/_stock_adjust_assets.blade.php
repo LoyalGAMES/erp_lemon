@@ -47,16 +47,30 @@
 
                     const field = event.target.closest('[data-stock-adjust-quantity]');
 
-                    if (!field) return;
+                    if (!field || field.disabled) return;
 
                     event.preventDefault();
+                    field.blur();
                     field.closest('[data-stock-adjust-row]')?.querySelector('[data-stock-adjust-submit]')?.click();
+                });
+
+                document.addEventListener('input', (event) => {
+                    const field = event.target.closest('[data-stock-adjust-quantity]');
+
+                    if (!field) return;
+
+                    const row = field.closest('[data-stock-adjust-row]');
+                    const error = row?.querySelector('[data-stock-adjust-error]');
+
+                    field.removeAttribute('aria-invalid');
+                    if (error) error.textContent = '';
+                    if (row?.dataset.stockAdjustState !== 'submitting') row.dataset.stockAdjustState = 'idle';
                 });
 
                 document.addEventListener('click', (event) => {
                     const button = event.target.closest('[data-stock-adjust-submit]');
 
-                    if (!button) return;
+                    if (!button || button.disabled) return;
 
                     const row = button.closest('[data-stock-adjust-row]');
                     const error = row?.querySelector('[data-stock-adjust-error]');
@@ -66,16 +80,35 @@
                     const productSku = button.dataset.productSku || '';
                     const warehouseCode = button.dataset.warehouseCode || '';
                     const quantity = String(quantityInput?.value || '').trim();
+                    const showError = (message) => {
+                        if (error) error.textContent = message;
+                        quantityInput?.setAttribute('aria-invalid', 'true');
+                        if (row) row.dataset.stockAdjustState = 'error';
+                        quantityInput?.focus();
+                    };
 
                     if (!action || !warehouseId || quantity === '') {
-                        if (error) error.textContent = 'Uzupełnij nowy stan ogółem.';
-                        quantityInput?.focus();
+                        showError('Uzupełnij nowy stan ogółem.');
                         return;
                     }
 
-                    if (!confirm(`Ustawić stan ogółem SKU ${productSku} w magazynie ${warehouseCode}? ERP odejmie rezerwacje przed synchronizacją z WooCommerce.`)) {
+                    if (!quantityInput?.checkValidity() || !Number.isFinite(Number(quantity)) || Number(quantity) < 0) {
+                        showError('Wpisz prawidłowy stan równy lub większy od zera.');
+                        quantityInput?.reportValidity();
                         return;
                     }
+
+                    if (!confirm(`Ustawić stan ogółem ${quantity} dla SKU ${productSku} w magazynie ${warehouseCode}? ERP odejmie rezerwacje przed synchronizacją z WooCommerce.`)) {
+                        return;
+                    }
+
+                    if (error) error.textContent = '';
+                    quantityInput.removeAttribute('aria-invalid');
+                    quantityInput.disabled = true;
+                    button.disabled = true;
+                    button.setAttribute('aria-busy', 'true');
+                    button.textContent = 'Zapisywanie…';
+                    if (row) row.dataset.stockAdjustState = 'submitting';
 
                     const form = document.createElement('form');
                     form.method = 'POST';
