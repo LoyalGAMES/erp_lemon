@@ -52,7 +52,7 @@ try {
     if (-not [string]::IsNullOrWhiteSpace([string] $env:GITHUB_PATH)) {
         Add-Content -LiteralPath $env:GITHUB_PATH -Value $nsisDirectory -Encoding UTF8
     }
-    Write-Host "Zweryfikowany NSIS $Version: $nsisDirectory"
+    Write-Host "Zweryfikowany NSIS ${Version}: $nsisDirectory"
     return $nsisDirectory
 } finally {
     Remove-Item -LiteralPath $archivePath -Force -ErrorAction SilentlyContinue

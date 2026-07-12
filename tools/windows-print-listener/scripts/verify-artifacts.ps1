@@ -33,7 +33,7 @@ foreach ($path in @($listenerPath, $installerPath, $manifestPath, $checksumPath)
 
 $versionOutput = (& $listenerPath --version).Trim()
 if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch [regex]::Escape($Version)) {
-    throw "Plik EXE nie raportuje oczekiwanej wersji $Version: $versionOutput"
+    throw "Plik EXE nie raportuje oczekiwanej wersji ${Version}: $versionOutput"
 }
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json

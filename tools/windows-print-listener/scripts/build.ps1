@@ -79,6 +79,7 @@ try {
 
     $nsisArguments = @(
         '/WX',
+        '/INPUTCHARSET', 'UTF8',
         "/DAPP_VERSION=$Version",
         "/DAPP_FILE_VERSION=$Version.0",
         "/DBUILD_DIR=$($buildDirectory.Replace('/', '\'))",

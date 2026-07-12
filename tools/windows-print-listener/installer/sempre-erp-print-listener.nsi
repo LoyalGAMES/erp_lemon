@@ -81,8 +81,8 @@ Page custom ConfigPageCreate ConfigPageLeave
 !ifdef SIGN_ARTIFACTS
   ; The signing script reads only an ephemeral certificate thumbprint and TSA URL
   ; from the environment. No PFX password is placed on a process command line.
-  !uninstfinalize 'powershell.exe -NoLogo -NoProfile -NonInteractive -File ".\scripts\sign-artifact.ps1" "%1"'
-  !finalize 'powershell.exe -NoLogo -NoProfile -NonInteractive -File ".\scripts\sign-artifact.ps1" "%1"'
+  !uninstfinalize 'pwsh.exe -NoLogo -NoProfile -NonInteractive -File ".\scripts\sign-artifact.ps1" "%1"'
+  !finalize 'pwsh.exe -NoLogo -NoProfile -NonInteractive -File ".\scripts\sign-artifact.ps1" "%1"'
 !endif
 
 Function .onInit

@@ -28,7 +28,7 @@ concurrency:
 
 defaults:
   run:
-    shell: powershell
+    shell: pwsh
 
 jobs:
   validate:
