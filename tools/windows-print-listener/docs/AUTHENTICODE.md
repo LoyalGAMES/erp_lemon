@@ -6,8 +6,9 @@ Pipeline obsługuje dwa jawne profile:
   usługę/HSM;
 - `internal` — oddzielny certyfikat wydawcy wystawiony bezpośrednio przez
   samopodpisany wewnętrzny root CA. Ten profil wolno stosować wyłącznie na
-  zarządzanych komputerach, na których root i wydawca zostały wcześniej
-  wdrożone niezależnym, administracyjnym kanałem.
+  kontrolowanych komputerach. Instalator uruchomiony jako administrator
+  jednorazowo dodaje osadzone publiczne certyfikaty do magazynów maszyny;
+  pierwsze uruchomienie może więc jeszcze pokazać nieznanego wydawcę.
 
 Podpis nie jest obejściem ochrony Windows. Zapewnia identyfikację wydawcy i
 integralność pliku, ale sam w sobie nie gwarantuje natychmiastowej reputacji
@@ -41,10 +42,12 @@ Signature i EKU Code Signing wydawcy, RSA-3072+, ważność, dokładne SHA-256 o
 magazynu maszyny omija blokujące okno potwierdzenia chronionego magazynu root
 bieżącego użytkownika.
 
-Instalator nigdy nie dodaje własnego certyfikatu do magazynów zaufania. Byłoby
-to kołowym „samozaufaniem”. Na stanowiskach magazynowych publiczny root należy
-wdrożyć wcześniej do `LocalMachine\Root`, a certyfikat wydawcy do
-`LocalMachine\TrustedPublisher`, najlepiej przez GPO/Intune/WDAC.
+Wewnętrzny instalator dodaje publiczny root do `LocalMachine\Root`, a wydawcę
+do `LocalMachine\TrustedPublisher`. Jest to świadomy, jednorazowy bootstrap na
+komputerze właściciela i nie eliminuje ostrzeżenia przed pierwszym startem — kod
+nie może nadać sobie zaufania, zanim użytkownik zezwoli mu działać jako
+administrator. W środowisku zarządzanym bezpieczniejszą alternatywą pozostaje
+wcześniejsze wdrożenie tych certyfikatów przez GPO/Intune/WDAC.
 
 Zalecane jest zastąpienie PFX usługą podpisu opartą o HSM, gdy organizacja taką
 posiada. W takim wariancie należy zachować te same bramki: SHA-256, timestamp
@@ -67,8 +70,9 @@ signtool.exe verify /pa /all /tw /v .\dist\SempreERP-PrintListener-Setup.exe
 
 Manifest podpisanego wydania zawiera równe `release_channel` i
 `signing_profile` (`internal` albo `public`), pełny Subject, SHA-256 wydawcy i
-`timestamped: true`. Profil `internal` dodatkowo zawiera SHA-256 root i dwa
-publiczne artefakty `SempreERP-Internal-Root.cer` oraz
+`timestamped: true`. Profil `internal` dodatkowo zawiera
+`trust_bootstrap: "installer"`, SHA-256 root i dwa publiczne artefakty
+`SempreERP-Internal-Root.cer` oraz
 `SempreERP-Internal-Publisher.cer`. Pliki CER nie zawierają kluczy prywatnych.
 
 Dokumentacja Microsoft:

@@ -62,8 +62,13 @@ Var Station
 Var Worker
 Var WriteConfig
 Var ServiceExisted
+Var InternalRootAdded
+Var InternalPublisherAdded
+Var InternalTrustCommitted
+Var SetupMutex
 
 !define MUI_ABORTWARNING
+!define MUI_CUSTOMFUNCTION_ABORT RollbackInternalTrust
 !define MUI_FINISHPAGE_NOAUTOCLOSE
 !define MUI_UNFINISHPAGE_NOAUTOCLOSE
 !insertmacro MUI_PAGE_WELCOME
@@ -87,14 +92,79 @@ Page custom ConfigPageCreate ConfigPageLeave
   !finalize 'pwsh.exe -NoLogo -NoProfile -NonInteractive -File "${SIGN_SCRIPT}" "%1"' = 0
 !endif
 
+!ifdef INTERNAL_TRUST_BOOTSTRAP
+  !ifndef SIGN_ARTIFACTS
+    !error "INTERNAL_TRUST_BOOTSTRAP requires a signed build"
+  !endif
+  !ifndef INTERNAL_ROOT_CERT
+    !error "INTERNAL_ROOT_CERT is required for the internal trust bootstrap"
+  !endif
+  !ifndef INTERNAL_PUBLISHER_CERT
+    !error "INTERNAL_PUBLISHER_CERT is required for the internal trust bootstrap"
+  !endif
+  !ifndef INTERNAL_ROOT_THUMBPRINT
+    !error "INTERNAL_ROOT_THUMBPRINT is required for the internal trust bootstrap"
+  !endif
+  !ifndef INTERNAL_PUBLISHER_THUMBPRINT
+    !error "INTERNAL_PUBLISHER_THUMBPRINT is required for the internal trust bootstrap"
+  !endif
+  !ifndef INTERNAL_ROOT_SHA256
+    !error "INTERNAL_ROOT_SHA256 is required for the internal trust bootstrap"
+  !endif
+  !ifndef INTERNAL_PUBLISHER_SHA256
+    !error "INTERNAL_PUBLISHER_SHA256 is required for the internal trust bootstrap"
+  !endif
+!endif
+
 Function .onInit
   SetShellVarContext all
   StrCpy $WriteConfig "0"
+  StrCpy $InternalRootAdded "0"
+  StrCpy $InternalPublisherAdded "0"
+  StrCpy $InternalTrustCommitted "0"
+  System::Call 'kernel32::CreateMutexW(p 0, i 0, w "Global\SempreERP.PrintListener.Setup") p .r0 ?e'
+  Pop $1
+  StrCpy $SetupMutex "$0"
+  ${If} $SetupMutex == 0
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się utworzyć blokady instalatora Sempre ERP. Spróbuj ponownie jako administrator." /SD IDOK
+    SetErrorLevel 10
+    Abort
+  ${EndIf}
+  ${If} $1 == 183
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Instalator Sempre ERP jest już uruchomiony. Dokończ lub zamknij poprzednie okno." /SD IDOK
+    SetErrorLevel 10
+    Abort
+  ${EndIf}
   ${IfNot} ${RunningX64}
     MessageBox MB_ICONSTOP|MB_OK "Sempre ERP Print Listener wymaga 64-bitowej wersji Windows." /SD IDOK
     SetErrorLevel 1
     Abort
   ${EndIf}
+FunctionEnd
+
+Function RollbackInternalTrust
+  !ifdef INTERNAL_TRUST_BOOTSTRAP
+    ${If} $InternalTrustCommitted != "1"
+      ${If} $InternalRootAdded == "1"
+        nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\certutil.exe" -delstore Root "${INTERNAL_ROOT_THUMBPRINT}"'
+        Pop $0
+        ${If} $0 == 0
+          StrCpy $InternalRootAdded "0"
+        ${EndIf}
+      ${EndIf}
+      ${If} $InternalPublisherAdded == "1"
+        nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\certutil.exe" -delstore TrustedPublisher "${INTERNAL_PUBLISHER_THUMBPRINT}"'
+        Pop $0
+        ${If} $0 == 0
+          StrCpy $InternalPublisherAdded "0"
+        ${EndIf}
+      ${EndIf}
+    ${EndIf}
+  !endif
+FunctionEnd
+
+Function .onInstFailed
+  Call RollbackInternalTrust
 FunctionEnd
 
 Function ConfigPageCreate
@@ -185,6 +255,76 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   SectionIn RO
   SetShellVarContext all
   SetRegView 64
+
+  !ifdef INTERNAL_TRUST_BOOTSTRAP
+    ; Enabled only for a signed internal release. It can make later upgrades
+    ; trusted, but cannot make Windows trust the first launch before this
+    ; elevated section is allowed to run.
+    InitPluginsDir
+    SetOutPath "$PLUGINSDIR"
+    File /oname=SempreERP-Internal-Publisher.cer "${INTERNAL_PUBLISHER_CERT}"
+    File /oname=SempreERP-Internal-Root.cer "${INTERNAL_ROOT_CERT}"
+
+    ; Check both exact SHA-1 store locators before asking for consent. The
+    ; release pipeline and embedded signed payload pin the stronger SHA-256.
+    nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\certutil.exe" -store TrustedPublisher "${INTERNAL_PUBLISHER_THUMBPRINT}"'
+    Pop $0
+    StrCpy $1 "$0"
+    nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\certutil.exe" -store Root "${INTERNAL_ROOT_THUMBPRINT}"'
+    Pop $0
+    StrCpy $2 "$0"
+
+    ${If} $1 != 0
+    ${OrIf} $2 != 0
+      IfSilent internal_trust_confirmed
+      MessageBox MB_ICONEXCLAMATION|MB_YESNO|MB_DEFBUTTON2 "Instalator jednorazowo doda zaufanie Sempre ERP na tym komputerze.$\r$\n$\r$\nWydawca SHA-256: ${INTERNAL_PUBLISHER_SHA256}$\r$\nRoot SHA-256: ${INTERNAL_ROOT_SHA256}$\r$\n$\r$\nKontynuować?" /SD IDYES IDYES internal_trust_confirmed
+      SetErrorLevel 9
+      Abort
+    internal_trust_confirmed:
+    ${EndIf}
+
+    ; Add publisher first. Without the root it cannot establish a working
+    ; chain, which is the safer partial state if power is lost mid-bootstrap.
+    ${If} $1 != 0
+      DetailPrint "Dodawanie wewnętrznego wydawcy Sempre ERP do zaufanych wydawców..."
+      ; The precheck proved this exact thumbprint absent, so rollback may safely
+      ; attempt deletion even if certutil reports a partial/timeout failure.
+      StrCpy $InternalPublisherAdded "1"
+      nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\certutil.exe" -f -addstore TrustedPublisher "$PLUGINSDIR\SempreERP-Internal-Publisher.cer"'
+      Pop $0
+      ${If} $0 != 0
+        MessageBox MB_ICONSTOP|MB_OK "Nie udało się dodać certyfikatu wydawcy Sempre ERP. Instalacja została przerwana." /SD IDOK
+        SetErrorLevel 9
+        Abort
+      ${EndIf}
+      nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\certutil.exe" -store TrustedPublisher "${INTERNAL_PUBLISHER_THUMBPRINT}"'
+      Pop $0
+      ${If} $0 != 0
+        MessageBox MB_ICONSTOP|MB_OK "Nie udało się potwierdzić certyfikatu wydawcy Sempre ERP. Instalacja została wycofana." /SD IDOK
+        SetErrorLevel 9
+        Abort
+      ${EndIf}
+    ${EndIf}
+
+    ${If} $2 != 0
+      DetailPrint "Dodawanie głównego certyfikatu Sempre ERP do zaufanych urzędów..."
+      StrCpy $InternalRootAdded "1"
+      nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\certutil.exe" -f -addstore Root "$PLUGINSDIR\SempreERP-Internal-Root.cer"'
+      Pop $0
+      ${If} $0 != 0
+        MessageBox MB_ICONSTOP|MB_OK "Nie udało się dodać głównego certyfikatu Sempre ERP. Instalacja została wycofana." /SD IDOK
+        SetErrorLevel 9
+        Abort
+      ${EndIf}
+      nsExec::ExecToLog /TIMEOUT=30000 '"$SYSDIR\certutil.exe" -store Root "${INTERNAL_ROOT_THUMBPRINT}"'
+      Pop $0
+      ${If} $0 != 0
+        MessageBox MB_ICONSTOP|MB_OK "Nie udało się potwierdzić głównego certyfikatu Sempre ERP. Instalacja została wycofana." /SD IDOK
+        SetErrorLevel 9
+        Abort
+      ${EndIf}
+    ${EndIf}
+  !endif
 
   ; Preserve the existing service registration during upgrades. This avoids
   ; DeleteService races and keeps recovery/security settings intact.
@@ -358,6 +498,7 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   CreateDirectory "$SMPROGRAMS\Sempre ERP Print Listener"
   CreateShortCut "$SMPROGRAMS\Sempre ERP Print Listener\Dokumentacja.lnk" "$INSTDIR\README.txt"
   CreateShortCut "$SMPROGRAMS\Sempre ERP Print Listener\Odinstaluj.lnk" "$INSTDIR\uninstall.exe"
+  StrCpy $InternalTrustCommitted "1"
 SectionEnd
 
 Section "Uninstall"

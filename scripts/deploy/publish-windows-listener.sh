@@ -102,6 +102,7 @@ release_mode="$(php -r '
         ];
         if ($releaseChannel === "internal") {
             $manifestKeys[] = "root_certificate_sha256";
+            $manifestKeys[] = "trust_bootstrap";
         }
         requireExactKeys($manifest, $manifestKeys, "manifest release");
 
@@ -130,6 +131,9 @@ release_mode="$(php -r '
         $rootFingerprint = $releaseChannel === "internal"
             ? requireFingerprint($manifest["root_certificate_sha256"], "root_certificate_sha256")
             : null;
+        if ($releaseChannel === "internal" && $manifest["trust_bootstrap"] !== "installer") {
+            failValidation("wewnętrzne wydanie nie deklaruje bootstrapu zaufania przez instalator");
+        }
 
         $artifactNames = [
             "lemon-print-listener.exe",

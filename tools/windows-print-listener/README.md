@@ -19,10 +19,10 @@ komputera magazynu. To komputer magazynowy inicjuje każde połączenie do endpo
 ## Instalacja na stanowisku pakowania
 
 1. Pobierz `SempreERP-PrintListener-Setup.exe` z ustawień pakowania w ERP.
-2. Sprawdź, czy Windows pokazuje oczekiwanego wydawcę Sempre ERP, i uruchom
-   instalator jako administrator. Dla wydania `internal` administrator musi
-   wcześniej wdrożyć dostarczony root do `LocalMachine\Root`, a certyfikat
-   wydawcy do `LocalMachine\TrustedPublisher` niezależnym, zaufanym kanałem.
+2. Uruchom instalator jako administrator. Dla wydania `internal` pierwszy start
+   może jeszcze pokazać nieznanego wydawcę; po zezwoleniu instalator jednorazowo
+   doda root do `LocalMachine\Root`, a wydawcę do
+   `LocalMachine\TrustedPublisher`.
 3. W instalatorze wpisz:
    - publiczny adres ERP rozpoczynający się od `https://`;
    - token zgodny z `PRINT_BRIDGE_TOKEN`;
@@ -118,6 +118,7 @@ podpisany `SempreERP-PrintListener-Setup.exe` oraz odpowiadający mu
 Stary surowy plik `lemon-print-listener.exe` nigdy nie jest fallbackiem.
 
 Profil `internal` dołącza publiczne `SempreERP-Internal-Root.cer` i
-`SempreERP-Internal-Publisher.cer` do artefaktu workflow, ale instalator nie
-instaluje ich i nie może sam nadać sobie zaufania. SmartScreen/Defender pozostają
-aktywnymi, niezależnymi zabezpieczeniami.
+`SempreERP-Internal-Publisher.cer` do artefaktu workflow i osadza je w
+instalatorze. Po podniesieniu uprawnień instalator dodaje je jednorazowo do
+magazynów maszyny. SmartScreen/Defender pozostają aktywnymi, niezależnymi
+zabezpieczeniami.

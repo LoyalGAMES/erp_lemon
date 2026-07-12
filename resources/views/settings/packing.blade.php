@@ -124,18 +124,18 @@
                     @if ($printListenerApp['available'])
                         <p>ERP udostępnia wyłącznie kompletny pakiet x64, którego podpis Authenticode, znacznik czasu i sumy kontrolne zostały zweryfikowane w procesie wydawniczym.</p>
 
-                        <dl class="listener-release-meta">
-                            <div><dt>Wersja</dt><dd>{{ $printListenerApp['version'] }}</dd></div>
-                            <div><dt>Kanał</dt><dd>{{ $printListenerApp['release_channel'] === 'internal' ? 'wewnętrzny' : 'publiczny' }}</dd></div>
-                            <div class="listener-release-meta-wide"><dt>Podmiot certyfikatu wydawcy</dt><dd><code>{{ $printListenerApp['publisher_subject'] }}</code></dd></div>
-                            <div class="listener-release-meta-wide"><dt>SHA-256 instalatora</dt><dd><code>{{ $printListenerApp['installer_sha256'] }}</code></dd></div>
-                            @if ($printListenerApp['is_internal'])
-                                <div class="listener-release-meta-wide"><dt>Odcisk certyfikatu wydawcy</dt><dd><code>{{ $printListenerApp['publisher_certificate_fingerprint'] }}</code></dd></div>
-                                <div class="listener-release-meta-wide"><dt>Odcisk certyfikatu głównego</dt><dd><code>{{ $printListenerApp['root_certificate_fingerprint'] }}</code></dd></div>
-                            @endif
-                        </dl>
-
-                        @if ($printListenerApp['is_internal'])
+                        @if ($printListenerApp['self_trusts'])
+                            <section class="listener-install-step">
+                                <div class="listener-install-step-heading">
+                                    <span class="listener-install-step-number">1</span>
+                                    <div>
+                                        <strong>Pobierz instalator i uruchom go jako administrator</strong>
+                                        <span>Instalator jednorazowo doda zaufanie Sempre ERP na tym komputerze, zainstaluje usługę i przygotuje kolejne aktualizacje do zwykłego uruchamiania.</span>
+                                    </div>
+                                </div>
+                                <a class="button listener-installer-button" href="{{ $printListenerApp['download_url'] }}">Pobierz instalator {{ $printListenerApp['filename'] }}</a>
+                            </section>
+                        @elseif ($printListenerApp['is_internal'])
                             <section class="listener-install-step">
                                 <div class="listener-install-step-heading">
                                     <span class="listener-install-step-number">1</span>
@@ -172,10 +172,28 @@
                             <a class="button listener-installer-button" href="{{ $printListenerApp['download_url'] }}">Pobierz podpisany instalator {{ $printListenerApp['filename'] }}</a>
                         @endif
 
+                        <details class="listener-release-details">
+                            <summary>Szczegóły techniczne i sumy kontrolne</summary>
+                            <dl class="listener-release-meta">
+                                <div><dt>Wersja</dt><dd>{{ $printListenerApp['version'] }}</dd></div>
+                                <div><dt>Kanał</dt><dd>{{ $printListenerApp['release_channel'] === 'internal' ? 'wewnętrzny' : 'publiczny' }}</dd></div>
+                                <div class="listener-release-meta-wide"><dt>Podmiot certyfikatu wydawcy</dt><dd><code>{{ $printListenerApp['publisher_subject'] }}</code></dd></div>
+                                <div class="listener-release-meta-wide"><dt>SHA-256 instalatora</dt><dd><code>{{ $printListenerApp['installer_sha256'] }}</code></dd></div>
+                                @if ($printListenerApp['is_internal'])
+                                    <div class="listener-release-meta-wide"><dt>Odcisk certyfikatu wydawcy</dt><dd><code>{{ $printListenerApp['publisher_certificate_fingerprint'] }}</code></dd></div>
+                                    <div class="listener-release-meta-wide"><dt>Odcisk certyfikatu głównego</dt><dd><code>{{ $printListenerApp['root_certificate_fingerprint'] }}</code></dd></div>
+                                @endif
+                            </dl>
+                        </details>
+
                         <small>Wersja {{ $printListenerApp['version'] }} · aktualizacja {{ $printListenerApp['updated_at'] }} · {{ $printListenerApp['size_mb'] }}</small>
                         <div class="listener-security-warning" role="note">
                             <strong>Nie wyłączaj Microsoft Defender ani SmartScreen.</strong>
-                            <span>Jeżeli Defender poda konkretną nazwę zagrożenia albo UAC pokaże „Nieznany wydawca”, przerwij instalację. SmartScreen lub Smart App Control w Windows 11 może nadal wymagać zgody albo polityki administratora; instalacja certyfikatów nie jest obejściem tych zabezpieczeń.</span>
+                            @if ($printListenerApp['self_trusts'])
+                                <span>Przy pierwszym uruchomieniu Windows może pokazać „Nieznany wydawca”, ponieważ zaufanie jest dodawane dopiero po uruchomieniu tego pliku jako administrator. Jest to oczekiwane wyłącznie dla instalatora pobranego z tego panelu i zgodnego z SHA-256 w szczegółach. Jeżeli Defender poda konkretną nazwę zagrożenia, przerwij instalację.</span>
+                            @else
+                                <span>Jeżeli Defender poda konkretną nazwę zagrożenia albo UAC pokaże „Nieznany wydawca”, przerwij instalację. SmartScreen lub Smart App Control w Windows 11 może nadal wymagać zgody albo polityki administratora.</span>
+                            @endif
                         </div>
                     @else
                         <span class="alert error">Podpisany instalator nie został jeszcze opublikowany. Stary surowy plik EXE nie jest udostępniany.</span>
@@ -230,6 +248,10 @@
         .listener-release-meta dd { margin: 0; color: var(--text); font-size: 12px; font-weight: 700; }
         .listener-release-meta code,
         .listener-certificate-guide code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; word-break: break-word; }
+        .listener-release-details { border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+        .listener-release-details summary { padding: 9px 10px; cursor: pointer; font-size: 12px; font-weight: 800; }
+        .listener-release-details[open] summary { border-bottom: 1px solid var(--border); }
+        .listener-release-details .listener-release-meta { margin: 10px; }
         .listener-install-step { display: grid; gap: 9px; padding: 11px; border: 1px solid var(--border); border-radius: 8px; background: #fffdfb; }
         .listener-install-step-heading { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 8px; align-items: start; }
         .listener-install-step-heading > div { display: grid; gap: 2px; }

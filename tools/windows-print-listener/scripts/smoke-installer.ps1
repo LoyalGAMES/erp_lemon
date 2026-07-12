@@ -48,6 +48,8 @@ $certificateBundle = $null
 $signingProfile = 'unsigned'
 $expectedSignerSubject = $null
 $expectedSignerSha256 = $null
+$rootCertificatePath = $null
+$publisherCertificatePath = $null
 
 if ($RequireSignature) {
     $signingProfile = ([string] $env:WINDOWS_CODESIGN_PROFILE).Trim().ToLowerInvariant()
@@ -72,17 +74,57 @@ if ($RequireSignature) {
             -ExpectedRootSha256 $expectedRootSha256 `
             -ExpectedLeafSha256 $expectedSignerSha256 `
             -ExpectedSubject $expectedSignerSubject
-        $trustState = Add-TemporaryInternalCertificateTrust `
-            -RootCertificate $certificateBundle.Root `
-            -LeafCertificate $certificateBundle.Leaf `
-            -RootCertificatePath $rootCertificatePath `
-            -LeafCertificatePath $publisherCertificatePath
+
+        $rootStorePath = "Cert:\LocalMachine\Root\$($certificateBundle.Root.Thumbprint)"
+        $publisherStorePath = "Cert:\LocalMachine\TrustedPublisher\$($certificateBundle.Leaf.Thumbprint)"
+        if ((Test-Path -LiteralPath $rootStorePath) -or (Test-Path -LiteralPath $publisherStorePath)) {
+            throw 'Podpisany smoke-test internal wymaga czystych magazynów certyfikatów Sempre ERP.'
+        }
+        # The installer must create these exact entries. This state removes
+        # only those previously absent entries from the ephemeral runner.
+        $trustState = [pscustomobject]@{
+            RootStorePath = $rootStorePath
+            PublisherStorePath = $publisherStorePath
+            RootThumbprint = $certificateBundle.Root.Thumbprint
+            PublisherThumbprint = $certificateBundle.Leaf.Thumbprint
+            RootSha256 = Get-CertificateSha256 $certificateBundle.Root
+            PublisherSha256 = Get-CertificateSha256 $certificateBundle.Leaf
+            RootAdded = $true
+            PublisherAdded = $true
+        }
     }
 }
 
 Remove-Item -LiteralPath $mockLog -Force -ErrorAction SilentlyContinue
 
 try {
+if ($RequireSignature -and $signingProfile -eq 'internal') {
+    foreach ($path in @($installDirectory, $configDirectory)) {
+        if (Test-Path -LiteralPath $path) {
+            throw "Smoke-test bootstrapu wymaga czystej ścieżki: $path"
+        }
+    }
+    if (Get-Service -Name $serviceName -ErrorAction SilentlyContinue) {
+        throw 'Smoke-test bootstrapu wymaga braku istniejącej usługi listenera.'
+    }
+
+    # Force a failure after the installer has bootstrapped trust but before it
+    # can install the service. .onInstFailed must roll back both new entries.
+    $failedInstall = Start-Process -FilePath $InstallerPath -ArgumentList '/S' -PassThru
+    if (-not $failedInstall.WaitForExit(60000)) {
+        Stop-Process -Id $failedInstall.Id -Force -ErrorAction SilentlyContinue
+        throw 'Negatywna próba instalatora nie zakończyła się w ciągu 60 sekund.'
+    }
+    $failedInstall.Refresh()
+    if ($failedInstall.ExitCode -eq 0) {
+        throw 'Instalator bez konfiguracji nieoczekiwanie zakończył się sukcesem.'
+    }
+    if ((Test-Path -LiteralPath $trustState.RootStorePath) -or
+        (Test-Path -LiteralPath $trustState.PublisherStorePath)) {
+        throw 'Instalator nie wycofał zaufania po kontrolowanym niepowodzeniu.'
+    }
+    Remove-Item -LiteralPath $installDirectory, $configDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}
 try {
     $mockJob = Start-Job -ArgumentList $mockPort, $mockToken, $mockStation, $mockWorker, $mockLog -ScriptBlock {
         param($Port, $Token, $Station, $Worker, $LogPath)
@@ -154,6 +196,11 @@ try {
             Get-Content -LiteralPath $listenerLog | Write-Host
         }
         throw "Instalator zakończył się kodem $($install.ExitCode)."
+    }
+
+    if ($RequireSignature -and $signingProfile -eq 'internal') {
+        Assert-MachineStoreCertificate -StoreName Root -Certificate $certificateBundle.Root
+        Assert-MachineStoreCertificate -StoreName TrustedPublisher -Certificate $certificateBundle.Leaf
     }
 
     $service = Get-Service -Name $serviceName -ErrorAction Stop
@@ -298,8 +345,15 @@ if (Test-Path -LiteralPath $configPath) {
 Write-Host 'Outbound polling, ACL, brak tokenu w SCM, usługa, health i deinstalacja: OK.'
 } finally {
     Remove-TemporaryInternalCertificateTrust $trustState
+    $trustCleanupFailed = $null -ne $trustState -and (
+        (Test-Path -LiteralPath $trustState.RootStorePath) -or
+        (Test-Path -LiteralPath $trustState.PublisherStorePath)
+    )
     if ($null -ne $certificateBundle) {
         $certificateBundle.Root.Dispose()
         $certificateBundle.Leaf.Dispose()
+    }
+    if ($trustCleanupFailed) {
+        throw 'Smoke-test pozostawił wewnętrzne certyfikaty w magazynach maszyny.'
     }
 }

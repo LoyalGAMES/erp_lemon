@@ -107,9 +107,14 @@ if ($RequireSignature) {
             $manifest.root_certificate_sha256 -ne $expectedRootSha256) {
             throw 'Wewnętrzny manifest nie zawiera przypiętego SHA-256 certyfikatu root.'
         }
+        if (-not (Test-ManifestProperty $manifest 'trust_bootstrap') -or
+            $manifest.trust_bootstrap -ne 'installer') {
+            throw 'Wewnętrzny manifest nie potwierdza bootstrapu zaufania przez instalator.'
+        }
         $expectedArtifactNames += @('SempreERP-Internal-Root.cer', 'SempreERP-Internal-Publisher.cer')
-    } elseif (Test-ManifestProperty $manifest 'root_certificate_sha256') {
-        throw 'Publiczny manifest nie może zawierać wewnętrznego certyfikatu root.'
+    } elseif ((Test-ManifestProperty $manifest 'root_certificate_sha256') -or
+        (Test-ManifestProperty $manifest 'trust_bootstrap')) {
+        throw 'Publiczny manifest nie może zawierać wewnętrznego bootstrapu zaufania.'
     }
 } else {
     if ($profile -ne 'unsigned' -or
@@ -117,7 +122,7 @@ if ($RequireSignature) {
         $manifest.timestamped -ne $false) {
         throw 'Niepodpisany manifest musi mieć kanał validation, profil unsigned i timestamped=false.'
     }
-    foreach ($property in @('publisher_subject', 'publisher_certificate_sha256', 'root_certificate_sha256')) {
+    foreach ($property in @('publisher_subject', 'publisher_certificate_sha256', 'root_certificate_sha256', 'trust_bootstrap')) {
         if (Test-ManifestProperty $manifest $property) {
             throw "Niepodpisany manifest nie może zawierać pola $property."
         }

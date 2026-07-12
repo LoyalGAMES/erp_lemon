@@ -88,11 +88,11 @@ Na czystej maszynie Windows x64 w profilu sieciowym Private:
 .\scripts\smoke-installer.ps1 -RequireSignature
 ```
 
-Dla `internal` przed testem należy niezależnie zainstalować
-`SempreERP-Internal-Root.cer` w `LocalMachine\Root` i
-`SempreERP-Internal-Publisher.cer` w `LocalMachine\TrustedPublisher`. Smoke-test
-CI dodaje je tylko tymczasowo do magazynów bieżącego użytkownika i usuwa w
-`finally`; sam instalator nigdy nie modyfikuje zaufanych magazynów.
+Dla `internal` smoke-test zaczyna bez wpisów Sempre ERP w
+`LocalMachine\Root` i `LocalMachine\TrustedPublisher`. Najpierw potwierdza
+rollback zaufania po kontrolowanym niepowodzeniu, a potem sprawdza, że podpisany
+instalator sam dodał dokładnie przypięte certyfikaty. W `finally` usuwa je z
+jednorazowego runnera.
 
 Test sprawdza usługę `SempreERPPrintListener`, wersję i połączenie outbound w
 lokalnym `/health`, dokładny ACL konfiguracji, brak sekretu w argumentach usługi,

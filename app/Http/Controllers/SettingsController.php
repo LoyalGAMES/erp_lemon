@@ -202,6 +202,7 @@ class SettingsController extends Controller
         $mtime = $release !== null ? filemtime($release['path']) : false;
         $cacheBuster = $mtime ?: now()->timestamp;
         $internal = ($release['signing_profile'] ?? null) === 'internal';
+        $selfTrusts = $internal && ($release['trust_bootstrap'] ?? null) === 'installer';
 
         return [
             'available' => $release !== null,
@@ -215,6 +216,7 @@ class SettingsController extends Controller
             'release_channel' => $release['release_channel'] ?? null,
             'signing_profile' => $release['signing_profile'] ?? null,
             'is_internal' => $internal,
+            'self_trusts' => $selfTrusts,
             'publisher_subject' => $release['publisher_subject'] ?? null,
             'installer_sha256' => $release['sha256'] ?? null,
             'publisher_certificate_sha256' => $release['publisher_certificate_sha256'] ?? null,
@@ -225,7 +227,7 @@ class SettingsController extends Controller
             'root_certificate_fingerprint' => isset($release['root_certificate_sha256'])
                 ? $this->formatSha256Fingerprint($release['root_certificate_sha256'])
                 : null,
-            'publisher_certificate_url' => $release !== null && $internal
+            'publisher_certificate_url' => $release !== null && $internal && ! $selfTrusts
                 ? route('settings.packing.windows-listener.certificate.publisher', ['v' => $cacheBuster])
                 : null,
         ];
@@ -274,6 +276,7 @@ class SettingsController extends Controller
         $signingProfile = $manifest['signing_profile'] ?? null;
         $publisherSubject = trim((string) ($manifest['publisher_subject'] ?? ''));
         $publisherCertificateSha256 = $this->normalizedSha256($manifest['publisher_certificate_sha256'] ?? null);
+        $trustBootstrap = $manifest['trust_bootstrap'] ?? null;
 
         if (($manifest['product'] ?? null) !== 'Sempre ERP Print Listener'
             || ($manifest['target'] ?? null) !== 'windows/amd64'
@@ -287,6 +290,7 @@ class SettingsController extends Controller
             || mb_strlen($publisherSubject) > 500
             || preg_match('/[\x00-\x1F\x7F]/u', $publisherSubject) !== 0
             || $publisherCertificateSha256 === null
+            || ($trustBootstrap !== null && $trustBootstrap !== 'installer')
             || ! is_array($manifest['artifacts'] ?? null)) {
             return null;
         }
@@ -343,7 +347,8 @@ class SettingsController extends Controller
             }
         } elseif (isset($artifacts['SempreERP-Internal-Root.cer'])
             || isset($artifacts['SempreERP-Internal-Publisher.cer'])
-            || array_key_exists('root_certificate_sha256', $manifest)) {
+            || array_key_exists('root_certificate_sha256', $manifest)
+            || array_key_exists('trust_bootstrap', $manifest)) {
             // Public releases never distribute the private trust bootstrap.
             return null;
         }
@@ -356,6 +361,7 @@ class SettingsController extends Controller
             'version' => $version,
             'release_channel' => $releaseChannel,
             'signing_profile' => $signingProfile,
+            'trust_bootstrap' => $trustBootstrap,
             'publisher_subject' => $publisherSubject,
             'publisher_certificate_sha256' => $publisherCertificateSha256,
             'root_certificate_sha256' => $rootCertificateSha256,

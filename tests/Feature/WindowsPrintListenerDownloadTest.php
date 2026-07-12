@@ -41,7 +41,7 @@ class WindowsPrintListenerDownloadTest extends TestCase
         parent::tearDown();
     }
 
-    public function test_internal_release_exposes_verified_metadata_and_two_step_installation(): void
+    public function test_internal_release_exposes_verified_metadata_and_one_step_installation(): void
     {
         $manifest = $this->publishRelease('internal');
 
@@ -55,17 +55,20 @@ class WindowsPrintListenerDownloadTest extends TestCase
             ->assertSee($manifest['artifacts'][0]['sha256'])
             ->assertSee($this->fingerprint($manifest['publisher_certificate_sha256']))
             ->assertSee($this->fingerprint($manifest['root_certificate_sha256']))
-            ->assertSee('Jednorazowo ustanów zaufanie')
-            ->assertSee('Nie pobieraj go razem z instalatorem')
+            ->assertSee('Pobierz instalator i uruchom go jako administrator')
+            ->assertSee('Instalator jednorazowo doda zaufanie Sempre ERP')
+            ->assertSee('Szczegóły techniczne i sumy kontrolne')
+            ->assertDontSee('Jednorazowo ustanów zaufanie')
+            ->assertDontSee('Nie pobieraj go razem z instalatorem')
             ->assertDontSee('Pobierz certyfikat główny')
-            ->assertSee('Pobierz certyfikat wydawcy')
-            ->assertSee('Trusted Root Certification Authorities')
-            ->assertSee('Trusted Publishers')
-            ->assertSee('Pobierz i uruchom podpisany instalator')
+            ->assertDontSee('Pobierz certyfikat wydawcy')
+            ->assertDontSee('Trusted Root Certification Authorities')
+            ->assertDontSee('Trusted Publishers')
             ->assertSee('Nie wyłączaj Microsoft Defender ani SmartScreen')
+            ->assertSee('Przy pierwszym uruchomieniu Windows może pokazać')
             ->assertSee('Nieznany wydawca')
-            ->assertSee('Smart App Control w Windows 11')
-            ->assertSee(route('settings.packing.windows-listener.certificate.publisher'), false)
+            ->assertSee('konkretną nazwę zagrożenia')
+            ->assertDontSee(route('settings.packing.windows-listener.certificate.publisher'), false)
             ->assertSee(route('settings.packing.windows-listener.download'), false);
     }
 
@@ -93,6 +96,20 @@ class WindowsPrintListenerDownloadTest extends TestCase
             ->assertHeader('X-Checksum-Sha256', $publisherHash);
     }
 
+    public function test_legacy_internal_release_keeps_manual_trust_instructions(): void
+    {
+        $manifest = $this->publishRelease('internal');
+        unset($manifest['trust_bootstrap']);
+        $this->writeManifest($manifest);
+
+        $this->get(route('settings.packing'))
+            ->assertOk()
+            ->assertSee('Jednorazowo ustanów zaufanie')
+            ->assertSee('Pobierz certyfikat wydawcy')
+            ->assertSee(route('settings.packing.windows-listener.certificate.publisher'), false)
+            ->assertDontSee('Instalator jednorazowo doda zaufanie Sempre ERP');
+    }
+
     public function test_certificate_downloads_require_an_authenticated_settings_user(): void
     {
         $this->publishRelease('internal');
@@ -111,6 +128,8 @@ class WindowsPrintListenerDownloadTest extends TestCase
             ->assertSee('Wydanie publiczne')
             ->assertSee($manifest['publisher_subject'])
             ->assertSee('Pobierz podpisany instalator')
+            ->assertSee('UAC pokaże „Nieznany wydawca”, przerwij instalację')
+            ->assertDontSee('Instalator jednorazowo doda zaufanie Sempre ERP')
             ->assertDontSee('Pobierz certyfikat główny')
             ->assertDontSee('Pobierz certyfikat wydawcy')
             ->assertDontSee(self::ROOT_CERTIFICATE)
@@ -137,6 +156,7 @@ class WindowsPrintListenerDownloadTest extends TestCase
             'brak znacznika czasu',
             'różne kanały wydania',
             'nieznany profil podpisu',
+            'nieznany bootstrap zaufania',
             'brak wydawcy',
             'duplikat artefaktu',
             'plik bez tabeli Authenticode',
@@ -189,6 +209,9 @@ class WindowsPrintListenerDownloadTest extends TestCase
                     break;
                 case 'nieznany profil podpisu':
                     $manifest['signing_profile'] = 'development';
+                    break;
+                case 'nieznany bootstrap zaufania':
+                    $manifest['trust_bootstrap'] = 'unsafe';
                     break;
                 case 'brak wydawcy':
                     $manifest['publisher_subject'] = '';
@@ -256,6 +279,7 @@ class WindowsPrintListenerDownloadTest extends TestCase
 
         if ($rootCertificateSha256 !== null) {
             $manifest['root_certificate_sha256'] = $rootCertificateSha256;
+            $manifest['trust_bootstrap'] = 'installer';
         }
 
         $this->writeManifest($manifest);

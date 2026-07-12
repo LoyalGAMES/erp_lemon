@@ -147,6 +147,28 @@ try {
             '/DSIGN_ARTIFACTS',
             "/DSIGN_SCRIPT=$signingScript"
         )
+        if ($signingProfile -eq 'internal') {
+            $installerRoot = Read-DerCertificate $internalRootPath 'Certyfikat root osadzany w instalatorze'
+            $installerPublisher = Read-DerCertificate $internalPublisherPath 'Certyfikat wydawcy osadzany w instalatorze'
+            try {
+                if ((Get-CertificateSha256 $installerRoot) -ne $rootSha256 -or
+                    (Get-CertificateSha256 $installerPublisher) -ne $publisherSha256) {
+                    throw 'Certyfikaty osadzane w instalatorze nie odpowiadają przypiętym SHA-256.'
+                }
+                $nsisArguments += @(
+                    '/DINTERNAL_TRUST_BOOTSTRAP',
+                    "/DINTERNAL_ROOT_CERT=$($internalRootPath.Replace('/', '\'))",
+                    "/DINTERNAL_PUBLISHER_CERT=$($internalPublisherPath.Replace('/', '\'))",
+                    "/DINTERNAL_ROOT_THUMBPRINT=$($installerRoot.Thumbprint)",
+                    "/DINTERNAL_PUBLISHER_THUMBPRINT=$($installerPublisher.Thumbprint)",
+                    "/DINTERNAL_ROOT_SHA256=$rootSha256",
+                    "/DINTERNAL_PUBLISHER_SHA256=$publisherSha256"
+                )
+            } finally {
+                $installerRoot.Dispose()
+                $installerPublisher.Dispose()
+            }
+        }
     }
     $nsisArguments += (Join-Path $root 'installer\sempre-erp-print-listener.nsi')
 
@@ -189,6 +211,7 @@ try {
     }
     if ($signingProfile -eq 'internal') {
         $manifest['root_certificate_sha256'] = $rootSha256
+        $manifest['trust_bootstrap'] = 'installer'
     }
     $manifestPath = Join-Path $OutputDirectory 'RELEASE-MANIFEST.json'
     $manifest | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $manifestPath -Encoding UTF8

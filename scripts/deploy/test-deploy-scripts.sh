@@ -268,6 +268,7 @@ PHP
             ];
             if ($profile === "internal") {
                 $manifest["root_certificate_sha256"] = $argv[10];
+                $manifest["trust_bootstrap"] = "installer";
                 $artifacts[] = [
                     "name" => "SempreERP-Internal-Root.cer",
                     "size" => (int) $argv[9],
@@ -442,6 +443,16 @@ PHP
         file_put_contents($path, json_encode($manifest, JSON_THROW_ON_ERROR)."\n");
     ' "$mismatched_fingerprint_staging/RELEASE-MANIFEST.json"
     expect_windows_publish_failure '0.2.0-201-6' "$mismatched_fingerprint_staging"
+
+    missing_bootstrap_staging="${integration_deploy_path}.deploy/.windows-release-upload-201-7"
+    create_windows_staging "$missing_bootstrap_staging" '0.2.0' internal
+    php -r '
+        $path = $argv[1];
+        $manifest = json_decode(file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        unset($manifest["trust_bootstrap"]);
+        file_put_contents($path, json_encode($manifest, JSON_THROW_ON_ERROR)."\n");
+    ' "$missing_bootstrap_staging/RELEASE-MANIFEST.json"
+    expect_windows_publish_failure '0.2.0-201-7' "$missing_bootstrap_staging"
 
     [[ "$(cat "${integration_deploy_path}.deploy/shared/windows-print-listener/CURRENT")" == '0.2.0-201-1' ]] ||
         fail 'odrzucone wydanie zmieniło atomowy wskaźnik CURRENT instalatora.'
