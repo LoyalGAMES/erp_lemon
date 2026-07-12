@@ -6,6 +6,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'certificate-utils.ps1')
 
 $root = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
@@ -42,9 +43,46 @@ $mockLog = Join-Path $temporaryRoot 'sempre-print-bridge-mock.log'
 $protectorPath = Join-Path $root 'build\windows-amd64\lemon-print-listener.exe'
 $installed = $false
 $mockJob = $null
+$trustState = $null
+$certificateBundle = $null
+$signingProfile = 'unsigned'
+$expectedSignerSubject = $null
+$expectedSignerSha256 = $null
+
+if ($RequireSignature) {
+    $signingProfile = ([string] $env:WINDOWS_CODESIGN_PROFILE).Trim().ToLowerInvariant()
+    if ($signingProfile -notin @('internal', 'public')) {
+        throw 'Podpisany smoke-test wymaga WINDOWS_CODESIGN_PROFILE=internal albo public.'
+    }
+    $expectedSignerSubject = ([string] $env:WINDOWS_CODESIGN_SUBJECT).Trim()
+    $expectedSignerSha256 = Normalize-CertificateSha256 `
+        ([string] $env:WINDOWS_CODESIGN_LEAF_SHA256) `
+        'WINDOWS_CODESIGN_LEAF_SHA256'
+
+    if ($signingProfile -eq 'internal') {
+        $releaseDirectory = Split-Path -Parent ([System.IO.Path]::GetFullPath($InstallerPath))
+        $rootCertificatePath = Join-Path $releaseDirectory 'SempreERP-Internal-Root.cer'
+        $publisherCertificatePath = Join-Path $releaseDirectory 'SempreERP-Internal-Publisher.cer'
+        $expectedRootSha256 = Normalize-CertificateSha256 `
+            ([string] $env:WINDOWS_CODESIGN_ROOT_SHA256) `
+            'WINDOWS_CODESIGN_ROOT_SHA256'
+        $certificateBundle = Assert-InternalCertificateBundle `
+            -RootCertificatePath $rootCertificatePath `
+            -LeafCertificatePath $publisherCertificatePath `
+            -ExpectedRootSha256 $expectedRootSha256 `
+            -ExpectedLeafSha256 $expectedSignerSha256 `
+            -ExpectedSubject $expectedSignerSubject
+        $trustState = Add-TemporaryInternalCertificateTrust `
+            -RootCertificate $certificateBundle.Root `
+            -LeafCertificate $certificateBundle.Leaf `
+            -RootCertificatePath $rootCertificatePath `
+            -LeafCertificatePath $publisherCertificatePath
+    }
+}
 
 Remove-Item -LiteralPath $mockLog -Force -ErrorAction SilentlyContinue
 
+try {
 try {
     $mockJob = Start-Job -ArgumentList $mockPort, $mockToken, $mockStation, $mockWorker, $mockLog -ScriptBlock {
         param($Port, $Token, $Station, $Worker, $LogPath)
@@ -221,11 +259,12 @@ try {
     }
 
     if ($RequireSignature) {
-        foreach ($path in @($InstallerPath, $listenerPath, $uninstallerPath, $rendererPath)) {
-            $signature = Get-AuthenticodeSignature -FilePath $path
-            if ($signature.Status -ne 'Valid') {
-                throw "Plik $path nie ma prawidłowego podpisu Authenticode."
-            }
+        foreach ($path in @($InstallerPath, $listenerPath, $uninstallerPath)) {
+            [void] (Assert-AuthenticodeSigner $path $expectedSignerSubject $expectedSignerSha256)
+        }
+        $rendererSignature = Get-AuthenticodeSignature -FilePath $rendererPath
+        if ($rendererSignature.Status -ne 'Valid') {
+            throw "Renderer $rendererPath nie ma prawidłowego podpisu Authenticode."
         }
     }
 } finally {
@@ -257,3 +296,10 @@ if (Test-Path -LiteralPath $configPath) {
 }
 
 Write-Host 'Outbound polling, ACL, brak tokenu w SCM, usługa, health i deinstalacja: OK.'
+} finally {
+    Remove-TemporaryInternalCertificateTrust $trustState
+    if ($null -ne $certificateBundle) {
+        $certificateBundle.Root.Dispose()
+        $certificateBundle.Leaf.Dispose()
+    }
+}

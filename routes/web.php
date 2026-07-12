@@ -58,6 +58,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::get('/settings/packing', [SettingsController::class, 'packing'])->name('settings.packing');
         Route::get('/settings/products', [SettingsController::class, 'products'])->name('settings.products');
         Route::get('/settings/packing/windows-listener/download', [SettingsController::class, 'downloadWindowsPrintListener'])->name('settings.packing.windows-listener.download');
+        Route::get('/settings/packing/windows-listener/certificates/publisher', [SettingsController::class, 'downloadWindowsPrintListenerPublisherCertificate'])->name('settings.packing.windows-listener.certificate.publisher');
         Route::put('/settings/packing', [SettingsController::class, 'updatePacking'])->name('settings.packing.update');
         Route::put('/settings/products', [SettingsController::class, 'updateProducts'])->name('settings.products.update');
     });

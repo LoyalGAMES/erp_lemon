@@ -18,6 +18,14 @@ on:
         required: true
         type: boolean
         default: false
+      signing_profile:
+        description: "Profil zaufania Authenticode"
+        required: true
+        type: choice
+        default: internal
+        options:
+          - internal
+          - public
 
 permissions:
   actions: read
@@ -33,15 +41,14 @@ defaults:
 
 jobs:
   validate:
-    name: Test Win10/11 (${{ matrix.os }}, bez publikacji)
+    name: Windows Server API baseline (${{ matrix.os }}, bez publikacji)
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
-        # GitHub does not provide Windows client runners. Server 2022 is the
-        # oldest current hosted NT10 baseline; Server 2025 carries the
-        # Win11/24H2 kernel/API baseline.
+        # Hosted runners are server API baselines, not literal Windows 10/11
+        # client certification. Clean Win10/11 VMs remain a release checklist.
         os: [windows-2022, windows-2025]
 
     steps:
@@ -89,7 +96,7 @@ jobs:
 
   signed_release:
     name: Podpisane wydanie produkcyjne
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_release }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_release && github.ref == 'refs/heads/main' }}
     needs: validate
     runs-on: windows-2022
     timeout-minutes: 25
@@ -99,9 +106,11 @@ jobs:
       version: ${{ steps.release.outputs.version }}
 
     env:
-      WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+      WINDOWS_CODESIGN_PROFILE: ${{ inputs.signing_profile }}
       WINDOWS_CODESIGN_TIMESTAMP_URL: ${{ secrets.WINDOWS_CODESIGN_TIMESTAMP_URL }}
       WINDOWS_CODESIGN_SUBJECT: ${{ secrets.WINDOWS_CODESIGN_SUBJECT }}
+      WINDOWS_CODESIGN_LEAF_SHA256: ${{ secrets.WINDOWS_CODESIGN_LEAF_SHA256 }}
+      WINDOWS_CODESIGN_ROOT_SHA256: ${{ secrets.WINDOWS_CODESIGN_ROOT_SHA256 }}
 
     steps:
       - name: Pobierz kod
@@ -116,9 +125,11 @@ jobs:
       - name: Pobierz i zweryfikuj NSIS 3.12
         run: .\tools\windows-print-listener\scripts\install-nsis.ps1
 
-      - name: Przygotuj tymczasowy PFX
+      - name: Przygotuj tymczasowy materiał podpisu
         env:
           WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          WINDOWS_CODESIGN_ROOT_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_ROOT_CERT_BASE64 }}
+          WINDOWS_CODESIGN_LEAF_CERT_BASE64: ${{ secrets.WINDOWS_CODESIGN_LEAF_CERT_BASE64 }}
         run: |
           if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_BASE64)) {
               throw 'Brak sekretu WINDOWS_CODESIGN_PFX_BASE64.'
@@ -130,7 +141,32 @@ jobs:
           )
           "WINDOWS_CODESIGN_PFX_PATH=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+          if ($env:WINDOWS_CODESIGN_PROFILE -eq 'internal') {
+              if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_ROOT_CERT_BASE64) -or
+                  [string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_LEAF_CERT_BASE64)) {
+                  throw 'Profil internal wymaga sekretów publicznych certyfikatów root i wydawcy DER.'
+              }
+              $rootPath = Join-Path $env:RUNNER_TEMP 'sempre-erp-internal-root.cer'
+              $leafPath = Join-Path $env:RUNNER_TEMP 'sempre-erp-internal-publisher.cer'
+              [System.IO.File]::WriteAllBytes(
+                  $rootPath,
+                  [Convert]::FromBase64String($env:WINDOWS_CODESIGN_ROOT_CERT_BASE64)
+              )
+              [System.IO.File]::WriteAllBytes(
+                  $leafPath,
+                  [Convert]::FromBase64String($env:WINDOWS_CODESIGN_LEAF_CERT_BASE64)
+              )
+              "WINDOWS_CODESIGN_ROOT_CERT_PATH=$rootPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+              "WINDOWS_CODESIGN_LEAF_CERT_PATH=$leafPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } elseif ($env:WINDOWS_CODESIGN_PROFILE -ne 'public') {
+              throw 'Profil podpisu musi mieć wartość internal albo public.'
+          }
+
       - name: Zbuduj, podpisz i zweryfikuj wydanie
+        env:
+          # Hasło jest udostępniane tylko procesowi importującemu PFX. Skrypt
+          # usuwa je ze swojego środowiska przed uruchomieniem NSIS/SignTool.
+          WINDOWS_CODESIGN_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
         run: .\tools\windows-print-listener\scripts\release.ps1
 
       - name: Usuń tymczasowy PFX
@@ -140,11 +176,24 @@ jobs:
               Remove-Item -LiteralPath $env:WINDOWS_CODESIGN_PFX_PATH -Force -ErrorAction SilentlyContinue
           }
 
+      - name: Przeskanuj podpisane artefakty Microsoft Defender
+        id: defender
+        run: .\tools\windows-print-listener\scripts\scan-defender.ps1
+
       - name: Przetestuj podpisany instalator
         run: >-
           .\tools\windows-print-listener\scripts\smoke-installer.ps1
           -InstallerPath .\tools\windows-print-listener\dist\SempreERP-PrintListener-Setup.exe
           -RequireSignature
+
+      - name: Raport skanu Microsoft Defender
+        if: ${{ always() && steps.defender.outcome != 'skipped' }}
+        run: |
+          @"
+          ### Microsoft Defender
+          - status: `${{ steps.defender.outputs.status || steps.defender.outcome }}`
+          - wynik: `${{ steps.defender.outputs.message || 'skan zakończył się błędem — zobacz log kroku' }}`
+          "@ | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
       - name: Odczytaj wersję
         id: release
@@ -152,7 +201,8 @@ jobs:
           $version = (Get-Content .\tools\windows-print-listener\VERSION -Raw).Trim()
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-      - name: Udostępnij wyłącznie podpisane artefakty
+      - name: Udostępnij podpisane artefakty publiczne
+        if: ${{ env.WINDOWS_CODESIGN_PROFILE == 'public' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: sempre-erp-print-listener-${{ steps.release.outputs.version }}-signed
@@ -165,9 +215,37 @@ jobs:
             tools/windows-print-listener/dist/SHA256SUMS.txt
             tools/windows-print-listener/build/windows-amd64/lemon-print-listener.exe
 
+      - name: Udostępnij podpisane artefakty wewnętrzne i łańcuch zaufania
+        if: ${{ env.WINDOWS_CODESIGN_PROFILE == 'internal' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sempre-erp-print-listener-${{ steps.release.outputs.version }}-signed
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          path: |
+            tools/windows-print-listener/dist/SempreERP-PrintListener-Setup.exe
+            tools/windows-print-listener/dist/RELEASE-MANIFEST.json
+            tools/windows-print-listener/dist/SHA256SUMS.txt
+            tools/windows-print-listener/dist/SempreERP-Internal-Root.cer
+            tools/windows-print-listener/dist/SempreERP-Internal-Publisher.cer
+            tools/windows-print-listener/build/windows-amd64/lemon-print-listener.exe
+
+      - name: Usuń tymczasowe publiczne certyfikaty
+        if: ${{ always() }}
+        run: |
+          foreach ($path in @(
+              $env:WINDOWS_CODESIGN_ROOT_CERT_PATH,
+              $env:WINDOWS_CODESIGN_LEAF_CERT_PATH
+          )) {
+              if (-not [string]::IsNullOrWhiteSpace([string] $path)) {
+                  Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+              }
+          }
+
   deploy_signed_release:
     name: Opublikuj podpisany instalator w ERP
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_release }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.signed_release && github.ref == 'refs/heads/main' }}
     needs: signed_release
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -255,6 +333,26 @@ jobs:
 
           deploy_root="${DEPLOY_PATH}.deploy"
           remote_staging="${deploy_root}/.windows-release-upload-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          signing_profile="$(jq -er '.signing_profile | select(. == "internal" or . == "public")' "$RELEASE_DIR/RELEASE-MANIFEST.json")"
+          release_channel="$(jq -er '.release_channel | select(. == "internal" or . == "public")' "$RELEASE_DIR/RELEASE-MANIFEST.json")"
+          if [[ "$signing_profile" != "$release_channel" ]]; then
+            echo "Manifest ma niespójny profil i kanał wydania." >&2
+            exit 1
+          fi
+          release_files=(
+            "$RELEASE_DIR/SempreERP-PrintListener-Setup.exe"
+            "$RELEASE_DIR/RELEASE-MANIFEST.json"
+            "$RELEASE_DIR/SHA256SUMS.txt"
+          )
+          if [[ "$signing_profile" == 'internal' ]]; then
+            release_files+=(
+              "$RELEASE_DIR/SempreERP-Internal-Root.cer"
+              "$RELEASE_DIR/SempreERP-Internal-Publisher.cer"
+            )
+          fi
+          for release_file in "${release_files[@]}"; do
+            test -f "$release_file"
+          done
           # Wszystkie interpolowane wartości są ograniczone walidatorami do bezpiecznych ścieżek/identyfikatorów.
           # shellcheck disable=SC2029
           ssh windows-release-production \
@@ -263,11 +361,7 @@ jobs:
              test \"\$(cat '$deploy_root/DEPLOY_PATH')\" = '$DEPLOY_PATH'; \
              test ! -e '$remote_staging'; \
              mkdir -m 0750 '$remote_staging'"
-          scp \
-            "$RELEASE_DIR/SempreERP-PrintListener-Setup.exe" \
-            "$RELEASE_DIR/RELEASE-MANIFEST.json" \
-            "$RELEASE_DIR/SHA256SUMS.txt" \
-            "windows-release-production:${remote_staging}/"
+          scp "${release_files[@]}" "windows-release-production:${remote_staging}/"
 
           # Zweryfikowane wartości mają być argumentami zdalnego publikatora.
           # shellcheck disable=SC2029

@@ -5,6 +5,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'certificate-utils.ps1')
 
 $root = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -14,10 +15,17 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $root 'dist'
 }
 
+$profile = ([string] $env:WINDOWS_CODESIGN_PROFILE).Trim().ToLowerInvariant()
 $pfxPath = [string] $env:WINDOWS_CODESIGN_PFX_PATH
 $pfxPassword = [string] $env:WINDOWS_CODESIGN_PFX_PASSWORD
 $expectedSubject = [string] $env:WINDOWS_CODESIGN_SUBJECT
+$expectedLeafSha256 = Normalize-CertificateSha256 `
+    ([string] $env:WINDOWS_CODESIGN_LEAF_SHA256) `
+    'WINDOWS_CODESIGN_LEAF_SHA256'
 
+if ($profile -notin @('internal', 'public')) {
+    throw 'WINDOWS_CODESIGN_PROFILE musi mieć wartość internal albo public.'
+}
 if ([string]::IsNullOrWhiteSpace($pfxPath) -or -not (Test-Path -LiteralPath $pfxPath -PathType Leaf)) {
     throw 'WINDOWS_CODESIGN_PFX_PATH musi wskazywać istniejący certyfikat Authenticode PFX.'
 }
@@ -31,10 +39,38 @@ if ([string]::IsNullOrWhiteSpace($expectedSubject)) {
     throw 'WINDOWS_CODESIGN_SUBJECT nie jest ustawiony; wydanie musi przypinać oczekiwanego wydawcę certyfikatu.'
 }
 
-$previousThumbprint = $env:WINDOWS_CODESIGN_THUMBPRINT
+$rootCertificatePath = [string] $env:WINDOWS_CODESIGN_ROOT_CERT_PATH
+$leafCertificatePath = [string] $env:WINDOWS_CODESIGN_LEAF_CERT_PATH
+$expectedRootSha256 = ''
+$certificateBundle = $null
+$trustState = $null
+
+if ($profile -eq 'internal') {
+    $expectedRootSha256 = Normalize-CertificateSha256 `
+        ([string] $env:WINDOWS_CODESIGN_ROOT_SHA256) `
+        'WINDOWS_CODESIGN_ROOT_SHA256'
+    $certificateBundle = Assert-InternalCertificateBundle `
+        -RootCertificatePath $rootCertificatePath `
+        -LeafCertificatePath $leafCertificatePath `
+        -ExpectedRootSha256 $expectedRootSha256 `
+        -ExpectedLeafSha256 $expectedLeafSha256 `
+        -ExpectedSubject $expectedSubject
+}
+
+$previousEnvironment = @{
+    WINDOWS_CODESIGN_THUMBPRINT = $env:WINDOWS_CODESIGN_THUMBPRINT
+    WINDOWS_RELEASE_CHANNEL = $env:WINDOWS_RELEASE_CHANNEL
+    WINDOWS_CODESIGN_PUBLISHER_SUBJECT = $env:WINDOWS_CODESIGN_PUBLISHER_SUBJECT
+    WINDOWS_CODESIGN_PUBLISHER_SHA256 = $env:WINDOWS_CODESIGN_PUBLISHER_SHA256
+    WINDOWS_CODESIGN_MANIFEST_ROOT_SHA256 = $env:WINDOWS_CODESIGN_MANIFEST_ROOT_SHA256
+}
 $securePassword = $null
 $importedCertificates = @()
 $certificate = $null
+$preexistingMyThumbprints = @(
+    Get-ChildItem 'Cert:\CurrentUser\My' -ErrorAction SilentlyContinue |
+        ForEach-Object { [string] $_.Thumbprint }
+)
 
 try {
     $securePassword = ConvertTo-SecureString $pfxPassword -AsPlainText -Force
@@ -46,39 +82,76 @@ try {
             -Exportable:$false
     )
 
-    $codeSigningOid = '1.3.6.1.5.5.7.3.3'
-    $certificate = $importedCertificates |
-        Where-Object {
-            $_.HasPrivateKey -and
-            ($_.Extensions |
-                Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] } |
-                ForEach-Object { $_.EnhancedKeyUsages } |
-                Where-Object { $_.Value -eq $codeSigningOid })
-        } |
-        Select-Object -First 1
+    # The PFX password is needed only for the import above. Remove it from this
+    # process before NSIS and SignTool child processes are started.
+    $pfxPassword = $null
+    $env:WINDOWS_CODESIGN_PFX_PASSWORD = $null
 
-    if ($null -eq $certificate) {
-        throw 'PFX nie zawiera certyfikatu z kluczem prywatnym i EKU Code Signing.'
+    $candidates = @(
+        $importedCertificates |
+            Where-Object {
+                $_.HasPrivateKey -and
+                [string]::Equals(
+                    (Get-CertificateSha256 $_),
+                    $expectedLeafSha256,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            }
+    )
+    if ($candidates.Count -ne 1) {
+        throw 'PFX musi zawierać dokładnie jeden klucz prywatny przypiętego certyfikatu wydawcy.'
     }
-    if ($certificate.NotBefore -gt (Get-Date) -or $certificate.NotAfter -le (Get-Date)) {
-        throw 'Certyfikat Authenticode nie jest obecnie ważny.'
-    }
-    if (-not [string]::Equals($certificate.Subject, $expectedSubject, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "Podmiot certyfikatu '$($certificate.Subject)' nie jest dokładnie oczekiwanym '$expectedSubject'."
+    $certificate = $candidates[0]
+    Assert-CodeSigningLeafCertificate $certificate $expectedSubject $expectedLeafSha256
+
+    if ($profile -eq 'internal') {
+        if (-not [string]::Equals(
+            (Get-CertificateSha256 $certificateBundle.Leaf),
+            (Get-CertificateSha256 $certificate),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'Publiczny certyfikat wydawcy DER nie odpowiada kluczowi prywatnemu z PFX.'
+        }
+
+        $trustState = Add-TemporaryInternalCertificateTrust `
+            -RootCertificate $certificateBundle.Root `
+            -LeafCertificate $certificateBundle.Leaf `
+            -RootCertificatePath $rootCertificatePath `
+            -LeafCertificatePath $leafCertificatePath
     }
 
     $env:WINDOWS_CODESIGN_THUMBPRINT = $certificate.Thumbprint
+    $env:WINDOWS_RELEASE_CHANNEL = $profile
+    $env:WINDOWS_CODESIGN_PUBLISHER_SUBJECT = $certificate.Subject
+    $env:WINDOWS_CODESIGN_PUBLISHER_SHA256 = $expectedLeafSha256
+    $env:WINDOWS_CODESIGN_MANIFEST_ROOT_SHA256 = if ($profile -eq 'internal') { $expectedRootSha256 } else { $null }
+
     & (Join-Path $PSScriptRoot 'build.ps1') -Version $Version -OutputDirectory $OutputDirectory -Sign
     & (Join-Path $PSScriptRoot 'verify-artifacts.ps1') -Version $Version -OutputDirectory $OutputDirectory -RequireSignature
 } finally {
-    $env:WINDOWS_CODESIGN_THUMBPRINT = $previousThumbprint
+    $pfxPassword = $null
+    $env:WINDOWS_CODESIGN_PFX_PASSWORD = $null
+    Remove-TemporaryInternalCertificateTrust $trustState
+
     foreach ($imported in $importedCertificates) {
-        if (-not [string]::IsNullOrWhiteSpace([string] $imported.Thumbprint)) {
+        if (-not [string]::IsNullOrWhiteSpace([string] $imported.Thumbprint) -and
+            $imported.Thumbprint -notin $preexistingMyThumbprints) {
             Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($imported.Thumbprint)" -Force -ErrorAction SilentlyContinue
         }
     }
+
+    foreach ($name in $previousEnvironment.Keys) {
+        Set-Item -Path "Env:$name" -Value $previousEnvironment[$name] -ErrorAction SilentlyContinue
+        if ($null -eq $previousEnvironment[$name]) {
+            Remove-Item -Path "Env:$name" -ErrorAction SilentlyContinue
+        }
+    }
+
+    if ($null -ne $certificateBundle) {
+        $certificateBundle.Root.Dispose()
+        $certificateBundle.Leaf.Dispose()
+    }
     $certificate = $null
     $importedCertificates = @()
-    $pfxPassword = $null
     $securePassword = $null
 }

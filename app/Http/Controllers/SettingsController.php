@@ -151,12 +151,21 @@ class SettingsController extends Controller
             abort(404, 'Podpisany instalator Windows nie jest dostępny na serwerze ERP.');
         }
 
-        return response()->download($release['path'], $release['filename'], [
+        $response = response()->download($release['path'], $release['filename'], [
             'Content-Type' => 'application/vnd.microsoft.portable-executable',
-            'Cache-Control' => 'no-store, max-age=0',
+            'Cache-Control' => 'private, no-store, max-age=0',
             'X-Content-Type-Options' => 'nosniff',
+            'X-Download-Options' => 'noopen',
+            'Cross-Origin-Resource-Policy' => 'same-origin',
             'X-Checksum-Sha256' => $release['sha256'],
         ]);
+
+        return $response->setPrivate();
+    }
+
+    public function downloadWindowsPrintListenerPublisherCertificate(): BinaryFileResponse
+    {
+        return $this->downloadWindowsPrintListenerCertificate('publisher_certificate');
     }
 
     public function updatePacking(Request $request, PackingSettingsService $packingSettings): RedirectResponse
@@ -186,22 +195,39 @@ class SettingsController extends Controller
         return back()->with('status', 'Ustawienia stanowisk pakowania i drukarek zostały zapisane.');
     }
 
-    /**
-     * @return array{available:bool,download_url:string,filename:string,size_mb:string|null,updated_at:string|null}
-     */
+    /** @return array<string, mixed> */
     private function windowsPrintListenerAppData(): array
     {
         $release = $this->windowsPrintListenerRelease();
         $mtime = $release !== null ? filemtime($release['path']) : false;
+        $cacheBuster = $mtime ?: now()->timestamp;
+        $internal = ($release['signing_profile'] ?? null) === 'internal';
 
         return [
             'available' => $release !== null,
-            'download_url' => route('settings.packing.windows-listener.download', [
-                'v' => $mtime ?: now()->timestamp,
-            ]),
+            'download_url' => $release !== null
+                ? route('settings.packing.windows-listener.download', ['v' => $cacheBuster])
+                : null,
             'filename' => 'SempreERP-PrintListener-Setup.exe',
             'size_mb' => $release !== null ? number_format($release['size'] / 1048576, 1, ',', ' ').' MB' : null,
             'updated_at' => $mtime !== false ? date('Y-m-d H:i', $mtime) : null,
+            'version' => $release['version'] ?? null,
+            'release_channel' => $release['release_channel'] ?? null,
+            'signing_profile' => $release['signing_profile'] ?? null,
+            'is_internal' => $internal,
+            'publisher_subject' => $release['publisher_subject'] ?? null,
+            'installer_sha256' => $release['sha256'] ?? null,
+            'publisher_certificate_sha256' => $release['publisher_certificate_sha256'] ?? null,
+            'publisher_certificate_fingerprint' => isset($release['publisher_certificate_sha256'])
+                ? $this->formatSha256Fingerprint($release['publisher_certificate_sha256'])
+                : null,
+            'root_certificate_sha256' => $release['root_certificate_sha256'] ?? null,
+            'root_certificate_fingerprint' => isset($release['root_certificate_sha256'])
+                ? $this->formatSha256Fingerprint($release['root_certificate_sha256'])
+                : null,
+            'publisher_certificate_url' => $release !== null && $internal
+                ? route('settings.packing.windows-listener.certificate.publisher', ['v' => $cacheBuster])
+                : null,
         ];
     }
 
@@ -210,21 +236,24 @@ class SettingsController extends Controller
      * manifest gate prevents an unsigned validation build or the legacy raw
      * executable from becoming a production download by accident.
      *
-     * @return array{path:string,filename:string,size:int,sha256:string}|null
+     * @return array<string, mixed>|null
      */
     private function windowsPrintListenerRelease(): ?array
     {
+        $configuredDistPath = config('erp.windows_listener_dist_path', base_path('tools/windows-print-listener/dist'));
+        $distPath = is_string($configuredDistPath) && trim($configuredDistPath) !== ''
+            ? $configuredDistPath
+            : base_path('tools/windows-print-listener/dist');
         $releaseDirectory = $this->windowsPrintListenerReleaseDirectory(
-            base_path('tools/windows-print-listener/dist'),
+            $distPath,
         );
         if ($releaseDirectory === null) {
             return null;
         }
 
-        $path = $releaseDirectory.'/SempreERP-PrintListener-Setup.exe';
         $manifestPath = $releaseDirectory.'/RELEASE-MANIFEST.json';
 
-        if (! is_file($path) || ! is_readable($path) || ! is_file($manifestPath) || ! is_readable($manifestPath)) {
+        if (! is_file($manifestPath) || is_link($manifestPath) || ! is_readable($manifestPath)) {
             return null;
         }
 
@@ -236,41 +265,187 @@ class SettingsController extends Controller
         $rawManifest = preg_replace('/^\xEF\xBB\xBF/', '', $rawManifest) ?? $rawManifest;
         $manifest = json_decode($rawManifest, true);
 
-        if (! is_array($manifest)
-            || ($manifest['product'] ?? null) !== 'Sempre ERP Print Listener'
+        if (! is_array($manifest)) {
+            return null;
+        }
+
+        $version = trim((string) ($manifest['version'] ?? ''));
+        $releaseChannel = $manifest['release_channel'] ?? null;
+        $signingProfile = $manifest['signing_profile'] ?? null;
+        $publisherSubject = trim((string) ($manifest['publisher_subject'] ?? ''));
+        $publisherCertificateSha256 = $this->normalizedSha256($manifest['publisher_certificate_sha256'] ?? null);
+
+        if (($manifest['product'] ?? null) !== 'Sempre ERP Print Listener'
             || ($manifest['target'] ?? null) !== 'windows/amd64'
             || ($manifest['signed'] ?? null) !== true
+            || ($manifest['timestamped'] ?? null) !== true
+            || ! in_array($releaseChannel, ['internal', 'public'], true)
+            || ! in_array($signingProfile, ['internal', 'public'], true)
+            || $releaseChannel !== $signingProfile
+            || preg_match('/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/', $version) !== 1
+            || $publisherSubject === ''
+            || mb_strlen($publisherSubject) > 500
+            || preg_match('/[\x00-\x1F\x7F]/u', $publisherSubject) !== 0
+            || $publisherCertificateSha256 === null
             || ! is_array($manifest['artifacts'] ?? null)) {
             return null;
         }
 
-        $installer = collect($manifest['artifacts'])
-            ->first(fn (mixed $artifact): bool => is_array($artifact)
-                && ($artifact['name'] ?? null) === 'SempreERP-PrintListener-Setup.exe');
+        $artifacts = [];
+        foreach ($manifest['artifacts'] as $artifact) {
+            if (! is_array($artifact) || ! is_string($artifact['name'] ?? null)) {
+                return null;
+            }
 
-        if (! is_array($installer)) {
+            $artifactName = $artifact['name'];
+            if (isset($artifacts[$artifactName])) {
+                return null;
+            }
+            $artifacts[$artifactName] = $artifact;
+        }
+
+        $installer = $this->verifiedWindowsPrintListenerArtifact(
+            $releaseDirectory,
+            $artifacts['SempreERP-PrintListener-Setup.exe'] ?? null,
+            'SempreERP-PrintListener-Setup.exe',
+        );
+
+        if ($installer === null || ! $this->hasEmbeddedAuthenticodeSignature($installer['path'])) {
             return null;
         }
 
-        $expectedHash = mb_strtolower(trim((string) ($installer['sha256'] ?? '')));
-        $size = filesize($path);
-        $actualHash = hash_file('sha256', $path);
+        $rootCertificateSha256 = null;
+        $rootCertificate = null;
+        $publisherCertificate = null;
 
-        if (preg_match('/^[a-f0-9]{64}$/', $expectedHash) !== 1
-            || $size === false
-            || (int) ($installer['size'] ?? -1) !== $size
-            || $actualHash === false
-            || ! hash_equals($expectedHash, $actualHash)
-            || ! $this->hasEmbeddedAuthenticodeSignature($path)) {
+        if ($signingProfile === 'internal') {
+            $rootCertificateSha256 = $this->normalizedSha256($manifest['root_certificate_sha256'] ?? null);
+            if ($rootCertificateSha256 === null) {
+                return null;
+            }
+
+            $rootCertificate = $this->verifiedWindowsPrintListenerArtifact(
+                $releaseDirectory,
+                $artifacts['SempreERP-Internal-Root.cer'] ?? null,
+                'SempreERP-Internal-Root.cer',
+            );
+            $publisherCertificate = $this->verifiedWindowsPrintListenerArtifact(
+                $releaseDirectory,
+                $artifacts['SempreERP-Internal-Publisher.cer'] ?? null,
+                'SempreERP-Internal-Publisher.cer',
+            );
+
+            if ($rootCertificate === null
+                || $publisherCertificate === null
+                || ! hash_equals($rootCertificateSha256, $rootCertificate['sha256'])
+                || ! hash_equals($publisherCertificateSha256, $publisherCertificate['sha256'])) {
+                return null;
+            }
+        } elseif (isset($artifacts['SempreERP-Internal-Root.cer'])
+            || isset($artifacts['SempreERP-Internal-Publisher.cer'])
+            || array_key_exists('root_certificate_sha256', $manifest)) {
+            // Public releases never distribute the private trust bootstrap.
             return null;
         }
 
         return [
-            'path' => $path,
+            'path' => $installer['path'],
             'filename' => 'SempreERP-PrintListener-Setup.exe',
+            'size' => $installer['size'],
+            'sha256' => $installer['sha256'],
+            'version' => $version,
+            'release_channel' => $releaseChannel,
+            'signing_profile' => $signingProfile,
+            'publisher_subject' => $publisherSubject,
+            'publisher_certificate_sha256' => $publisherCertificateSha256,
+            'root_certificate_sha256' => $rootCertificateSha256,
+            'root_certificate' => $rootCertificate,
+            'publisher_certificate' => $publisherCertificate,
+        ];
+    }
+
+    /** @return array{path:string,filename:string,size:int,sha256:string}|null */
+    private function verifiedWindowsPrintListenerArtifact(
+        string $releaseDirectory,
+        mixed $artifact,
+        string $expectedName,
+    ): ?array {
+        if (! is_array($artifact) || ($artifact['name'] ?? null) !== $expectedName) {
+            return null;
+        }
+
+        $path = $releaseDirectory.DIRECTORY_SEPARATOR.$expectedName;
+        $realReleaseDirectory = realpath($releaseDirectory);
+        $realPath = realpath($path);
+        $releasePrefix = $realReleaseDirectory !== false
+            ? rtrim($realReleaseDirectory, DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR
+            : null;
+
+        if ($realPath === false
+            || $releasePrefix === null
+            || ! str_starts_with($realPath, $releasePrefix)
+            || ! is_file($realPath)
+            || is_link($path)
+            || ! is_readable($realPath)) {
+            return null;
+        }
+
+        $expectedHash = $this->normalizedSha256($artifact['sha256'] ?? null);
+        $size = filesize($realPath);
+        $actualHash = hash_file('sha256', $realPath);
+
+        if ($expectedHash === null
+            || ! is_int($artifact['size'] ?? null)
+            || $size === false
+            || $artifact['size'] !== $size
+            || $actualHash === false
+            || ! hash_equals($expectedHash, $actualHash)) {
+            return null;
+        }
+
+        return [
+            'path' => $realPath,
+            'filename' => $expectedName,
             'size' => $size,
             'sha256' => $actualHash,
         ];
+    }
+
+    private function downloadWindowsPrintListenerCertificate(string $certificate): BinaryFileResponse
+    {
+        $release = $this->windowsPrintListenerRelease();
+        $artifact = $release[$certificate] ?? null;
+
+        if (($release['signing_profile'] ?? null) !== 'internal' || ! is_array($artifact)) {
+            abort(404, 'Certyfikat wewnętrznego wydania Windows nie jest dostępny.');
+        }
+
+        $response = response()->download($artifact['path'], $artifact['filename'], [
+            'Content-Type' => 'application/pkix-cert',
+            'Cache-Control' => 'private, no-store, max-age=0',
+            'X-Content-Type-Options' => 'nosniff',
+            'X-Download-Options' => 'noopen',
+            'Cross-Origin-Resource-Policy' => 'same-origin',
+            'X-Checksum-Sha256' => $artifact['sha256'],
+        ]);
+
+        return $response->setPrivate();
+    }
+
+    private function normalizedSha256(mixed $value): ?string
+    {
+        if (! is_string($value)) {
+            return null;
+        }
+
+        $hash = mb_strtolower(trim($value));
+
+        return preg_match('/^[a-f0-9]{64}$/', $hash) === 1 ? $hash : null;
+    }
+
+    private function formatSha256Fingerprint(string $hash): string
+    {
+        return mb_strtoupper(implode(':', str_split($hash, 2)));
     }
 
     /**

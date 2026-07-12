@@ -1,0 +1,7 @@
+# Signing and production release paths require an explicit owner review when
+# branch protection is enabled for this repository.
+/.github/workflows/ @LoyalGAMES
+/tools/windows-print-listener/ @LoyalGAMES
+/scripts/deploy/publish-windows-listener.sh @LoyalGAMES
+/app/Http/Controllers/SettingsController.php @LoyalGAMES
+/routes/web.php @LoyalGAMES

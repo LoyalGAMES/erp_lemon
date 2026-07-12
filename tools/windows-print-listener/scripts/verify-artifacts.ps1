@@ -7,6 +7,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'find-signtool.ps1')
+. (Join-Path $PSScriptRoot 'certificate-utils.ps1')
+
+function Test-ManifestProperty {
+    param([object] $Manifest, [string] $Name)
+
+    return $null -ne $Manifest.PSObject.Properties[$Name]
+}
 
 $root = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Version)) {
@@ -24,6 +31,8 @@ $listenerPath = Join-Path $root 'build\windows-amd64\lemon-print-listener.exe'
 $rendererPath = Join-Path $root 'build\windows-amd64\SumatraPDF.exe'
 $rendererLicensePath = Join-Path $root 'build\windows-amd64\SumatraPDF-COPYING.txt'
 $installerPath = Join-Path $OutputDirectory 'SempreERP-PrintListener-Setup.exe'
+$internalRootPath = Join-Path $OutputDirectory 'SempreERP-Internal-Root.cer'
+$internalPublisherPath = Join-Path $OutputDirectory 'SempreERP-Internal-Publisher.cer'
 $manifestPath = Join-Path $OutputDirectory 'RELEASE-MANIFEST.json'
 $checksumPath = Join-Path $OutputDirectory 'SHA256SUMS.txt'
 
@@ -54,19 +63,85 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.version -ne $Version) {
     throw "Manifest ma wersję '$($manifest.version)', oczekiwano '$Version'."
 }
-if ([bool] $manifest.signed -ne [bool] $RequireSignature) {
-    throw "Pole signed w manifeście nie odpowiada trybowi weryfikacji."
+if ([string] $manifest.commit -notmatch '^[0-9a-f]{40}$') {
+    throw "Manifest nie zawiera pełnego 40-znakowego SHA commita."
 }
-if (@($manifest.artifacts).Count -ne 2 -or
-    @($manifest.artifacts.name | Select-Object -Unique).Count -ne 2) {
-    throw 'Manifest musi zawierać dokładnie dwa unikalne artefakty.'
+if ([bool] $manifest.signed -ne [bool] $RequireSignature) {
+    throw 'Pole signed w manifeście nie odpowiada trybowi weryfikacji.'
 }
 
-foreach ($artifact in $manifest.artifacts) {
+$expectedArtifactNames = @('lemon-print-listener.exe', 'SempreERP-PrintListener-Setup.exe')
+$expectedSubject = $null
+$expectedLeafSha256 = $null
+$expectedRootSha256 = $null
+$profile = [string] $manifest.signing_profile
+
+if ($RequireSignature) {
+    $expectedProfile = ([string] $env:WINDOWS_CODESIGN_PROFILE).Trim().ToLowerInvariant()
+    if ($expectedProfile -notin @('internal', 'public') -or $profile -ne $expectedProfile) {
+        throw "Manifest ma profil podpisu '$profile', oczekiwano '$expectedProfile'."
+    }
+    $expectedChannel = $profile
+    if ($manifest.release_channel -ne $expectedChannel) {
+        throw "Manifest ma kanał '$($manifest.release_channel)', oczekiwano '$expectedChannel'."
+    }
+    if ($manifest.timestamped -ne $true) {
+        throw 'Podpisany manifest musi potwierdzać timestamp RFC 3161.'
+    }
+
+    $expectedSubject = ([string] $env:WINDOWS_CODESIGN_SUBJECT).Trim()
+    $expectedLeafSha256 = Normalize-CertificateSha256 `
+        ([string] $env:WINDOWS_CODESIGN_LEAF_SHA256) `
+        'WINDOWS_CODESIGN_LEAF_SHA256'
+    if ([string]::IsNullOrWhiteSpace($expectedSubject) -or
+        $manifest.publisher_subject -ne $expectedSubject -or
+        $manifest.publisher_certificate_sha256 -ne $expectedLeafSha256) {
+        throw 'Manifest nie zawiera dokładnie przypiętej tożsamości wydawcy.'
+    }
+
+    if ($profile -eq 'internal') {
+        $expectedRootSha256 = Normalize-CertificateSha256 `
+            ([string] $env:WINDOWS_CODESIGN_ROOT_SHA256) `
+            'WINDOWS_CODESIGN_ROOT_SHA256'
+        if (-not (Test-ManifestProperty $manifest 'root_certificate_sha256') -or
+            $manifest.root_certificate_sha256 -ne $expectedRootSha256) {
+            throw 'Wewnętrzny manifest nie zawiera przypiętego SHA-256 certyfikatu root.'
+        }
+        $expectedArtifactNames += @('SempreERP-Internal-Root.cer', 'SempreERP-Internal-Publisher.cer')
+    } elseif (Test-ManifestProperty $manifest 'root_certificate_sha256') {
+        throw 'Publiczny manifest nie może zawierać wewnętrznego certyfikatu root.'
+    }
+} else {
+    if ($profile -ne 'unsigned' -or
+        $manifest.release_channel -ne 'validation' -or
+        $manifest.timestamped -ne $false) {
+        throw 'Niepodpisany manifest musi mieć kanał validation, profil unsigned i timestamped=false.'
+    }
+    foreach ($property in @('publisher_subject', 'publisher_certificate_sha256', 'root_certificate_sha256')) {
+        if (Test-ManifestProperty $manifest $property) {
+            throw "Niepodpisany manifest nie może zawierać pola $property."
+        }
+    }
+}
+
+$manifestArtifacts = @($manifest.artifacts)
+$actualArtifactNames = @($manifestArtifacts | ForEach-Object { [string] $_.name })
+if ($manifestArtifacts.Count -ne $expectedArtifactNames.Count -or
+    @($actualArtifactNames | Select-Object -Unique).Count -ne $expectedArtifactNames.Count -or
+    (Compare-Object ($actualArtifactNames | Sort-Object) ($expectedArtifactNames | Sort-Object))) {
+    throw 'Manifest nie zawiera dokładnie oczekiwanego zestawu artefaktów.'
+}
+
+foreach ($artifact in $manifestArtifacts) {
     $artifactPath = switch ($artifact.name) {
         'lemon-print-listener.exe' { $listenerPath }
         'SempreERP-PrintListener-Setup.exe' { $installerPath }
+        'SempreERP-Internal-Root.cer' { $internalRootPath }
+        'SempreERP-Internal-Publisher.cer' { $internalPublisherPath }
         default { throw "Manifest zawiera nieoczekiwany artefakt '$($artifact.name)'." }
+    }
+    if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+        throw "Brak artefaktu wymienionego w manifeście: $artifactPath"
     }
     if ((Get-Item -LiteralPath $artifactPath).Length -ne [long] $artifact.size) {
         throw "Niezgodny rozmiar dla $($artifact.name)."
@@ -80,31 +155,27 @@ foreach ($artifact in $manifest.artifacts) {
     }
 }
 
+if ($RequireSignature -and $profile -eq 'internal') {
+    $bundle = Assert-InternalCertificateBundle `
+        -RootCertificatePath $internalRootPath `
+        -LeafCertificatePath $internalPublisherPath `
+        -ExpectedRootSha256 $expectedRootSha256 `
+        -ExpectedLeafSha256 $expectedLeafSha256 `
+        -ExpectedSubject $expectedSubject
+    $bundle.Root.Dispose()
+    $bundle.Leaf.Dispose()
+}
+
 $installerVersion = (Get-Item -LiteralPath $installerPath).VersionInfo.ProductVersion
 if ($installerVersion -notlike "$Version*") {
     throw "Instalator ma ProductVersion '$installerVersion', oczekiwano '$Version'."
 }
 
 if ($RequireSignature) {
-    $expectedSubject = [string] $env:WINDOWS_CODESIGN_SUBJECT
-    if ([string]::IsNullOrWhiteSpace($expectedSubject)) {
-        throw 'WINDOWS_CODESIGN_SUBJECT jest wymagany przy weryfikacji podpisanego wydania.'
-    }
     $signTool = Find-SignTool
 
     foreach ($artifactPath in @($listenerPath, $installerPath)) {
-        $signature = Get-AuthenticodeSignature -FilePath $artifactPath
-        if ($signature.Status -ne 'Valid') {
-            throw "Podpis Authenticode $artifactPath ma status $($signature.Status): $($signature.StatusMessage)"
-        }
-        if (-not [string]::Equals(
-            $signature.SignerCertificate.Subject,
-            $expectedSubject,
-            [StringComparison]::OrdinalIgnoreCase
-        )) {
-            throw "Podpis $artifactPath ma nieoczekiwany podmiot '$($signature.SignerCertificate.Subject)'."
-        }
-
+        [void] (Assert-AuthenticodeSigner $artifactPath $expectedSubject $expectedLeafSha256)
         & $signTool verify /pa /all /tw /v $artifactPath
         if ($LASTEXITCODE -ne 0) {
             throw "signtool verify nie powiódł się dla $artifactPath."
@@ -112,4 +183,4 @@ if ($RequireSignature) {
     }
 }
 
-Write-Host "Artefakty wersji $Version zweryfikowane. Podpis wymagany: $([bool] $RequireSignature)."
+Write-Host "Artefakty wersji $Version zweryfikowane. Podpis wymagany: $([bool] $RequireSignature), profil: $profile."

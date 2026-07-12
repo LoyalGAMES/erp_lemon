@@ -1,9 +1,13 @@
 # Podpis Authenticode
 
-Wydanie produkcyjne Sempre ERP Print Listener wymaga ważnego certyfikatu code
-signing wystawionego dla organizacji przez zaufane CA albo certyfikatu w
-zatwierdzonej usłudze/HSM. Certyfikat samopodpisany nadaje się wyłącznie do
-testów wewnętrznych i nie może być publikowany użytkownikom.
+Pipeline obsługuje dwa jawne profile:
+
+- `public` — certyfikat code signing wystawiony przez publicznie zaufane CA lub
+  usługę/HSM;
+- `internal` — oddzielny certyfikat wydawcy wystawiony bezpośrednio przez
+  samopodpisany wewnętrzny root CA. Ten profil wolno stosować wyłącznie na
+  zarządzanych komputerach, na których root i wydawca zostały wcześniej
+  wdrożone niezależnym, administracyjnym kanałem.
 
 Podpis nie jest obejściem ochrony Windows. Zapewnia identyfikację wydawcy i
 integralność pliku, ale sam w sobie nie gwarantuje natychmiastowej reputacji
@@ -19,12 +23,25 @@ następujących sekretów:
 - `WINDOWS_CODESIGN_PFX_BASE64` — PFX zakodowany Base64;
 - `WINDOWS_CODESIGN_PFX_PASSWORD` — hasło PFX;
 - `WINDOWS_CODESIGN_TIMESTAMP_URL` — URL zaufanej usługi RFC 3161;
-- `WINDOWS_CODESIGN_SUBJECT` — oczekiwany fragment Subject certyfikatu.
+- `WINDOWS_CODESIGN_SUBJECT` — pełny, dokładny Subject certyfikatu wydawcy;
+- `WINDOWS_CODESIGN_LEAF_SHA256` — dokładny SHA-256 DER certyfikatu wydawcy;
+- dla profilu `internal`: `WINDOWS_CODESIGN_ROOT_SHA256`,
+  `WINDOWS_CODESIGN_ROOT_CERT_BASE64` i
+  `WINDOWS_CODESIGN_LEAF_CERT_BASE64`.
 
 PFX jest zapisywany wyłącznie w katalogu tymczasowym runnera. Skrypt
 `release.ps1` importuje certyfikat jako nieeksportowalny do magazynu bieżącego
 użytkownika, podpisuje artefakty po thumbprincie i usuwa certyfikat w bloku
 `finally`. Hasło PFX nie jest przekazywane w argumentach `signtool.exe`.
+W profilu `internal` pipeline waliduje CA/key usage root, CA=false, Digital
+Signature i EKU Code Signing wydawcy, RSA-3072+, ważność, dokładne SHA-256 oraz
+łańcuch. Root trafia tymczasowo do `CurrentUser\Root`, a wydawca do
+`CurrentUser\TrustedPublisher`; oba wpisy są usuwane w `finally`.
+
+Instalator nigdy nie dodaje własnego certyfikatu do magazynów zaufania. Byłoby
+to kołowym „samozaufaniem”. Na stanowiskach magazynowych publiczny root należy
+wdrożyć wcześniej do `LocalMachine\Root`, a certyfikat wydawcy do
+`LocalMachine\TrustedPublisher`, najlepiej przez GPO/Intune/WDAC.
 
 Zalecane jest zastąpienie PFX usługą podpisu opartą o HSM, gdy organizacja taką
 posiada. W takim wariancie należy zachować te same bramki: SHA-256, timestamp
@@ -44,6 +61,12 @@ weryfikacja uruchamia zarówno `Get-AuthenticodeSignature`, jak i:
 ```powershell
 signtool.exe verify /pa /all /tw /v .\dist\SempreERP-PrintListener-Setup.exe
 ```
+
+Manifest podpisanego wydania zawiera równe `release_channel` i
+`signing_profile` (`internal` albo `public`), pełny Subject, SHA-256 wydawcy i
+`timestamped: true`. Profil `internal` dodatkowo zawiera SHA-256 root i dwa
+publiczne artefakty `SempreERP-Internal-Root.cer` oraz
+`SempreERP-Internal-Publisher.cer`. Pliki CER nie zawierają kluczy prywatnych.
 
 Dokumentacja Microsoft:
 

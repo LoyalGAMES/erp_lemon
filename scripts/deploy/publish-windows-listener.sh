@@ -31,7 +31,6 @@ marker="${deploy_root}/DEPLOY_PATH"
 [[ -d "$shared_root" ]] || fail 'brak współdzielonego katalogu wdrożenia.'
 command -v flock >/dev/null 2>&1 || fail 'na serwerze brakuje programu flock.'
 command -v php >/dev/null 2>&1 || fail 'na serwerze brakuje programu php.'
-command -v sha256sum >/dev/null 2>&1 || fail 'na serwerze brakuje programu sha256sum.'
 
 exec 9>"${deploy_root}/deploy.lock"
 flock -w 300 9 || fail 'inne wdrożenie utrzymuje blokadę dłużej niż 300 sekund.'
@@ -45,69 +44,217 @@ deploy_root_resolved="$(realpath -e "$deploy_root")" ||
 [[ -d "$staging_resolved" && ! -L "$staging_path" ]] ||
     fail 'katalog tymczasowy nie jest zwykłym katalogiem.'
 
-expected_files=(
-    'SempreERP-PrintListener-Setup.exe'
-    'RELEASE-MANIFEST.json'
-    'SHA256SUMS.txt'
-)
-for filename in "${expected_files[@]}"; do
-    [[ -f "${staging_resolved}/${filename}" && ! -L "${staging_resolved}/${filename}" ]] ||
-        fail "brak zwykłego pliku ${filename}."
-done
-file_count="$(find "$staging_resolved" -mindepth 1 -maxdepth 1 -print | wc -l | tr -d ' ')"
-[[ "$file_count" -eq "${#expected_files[@]}" ]] ||
-    fail 'katalog tymczasowy zawiera nieoczekiwane pliki.'
-
 release_version="${release_id%%-*}"
-php -r '
+# PHP jest celowo przekazywany jako pojedynczy, nieinterpolowany skrypt walidatora.
+# shellcheck disable=SC2016
+release_mode="$(php -r '
+    function failValidation(string $message): never
+    {
+        throw new RuntimeException($message);
+    }
+
+    function requireExactKeys(array $value, array $expected, string $context): void
+    {
+        $actual = array_keys($value);
+        sort($actual, SORT_STRING);
+        sort($expected, SORT_STRING);
+        if ($actual !== $expected) {
+            failValidation($context." zawiera brakujące albo nieznane pola");
+        }
+    }
+
+    function requireFingerprint(mixed $value, string $field): string
+    {
+        if (!is_string($value) || preg_match("/^[a-f0-9]{64}$/D", $value) !== 1) {
+            failValidation("pole {$field} nie jest prawidłowym SHA-256");
+        }
+
+        return $value;
+    }
+
     try {
         $manifest = json_decode(file_get_contents($argv[1]), true, 32, JSON_THROW_ON_ERROR);
-        if (($manifest["product"] ?? null) !== "Sempre ERP Print Listener"
-            || ($manifest["version"] ?? null) !== $argv[3]
-            || ($manifest["target"] ?? null) !== "windows/amd64"
-            || ($manifest["signed"] ?? null) !== true
-            || !is_array($manifest["artifacts"] ?? null)) {
+        if (!is_array($manifest) || array_is_list($manifest)) {
+            failValidation("manifest release nie jest obiektem JSON");
+        }
+
+        $releaseChannel = $manifest["release_channel"] ?? null;
+        $signingProfile = $manifest["signing_profile"] ?? null;
+        if (!is_string($releaseChannel)
+            || !in_array($releaseChannel, ["public", "internal"], true)
+            || $signingProfile !== $releaseChannel) {
+            failValidation("manifest zawiera nieprawidłowy albo niespójny tryb wydania");
+        }
+
+        $manifestKeys = [
+            "product",
+            "version",
+            "commit",
+            "target",
+            "go_version",
+            "signed",
+            "timestamped",
+            "release_channel",
+            "signing_profile",
+            "publisher_subject",
+            "publisher_certificate_sha256",
+            "artifacts",
+        ];
+        if ($releaseChannel === "internal") {
+            $manifestKeys[] = "root_certificate_sha256";
+        }
+        requireExactKeys($manifest, $manifestKeys, "manifest release");
+
+        if ($manifest["product"] !== "Sempre ERP Print Listener"
+            || $manifest["version"] !== $argv[3]
+            || $manifest["target"] !== "windows/amd64"
+            || $manifest["signed"] !== true
+            || $manifest["timestamped"] !== true
+            || !is_string($manifest["commit"])
+            || preg_match("/^[a-f0-9]{40}$/D", $manifest["commit"]) !== 1
+            || !is_string($manifest["go_version"])
+            || trim($manifest["go_version"]) === ""
+            || !is_string($manifest["publisher_subject"])
+            || trim($manifest["publisher_subject"]) === ""
+            || strlen($manifest["publisher_subject"]) > 500
+            || preg_match("/[\\x00-\\x1f\\x7f]/", $manifest["publisher_subject"]) === 1
+            || !is_array($manifest["artifacts"])
+            || !array_is_list($manifest["artifacts"])) {
             throw new RuntimeException("manifest release jest nieprawidłowy");
         }
-        $installer = null;
-        $installerCount = 0;
-        foreach ($manifest["artifacts"] as $artifact) {
-            if (is_array($artifact) && ($artifact["name"] ?? null) === "SempreERP-PrintListener-Setup.exe") {
-                $installer = $artifact;
-                $installerCount++;
+
+        $publisherFingerprint = requireFingerprint(
+            $manifest["publisher_certificate_sha256"],
+            "publisher_certificate_sha256"
+        );
+        $rootFingerprint = $releaseChannel === "internal"
+            ? requireFingerprint($manifest["root_certificate_sha256"], "root_certificate_sha256")
+            : null;
+
+        $artifactNames = [
+            "lemon-print-listener.exe",
+            "SempreERP-PrintListener-Setup.exe",
+        ];
+        $publishedArtifactNames = ["SempreERP-PrintListener-Setup.exe"];
+        $expectedFiles = [
+            "SempreERP-PrintListener-Setup.exe",
+            "RELEASE-MANIFEST.json",
+            "SHA256SUMS.txt",
+        ];
+        if ($releaseChannel === "internal") {
+            $certificateNames = [
+                "SempreERP-Internal-Root.cer",
+                "SempreERP-Internal-Publisher.cer",
+            ];
+            array_push($artifactNames, ...$certificateNames);
+            array_push($publishedArtifactNames, ...$certificateNames);
+            array_push($expectedFiles, ...$certificateNames);
+        }
+
+        $actualFiles = array_values(array_diff(scandir($argv[2]), [".", ".."]));
+        sort($actualFiles, SORT_STRING);
+        $sortedExpectedFiles = $expectedFiles;
+        sort($sortedExpectedFiles, SORT_STRING);
+        if ($actualFiles !== $sortedExpectedFiles) {
+            failValidation("katalog tymczasowy zawiera brakujące albo nieoczekiwane pliki");
+        }
+        foreach ($expectedFiles as $fileName) {
+            $filePath = $argv[2].DIRECTORY_SEPARATOR.$fileName;
+            if (!is_file($filePath) || is_link($filePath)) {
+                failValidation("{$fileName} nie jest zwykłym plikiem");
             }
         }
-        if ($installerCount !== 1
-            || !is_array($installer)
-            || !preg_match("/^[a-f0-9]{64}$/", (string) ($installer["sha256"] ?? ""))
-            || (int) ($installer["size"] ?? -1) !== filesize($argv[2])
-            || !hash_equals((string) $installer["sha256"], hash_file("sha256", $argv[2]))) {
-            throw new RuntimeException("instalator nie odpowiada podpisanemu manifestowi");
+
+        $artifacts = [];
+        foreach ($manifest["artifacts"] as $artifact) {
+            if (!is_array($artifact) || array_is_list($artifact)) {
+                failValidation("wpis artefaktu nie jest obiektem JSON");
+            }
+            requireExactKeys($artifact, ["name", "size", "sha256"], "wpis artefaktu");
+            $name = $artifact["name"];
+            if (!is_string($name)
+                || !in_array($name, $artifactNames, true)
+                || array_key_exists($name, $artifacts)
+                || !is_int($artifact["size"])
+                || $artifact["size"] <= 0) {
+                failValidation("manifest zawiera nieprawidłowy albo powtórzony artefakt");
+            }
+            requireFingerprint($artifact["sha256"], "artifacts.sha256");
+            $artifacts[$name] = $artifact;
         }
+
+        $declaredNames = array_keys($artifacts);
+        sort($declaredNames, SORT_STRING);
+        $sortedArtifactNames = $artifactNames;
+        sort($sortedArtifactNames, SORT_STRING);
+        if ($declaredNames !== $sortedArtifactNames) {
+            failValidation("manifest nie deklaruje dokładnego zestawu artefaktów profilu");
+        }
+
+        foreach ($publishedArtifactNames as $name) {
+            $path = $argv[2].DIRECTORY_SEPARATOR.$name;
+            $actualSize = filesize($path);
+            $actualHash = hash_file("sha256", $path);
+            if ($actualSize !== $artifacts[$name]["size"]
+                || !is_string($actualHash)
+                || !hash_equals($artifacts[$name]["sha256"], $actualHash)) {
+                failValidation("{$name} nie odpowiada podpisanemu manifestowi");
+            }
+        }
+
+        if ($releaseChannel === "internal") {
+            if (!hash_equals($publisherFingerprint, $artifacts["SempreERP-Internal-Publisher.cer"]["sha256"])
+                || !hash_equals($rootFingerprint, $artifacts["SempreERP-Internal-Root.cer"]["sha256"])) {
+                failValidation("fingerprint certyfikatu nie odpowiada artefaktowi CER");
+            }
+        }
+
+        $checksumContents = file_get_contents($argv[4]);
+        if (!is_string($checksumContents) || $checksumContents === "" || str_contains($checksumContents, "\0")) {
+            failValidation("SHA256SUMS.txt jest pusty albo nieprawidłowy");
+        }
+        $checksumLines = preg_split("/\\r\\n|\\n|\\r/", $checksumContents);
+        if ($checksumLines === false) {
+            failValidation("nie można odczytać SHA256SUMS.txt");
+        }
+        if (end($checksumLines) === "") {
+            array_pop($checksumLines);
+        }
+
+        $checksums = [];
+        foreach ($checksumLines as $line) {
+            if (!is_string($line)
+                || preg_match("/^([a-f0-9]{64}) \\*([A-Za-z0-9._-]+)$/D", $line, $matches) !== 1
+                || array_key_exists($matches[2] ?? "", $checksums)) {
+                failValidation("SHA256SUMS.txt zawiera nieprawidłowy albo powtórzony wpis");
+            }
+            $checksums[$matches[2]] = $matches[1];
+        }
+
+        $checksumNames = array_keys($checksums);
+        sort($checksumNames, SORT_STRING);
+        if ($checksumNames !== $sortedArtifactNames) {
+            failValidation("SHA256SUMS.txt nie zawiera dokładnego zestawu artefaktów profilu");
+        }
+        foreach ($artifacts as $name => $artifact) {
+            if (!hash_equals($artifact["sha256"], $checksums[$name])) {
+                failValidation("suma SHA-256 dla {$name} nie odpowiada manifestowi");
+            }
+        }
+
+        echo $releaseChannel;
     } catch (Throwable $exception) {
         fwrite(STDERR, $exception->getMessage().PHP_EOL);
         exit(1);
     }
 ' \
     "${staging_resolved}/RELEASE-MANIFEST.json" \
-    "${staging_resolved}/SempreERP-PrintListener-Setup.exe" \
-    "$release_version" ||
-    fail 'manifest albo suma instalatora nie przeszły weryfikacji.'
-
-installer_checksum_count="$(
-    grep -Ec '^[a-f0-9]{64} \*SempreERP-PrintListener-Setup\.exe$' \
-        "${staging_resolved}/SHA256SUMS.txt"
-)"
-[[ "$installer_checksum_count" -eq 1 ]] ||
-    fail 'SHA256SUMS.txt nie zawiera dokładnie jednej sumy instalatora.'
-installer_checksum="$(
-    grep -E '^[a-f0-9]{64} \*SempreERP-PrintListener-Setup\.exe$' \
-        "${staging_resolved}/SHA256SUMS.txt"
-)"
-(
-    cd "$staging_resolved"
-    printf '%s\n' "$installer_checksum" | sha256sum -c -
-) >/dev/null || fail 'suma SHA-256 instalatora jest nieprawidłowa.'
+    "$staging_resolved" \
+    "$release_version" \
+    "${staging_resolved}/SHA256SUMS.txt")" ||
+    fail 'manifest, artefakty albo sumy SHA-256 nie przeszły weryfikacji.'
+[[ "$release_mode" == 'public' || "$release_mode" == 'internal' ]] ||
+    fail 'walidator zwrócił nieprawidłowy tryb wydania.'
 
 group_file="${deploy_root}/RUNTIME_GROUP"
 group="$(id -gn)"
@@ -135,4 +282,4 @@ chmod 0640 "$pointer_temporary"
 mv -fT "$pointer_temporary" "${windows_root}/CURRENT"
 trap - EXIT
 
-echo "Opublikowano podpisany instalator Windows ${release_version} w ${release_path}."
+echo "Opublikowano podpisany instalator Windows ${release_version} (${release_mode}) w ${release_path}."

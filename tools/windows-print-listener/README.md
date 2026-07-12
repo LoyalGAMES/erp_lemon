@@ -20,7 +20,9 @@ komputera magazynu. To komputer magazynowy inicjuje każde połączenie do endpo
 
 1. Pobierz `SempreERP-PrintListener-Setup.exe` z ustawień pakowania w ERP.
 2. Sprawdź, czy Windows pokazuje oczekiwanego wydawcę Sempre ERP, i uruchom
-   instalator jako administrator.
+   instalator jako administrator. Dla wydania `internal` administrator musi
+   wcześniej wdrożyć dostarczony root do `LocalMachine\Root`, a certyfikat
+   wydawcy do `LocalMachine\TrustedPublisher` niezależnym, zaufanym kanałem.
 3. W instalatorze wpisz:
    - publiczny adres ERP rozpoczynający się od `https://`;
    - token zgodny z `PRINT_BRIDGE_TOKEN`;
@@ -104,8 +106,9 @@ Smoke-test uruchamia lokalny mock ERP, tworzy konfigurację z chronionym ACL,
 instaluje usługę, potwierdza autoryzowany polling outbound, brak tokenu w SCM i
 brak przychodzącej reguły zapory, a na końcu wszystko odinstalowuje.
 
-Wydanie produkcyjne musi przejść przez `scripts\release.ps1`, który wymaga
-certyfikatu Authenticode i timestampu RFC 3161. Niepodpisany build służy tylko
+Wydanie musi przejść przez `scripts\release.ps1`, który wymaga profilu
+`internal` albo `public`, certyfikatu Authenticode, przypiętego SHA-256 i
+timestampu RFC 3161. Niepodpisany build służy tylko
 testom i pipeline go nie publikuje. Szczegóły są w
 `docs\AUTHENTICODE.md` i `docs\RELEASE.md`.
 
@@ -113,3 +116,8 @@ ERP udostępnia pobieranie dopiero wtedy, gdy w `dist` znajdują się jednocześ
 podpisany `SempreERP-PrintListener-Setup.exe` oraz odpowiadający mu
 `RELEASE-MANIFEST.json` z trybem `signed: true`, zgodnym rozmiarem i SHA-256.
 Stary surowy plik `lemon-print-listener.exe` nigdy nie jest fallbackiem.
+
+Profil `internal` dołącza publiczne `SempreERP-Internal-Root.cer` i
+`SempreERP-Internal-Publisher.cer` do artefaktu workflow, ale instalator nie
+instaluje ich i nie może sam nadać sobie zaufania. SmartScreen/Defender pozostają
+aktywnymi, niezależnymi zabezpieczeniami.

@@ -1,4 +1,9 @@
 *.log
+*.p12
+*.pfx
+*.pvk
+*.snk
+*.key.pem
 .DS_Store
 .env
 .env.backup

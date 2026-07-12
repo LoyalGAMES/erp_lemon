@@ -218,15 +218,106 @@ PHP
     printf '%s\n' 'APP_ENV=production' >"${integration_deploy_path}.deploy/shared/.env"
     create_fake_release "$first_release"
 
+    create_windows_staging() {
+        local staging_path="$1"
+        local version="$2"
+        local signing_profile="$3"
+        local installer_hash installer_size listener_hash listener_size
+        local root_hash='' root_size=0 publisher_hash publisher_size=0
+
+        mkdir "$staging_path"
+        printf '%s\n' "signed-installer-${signing_profile}-fixture" \
+            >"$staging_path/SempreERP-PrintListener-Setup.exe"
+        installer_hash="$(sha256sum "$staging_path/SempreERP-PrintListener-Setup.exe" | awk '{print $1}')"
+        installer_size="$(stat -c '%s' "$staging_path/SempreERP-PrintListener-Setup.exe")"
+        listener_hash="$(printf '%s' 'signed-listener-fixture' | sha256sum | awk '{print $1}')"
+        listener_size=23
+
+        if [[ "$signing_profile" == 'internal' ]]; then
+            printf '%s\n' 'internal-root-certificate-fixture' \
+                >"$staging_path/SempreERP-Internal-Root.cer"
+            printf '%s\n' 'internal-publisher-certificate-fixture' \
+                >"$staging_path/SempreERP-Internal-Publisher.cer"
+            root_hash="$(sha256sum "$staging_path/SempreERP-Internal-Root.cer" | awk '{print $1}')"
+            root_size="$(stat -c '%s' "$staging_path/SempreERP-Internal-Root.cer")"
+            publisher_hash="$(sha256sum "$staging_path/SempreERP-Internal-Publisher.cer" | awk '{print $1}')"
+            publisher_size="$(stat -c '%s' "$staging_path/SempreERP-Internal-Publisher.cer")"
+        else
+            publisher_hash='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+        fi
+
+        php -r '
+            $profile = $argv[3];
+            $artifacts = [
+                ["name" => "lemon-print-listener.exe", "size" => (int) $argv[4], "sha256" => $argv[5]],
+                ["name" => "SempreERP-PrintListener-Setup.exe", "size" => (int) $argv[6], "sha256" => $argv[7]],
+            ];
+            $manifest = [
+                "product" => "Sempre ERP Print Listener",
+                "version" => $argv[2],
+                "commit" => str_repeat("a", 40),
+                "target" => "windows/amd64",
+                "go_version" => "go1.24.5",
+                "signed" => true,
+                "timestamped" => true,
+                "release_channel" => $profile,
+                "signing_profile" => $profile,
+                "publisher_subject" => "CN=Sempre ERP Internal Code Signing",
+                "publisher_certificate_sha256" => $argv[8],
+                "artifacts" => &$artifacts,
+            ];
+            if ($profile === "internal") {
+                $manifest["root_certificate_sha256"] = $argv[10];
+                $artifacts[] = [
+                    "name" => "SempreERP-Internal-Root.cer",
+                    "size" => (int) $argv[9],
+                    "sha256" => $argv[10],
+                ];
+                $artifacts[] = [
+                    "name" => "SempreERP-Internal-Publisher.cer",
+                    "size" => (int) $argv[11],
+                    "sha256" => $argv[8],
+                ];
+            }
+            file_put_contents(
+                $argv[1]."/RELEASE-MANIFEST.json",
+                json_encode($manifest, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES)."\n"
+            );
+        ' \
+            "$staging_path" \
+            "$version" \
+            "$signing_profile" \
+            "$listener_size" \
+            "$listener_hash" \
+            "$installer_size" \
+            "$installer_hash" \
+            "$publisher_hash" \
+            "$root_size" \
+            "$root_hash" \
+            "$publisher_size"
+
+        {
+            printf '%s *lemon-print-listener.exe\n' "$listener_hash"
+            printf '%s *SempreERP-PrintListener-Setup.exe\n' "$installer_hash"
+            if [[ "$signing_profile" == 'internal' ]]; then
+                printf '%s *SempreERP-Internal-Root.cer\n' "$root_hash"
+                printf '%s *SempreERP-Internal-Publisher.cer\n' "$publisher_hash"
+            fi
+        } >"$staging_path/SHA256SUMS.txt"
+    }
+
+    expect_windows_publish_failure() {
+        local release_id="$1"
+        local staging_path="$2"
+        expect_failure env PATH="$temporary_directory/bin:$PATH" \
+            bash "$repository_root/scripts/deploy/publish-windows-listener.sh" \
+            "$integration_deploy_path" "$release_id" "$staging_path"
+        [[ ! -e "${integration_deploy_path}.deploy/shared/windows-print-listener/releases/${release_id}" ]] ||
+            fail "publikator utworzył odrzucone wydanie ${release_id}."
+    }
+
     windows_staging="${integration_deploy_path}.deploy/.windows-release-upload-200-1"
-    mkdir "$windows_staging"
-    printf '%s\n' 'signed-installer-fixture' >"$windows_staging/SempreERP-PrintListener-Setup.exe"
-    windows_hash="$(sha256sum "$windows_staging/SempreERP-PrintListener-Setup.exe" | awk '{print $1}')"
-    windows_size="$(stat -c '%s' "$windows_staging/SempreERP-PrintListener-Setup.exe")"
-    cat >"$windows_staging/RELEASE-MANIFEST.json" <<EOF
-{"product":"Sempre ERP Print Listener","version":"0.2.0","target":"windows/amd64","signed":true,"artifacts":[{"name":"SempreERP-PrintListener-Setup.exe","size":$windows_size,"sha256":"$windows_hash"}]}
-EOF
-    printf '%s *SempreERP-PrintListener-Setup.exe\n' "$windows_hash" >"$windows_staging/SHA256SUMS.txt"
+    create_windows_staging "$windows_staging" '0.2.0' public
     PATH="$temporary_directory/bin:$PATH" \
         bash "$repository_root/scripts/deploy/publish-windows-listener.sh" \
         "$integration_deploy_path" '0.2.0-200-1' "$windows_staging" >/dev/null
@@ -239,13 +330,121 @@ EOF
         "$unsigned_staging/"
     php -r '
         $path = $argv[1];
-        file_put_contents($path, str_replace("\"signed\":true", "\"signed\":false", file_get_contents($path)));
+        $manifest = json_decode(file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        $manifest["signed"] = false;
+        file_put_contents($path, json_encode($manifest, JSON_THROW_ON_ERROR)."\n");
     ' "$unsigned_staging/RELEASE-MANIFEST.json"
-    expect_failure env PATH="$temporary_directory/bin:$PATH" \
+    expect_windows_publish_failure '0.2.0-200-2' "$unsigned_staging"
+
+    untimestamped_staging="${integration_deploy_path}.deploy/.windows-release-upload-200-3"
+    create_windows_staging "$untimestamped_staging" '0.2.0' public
+    php -r '
+        $path = $argv[1];
+        $manifest = json_decode(file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        $manifest["timestamped"] = false;
+        file_put_contents($path, json_encode($manifest, JSON_THROW_ON_ERROR)."\n");
+    ' "$untimestamped_staging/RELEASE-MANIFEST.json"
+    expect_windows_publish_failure '0.2.0-200-3' "$untimestamped_staging"
+
+    mismatched_mode_staging="${integration_deploy_path}.deploy/.windows-release-upload-200-4"
+    create_windows_staging "$mismatched_mode_staging" '0.2.0' public
+    php -r '
+        $path = $argv[1];
+        $manifest = json_decode(file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        $manifest["signing_profile"] = "internal";
+        file_put_contents($path, json_encode($manifest, JSON_THROW_ON_ERROR)."\n");
+    ' "$mismatched_mode_staging/RELEASE-MANIFEST.json"
+    expect_windows_publish_failure '0.2.0-200-4' "$mismatched_mode_staging"
+
+    unknown_mode_staging="${integration_deploy_path}.deploy/.windows-release-upload-200-5"
+    create_windows_staging "$unknown_mode_staging" '0.2.0' public
+    php -r '
+        $path = $argv[1];
+        $manifest = json_decode(file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        $manifest["release_channel"] = "preview";
+        $manifest["signing_profile"] = "preview";
+        file_put_contents($path, json_encode($manifest, JSON_THROW_ON_ERROR)."\n");
+    ' "$unknown_mode_staging/RELEASE-MANIFEST.json"
+    expect_windows_publish_failure '0.2.0-200-5' "$unknown_mode_staging"
+
+    unknown_field_staging="${integration_deploy_path}.deploy/.windows-release-upload-200-6"
+    create_windows_staging "$unknown_field_staging" '0.2.0' public
+    php -r '
+        $path = $argv[1];
+        $manifest = json_decode(file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        $manifest["trust_installer"] = true;
+        file_put_contents($path, json_encode($manifest, JSON_THROW_ON_ERROR)."\n");
+    ' "$unknown_field_staging/RELEASE-MANIFEST.json"
+    expect_windows_publish_failure '0.2.0-200-6' "$unknown_field_staging"
+
+    extra_file_staging="${integration_deploy_path}.deploy/.windows-release-upload-200-7"
+    create_windows_staging "$extra_file_staging" '0.2.0' public
+    printf '%s\n' 'unexpected' >"$extra_file_staging/extra.txt"
+    expect_windows_publish_failure '0.2.0-200-7' "$extra_file_staging"
+
+    internal_staging="${integration_deploy_path}.deploy/.windows-release-upload-201-1"
+    create_windows_staging "$internal_staging" '0.2.0' internal
+    PATH="$temporary_directory/bin:$PATH" \
         bash "$repository_root/scripts/deploy/publish-windows-listener.sh" \
-        "$integration_deploy_path" '0.2.0-200-2' "$unsigned_staging"
-    [[ ! -e "${integration_deploy_path}.deploy/shared/windows-print-listener/releases/0.2.0-200-2" ]] ||
-        fail 'publikator dopuścił niepodpisany manifest.'
+        "$integration_deploy_path" '0.2.0-201-1' "$internal_staging" >/dev/null
+    [[ "$(cat "${integration_deploy_path}.deploy/shared/windows-print-listener/CURRENT")" == '0.2.0-201-1' ]] ||
+        fail 'publikator nie przełączył CURRENT na wydanie wewnętrzne.'
+    [[ -f "${integration_deploy_path}.deploy/shared/windows-print-listener/releases/0.2.0-201-1/SempreERP-Internal-Root.cer" ]] ||
+        fail 'publikator nie zachował certyfikatu root wydania wewnętrznego.'
+    [[ -f "${integration_deploy_path}.deploy/shared/windows-print-listener/releases/0.2.0-201-1/SempreERP-Internal-Publisher.cer" ]] ||
+        fail 'publikator nie zachował certyfikatu wydawcy wydania wewnętrznego.'
+
+    missing_certificate_staging="${integration_deploy_path}.deploy/.windows-release-upload-201-2"
+    create_windows_staging "$missing_certificate_staging" '0.2.0' internal
+    rm "$missing_certificate_staging/SempreERP-Internal-Root.cer"
+    expect_windows_publish_failure '0.2.0-201-2' "$missing_certificate_staging"
+
+    tampered_certificate_staging="${integration_deploy_path}.deploy/.windows-release-upload-201-3"
+    create_windows_staging "$tampered_certificate_staging" '0.2.0' internal
+    printf '%s\n' 'tampered' >>"$tampered_certificate_staging/SempreERP-Internal-Publisher.cer"
+    expect_windows_publish_failure '0.2.0-201-3' "$tampered_certificate_staging"
+
+    tampered_checksum_staging="${integration_deploy_path}.deploy/.windows-release-upload-201-4"
+    create_windows_staging "$tampered_checksum_staging" '0.2.0' internal
+    php -r '
+        $path = $argv[1];
+        $contents = file_get_contents($path);
+        $contents = preg_replace(
+            "/^[a-f0-9]{64} \\*SempreERP-Internal-Root\\.cer$/m",
+            str_repeat("0", 64)." *SempreERP-Internal-Root.cer",
+            $contents
+        );
+        file_put_contents($path, $contents);
+    ' "$tampered_checksum_staging/SHA256SUMS.txt"
+    expect_windows_publish_failure '0.2.0-201-4' "$tampered_checksum_staging"
+
+    duplicate_certificate_staging="${integration_deploy_path}.deploy/.windows-release-upload-201-5"
+    create_windows_staging "$duplicate_certificate_staging" '0.2.0' internal
+    php -r '
+        $path = $argv[1];
+        $manifest = json_decode(file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        foreach ($manifest["artifacts"] as $artifact) {
+            if ($artifact["name"] === "SempreERP-Internal-Root.cer") {
+                $manifest["artifacts"][] = $artifact;
+                break;
+            }
+        }
+        file_put_contents($path, json_encode($manifest, JSON_THROW_ON_ERROR)."\n");
+    ' "$duplicate_certificate_staging/RELEASE-MANIFEST.json"
+    expect_windows_publish_failure '0.2.0-201-5' "$duplicate_certificate_staging"
+
+    mismatched_fingerprint_staging="${integration_deploy_path}.deploy/.windows-release-upload-201-6"
+    create_windows_staging "$mismatched_fingerprint_staging" '0.2.0' internal
+    php -r '
+        $path = $argv[1];
+        $manifest = json_decode(file_get_contents($path), true, 32, JSON_THROW_ON_ERROR);
+        $manifest["root_certificate_sha256"] = str_repeat("c", 64);
+        file_put_contents($path, json_encode($manifest, JSON_THROW_ON_ERROR)."\n");
+    ' "$mismatched_fingerprint_staging/RELEASE-MANIFEST.json"
+    expect_windows_publish_failure '0.2.0-201-6' "$mismatched_fingerprint_staging"
+
+    [[ "$(cat "${integration_deploy_path}.deploy/shared/windows-print-listener/CURRENT")" == '0.2.0-201-1' ]] ||
+        fail 'odrzucone wydanie zmieniło atomowy wskaźnik CURRENT instalatora.'
 
     PATH="$temporary_directory/bin:$PATH" \
         PHP_BIN="$temporary_directory/bin/fake-php" \
@@ -266,7 +465,7 @@ EOF
         fail 'release SQLite wskazuje poza współdzieloną bazę.'
     [[ -L "$integration_deploy_path/tools/windows-print-listener/dist" ]] ||
         fail 'wydanie nie podpięło współdzielonego katalogu instalatora Windows.'
-    [[ "$(cat "$integration_deploy_path/tools/windows-print-listener/dist/CURRENT")" == '0.2.0-200-1' ]] ||
+    [[ "$(cat "$integration_deploy_path/tools/windows-print-listener/dist/CURRENT")" == '0.2.0-201-1' ]] ||
         fail 'wydanie nie widzi opublikowanego instalatora ze shared.'
 
     second_release=abcdef2-201-1
@@ -286,7 +485,7 @@ EOF
         fail 'CURRENT nie został atomowo przełączony na drugie wydanie.'
     [[ "$(basename "$(realpath "${integration_deploy_path}.deploy/PREVIOUS")")" == "$first_release" ]] ||
         fail 'PREVIOUS nie zachował pierwszego wydania.'
-    [[ "$(cat "$integration_deploy_path/tools/windows-print-listener/dist/CURRENT")" == '0.2.0-200-1' ]] ||
+    [[ "$(cat "$integration_deploy_path/tools/windows-print-listener/dist/CURRENT")" == '0.2.0-201-1' ]] ||
         fail 'kolejny deploy zgubił współdzielony instalator Windows.'
 
     mkdir -p "${integration_deploy_path}.deploy/releases/${second_release}/database/migrations"
