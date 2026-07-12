@@ -48,6 +48,12 @@ jobs:
       - name: Pobierz kod
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Sprawdź składnię skryptów PowerShell
+        run: |
+          Get-ChildItem .\tools\windows-print-listener -Filter *.ps1 -Recurse | ForEach-Object {
+              [void] [ScriptBlock]::Create([IO.File]::ReadAllText($_.FullName))
+          }
+
       - name: Ustaw Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:

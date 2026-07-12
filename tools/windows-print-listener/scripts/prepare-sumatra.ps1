@@ -42,7 +42,7 @@ try {
     }
     Copy-Item -LiteralPath $source -Destination $DestinationPath -Force
     Copy-Item -LiteralPath $temporaryLicense -Destination $licensePath -Force
-    Write-Host "Zweryfikowany renderer SumatraPDF $version: $DestinationPath"
+    Write-Host "Zweryfikowany renderer SumatraPDF ${version}: $DestinationPath"
 } finally {
     Remove-Item -LiteralPath $archive, $temporary, $temporaryLicense -Recurse -Force -ErrorAction SilentlyContinue
 }
