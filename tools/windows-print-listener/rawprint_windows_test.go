@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"strings"
 	"syscall"
 	"testing"
@@ -15,7 +16,7 @@ func TestRawPrintChecksFinalizationAndClosesPrinter(t *testing.T) {
 	api := successfulRawPrinterAPI(&aborted, &closed)
 	api.endDoc = func(syscall.Handle) error { return windows.ERROR_INVALID_FUNCTION }
 	err := rawPrintWithAPI(api, "Zebra", []byte("^XA^XZ"))
-	if err == nil || !strings.Contains(err.Error(), "EndDocPrinter") {
+	if !errors.Is(err, windows.ERROR_INVALID_FUNCTION) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if aborted != 1 || closed != 1 {
@@ -57,7 +58,7 @@ func TestRawPrintPropagatesClosePrinterFailure(t *testing.T) {
 		return windows.ERROR_INVALID_HANDLE
 	}
 	err := rawPrintWithAPI(api, "Zebra", []byte("^XA^XZ"))
-	if err == nil || !strings.Contains(err.Error(), "ClosePrinter") {
+	if !errors.Is(err, windows.ERROR_INVALID_HANDLE) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if aborted != 0 || closed != 1 {

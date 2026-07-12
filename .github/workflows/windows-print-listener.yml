@@ -249,6 +249,8 @@ jobs:
 
           deploy_root="${DEPLOY_PATH}.deploy"
           remote_staging="${deploy_root}/.windows-release-upload-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          # Wszystkie interpolowane wartości są ograniczone walidatorami do bezpiecznych ścieżek/identyfikatorów.
+          # shellcheck disable=SC2029
           ssh windows-release-production \
             "set -eu; \
              test -f '$deploy_root/DEPLOY_PATH'; \
@@ -261,6 +263,8 @@ jobs:
             "$RELEASE_DIR/SHA256SUMS.txt" \
             "windows-release-production:${remote_staging}/"
 
+          # Zweryfikowane wartości mają być argumentami zdalnego publikatora.
+          # shellcheck disable=SC2029
           ssh windows-release-production \
             "bash -s -- '$DEPLOY_PATH' '$release_id' '$remote_staging'" \
             < scripts/deploy/publish-windows-listener.sh

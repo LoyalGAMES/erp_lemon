@@ -140,6 +140,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Obie wartości przeszły validate-target.sh; mają zostać rozwinięte lokalnie jako argumenty zdalnego skryptu.
+          # shellcheck disable=SC2029
           ssh production-erp \
             "bash -s -- '$DEPLOY_PATH' '$RELEASE_ID'" \
             < scripts/deploy/initialize-release.sh
@@ -170,6 +172,8 @@ jobs:
         run: |
           set -euo pipefail
           remote_script="${DEPLOY_PATH}.deploy/releases/${RELEASE_ID}/scripts/deploy/remote-release.sh"
+          # Ścieżka i identyfikator są lokalnie walidowane oraz celowo przekazywane do zdalnego procesu.
+          # shellcheck disable=SC2029
           ssh production-erp \
             "bash '$remote_script' deploy '$DEPLOY_PATH' '$RELEASE_ID'"
 
