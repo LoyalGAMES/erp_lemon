@@ -101,7 +101,12 @@ try {
     # Set this before launching so a partially completed installation is also
     # cleaned up when the installer reports an error.
     $installed = $true
-    $install = Start-Process -FilePath $InstallerPath -ArgumentList '/S' -Wait -PassThru
+    $install = Start-Process -FilePath $InstallerPath -ArgumentList '/S' -PassThru
+    if (-not $install.WaitForExit(60000)) {
+        Stop-Process -Id $install.Id -Force -ErrorAction SilentlyContinue
+        throw 'Instalator nie zakończył się w ciągu 60 sekund.'
+    }
+    $install.Refresh()
     if ($install.ExitCode -ne 0) {
         throw "Instalator zakończył się kodem $($install.ExitCode)."
     }
@@ -165,7 +170,12 @@ try {
     }
 } finally {
     if ($installed -and (Test-Path -LiteralPath $uninstallerPath)) {
-        $uninstall = Start-Process -FilePath $uninstallerPath -ArgumentList '/S', "_?=$installDirectory" -Wait -PassThru
+        $uninstall = Start-Process -FilePath $uninstallerPath -ArgumentList '/S', "_?=$installDirectory" -PassThru
+        if (-not $uninstall.WaitForExit(60000)) {
+            Stop-Process -Id $uninstall.Id -Force -ErrorAction SilentlyContinue
+            throw 'Deinstalator nie zakończył się w ciągu 60 sekund.'
+        }
+        $uninstall.Refresh()
         if ($uninstall.ExitCode -ne 0) {
             Write-Warning "Uninstaller zakończył się kodem $($uninstall.ExitCode)."
         }

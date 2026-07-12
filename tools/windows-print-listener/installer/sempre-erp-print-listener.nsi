@@ -89,7 +89,8 @@ Function .onInit
   SetShellVarContext all
   StrCpy $WriteConfig "0"
   ${IfNot} ${RunningX64}
-    MessageBox MB_ICONSTOP|MB_OK "Sempre ERP Print Listener wymaga 64-bitowej wersji Windows."
+    MessageBox MB_ICONSTOP|MB_OK "Sempre ERP Print Listener wymaga 64-bitowej wersji Windows." /SD IDOK
+    SetErrorLevel 1
     Abort
   ${EndIf}
 FunctionEnd
@@ -162,19 +163,19 @@ Function ConfigPageLeave
 
   StrCpy $0 $BaseUrl 8
   ${If} $0 != "https://"
-    MessageBox MB_ICONEXCLAMATION|MB_OK "Adres produkcyjnego ERP musi zaczynać się od https://."
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Adres produkcyjnego ERP musi zaczynać się od https://." /SD IDOK
     Abort
   ${EndIf}
   ${If} $BridgeToken == ""
-    MessageBox MB_ICONEXCLAMATION|MB_OK "Wpisz token pokazany w ustawieniach pakowania ERP."
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Wpisz token pokazany w ustawieniach pakowania ERP." /SD IDOK
     Abort
   ${EndIf}
   ${If} $Station == ""
-    MessageBox MB_ICONEXCLAMATION|MB_OK "Wpisz kod stanowiska skonfigurowany w ERP, np. station-1."
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Wpisz kod stanowiska skonfigurowany w ERP, np. station-1." /SD IDOK
     Abort
   ${EndIf}
   ${If} $Worker == ""
-    MessageBox MB_ICONEXCLAMATION|MB_OK "Wpisz nazwę workera/komputera."
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Wpisz nazwę workera/komputera." /SD IDOK
     Abort
   ${EndIf}
 
@@ -210,7 +211,7 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -protect-config-directory "${CONFIG_DIR}"'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zabezpieczyć katalogu konfiguracji ACL. Instalacja została przerwana."
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zabezpieczyć katalogu konfiguracji ACL. Instalacja została przerwana." /SD IDOK
     SetErrorLevel 3
     Abort
   ${EndIf}
@@ -241,7 +242,7 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -protect-config-file "${CONFIG_FILE}"'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zabezpieczyć pliku konfiguracji ACL. Instalacja została przerwana."
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zabezpieczyć pliku konfiguracji ACL. Instalacja została przerwana." /SD IDOK
     SetErrorLevel 3
     Abort
   ${EndIf}
@@ -249,7 +250,7 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -mode bridge -config "${CONFIG_FILE}" -validate-config'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Konfiguracja mostu jest nieprawidłowa. Sprawdź adres HTTPS, token i kod stanowiska."
+    MessageBox MB_ICONSTOP|MB_OK "Konfiguracja mostu jest nieprawidłowa. Sprawdź adres HTTPS, token i kod stanowiska." /SD IDOK
     SetErrorLevel 4
     Abort
   ${EndIf}
@@ -258,7 +259,7 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   config_write_failed:
     SetDetailsPrint both
     StrCpy $BridgeToken ""
-    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zapisać chronionej konfiguracji. Instalacja została przerwana."
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zapisać chronionej konfiguracji. Instalacja została przerwana." /SD IDOK
     Delete "${CONFIG_FILE}"
     SetErrorLevel 2
     Abort
@@ -272,7 +273,8 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -mode bridge -config "${CONFIG_FILE}" -log-file "${CONFIG_DIR}\listener.log" -service install'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zainstalować usługi Windows (${SERVICE_NAME}). Instalacja zostanie przerwana."
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zainstalować usługi Windows (${SERVICE_NAME}). Instalacja zostanie przerwana." /SD IDOK
+    SetErrorLevel 5
     Delete "$INSTDIR\uninstall.exe"
     Delete "$INSTDIR\README.txt"
     Delete "$INSTDIR\${APP_EXE}"
@@ -287,7 +289,8 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service start'
   Pop $0
   ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Usługa została zainstalowana, ale nie połączyła się poprawnie. Sprawdź konfigurację i dziennik w ProgramData\Sempre ERP\Print Listener."
+    MessageBox MB_ICONSTOP|MB_OK "Usługa została zainstalowana, ale nie połączyła się poprawnie. Sprawdź konfigurację i dziennik w ProgramData\Sempre ERP\Print Listener." /SD IDOK
+    SetErrorLevel 6
     nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service uninstall'
     Pop $1
     Delete "$INSTDIR\uninstall.exe"
