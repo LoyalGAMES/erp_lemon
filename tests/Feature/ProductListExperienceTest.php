@@ -59,7 +59,7 @@ class ProductListExperienceTest extends TestCase
             'stock_sync_enabled' => true,
         ]);
 
-        $this->get(route('products.index'))
+        $response = $this->get(route('products.index'))
             ->assertOk()
             ->assertSee('Koszula AVA kremowa')
             ->assertDontSee('AVA Cream Shirt')
@@ -72,6 +72,23 @@ class ProductListExperienceTest extends TestCase
             ->assertSee(route('products.edit', $polish), false)
             ->assertDontSee('>Szczegóły<', false)
             ->assertSee('data-stock-modal-open', false);
+
+        $html = $response->getContent();
+        $this->assertMatchesRegularExpression('/<article\b(?=[^>]*\bdata-product-list(?:\s|=|>))[^>]*>/s', $html);
+        $this->assertMatchesRegularExpression('/<div\b(?=[^>]*\bdata-product-list-scroll(?:\s|=|>))[^>]*>/s', $html);
+        $this->assertMatchesRegularExpression('/<table\b(?=[^>]*\bdata-product-list-table(?:\s|=|>))[^>]*>/s', $html);
+        $this->assertMatchesRegularExpression(
+            '/<tr\b(?=[^>]*\bdata-product-card="parent")(?=[^>]*\bdata-product-id="'.$polish->id.'")[^>]*>/s',
+            $html,
+        );
+
+        foreach (['identity', 'price', 'stock', 'channels', 'actions'] as $section) {
+            $this->assertMatchesRegularExpression(
+                '/<td\b(?=[^>]*\bdata-product-card-section="'.$section.'")[^>]*>/s',
+                $html,
+            );
+        }
+        $this->assertSame(5, preg_match_all('/<td\b[^>]*\bdata-product-card-section="[^"]+"[^>]*>/s', $html));
 
         $this->from(route('products.index'))->post(route('products.favorite.toggle', $polish))
             ->assertRedirect(route('products.index'));

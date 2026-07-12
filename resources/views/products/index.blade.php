@@ -107,6 +107,55 @@
         @media (max-width: 1400px) {
             .product-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }
         }
+        @media (max-width: 900px) {
+            .products-table { overflow: visible; }
+            .products-table > .panel-header { min-height: 0; display: grid; gap: 2px; padding: 11px 14px; }
+            .products-table > .panel-header span:first-child { color: var(--muted); font-size: 12px; }
+            .products-table > .panel-header span:last-child { font-size: 14px; }
+            .products-table > [data-product-list-scroll] { overflow: visible; }
+            .products-table [data-product-list-table] { position: relative; width: 100%; min-width: 0; display: block; }
+            .products-table [data-product-list-table] > thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; }
+            .products-table [data-product-list-table] > tbody { display: grid; gap: 12px; padding: 10px; background: var(--surface-soft); }
+            .products-table [data-product-list-table] > tbody > tr { width: 100%; min-width: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "identity identity" "price channels" "stock stock" "actions actions"; border: 1px solid var(--border); border-radius: 11px; background: var(--surface); box-shadow: 0 5px 16px rgba(67, 53, 43, .07); }
+            .products-table [data-product-list-table] > tbody > tr[hidden] { display: none !important; }
+            .products-table [data-product-list-table] > tbody > tr.product-import-issue-row { border-color: rgba(207, 54, 54, .34); background: #fffafa; box-shadow: inset 3px 0 0 rgba(207, 54, 54, .48), 0 5px 16px rgba(67, 53, 43, .07); }
+            .products-table [data-product-list-table] > tbody > tr.variant-row { width: calc(100% - 12px); margin-left: 12px; border-left: 3px solid rgba(134, 115, 100, .38); background: #fbf9f7; }
+            .products-table [data-product-list-table] > tbody > tr > td { width: auto !important; min-width: 0; display: block; padding: 0; border: 0; white-space: normal; }
+            .products-table [data-product-list-table] > tbody > tr > td[colspan] { grid-column: 1 / -1; padding: 14px; }
+            .products-table [data-product-card-section="identity"] { grid-area: identity; padding: 12px !important; border-bottom: 1px solid var(--border) !important; }
+            .products-table [data-product-card-section="price"] { grid-area: price; padding: 10px 12px !important; background: rgba(134, 115, 100, .055); border-right: 1px solid var(--border) !important; border-bottom: 1px solid var(--border) !important; }
+            .products-table [data-product-card-section="channels"] { grid-area: channels; padding: 10px 12px !important; background: rgba(134, 115, 100, .055); border-bottom: 1px solid var(--border) !important; }
+            .products-table [data-product-card-section="stock"] { grid-area: stock; padding: 12px !important; border-bottom: 1px solid var(--border) !important; }
+            .products-table [data-product-card-section="actions"] { grid-area: actions; padding: 12px !important; }
+            .products-table [data-product-card-section]:not([data-product-card-section="identity"])::before { display: block; margin-bottom: 6px; color: var(--muted); font-size: 10px; font-weight: 820; letter-spacing: .04em; text-transform: uppercase; }
+            .products-table [data-product-card-section="price"]::before { content: "Cena / VAT"; }
+            .products-table [data-product-card-section="channels"]::before { content: "Kanały"; }
+            .products-table [data-product-card="parent"] [data-product-card-section="stock"]::before { content: "Stan rodziny"; }
+            .products-table [data-product-card="variant"] [data-product-card-section="stock"]::before { content: "Stan wariantu"; }
+            .products-table [data-product-card-section="actions"]::before { content: "Akcje"; }
+            .products-table [data-product-card="variant"] [data-product-card-section="identity"]::before { content: "Wariant"; display: inline-flex; margin-bottom: 8px; border-radius: 999px; padding: 3px 7px; background: var(--green-soft); color: var(--green-dark); font-size: 10px; font-weight: 850; letter-spacing: .03em; text-transform: uppercase; }
+            .products-table .product-cell, .products-table .product-cell.variant { grid-template-columns: 44px 58px minmax(0, 1fr); gap: 8px; padding-left: 0; align-items: start; }
+            .products-table .product-cell.variant { grid-template-columns: 44px 48px minmax(0, 1fr); }
+            .products-table .product-cell > :last-child { min-width: 0; }
+            .products-table .favorite-button { width: 44px; height: 44px; }
+            .products-table .product-title { display: block; overflow-wrap: anywhere; line-height: 1.35; }
+            .products-table .product-meta { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+            .products-table .product-meta span { min-width: 0; overflow-wrap: anywhere; white-space: normal; }
+            .products-table .variant-toggle { min-height: 40px; }
+            .products-table .price-cell { min-width: 0; gap: 1px; }
+            .products-table .channel-badges { min-width: 0; max-width: none; align-content: start; }
+            .products-table .channel-badges .status { white-space: normal; }
+            .products-table [data-product-card-section="stock"] > .stock-summary { min-width: 0; gap: 9px; }
+            .products-table [data-product-card-section="stock"] > .stock-summary > .stock-pills { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+            .products-table [data-product-card-section="stock"] > .stock-summary > .stock-pills > .stock-pill { min-width: 0; display: grid; align-content: center; gap: 2px; padding: 7px 4px; text-align: center; line-height: 1.2; }
+            .products-table [data-product-card-section="stock"] > .stock-summary > .stock-pills > .stock-pill strong { margin-left: 0; font-size: 15px; }
+            .products-table .warehouse-modal-trigger { width: 100%; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid rgba(134, 115, 100, .34); border-radius: 8px; padding: 8px 10px; background: var(--green-soft); }
+            .products-table [data-product-card-section="actions"] .inline-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+            .products-table [data-product-card="variant"] [data-product-card-section="actions"] .inline-actions { grid-template-columns: minmax(0, 1fr); }
+            .products-table [data-product-card-section="actions"] .inline-actions form { width: 100%; display: block; }
+            .products-table [data-product-card-section="actions"] .inline-actions .button { width: 100%; min-width: 0; min-height: 44px; padding-inline: 6px; }
+            .product-import-issue-items { min-width: 0; }
+        }
         @media (max-width: 720px) {
             .product-mobile-filter-trigger { display: inline-flex; margin-bottom: 12px; }
             .product-mobile-filter-backdrop { position: fixed; inset: 0; z-index: 80; background: rgba(37, 31, 26, .42); }
@@ -642,13 +691,13 @@
         </form>
     </aside>
 
-    <article class="card products-table">
+    <article class="card products-table" data-product-list>
         <div class="panel-header">
             <span>Produkty w systemie</span>
             <span>{{ $productRows->total() }} produktów głównych / {{ $productsCount }} SKU</span>
         </div>
-        <div class="table-scroll">
-            <table class="dense-table">
+        <div class="table-scroll" data-product-list-scroll>
+            <table class="dense-table product-catalog-table" data-product-list-table>
                 <thead>
                     <tr>
                         <th>Towar</th>
@@ -674,8 +723,8 @@
                             $externalId = $product->externalDisplayId();
                             $isImportIssueProduct = (bool) ($row['is_import_issue'] ?? false);
                         @endphp
-                        <tr @class(['parent-row', 'product-import-issue-row' => $isImportIssueProduct])>
-                            <td>
+                        <tr @class(['parent-row', 'product-import-issue-row' => $isImportIssueProduct]) data-product-card="parent" data-product-id="{{ $product->id }}">
+                            <td data-product-card-section="identity">
                                 <div class="product-cell">
                                     <form method="POST" action="{{ route('products.favorite.toggle', $product) }}">
                                         @csrf
@@ -718,13 +767,13 @@
                                     </div>
                                 </div>
                             </td>
-                            <td>
+                            <td data-product-card-section="price">
                                 <div class="price-cell">
                                     <strong>{{ $money($price) }}</strong>
                                     <span>VAT {{ $percent($product->vat_rate) }}</span>
                                 </div>
                             </td>
-                            <td>
+                            <td data-product-card-section="stock">
                                 <div class="stock-summary">
                                     <div class="stock-pills">
                                         <span class="stock-pill">Ogółem <strong>{{ $qty($stock['on_hand'], $product) }}</strong></span>
@@ -754,7 +803,7 @@
                                     </div>
                                 </div>
                             </td>
-                            <td>
+                            <td data-product-card-section="channels">
                                 <div class="channel-badges">
                                     @forelse ($channelNames as $channelName)
                                         <span class="status">{{ $channelName }}</span>
@@ -763,7 +812,7 @@
                                     @endforelse
                                 </div>
                             </td>
-                            <td>
+                            <td data-product-card-section="actions">
                                 <div class="inline-actions">
                                     <a class="button secondary" href="{{ route('products.edit', $product) }}">Edytuj</a>
                                     <form method="POST" action="{{ route('products.duplicate', $product) }}">
@@ -801,8 +850,8 @@
                                     ->filter()
                                     ->implode(' | ');
                             @endphp
-                            <tr @class(['variant-row', 'product-import-issue-row' => $importIssue]) data-variant-parent="{{ $rowKey }}" @if (! $importIssue) hidden @endif>
-                                <td>
+                            <tr @class(['variant-row', 'product-import-issue-row' => $importIssue]) data-variant-parent="{{ $rowKey }}" data-product-card="variant" data-product-id="{{ $variant->id }}" data-parent-product-id="{{ $product->id }}" @if (! $importIssue) hidden @endif>
+                                <td data-product-card-section="identity">
                                     <div class="product-cell variant">
                                         <form method="POST" action="{{ route('products.favorite.toggle', $variant) }}">
                                             @csrf
@@ -843,13 +892,13 @@
                                         </div>
                                     </div>
                                 </td>
-                                <td>
+                                <td data-product-card-section="price">
                                     <div class="price-cell">
                                         <strong>{{ $money($variantPrice) }}</strong>
                                         <span>VAT {{ $percent($variant->vat_rate) }}</span>
                                     </div>
                                 </td>
-                                <td>
+                                <td data-product-card-section="stock">
                                     <div class="stock-summary">
                                         <div class="stock-pills">
                                             <span class="stock-pill">Ogółem <strong>{{ $qty($variantStock['on_hand'], $variant) }}</strong></span>
@@ -876,7 +925,7 @@
                                         </div>
                                     </div>
                                 </td>
-                                <td>
+                                <td data-product-card-section="channels">
                                     <div class="channel-badges">
                                         @forelse ($variantChannels as $channelName)
                                             <span class="status">{{ $channelName }}</span>
@@ -885,7 +934,7 @@
                                         @endforelse
                                     </div>
                                 </td>
-                                <td>
+                                <td data-product-card-section="actions">
                                     <div class="inline-actions">
                                         <a class="button secondary" href="{{ route('products.edit', $variant) }}">Edytuj</a>
                                     </div>
@@ -893,7 +942,7 @@
                             </tr>
                         @endforeach
                     @empty
-                        <tr>
+                        <tr class="product-empty-row">
                             <td colspan="5">Brak produktów. Dodaj produkt ręcznie albo zaimportuj produkty z WooCommerce w module Integracje.</td>
                         </tr>
                     @endforelse

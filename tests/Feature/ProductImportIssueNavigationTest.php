@@ -124,7 +124,7 @@ class ProductImportIssueNavigationTest extends TestCase
             ->assertDontSee('javascript:alert(1)', false);
 
         $this->assertMatchesRegularExpression(
-            '/class="variant-row product-import-issue-row" data-variant-parent="product-'.$parent->id.'"(?![^>]* hidden)/',
+            '/<tr\b(?=[^>]*\bclass="[^"]*\bvariant-row\b[^"]*")(?=[^>]*\bdata-variant-parent="product-'.$parent->id.'")(?=[^>]*\bdata-product-card="variant")(?=[^>]*\bdata-product-id="'.$affectedVariant->id.'")(?=[^>]*\bdata-parent-product-id="'.$parent->id.'")(?![^>]*\shidden(?:\s|=|>))[^>]*>/s',
             $response->getContent(),
         );
 
