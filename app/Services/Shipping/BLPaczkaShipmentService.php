@@ -39,6 +39,14 @@ final class BLPaczkaShipmentService
         'delivered',
     ];
 
+    private const DELIVERED_KEYWORDS = [
+        'doręcz',
+        'dostarcz',
+        'wydano odbiorcy',
+        'odebrana przez odbiorc',
+        'delivered',
+    ];
+
     public function __construct(
         private readonly ShippingAddressParser $addressParser,
     ) {}
@@ -346,7 +354,7 @@ final class BLPaczkaShipmentService
     }
 
     /**
-     * @return array{status:string,picked_up:bool,picked_up_at:?string,events:list<array<string,mixed>>}
+     * @return array{status:string,picked_up:bool,picked_up_at:?string,delivered:bool,delivered_at:?string,events:list<array<string,mixed>>}
      */
     public function trackingStatus(string $blpaczkaOrderId, CourierAccount $account): array
     {
@@ -374,6 +382,16 @@ final class BLPaczkaShipmentService
 
             return false;
         });
+        $deliveredEvent = $events->first(function (array $event): bool {
+            $haystack = mb_strtolower(implode(' ', array_map(
+                fn ($value): string => is_scalar($value) ? (string) $value : '',
+                $event,
+            )));
+
+            return collect(self::DELIVERED_KEYWORDS)->contains(
+                fn (string $keyword): bool => str_contains($haystack, $keyword),
+            );
+        });
 
         $latest = $events->last();
 
@@ -384,6 +402,10 @@ final class BLPaczkaShipmentService
             'picked_up' => $pickedUpEvent !== null,
             'picked_up_at' => is_array($pickedUpEvent)
                 ? (string) ($pickedUpEvent['date'] ?? $pickedUpEvent['datetime'] ?? $pickedUpEvent['created'] ?? '') ?: null
+                : null,
+            'delivered' => $deliveredEvent !== null,
+            'delivered_at' => is_array($deliveredEvent)
+                ? (string) ($deliveredEvent['date'] ?? $deliveredEvent['datetime'] ?? $deliveredEvent['created'] ?? '') ?: null
                 : null,
             'events' => $events->all(),
         ];

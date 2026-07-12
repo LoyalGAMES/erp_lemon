@@ -22,8 +22,16 @@ final class EmailTemplateRenderer
             'currency' => 'Waluta',
             'payment_url' => 'Link do płatności',
             'tracking_number' => 'Numer śledzenia',
+            'tracking_url' => 'Link do śledzenia przesyłki',
+            'courier_name' => 'Nazwa przewoźnika',
             'invoice_number' => 'Numer faktury lub korekty',
             'child_order_number' => 'Numer zamówienia częściowego',
+            'order_date' => 'Data złożenia zamówienia',
+            'order_status' => 'Status zamówienia',
+            'shipping_method' => 'Sposób dostawy',
+            'payment_method' => 'Sposób płatności',
+            'order_url' => 'Link do szczegółów zamówienia',
+            'return_reason' => 'Powód zwrotu',
             'from_name' => 'Nazwa nadawcy',
             'brand_name' => 'Nazwa marki',
             'support_email' => 'E-mail kontaktowy',
@@ -32,7 +40,7 @@ final class EmailTemplateRenderer
     }
 
     /**
-     * @param array<string, mixed> $context
+     * @param  array<string, mixed>  $context
      */
     public function render(string $template, array $context): string
     {
@@ -46,7 +54,7 @@ final class EmailTemplateRenderer
     }
 
     /**
-     * @param array<string, mixed> $context
+     * @param  array<string, mixed>  $context
      * @return array<string, string>
      */
     public function normalize(array $context): array

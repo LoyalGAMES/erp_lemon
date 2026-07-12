@@ -8,11 +8,14 @@ use App\Mail\CustomerMessageMail;
 use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
 use App\Models\IntegrationSyncLog;
+use App\Models\Product;
+use App\Models\ProductChannelMapping;
 use App\Models\ReturnCase;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Communication\CustomerEmailWorkflowSettingsService;
+use App\Services\Communication\MailSettingsService;
 use App\Services\WooCommerce\WooCommerceOrderStatusService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
@@ -23,6 +26,21 @@ use Tests\TestCase;
 class CustomerCommunicationWorkflowTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Mail::fake();
+        app(MailSettingsService::class)->update([
+            'enabled' => true,
+            'host' => 'smtp.example.test',
+            'port' => 587,
+            'encryption' => 'tls',
+            'from_address' => 'sklep@example.test',
+            'from_name' => 'Sempre',
+            'timeout' => 15,
+        ]);
+    }
 
     public function test_operator_can_send_manual_message_from_order(): void
     {
@@ -169,7 +187,109 @@ class CustomerCommunicationWorkflowTest extends TestCase
         });
     }
 
-    public function test_disabled_woocommerce_status_workflow_skips_indirect_store_email_trigger(): void
+    public function test_disabled_smtp_holds_message_until_operator_retries_it(): void
+    {
+        app(MailSettingsService::class)->update([
+            'enabled' => false,
+            'encryption' => 'tls',
+            'timeout' => 15,
+        ]);
+        $order = $this->createOrder('client@example.test');
+
+        $message = app(CustomerCommunicationService::class)->sendOrderStatus($order, 'order_received');
+
+        $this->assertSame('held', $message?->status);
+        $this->assertStringContainsString('SMTP jest wyłączone', (string) $message?->error_message);
+        Mail::assertNothingSent();
+
+        app(MailSettingsService::class)->update([
+            'enabled' => true,
+            'host' => 'smtp.example.test',
+            'port' => 587,
+            'encryption' => 'tls',
+            'from_address' => 'sklep@example.test',
+            'from_name' => 'Sempre',
+            'timeout' => 15,
+        ]);
+
+        $this->post(route('settings.mail.retry-unsent'), ['limit' => 100])
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $this->assertSame('sent', $message->fresh()->status);
+        $this->assertSame(1, CustomerMessage::query()->count());
+        Mail::assertSent(CustomerMessageMail::class, 1);
+    }
+
+    public function test_order_mail_snapshots_products_totals_delivery_and_customer_action(): void
+    {
+        $order = $this->createOrder('client@example.test');
+        $product = Product::query()->create([
+            'sku' => 'SKU-LUNA',
+            'name' => 'Sukienka Luna',
+            'unit' => 'szt.',
+            'quantity_precision' => 0,
+            'attributes' => [
+                'master' => ['media' => [['src' => 'https://cdn.example.test/luna.jpg']]],
+            ],
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_product_id' => '501',
+            'external_sku' => 'SKU-LUNA',
+            'stock_sync_enabled' => true,
+            'metadata' => ['woocommerce_permalink' => 'https://shop.test/produkt/luna'],
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $order->sales_channel_id,
+            'name' => 'Sklep',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $order->update([
+            'total_gross' => 264.80,
+            'shipping_data' => [
+                'first_name' => 'Anna',
+                'last_name' => 'Kowalska',
+                'address_1' => 'Kwiatowa 12',
+                'postcode' => '62-070',
+                'city' => 'Poznań',
+                'phone' => '+48 500 600 700',
+            ],
+            'raw_payload' => [
+                'payment_method_title' => 'PayU',
+                'shipping_total' => '14.90',
+                'shipping_lines' => [['method_title' => 'Kurier InPost']],
+            ],
+        ]);
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => '7001',
+            'sku' => 'SKU-LUNA',
+            'name' => 'Sukienka Luna',
+            'quantity' => 1,
+            'unit_gross_price' => 249.90,
+            'raw_payload' => [],
+        ]);
+
+        $message = app(CustomerCommunicationService::class)->sendOrderStatus($order->fresh(), 'order_received');
+
+        $this->assertSame('Sukienka Luna', data_get($message?->metadata, 'items.0.name'));
+        $this->assertSame('https://cdn.example.test/luna.jpg', data_get($message?->metadata, 'items.0.image_url'));
+        $this->assertSame('https://shop.test/produkt/luna', data_get($message?->metadata, 'items.0.product_url'));
+        $this->assertSame('264,80', data_get($message?->metadata, 'totals.grand_total_formatted'));
+        $this->assertSame('Kurier InPost', data_get($message?->metadata, 'shipping_method'));
+        $html = (new CustomerMessageMail($message))->render();
+        $this->assertStringContainsString('Twoje produkty', $html);
+        $this->assertStringContainsString('Sukienka Luna', $html);
+        $this->assertStringContainsString('264,80', $html);
+        $this->assertStringContainsString('Sprawdź szczegóły zamówienia', $html);
+    }
+
+    public function test_woocommerce_status_sync_is_independent_from_customer_email_workflow(): void
     {
         Http::fake();
         $order = $this->createOrder('client@example.test');
@@ -197,14 +317,11 @@ class CustomerCommunicationWorkflowTest extends TestCase
 
         $result = app(WooCommerceOrderStatusService::class)->markReadyForShipment($order);
 
-        $this->assertTrue((bool) ($result['skipped'] ?? false));
-        $this->assertNull($result['status']);
-        $this->assertSame('ready-to-ship', $result['target_status']);
-        Http::assertNothingSent();
+        $this->assertSame('ready-to-ship', $result['status']);
+        Http::assertSentCount(1);
 
         $log = IntegrationSyncLog::query()->where('operation', 'order_ready_for_shipment')->firstOrFail();
-        $this->assertSame('skipped', $log->status);
-        $this->assertTrue((bool) data_get($log->response_payload, 'workflow_disabled'));
+        $this->assertSame('success', $log->status);
     }
 
     private function createOrder(string $email): ExternalOrder

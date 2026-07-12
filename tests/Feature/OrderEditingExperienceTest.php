@@ -12,6 +12,7 @@ use App\Models\Product;
 use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
+use App\Services\Communication\MailSettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -21,6 +22,21 @@ use Tests\TestCase;
 class OrderEditingExperienceTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Mail::fake();
+        app(MailSettingsService::class)->update([
+            'enabled' => true,
+            'host' => 'smtp.example.test',
+            'port' => 587,
+            'encryption' => 'tls',
+            'from_address' => 'sklep@example.test',
+            'from_name' => 'Sempre',
+            'timeout' => 15,
+        ]);
+    }
 
     public function test_order_page_exposes_full_width_product_editor_status_and_payment_actions(): void
     {
@@ -153,7 +169,7 @@ class OrderEditingExperienceTest extends TestCase
         $message = CustomerMessage::query()->sole();
         $this->assertSame('manual_payment_reminder', $message->trigger);
         $this->assertSame('https://shop.test/pay/9001', data_get($message->metadata, 'payment_url'));
-        $this->assertStringContainsString('Przypomnienie o płatności', $message->subject);
+        $this->assertStringContainsString('Dokończ płatność', $message->subject);
         $this->assertStringContainsString('Przejdź do płatności', (new CustomerMessageMail($message))->render());
         Mail::assertSent(CustomerMessageMail::class, fn (CustomerMessageMail $mail): bool => $mail->customerMessage->is($message));
     }

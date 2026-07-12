@@ -498,6 +498,10 @@ final class PackingFulfillmentService
             'warnings' => $warnings,
         ]);
 
+        $this->communication->sendOrderStatus($order->fresh() ?? $order, 'order_packing_rollback', [
+            'rollback_reason' => $reason !== '' ? $reason : null,
+        ]);
+
         return [
             'tasks' => $tasksCount,
             'woo_status' => $wooStatus,

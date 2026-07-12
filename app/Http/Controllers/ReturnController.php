@@ -49,8 +49,7 @@ class ReturnController extends Controller
         Request $request,
         ReturnSettingsService $settings,
         MbankTransferBasketService $mbankBasket,
-    ): View
-    {
+    ): View {
         $returnSettings = $settings->data();
         $tab = $request->query('tab') === 'pending' ? 'pending' : 'all';
         $search = trim((string) $request->query('q', ''));
@@ -344,6 +343,8 @@ class ReturnController extends Controller
             return $returnCase;
         });
 
+        $communication->sendReturnStatus($returnCase, 'return_waiting_for_package');
+
         $warnings = [];
         $createRx = $automationSettings->actionEnabled('return.created', 'return.rx.create');
         $postRx = $automationSettings->actionEnabled('return.created', 'return.rx.post');
@@ -361,8 +362,6 @@ class ReturnController extends Controller
                 $warnings[] = 'Automatyzacja RX: '.$exception->getMessage();
             }
         }
-
-        $communication->sendReturnStatus($returnCase, 'return_waiting_for_package');
 
         $response = back()->with('status', "Zwrot {$returnCase->number} został utworzony.");
 
@@ -532,7 +531,7 @@ class ReturnController extends Controller
 
         $freshReturn = $returnCase->fresh() ?? $returnCase;
 
-        $communication->sendReturnStatus($freshReturn, 'return_refunded', [
+        $communication->sendReturnStatus($freshReturn, 'return_correction_issued', [
             'invoice_number' => $invoice->number,
         ]);
 
@@ -554,6 +553,14 @@ class ReturnController extends Controller
                 'payment_status' => $payuPayment->status,
             ]);
 
+            if ($payuPayment->status === 'paid') {
+                $communication->sendReturnStatus($freshReturn, 'return_refunded', [
+                    'invoice_number' => $invoice->number,
+                    'payment_reference' => $payuPayment->reference,
+                    'payment_status' => $payuPayment->status,
+                ]);
+            }
+
             return back()->with('status', "Wystawiono fakturę korygującą {$invoice->number} i wysłano refund PayU dla zwrotu {$returnCase->number}.");
         }
 
@@ -563,12 +570,14 @@ class ReturnController extends Controller
     public function approve(
         ReturnCase $returnCase,
         ReturnStatusPushService $pusher,
+        CustomerCommunicationService $communication,
     ): RedirectResponse {
         if ($returnCase->status !== StoreReturnIntakeService::STATUS_PENDING) {
             return back()->with('error', "Zwrot {$returnCase->number} nie oczekuje na zatwierdzenie.");
         }
 
         $returnCase->update(['status' => StoreReturnIntakeService::STATUS_COMPLETED]);
+        $communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_approved');
 
         return $this->pushStatusToStore(
             $returnCase,
@@ -577,13 +586,17 @@ class ReturnController extends Controller
         );
     }
 
-    public function reject(ReturnCase $returnCase, ReturnStatusPushService $pusher): RedirectResponse
-    {
+    public function reject(
+        ReturnCase $returnCase,
+        ReturnStatusPushService $pusher,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse {
         if ($returnCase->status !== StoreReturnIntakeService::STATUS_PENDING) {
             return back()->with('error', "Zwrot {$returnCase->number} nie oczekuje na obsługę.");
         }
 
         $returnCase->update(['status' => StoreReturnIntakeService::STATUS_REJECTED]);
+        $communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_rejected');
 
         return $this->pushStatusToStore(
             $returnCase,
@@ -617,6 +630,7 @@ class ReturnController extends Controller
         Request $request,
         ReturnCase $returnCase,
         ShippingLabelService $shippingLabels,
+        CustomerCommunicationService $communication,
     ): RedirectResponse {
         $data = $request->validate([
             'courier_account_id' => ['required', 'integer', 'exists:courier_accounts,id'],
@@ -641,10 +655,21 @@ class ReturnController extends Controller
                 ? $shippingLabels->generateExchangeLabel($returnCase, $account)
                 : $shippingLabels->generateReturnLabel($returnCase, $account);
         } catch (RuntimeException $exception) {
-            return back()->with('error', 'Nie udało się wygenerować przesyłki: ' . $exception->getMessage());
+            return back()->with('error', 'Nie udało się wygenerować przesyłki: '.$exception->getMessage());
         }
 
         $kind = $purpose === 'exchange' ? 'wymiany do klienta' : 'zwrotna';
+
+        if ($purpose === 'return') {
+            $communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_label_ready', [
+                'tracking_number' => $label->trackingIdentifier(),
+                'attachment_shipping_label_ids' => [$label->id],
+            ]);
+        } else {
+            $communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'exchange_label_ready', [
+                'tracking_number' => $label->trackingIdentifier(),
+            ]);
+        }
 
         return back()->with('status', "Etykieta {$kind} dla {$returnCase->number} została wygenerowana ({$account->name}): {$label->filename()}.");
     }
@@ -690,8 +715,7 @@ class ReturnController extends Controller
         Request $request,
         ReturnCase $returnCase,
         CustomerCommunicationService $communication,
-    ): RedirectResponse
-    {
+    ): RedirectResponse {
         $validated = $request->validate([
             'amount' => ['required', 'numeric', 'min:0.01', 'max:99999999.99'],
             'currency' => ['nullable', 'string', 'size:3'],
@@ -703,26 +727,27 @@ class ReturnController extends Controller
             'send_payment_request' => ['nullable', 'boolean'],
         ]);
 
+        $isPaymentRequest = $request->boolean('send_payment_request');
         $payment = CustomerPayment::query()->create([
             'external_order_id' => $returnCase->external_order_id,
             'return_case_id' => $returnCase->id,
             'direction' => 'incoming',
             'method' => $validated['method'],
-            'status' => 'booked',
+            'status' => $isPaymentRequest ? 'pending' : 'booked',
             'amount' => round((float) $validated['amount'], 2),
             'currency' => mb_strtoupper($validated['currency'] ?? $returnCase->externalOrder?->currency ?? 'PLN'),
             'reference' => $validated['reference'] ?? null,
             'description' => $validated['description'] ?? null,
-            'booked_at' => $validated['booked_at'] ?? now(),
+            'booked_at' => $isPaymentRequest ? null : ($validated['booked_at'] ?? now()),
             'metadata' => [
                 'source' => 'return_view',
                 'booked_by' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
                 'payment_url' => trim((string) ($validated['payment_url'] ?? '')) ?: null,
-                'send_payment_request' => $request->boolean('send_payment_request'),
+                'send_payment_request' => $isPaymentRequest,
             ],
         ]);
 
-        if ($request->boolean('send_payment_request')) {
+        if ($isPaymentRequest) {
             $communication->sendReturnStatus($returnCase, 'exchange_payment_requested', [
                 'amount' => number_format((float) $payment->amount, 2, ',', ' '),
                 'currency' => $payment->currency,
@@ -732,8 +757,14 @@ class ReturnController extends Controller
                 'customer_payment_id' => $payment->id,
             ]);
 
-            return back()->with('status', 'Wpłata klienta została zaksięgowana i wysłano prośbę o dopłatę do wymiany.');
+            return back()->with('status', 'Zapisano oczekiwaną dopłatę i wysłano klientowi prośbę o płatność.');
         }
+
+        $communication->sendReturnStatus($returnCase, 'exchange_payment_received', [
+            'amount' => number_format((float) $payment->amount, 2, ',', ' '),
+            'currency' => $payment->currency,
+            'payment_reference' => $payment->reference,
+        ]);
 
         return back()->with('status', 'Wpłata klienta została zaksięgowana w saldzie zwrotu/wymiany.');
     }
@@ -742,8 +773,7 @@ class ReturnController extends Controller
         ReturnCase $returnCase,
         PayuRefundService $payuRefunds,
         CustomerCommunicationService $communication,
-    ): RedirectResponse
-    {
+    ): RedirectResponse {
         try {
             $payment = $payuRefunds->refundReturn($returnCase);
         } catch (RuntimeException $exception) {
@@ -756,6 +786,14 @@ class ReturnController extends Controller
             'payment_reference' => $payment->reference,
             'payment_status' => $payment->status,
         ]);
+
+        if ($payment->status === 'paid') {
+            $communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_refunded', [
+                'invoice_number' => $returnCase->correctionInvoice?->number,
+                'payment_reference' => $payment->reference,
+                'payment_status' => $payment->status,
+            ]);
+        }
 
         return back()->with('status', "Refund PayU dla zwrotu {$returnCase->number} został wysłany. Status: {$payment->status}.");
     }

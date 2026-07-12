@@ -151,8 +151,12 @@ class ExternalOrderController extends Controller
         );
     }
 
-    public function updateLines(Request $request, ExternalOrder $order, OrderEditingService $editing): RedirectResponse
-    {
+    public function updateLines(
+        Request $request,
+        ExternalOrder $order,
+        OrderEditingService $editing,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse {
         $validated = $request->validate([
             'lines' => ['required', 'array', 'min:1'],
             'lines.*.product_id' => ['nullable', 'integer', 'exists:products,id'],
@@ -179,6 +183,10 @@ class ExternalOrderController extends Controller
             $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
         }
 
+        if (($result['updated'] + $result['added'] + $result['removed']) > 0) {
+            $communication->sendOrderStatus($order->fresh() ?? $order, 'order_updated');
+        }
+
         return back()->with('status', $message);
     }
 
@@ -189,6 +197,7 @@ class ExternalOrderController extends Controller
         StockReservationService $reservations,
         PackingTaskService $packingTasks,
         AuditLogService $audit,
+        CustomerCommunicationService $communication,
     ): RedirectResponse {
         $validated = $request->validate([
             'status' => ['required', 'string', 'max:80', 'regex:/^[a-z0-9][a-z0-9-]*$/'],
@@ -217,6 +226,19 @@ class ExternalOrderController extends Controller
         }
 
         $freshOrder = $order->fresh();
+        $notificationTrigger = match ((string) $freshOrder->status) {
+            'processing' => 'order_received',
+            'on-hold' => 'order_on_hold',
+            'cancelled' => 'order_cancelled',
+            'failed' => 'order_payment_failed',
+            'refunded' => 'order_refunded',
+            default => null,
+        };
+
+        if ($notificationTrigger !== null && $before['status'] !== $freshOrder->status) {
+            $communication->sendOrderStatus($freshOrder, $notificationTrigger);
+        }
+
         $audit->record('order.status_updated', $freshOrder, $before, [
             'status' => $freshOrder->status,
             'fulfillment_status' => $freshOrder->fulfillment_status,
@@ -293,8 +315,11 @@ class ExternalOrderController extends Controller
         return back()->with('status', 'Notatka wewnętrzna została dodana.');
     }
 
-    public function storePayment(Request $request, ExternalOrder $order): RedirectResponse
-    {
+    public function storePayment(
+        Request $request,
+        ExternalOrder $order,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse {
         $validated = $request->validate([
             'amount' => ['required', 'numeric', 'min:0.01', 'max:99999999.99'],
             'currency' => ['nullable', 'string', 'size:3'],
@@ -304,7 +329,7 @@ class ExternalOrderController extends Controller
             'booked_at' => ['nullable', 'date'],
         ]);
 
-        CustomerPayment::query()->create([
+        $payment = CustomerPayment::query()->create([
             'external_order_id' => $order->id,
             'direction' => 'incoming',
             'method' => $validated['method'],
@@ -318,6 +343,12 @@ class ExternalOrderController extends Controller
                 'source' => 'order_view',
                 'booked_by' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
             ],
+        ]);
+
+        $communication->sendOrderStatus($order, 'order_payment_received', [
+            'amount' => number_format((float) $payment->amount, 2, ',', ' '),
+            'currency' => $payment->currency,
+            'payment_reference' => $payment->reference,
         ]);
 
         return back()->with('status', 'Wpłata klienta została zaksięgowana w saldzie zamówienia.');

@@ -7,7 +7,6 @@ namespace App\Services\WooCommerce;
 use App\Models\ExternalOrder;
 use App\Models\IntegrationSyncLog;
 use App\Models\WordpressIntegration;
-use App\Services\Communication\CustomerEmailWorkflowSettingsService;
 use RuntimeException;
 use Throwable;
 
@@ -15,7 +14,6 @@ final class WooCommerceOrderStatusService
 {
     public function __construct(
         private readonly WooCommerceClient $client,
-        private readonly CustomerEmailWorkflowSettingsService $emailWorkflow,
     ) {}
 
     /**
@@ -52,7 +50,6 @@ final class WooCommerceOrderStatusService
             settingsKey: null,
             defaultStatus: $status,
             operation: 'order_status_manual_update',
-            respectWorkflow: false,
         );
     }
 
@@ -64,7 +61,6 @@ final class WooCommerceOrderStatusService
         ?string $settingsKey,
         string $defaultStatus,
         string $operation,
-        bool $respectWorkflow = true,
     ): array {
         $order = ExternalOrder::query()->findOrFail($order->id);
         $integration = WordpressIntegration::query()
@@ -80,20 +76,6 @@ final class WooCommerceOrderStatusService
             : trim($defaultStatus);
         $status = $status !== '' ? $status : $defaultStatus;
         $startedAt = now();
-
-        if ($respectWorkflow && ! $this->emailWorkflow->isEnabled($operation)) {
-            $this->syncLog($integration, $order, $operation, 'skipped', $startedAt, [
-                'status' => $status,
-                'workflow_disabled' => true,
-                'message' => 'Zmiana statusu WooCommerce wyłączona w workflow maili.',
-            ]);
-
-            return [
-                'status' => null,
-                'skipped' => true,
-                'target_status' => $status,
-            ];
-        }
 
         try {
             $response = $this->client->updateOrderStatus($integration, (string) $order->external_id, $status);

@@ -40,7 +40,7 @@ final class InPostTrackingService
     ];
 
     /**
-     * @return array{status:string,picked_up:bool,picked_up_at:?string}
+     * @return array{status:string,picked_up:bool,picked_up_at:?string,delivered:bool,delivered_at:?string}
      */
     public function trackingStatus(string $trackingNumber): array
     {
@@ -56,7 +56,7 @@ final class InPostTrackingService
             ->get("/v1/tracking/{$trackingNumber}");
 
         if ($response->status() === 404) {
-            return ['status' => 'not_found', 'picked_up' => false, 'picked_up_at' => null];
+            return ['status' => 'not_found', 'picked_up' => false, 'picked_up_at' => null, 'delivered' => false, 'delivered_at' => null];
         }
 
         if ($response->failed()) {
@@ -66,6 +66,7 @@ final class InPostTrackingService
         $data = (array) $response->json();
         $status = (string) ($data['status'] ?? '');
         $pickedUpAt = null;
+        $deliveredAt = null;
         $rootEventCode = (string) ($data['eventCode'] ?? $data['event_code'] ?? '');
 
         if (in_array($rootEventCode, self::PICKED_UP_EVENT_CODES, true)) {
@@ -74,9 +75,12 @@ final class InPostTrackingService
         }
 
         foreach ((array) ($data['tracking_details'] ?? []) as $event) {
+            if ((string) ($event['status'] ?? '') === 'delivered') {
+                $deliveredAt = (string) ($event['datetime'] ?? '') ?: null;
+            }
+
             if (in_array((string) ($event['status'] ?? ''), self::PICKED_UP_STATUSES, true)) {
-                $pickedUpAt = (string) ($event['datetime'] ?? '') ?: null;
-                break;
+                $pickedUpAt ??= (string) ($event['datetime'] ?? '') ?: null;
             }
         }
 
@@ -109,6 +113,8 @@ final class InPostTrackingService
                 || in_array($status, self::PICKED_UP_EVENT_CODES, true)
                 || $pickedUpAt !== null,
             'picked_up_at' => $pickedUpAt,
+            'delivered' => $status === 'delivered' || $deliveredAt !== null,
+            'delivered_at' => $deliveredAt,
         ];
     }
 }

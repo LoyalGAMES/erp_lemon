@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Mail\CustomerMessageMail;
 use App\Models\CourierAccount;
 use App\Models\CustomerMessage;
 use App\Models\CustomerPayment;
@@ -15,6 +16,7 @@ use App\Models\ReturnCase;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
 use App\Models\Warehouse;
+use App\Services\Communication\MailSettingsService;
 use App\Services\Payments\MbankTransferBasketSettingsService;
 use App\Services\Payments\PayuRefundSettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -25,6 +27,21 @@ use Tests\TestCase;
 class ReturnsPaymentsNotesWorkflowTest extends TestCase
 {
     use RefreshDatabase;
+
+    protected function setUp(): void
+    {
+        parent::setUp();
+        Mail::fake();
+        app(MailSettingsService::class)->update([
+            'enabled' => true,
+            'host' => 'smtp.example.test',
+            'port' => 587,
+            'encryption' => 'tls',
+            'from_address' => 'sklep@example.test',
+            'from_name' => 'Sempre',
+            'timeout' => 15,
+        ]);
+    }
 
     public function test_operator_can_add_internal_note_and_manual_payment_to_order(): void
     {
@@ -75,6 +92,10 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
         $this->assertSame($returnCase->id, $label->return_case_id);
         $this->assertSame('exchange', $label->purpose);
         $this->assertSame('exchange_to_customer', data_get($label->response_payload, 'direction'));
+        $this->assertDatabaseHas('customer_messages', [
+            'return_case_id' => $returnCase->id,
+            'trigger' => 'exchange_label_ready',
+        ]);
 
         Http::assertSent(function ($request): bool {
             if ($request->method() !== 'POST' || ! str_ends_with(parse_url($request->url(), PHP_URL_PATH), '/shipments')) {
@@ -106,6 +127,8 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
         $payment = CustomerPayment::query()->firstOrFail();
         $this->assertSame($returnCase->id, $payment->return_case_id);
         $this->assertSame('24.99', (string) $payment->amount);
+        $this->assertSame('pending', $payment->status);
+        $this->assertNull($payment->booked_at);
         $this->assertSame('https://pay.example.test/doplata/1', data_get($payment->metadata, 'payment_url'));
 
         $message = CustomerMessage::query()
@@ -115,7 +138,8 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
         $this->assertSame($returnCase->id, $message->return_case_id);
         $this->assertSame('sent', $message->status);
         $this->assertStringContainsString('24,99 PLN', $message->body);
-        $this->assertStringContainsString('https://pay.example.test/doplata/1', $message->body);
+        $this->assertSame('https://pay.example.test/doplata/1', data_get($message->metadata, 'payment_url'));
+        $this->assertStringContainsString('Opłać dopłatę', (new CustomerMessageMail($message))->render());
     }
 
     public function test_return_detail_card_groups_operational_information_outside_index(): void

@@ -14,6 +14,7 @@ use App\Models\StockReservation;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
+use App\Services\Communication\MailSettingsService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\WooCommerce\WooCommerceImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -30,6 +31,15 @@ class OrderSplitWorkflowTest extends TestCase
     public function test_operator_can_split_order_and_recalculate_reservations(): void
     {
         Mail::fake();
+        app(MailSettingsService::class)->update([
+            'enabled' => true,
+            'host' => 'smtp.example.test',
+            'port' => 587,
+            'encryption' => 'tls',
+            'from_address' => 'sklep@example.test',
+            'from_name' => 'Sempre',
+            'timeout' => 15,
+        ]);
 
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
@@ -226,7 +236,7 @@ class OrderSplitWorkflowTest extends TestCase
         $this->assertSame(0, StockReservation::query()->where('status', 'active')->count());
 
         $document = WarehouseDocument::query()->create([
-            'number' => 'PZ/' . now()->format('Y') . '/000001',
+            'number' => 'PZ/'.now()->format('Y').'/000001',
             'type' => 'PZ',
             'status' => 'draft',
             'destination_warehouse_id' => $warehouse->id,

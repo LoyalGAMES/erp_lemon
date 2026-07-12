@@ -198,10 +198,9 @@ class MailSettingsWorkflowTest extends TestCase
             ->assertSee('Workflow maili do klientów')
             ->assertSee('order_created')
             ->assertSee('return_refunded')
-            ->assertSee('Magazyn i WooCommerce')
-            ->assertSee('WooCommerce: gotowe do wysyłki')
-            ->assertSee('order_shipped')
-            ->assertSee('Wysyłaj do klienta')
+            ->assertSee('Przesyłka dostarczona')
+            ->assertSee('Podgląd wiadomości')
+            ->assertSee('ERP odpowiada za całą komunikację')
             ->assertSee('DNS domeny semprelove.pl')
             ->assertSee('Login SMTP jest w innej domenie')
             ->assertSee('{{return_number}}')
@@ -233,5 +232,58 @@ class MailSettingsWorkflowTest extends TestCase
         $this->assertSame('Po płatności - ręczna decyzja', $setting->value['order_received']['stage']);
         $this->assertSame('Spakowaliśmy {{order_number}}', $setting->value['order_packed']['subject']);
         $this->assertSame('Paczka {{order_number}} czeka na kuriera.', $setting->value['order_packed']['body']);
+    }
+
+    public function test_mail_preview_uses_production_views_without_saving_or_sending(): void
+    {
+        Mail::fake();
+        $messageCount = CustomerMessage::query()->count();
+
+        $response = $this->postJson(route('settings.mail.preview'), [
+            'trigger' => 'order_courier_picked_up',
+            'scenario' => 'shipment',
+            'subject' => 'Paczka {{order_number}} jest w drodze',
+            'body' => 'Kurier przejął paczkę. Numer: {{tracking_number}}.',
+            'layout' => [
+                'brand_name' => 'Sempre Preview',
+                'accent_color' => '#f4d35e',
+                'header_text' => 'Status dostawy',
+                'support_email' => 'pomoc@example.test',
+            ],
+        ]);
+
+        $response
+            ->assertOk()
+            ->assertHeader('Cache-Control', 'max-age=0, no-store, private')
+            ->assertJsonPath('subject', 'Paczka SL/2026/10482 jest w drodze')
+            ->assertJsonPath('diagnostics.unknown_variables', [])
+            ->assertJsonPath('diagnostics.missing_variables', []);
+
+        $html = (string) $response->json('html');
+        $text = (string) $response->json('text');
+        $this->assertStringContainsString('Sempre Preview', $html);
+        $this->assertStringContainsString('Lniana sukienka Luna', $html);
+        $this->assertStringContainsString('Śledź przesyłkę', $html);
+        $this->assertStringContainsString('620012345678901234567890', $text);
+        $this->assertSame($messageCount, CustomerMessage::query()->count());
+        Mail::assertNothingSent();
+    }
+
+    public function test_mail_preview_reports_unknown_variables_and_escapes_content(): void
+    {
+        $response = $this->postJson(route('settings.mail.preview'), [
+            'trigger' => 'order_received',
+            'scenario' => 'order',
+            'subject' => 'Zamówienie {{order_numer}}',
+            'body' => '<script>alert(1)</script> {{tracking_number}}',
+            'layout' => ['brand_name' => '<img src=x onerror=alert(1)>'],
+        ])->assertOk();
+
+        $response->assertJsonPath('diagnostics.unknown_variables.0', 'order_numer');
+        $response->assertJsonPath('diagnostics.missing_variables.0', 'tracking_number');
+        $html = (string) $response->json('html');
+        $this->assertStringNotContainsString('<script>alert(1)</script>', $html);
+        $this->assertStringContainsString('&lt;script&gt;alert(1)&lt;/script&gt;', $html);
+        $this->assertStringNotContainsString('<img src=x onerror=alert(1)>', $html);
     }
 }

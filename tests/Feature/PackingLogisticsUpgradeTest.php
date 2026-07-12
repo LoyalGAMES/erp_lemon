@@ -227,14 +227,22 @@ class PackingLogisticsUpgradeTest extends TestCase
         ]);
 
         Http::fake([
-            '*/v1/tracking/520000999888777666555444' => Http::response([
-                'tracking_number' => '520000999888777666555444',
-                'status' => 'collected_from_sender',
-                'tracking_details' => [
-                    ['status' => 'confirmed', 'datetime' => now()->subHour()->toISOString()],
-                    ['status' => 'collected_from_sender', 'datetime' => now()->toISOString()],
-                ],
-            ], 200),
+            '*/v1/tracking/520000999888777666555444' => Http::sequence()
+                ->push([
+                    'tracking_number' => '520000999888777666555444',
+                    'status' => 'collected_from_sender',
+                    'tracking_details' => [
+                        ['status' => 'confirmed', 'datetime' => now()->subHour()->toISOString()],
+                        ['status' => 'collected_from_sender', 'datetime' => now()->toISOString()],
+                    ],
+                ], 200)
+                ->push([
+                    'tracking_number' => '520000999888777666555444',
+                    'status' => 'delivered',
+                    'tracking_details' => [
+                        ['status' => 'delivered', 'datetime' => now()->toISOString()],
+                    ],
+                ], 200),
         ]);
 
         $result = app(CourierPickupTrackingService::class)->trackPackedOrders();
@@ -253,6 +261,15 @@ class PackingLogisticsUpgradeTest extends TestCase
             'inpost_tracking',
             data_get(PackingTask::query()->where('external_order_id', $order->id)->first()->metadata, 'courier_pickup.source'),
         );
+
+        $delivery = app(CourierPickupTrackingService::class)->trackPackedOrders(force: true);
+
+        $this->assertSame(1, $delivery['delivered'], json_encode($delivery, JSON_UNESCAPED_UNICODE));
+        $this->assertSame('delivered', $label->fresh()->status);
+        $this->assertDatabaseHas('customer_messages', [
+            'external_order_id' => $order->id,
+            'trigger' => 'order_delivered',
+        ]);
     }
 
     public function test_tracking_command_skips_parcels_not_picked_up_yet(): void

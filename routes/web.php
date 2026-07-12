@@ -45,6 +45,8 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::get('/settings/mail', [SettingsController::class, 'mail'])->name('settings.mail');
         Route::put('/settings/mail', [SettingsController::class, 'updateMail'])->name('settings.mail.update');
         Route::put('/settings/mail/workflow', [SettingsController::class, 'updateMailWorkflow'])->name('settings.mail.workflow.update');
+        Route::post('/settings/mail/preview', [SettingsController::class, 'previewMail'])->name('settings.mail.preview');
+        Route::post('/settings/mail/retry-unsent', [SettingsController::class, 'retryUnsentMail'])->name('settings.mail.retry-unsent');
         Route::post('/settings/mail/test', [SettingsController::class, 'testMail'])->name('settings.mail.test');
         Route::post('/settings/mail/templates', [SettingsController::class, 'storeEmailTemplate'])->name('settings.mail.templates.store');
         Route::put('/settings/mail/templates/{template}', [SettingsController::class, 'updateEmailTemplate'])->name('settings.mail.templates.update');

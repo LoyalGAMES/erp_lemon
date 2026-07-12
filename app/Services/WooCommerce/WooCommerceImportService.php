@@ -788,16 +788,13 @@ final class WooCommerceImportService
                     }
                 }
 
-                if ($wasCreated && $isFulfillmentStatus) {
-                    $this->communication->sendOrderStatus($order, 'order_received');
-                } elseif ($wasCreated && $this->shouldNotifyOrderCreated((string) $order->status)) {
-                    $this->communication->sendOrderStatus($order, 'order_created');
-                } elseif (
-                    ! $wasCreated
-                    && ! $this->statusPolicy->isFulfillmentStatus($previousStatus)
-                    && $isFulfillmentStatus
-                ) {
-                    $this->communication->sendOrderStatus($order, 'order_received');
+                $statusChanged = $wasCreated || mb_strtolower((string) $previousStatus) !== mb_strtolower((string) $order->status);
+                $notificationTrigger = $statusChanged
+                    ? $this->orderNotificationTrigger((string) $order->status, $wasCreated)
+                    : null;
+
+                if ($notificationTrigger !== null) {
+                    $this->communication->sendOrderStatus($order, $notificationTrigger);
                 }
             }
 
@@ -846,9 +843,17 @@ final class WooCommerceImportService
         ];
     }
 
-    private function shouldNotifyOrderCreated(string $status): bool
+    private function orderNotificationTrigger(string $status, bool $created): ?string
     {
-        return in_array(mb_strtolower(trim($status)), ['pending', 'on-hold'], true);
+        return match (mb_strtolower(trim($status))) {
+            'processing' => 'order_received',
+            'pending' => $created ? 'order_created' : 'order_on_hold',
+            'on-hold' => 'order_on_hold',
+            'cancelled' => 'order_cancelled',
+            'failed' => 'order_payment_failed',
+            'refunded' => 'order_refunded',
+            default => null,
+        };
     }
 
     /**

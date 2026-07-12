@@ -22,6 +22,7 @@ final class CustomerCommunicationService
         private readonly MailSettingsService $mailSettings,
         private readonly EmailTemplateRenderer $templateRenderer,
         private readonly CustomerEmailWorkflowSettingsService $emailWorkflow,
+        private readonly CustomerMailContextService $mailContext,
     ) {}
 
     public function sendManualForOrder(ExternalOrder $order, string $subject, string $body): CustomerMessage
@@ -32,7 +33,7 @@ final class CustomerCommunicationService
             throw new RuntimeException('Zamówienie nie ma adresu e-mail klienta.');
         }
 
-        $templateContext = $this->orderTemplateContext($order, $recipient);
+        $templateContext = $this->mailContext->forOrder($order, $recipient, 'manual_order_message');
 
         return $this->createAndSend([
             'external_order_id' => $order->id,
@@ -55,7 +56,7 @@ final class CustomerCommunicationService
             throw new RuntimeException('Zwrot nie ma adresu e-mail klienta.');
         }
 
-        $templateContext = $this->returnTemplateContext($returnCase, $recipient);
+        $templateContext = $this->mailContext->forReturn($returnCase, $recipient, 'manual_return_message');
 
         return $this->createAndSend([
             'return_case_id' => $returnCase->id,
@@ -85,11 +86,21 @@ final class CustomerCommunicationService
             throw new RuntimeException('Brak poprawnego linku do płatności dla tego zamówienia.');
         }
 
-        $templateContext = $this->orderTemplateContext($order, $recipient, [
+        $templateContext = $this->mailContext->forOrder($order, $recipient, 'manual_payment_reminder', [
             'payment_url' => $paymentUrl,
             'amount' => number_format((float) $order->total_gross, 2, ',', ' '),
         ]);
-        $number = $this->orderNumber($order);
+        $content = $this->renderContent(
+            $this->emailWorkflow->contentFor('manual_payment_reminder') ?? [
+                'subject' => 'Przypomnienie o płatności za zamówienie {{order_number}}',
+                'body' => "Dzień dobry,\n\nnie odnotowaliśmy jeszcze płatności za zamówienie {{order_number}} w kwocie {{amount}} {{currency}}. Użyj bezpiecznego przycisku poniżej, aby dokończyć płatność. Jeżeli płatność została już wykonana, zignoruj tę wiadomość.",
+            ],
+            $templateContext,
+        );
+
+        if (! $this->emailWorkflow->isEnabled('manual_payment_reminder')) {
+            throw new RuntimeException('Wysyłka przypomnienia o płatności jest wyłączona w ustawieniach maili.');
+        }
 
         return $this->createAndSend([
             'external_order_id' => $order->id,
@@ -97,8 +108,8 @@ final class CustomerCommunicationService
             'trigger' => 'manual_payment_reminder',
             'recipient_email' => $recipient['email'],
             'recipient_name' => $recipient['name'],
-            'subject' => "Przypomnienie o płatności za zamówienie {$number}",
-            'body' => "Dzień dobry,\n\nprzypominamy o płatności za zamówienie {$number} w kwocie {$templateContext['amount']} {$templateContext['currency']}. Aby ponowić płatność, użyj przycisku poniżej.",
+            'subject' => $content['subject'],
+            'body' => $content['body'],
             'metadata' => $templateContext,
         ], true);
     }
@@ -113,7 +124,7 @@ final class CustomerCommunicationService
         }
 
         $recipient = $this->orderRecipient($order);
-        $templateContext = $this->orderTemplateContext($order, $recipient, $context);
+        $templateContext = $this->mailContext->forOrder($order, $recipient, $trigger, $context);
         $content = $this->renderContent(
             $this->emailWorkflow->contentFor($trigger) ?? $this->orderStatusContent($order, $trigger, $templateContext),
             $templateContext,
@@ -146,7 +157,7 @@ final class CustomerCommunicationService
 
         $returnCase->loadMissing('externalOrder');
         $recipient = $this->returnRecipient($returnCase);
-        $templateContext = $this->returnTemplateContext($returnCase, $recipient, $context);
+        $templateContext = $this->mailContext->forReturn($returnCase, $recipient, $trigger, $context);
         $content = $this->renderContent(
             $this->emailWorkflow->contentFor($trigger) ?? $this->returnStatusContent($returnCase, $trigger, $templateContext),
             $templateContext,
@@ -222,9 +233,20 @@ final class CustomerCommunicationService
             'status' => 'pending',
         ]));
 
-        try {
-            $this->mailSettings->apply();
+        if (! $this->mailSettings->apply()) {
+            $message->update([
+                'status' => 'held',
+                'error_message' => 'SMTP jest wyłączone. Wiadomość oczekuje na ręczne ponowienie po włączeniu wysyłki.',
+            ]);
 
+            if ($throwOnFailure) {
+                throw new RuntimeException('SMTP jest wyłączone. Wiadomość została zapisana jako oczekująca i nie została wysłana.');
+            }
+
+            return $message->refresh();
+        }
+
+        try {
             Mail::to($message->recipient_email, $message->recipient_name ?: null)
                 ->send(new CustomerMessageMail($message));
 
@@ -247,9 +269,82 @@ final class CustomerCommunicationService
         return $message->refresh();
     }
 
+    /**
+     * Ponawia niewysłane wiadomości na wyraźne żądanie operatora.
+     *
+     * @return array{selected:int,sent:int,failed:int}
+     */
+    public function retryUnsent(int $limit = 100): array
+    {
+        if (! $this->mailSettings->apply()) {
+            throw new RuntimeException('Najpierw włącz SMTP i zapisz poprawną konfigurację.');
+        }
+
+        $messages = CustomerMessage::query()
+            ->where('direction', 'outgoing')
+            ->where(function ($query): void {
+                $query->whereIn('status', ['held', 'failed'])
+                    ->orWhere(function ($query): void {
+                        $query->where('status', 'pending')
+                            ->where('created_at', '<=', now()->subMinutes(5));
+                    });
+            })
+            ->oldest('created_at')
+            ->limit(max(1, min(500, $limit)))
+            ->get();
+
+        $sent = 0;
+        $failed = 0;
+
+        foreach ($messages as $message) {
+            if ($this->retryMessage($message)) {
+                $sent++;
+            } else {
+                $failed++;
+            }
+        }
+
+        return [
+            'selected' => $messages->count(),
+            'sent' => $sent,
+            'failed' => $failed,
+        ];
+    }
+
+    private function retryMessage(CustomerMessage $message): bool
+    {
+        $message->update([
+            'status' => 'pending',
+            'failed_at' => null,
+            'error_message' => null,
+        ]);
+
+        try {
+            Mail::to($message->recipient_email, $message->recipient_name ?: null)
+                ->send(new CustomerMessageMail($message));
+
+            $message->update([
+                'status' => 'sent',
+                'sent_at' => now(),
+                'failed_at' => null,
+                'error_message' => null,
+            ]);
+
+            return true;
+        } catch (Throwable $exception) {
+            $message->update([
+                'status' => 'failed',
+                'failed_at' => now(),
+                'error_message' => $exception->getMessage(),
+            ]);
+
+            return false;
+        }
+    }
+
     private function alreadySentForOrder(ExternalOrder $order, string $trigger): bool
     {
-        if ($trigger === 'order_partial_created') {
+        if (in_array($trigger, ['order_partial_created', 'order_updated', 'order_payment_received', 'order_packed', 'order_packing_rollback'], true)) {
             return false;
         }
 
@@ -257,17 +352,21 @@ final class CustomerCommunicationService
             ->where('external_order_id', $order->id)
             ->where('type', self::TYPE_AUTOMATED)
             ->where('trigger', $trigger)
-            ->whereIn('status', ['pending', 'sent', 'skipped'])
+            ->whereIn('status', ['held', 'pending', 'sent', 'skipped'])
             ->exists();
     }
 
     private function alreadySentForReturn(ReturnCase $returnCase, string $trigger): bool
     {
+        if (in_array($trigger, ['exchange_payment_requested', 'exchange_payment_received', 'exchange_label_ready'], true)) {
+            return false;
+        }
+
         return CustomerMessage::query()
             ->where('return_case_id', $returnCase->id)
             ->where('type', self::TYPE_AUTOMATED)
             ->where('trigger', $trigger)
-            ->whereIn('status', ['pending', 'sent', 'skipped'])
+            ->whereIn('status', ['held', 'pending', 'sent', 'skipped'])
             ->exists();
     }
 
@@ -403,54 +502,6 @@ final class CustomerCommunicationService
     private function orderNumber(ExternalOrder $order): string
     {
         return (string) ($order->external_number ?: $order->external_id ?: $order->id);
-    }
-
-    /**
-     * @param  array{email:?string,name:?string}  $recipient
-     * @param  array<string, mixed>  $context
-     * @return array<string, mixed>
-     */
-    private function orderTemplateContext(ExternalOrder $order, array $recipient, array $context = []): array
-    {
-        return array_merge($this->baseTemplateContext(), $context, [
-            'order_number' => $this->orderNumber($order),
-            'customer_email' => $recipient['email'],
-            'customer_name' => $recipient['name'],
-            'currency' => $order->currency ?: ($context['currency'] ?? 'PLN'),
-        ]);
-    }
-
-    /**
-     * @param  array{email:?string,name:?string}  $recipient
-     * @param  array<string, mixed>  $context
-     * @return array<string, mixed>
-     */
-    private function returnTemplateContext(ReturnCase $returnCase, array $recipient, array $context = []): array
-    {
-        return array_merge($this->baseTemplateContext(), $context, [
-            'return_number' => $returnCase->number,
-            'order_number' => $returnCase->externalOrder instanceof ExternalOrder
-                ? $this->orderNumber($returnCase->externalOrder)
-                : ($context['order_number'] ?? ''),
-            'customer_email' => $recipient['email'],
-            'customer_name' => $recipient['name'],
-            'currency' => $context['currency'] ?? $returnCase->externalOrder?->currency ?? 'PLN',
-        ]);
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private function baseTemplateContext(): array
-    {
-        $settings = $this->mailSettings->data();
-
-        return [
-            'from_name' => $settings['from_name'],
-            'brand_name' => $settings['brand_name'],
-            'support_email' => $settings['support_email'],
-            'support_phone' => $settings['support_phone'],
-        ];
     }
 
     /**

@@ -445,7 +445,7 @@ final class WarehouseDocumentPostingService
                 $returnCase = ReturnCase::query()->findOrFail($returnCaseId);
                 $invoice = $this->returnCorrections->createForReturn($returnCase);
                 $this->invoiceUpload->upload($invoice);
-                $this->communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_refunded', [
+                $this->communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_correction_issued', [
                     'invoice_number' => $invoice->number,
                 ]);
                 $payment = $this->payuRefunds->attemptAutomaticRefund($returnCase->fresh() ?? $returnCase, $invoice);
@@ -457,6 +457,14 @@ final class WarehouseDocumentPostingService
                         'payment_reference' => $payment->reference,
                         'payment_status' => $payment->status,
                     ]);
+
+                    if ($payment->status === 'paid') {
+                        $this->communication->sendReturnStatus($freshReturn, 'return_refunded', [
+                            'invoice_number' => $invoice->number,
+                            'payment_reference' => $payment->reference,
+                            'payment_status' => $payment->status,
+                        ]);
+                    }
                 }
             } catch (Throwable $exception) {
                 $returnCase = ReturnCase::query()->find($returnCaseId);

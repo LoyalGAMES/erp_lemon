@@ -8,6 +8,7 @@ use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\PackingTask;
 use App\Models\ShippingLabel;
+use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Packing\PackingFulfillmentService;
 use Throwable;
 
@@ -22,10 +23,11 @@ final class CourierPickupTrackingService
         private readonly BLPaczkaShipmentService $blpaczka,
         private readonly ShippingProviderResolver $providers,
         private readonly PackingFulfillmentService $fulfillment,
+        private readonly CustomerCommunicationService $communication,
     ) {}
 
     /**
-     * @return array{checked:int,picked_up:int,orders:int,warnings:list<string>}
+     * @return array{checked:int,picked_up:int,delivered:int,orders:int,warnings:list<string>}
      */
     public function trackPackedOrders(int $limit = 50, bool $force = false): array
     {
@@ -38,7 +40,7 @@ final class CourierPickupTrackingService
             ->with(['order', 'courierAccount'])
             ->shipments()
             ->whereIn('external_order_id', $orderIds)
-            ->where('status', 'generated');
+            ->whereIn('status', ['generated', 'picked_up']);
 
         if (! $force) {
             $labelsQuery->where(function ($query): void {
@@ -79,12 +81,13 @@ final class CourierPickupTrackingService
         $checked = 0;
         $pickedUp = 0;
         $shippedOrders = 0;
+        $delivered = 0;
         $warnings = [];
 
         foreach ($labels as $label) {
             $claim = ShippingLabel::query()
                 ->whereKey($label->id)
-                ->where('status', 'generated');
+                ->whereIn('status', ['generated', 'picked_up']);
 
             if (! $force) {
                 $claim->where(function ($query): void {
@@ -102,7 +105,7 @@ final class CourierPickupTrackingService
 
             $label->refresh();
 
-            if ($label->status !== 'generated') {
+            if (! in_array($label->status, ['generated', 'picked_up'], true)) {
                 continue;
             }
 
@@ -157,20 +160,40 @@ final class CourierPickupTrackingService
             }
 
             $checked++;
+            $wasPickedUp = $label->status === 'picked_up';
+            $isDelivered = (bool) ($status['delivered'] ?? false);
 
             $label->update([
                 'tracking_status' => $status['status'],
                 'tracking_checked_at' => now(),
-                'next_tracking_check_at' => $status['picked_up'] ? null : now()->addMinutes(5),
+                'next_tracking_check_at' => $isDelivered
+                    ? null
+                    : ($status['picked_up'] ? now()->addHours(2) : now()->addMinutes(5)),
                 'tracking_attempts' => 0,
                 'tracking_last_error' => null,
                 'response_payload' => array_merge((array) $label->response_payload, [
                     'tracking' => [
                         'status' => $status['status'],
                         'checked_at' => now()->toISOString(),
+                        'delivered_at' => $status['delivered_at'] ?? null,
                     ],
                 ]),
             ]);
+
+            if ($wasPickedUp) {
+                if ($isDelivered) {
+                    $label->update(['status' => 'delivered', 'next_tracking_check_at' => null]);
+                    $this->communication->sendOrderStatus($order, 'order_delivered', [
+                        'tracking_number' => $label->trackingIdentifier(),
+                        'tracking_url' => $this->providers->trackingUrl($label),
+                        'courier' => $this->providers->courierName($label),
+                        'delivered_at' => $status['delivered_at'] ?? now()->toISOString(),
+                    ]);
+                    $delivered++;
+                }
+
+                continue;
+            }
 
             if (! $status['picked_up']) {
                 continue;
@@ -204,8 +227,9 @@ final class CourierPickupTrackingService
             }
 
             $label->update([
-                'status' => 'picked_up',
+                'status' => $isDelivered ? 'delivered' : 'picked_up',
                 'picked_up_at' => $pickedUpAt,
+                'next_tracking_check_at' => $isDelivered ? null : now()->addHours(2),
             ]);
 
             ShippingLabel::query()
@@ -223,19 +247,30 @@ final class CourierPickupTrackingService
                 $shippedOrders++;
             }
 
+            if ($isDelivered) {
+                $this->communication->sendOrderStatus($order, 'order_delivered', [
+                    'tracking_number' => $label->trackingIdentifier(),
+                    'tracking_url' => $this->providers->trackingUrl($label),
+                    'courier' => $this->providers->courierName($label),
+                    'delivered_at' => $status['delivered_at'] ?? now()->toISOString(),
+                ]);
+                $delivered++;
+            }
+
             $warnings = array_merge($warnings, $result['warnings']);
         }
 
         return [
             'checked' => $checked,
             'picked_up' => $pickedUp,
+            'delivered' => $delivered,
             'orders' => $shippedOrders,
             'warnings' => $warnings,
         ];
     }
 
     /**
-     * @return array{status:string,picked_up:bool,picked_up_at:?string}|null
+     * @return array{status:string,picked_up:bool,picked_up_at:?string,delivered?:bool,delivered_at?:?string}|null
      */
     private function statusForLabel(ShippingLabel $label): ?array
     {

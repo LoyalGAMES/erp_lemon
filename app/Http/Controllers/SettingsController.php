@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Models\CourierAccount;
+use App\Models\CustomerMessage;
 use App\Models\EmailTemplate;
 use App\Models\Warehouse;
 use App\Services\Automation\DocumentAutomationSettingsService;
+use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Communication\CustomerEmailWorkflowSettingsService;
+use App\Services\Communication\CustomerMailPreviewService;
 use App\Services\Communication\EmailTemplateRenderer;
 use App\Services\Communication\MailSettingsService;
 use App\Services\Inventory\WarehouseDocumentSettingsService;
@@ -18,12 +21,14 @@ use App\Services\Payments\PayuRefundSettingsService;
 use App\Services\Printing\PrintBridgeTokenService;
 use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Returns\ReturnSettingsService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Mail\Message;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
@@ -75,7 +80,7 @@ class SettingsController extends Controller
     ): View {
         return view('settings.mail', [
             'title' => 'Ustawienia maili',
-            'subtitle' => 'Konfiguracja SMTP oraz szablony ręcznej komunikacji z klientami.',
+            'subtitle' => 'Pełna komunikacja transakcyjna ERP: wygląd, treści, podglądy, wysyłka i diagnostyka.',
             'module' => 'settings',
             'mailSettings' => $mailSettings->data(),
             'mailDeliverability' => $mailSettings->deliverabilityReport(),
@@ -86,6 +91,16 @@ class SettingsController extends Controller
                 ->orderBy('name')
                 ->get(),
             'runtimeMailer' => config('mail.default'),
+            'mailQueue' => [
+                'held' => CustomerMessage::query()->where('status', 'held')->count(),
+                'pending' => CustomerMessage::query()->where('status', 'pending')->count(),
+                'failed' => CustomerMessage::query()->where('status', 'failed')->count(),
+                'recent' => CustomerMessage::query()
+                    ->whereIn('status', ['held', 'pending', 'failed'])
+                    ->latest()
+                    ->limit(6)
+                    ->get(['id', 'recipient_email', 'subject', 'status', 'error_message', 'created_at']),
+            ],
         ]);
     }
 
@@ -659,6 +674,62 @@ class SettingsController extends Controller
         $mailWorkflow->update((array) ($validated['workflow'] ?? []));
 
         return back()->with('status', 'Workflow maili do klientów został zapisany.');
+    }
+
+    public function previewMail(
+        Request $request,
+        CustomerEmailWorkflowSettingsService $mailWorkflow,
+        CustomerMailPreviewService $preview,
+    ): JsonResponse {
+        $validated = $request->validate([
+            'trigger' => ['required', 'string', Rule::in(array_keys($mailWorkflow->data()))],
+            'scenario' => ['required', 'string', Rule::in(['order', 'payment', 'shipment', 'split', 'return', 'invoice'])],
+            'subject' => ['required', 'string', 'max:160'],
+            'body' => ['required', 'string', 'max:5000'],
+            'layout' => ['nullable', 'array'],
+            'layout.brand_name' => ['nullable', 'string', 'max:120'],
+            'layout.logo_url' => ['nullable', 'url:http,https', 'max:1000'],
+            'layout.accent_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
+            'layout.header_text' => ['nullable', 'string', 'max:160'],
+            'layout.signature' => ['nullable', 'string', 'max:1000'],
+            'layout.footer_text' => ['nullable', 'string', 'max:1000'],
+            'layout.support_email' => ['nullable', 'email', 'max:255'],
+            'layout.support_phone' => ['nullable', 'string', 'max:40'],
+        ]);
+
+        return response()
+            ->json($preview->render(
+                $validated['trigger'],
+                $validated['scenario'],
+                $validated['subject'],
+                $validated['body'],
+                (array) ($validated['layout'] ?? []),
+            ))
+            ->header('Cache-Control', 'private, no-store, max-age=0')
+            ->header('Pragma', 'no-cache');
+    }
+
+    public function retryUnsentMail(
+        Request $request,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'limit' => ['nullable', 'integer', 'min:1', 'max:500'],
+        ]);
+
+        try {
+            $result = $communication->retryUnsent((int) ($validated['limit'] ?? 100));
+        } catch (\RuntimeException $exception) {
+            return back()->with('error', $exception->getMessage());
+        }
+
+        if ($result['selected'] === 0) {
+            return back()->with('status', 'Nie ma niewysłanych wiadomości do ponowienia.');
+        }
+
+        $message = "Ponowiono {$result['selected']} wiadomości: wysłano {$result['sent']}, błędów {$result['failed']}.";
+
+        return back()->with($result['failed'] > 0 ? 'error' : 'status', $message);
     }
 
     public function testMail(Request $request, MailSettingsService $mailSettings): RedirectResponse

@@ -16,6 +16,7 @@ use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
+use App\Services\Communication\MailSettingsService;
 use App\Services\WooCommerce\WooCommerceImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
@@ -540,6 +541,15 @@ class WooCommerceOrderReservationTest extends TestCase
     public function test_pending_order_is_imported_for_customer_communication_and_reserves_stock(): void
     {
         Mail::fake();
+        app(MailSettingsService::class)->update([
+            'enabled' => true,
+            'host' => 'smtp.example.test',
+            'port' => 587,
+            'encryption' => 'tls',
+            'from_address' => 'sklep@example.test',
+            'from_name' => 'Sempre',
+            'timeout' => 15,
+        ]);
 
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
