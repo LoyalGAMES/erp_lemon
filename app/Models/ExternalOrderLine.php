@@ -17,6 +17,7 @@ class ExternalOrderLine extends Model
         'external_order_id',
         'product_id',
         'external_line_id',
+        'canonical_external_line_id',
         'sku',
         'name',
         'quantity',

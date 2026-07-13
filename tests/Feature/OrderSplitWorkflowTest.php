@@ -138,10 +138,13 @@ class OrderSplitWorkflowTest extends TestCase
         $splitOrder = ExternalOrder::query()->where('external_id', '9001-SPLIT-1')->with('lines')->firstOrFail();
 
         $this->assertSame('9001/S1', $splitOrder->external_number);
+        $this->assertSame($order->id, $splitOrder->split_parent_order_id);
+        $this->assertSame($order->id, $splitOrder->split_root_order_id);
         $this->assertCount(1, $order->lines);
         $this->assertSame($firstProduct->id, $order->lines->first()->product_id);
         $this->assertCount(1, $splitOrder->lines);
         $this->assertSame($secondProduct->id, $splitOrder->lines->first()->product_id);
+        $this->assertSame('line-2', $splitOrder->lines->first()->canonical_external_line_id);
         $this->assertSame('200.00', (string) $order->total_gross);
         $this->assertSame('300.00', (string) $splitOrder->total_gross);
 
@@ -160,6 +163,23 @@ class OrderSplitWorkflowTest extends TestCase
             'recipient_email' => 'client@example.test',
         ]);
         $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_partial_created')->count());
+
+        $nestedSourceLine = $splitOrder->lines->firstOrFail();
+        $this->post(route('orders.split', $splitOrder), [
+            'split_lines' => [
+                $nestedSourceLine->id => ['quantity' => 1],
+            ],
+            'note' => 'Drugi poziom wydzielenia',
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $nestedOrder = ExternalOrder::query()
+            ->where('external_id', '9001-SPLIT-1-SPLIT-1')
+            ->with('lines')
+            ->firstOrFail();
+
+        $this->assertSame($splitOrder->id, $nestedOrder->split_parent_order_id);
+        $this->assertSame($order->id, $nestedOrder->split_root_order_id);
+        $this->assertSame('line-2', $nestedOrder->lines->firstOrFail()->canonical_external_line_id);
     }
 
     public function test_split_order_waits_for_stock_and_is_allocated_after_pz_posting(): void
@@ -418,5 +438,97 @@ class OrderSplitWorkflowTest extends TestCase
         $this->assertCount(1, $splitOrder->lines);
         $this->assertSame('1.0000', (string) $splitOrder->lines->first()->quantity);
         $this->assertSame(1, PackingTask::query()->whereIn('status', ['open', 'picked'])->count());
+    }
+
+    public function test_woo_reimport_preserves_a_nested_split_without_sku_fallback(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'NESTED-WOO',
+            'name' => 'Nested Woo',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $rootOrder = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '9301',
+            'external_number' => '9301',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 0,
+        ]);
+        $childOrder = ExternalOrder::query()->create([
+            'split_parent_order_id' => $rootOrder->id,
+            'split_root_order_id' => $rootOrder->id,
+            'sales_channel_id' => $channel->id,
+            'external_id' => '9301-SPLIT-1',
+            'external_number' => '9301/S1',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 0,
+        ]);
+        $nestedOrder = ExternalOrder::query()->create([
+            'split_parent_order_id' => $childOrder->id,
+            'split_root_order_id' => $rootOrder->id,
+            'sales_channel_id' => $channel->id,
+            'external_id' => '9301-SPLIT-1-SPLIT-1',
+            'external_number' => '9301/S1/S1',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 200,
+        ]);
+        $nestedOrder->lines()->create([
+            'external_line_id' => 'line-1-S1-S1',
+            'canonical_external_line_id' => 'line-1',
+            'sku' => null,
+            'name' => 'Produkt bez SKU',
+            'quantity' => 2,
+            'unit_gross_price' => 100,
+            'raw_payload' => [
+                'sempre_erp_split' => [
+                    'source_external_line_id' => 'line-1-S1',
+                    'root_external_line_id' => 'line-1',
+                ],
+            ],
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Nested Woo import',
+            'base_url' => 'https://nested-shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_nested'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_nested'),
+            'order_import_enabled' => true,
+            'stock_export_enabled' => false,
+        ]);
+
+        Http::fake(function ($request) {
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if ((int) ($query['page'] ?? 1) > 1) {
+                return Http::response([]);
+            }
+
+            return Http::response([[
+                'id' => 9301,
+                'number' => '9301',
+                'status' => 'processing',
+                'currency' => 'PLN',
+                'total' => '200.00',
+                'line_items' => [[
+                    'id' => 'line-1',
+                    'sku' => '',
+                    'name' => 'Produkt bez SKU',
+                    'quantity' => 2,
+                    'subtotal' => '200.00',
+                    'total' => '200.00',
+                ]],
+            ]]);
+        });
+
+        app(WooCommerceImportService::class)->importOrders($integration);
+
+        $this->assertCount(0, $rootOrder->refresh()->lines);
+        $this->assertCount(0, $childOrder->refresh()->lines);
+        $this->assertSame('2.0000', (string) $nestedOrder->refresh()->lines->firstOrFail()->quantity);
+        $this->assertSame('line-1', $nestedOrder->lines->firstOrFail()->canonical_external_line_id);
     }
 }

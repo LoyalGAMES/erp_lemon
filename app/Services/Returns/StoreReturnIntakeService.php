@@ -10,6 +10,7 @@ use App\Models\ExternalOrderLine;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
 use Illuminate\Database\QueryException;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -39,17 +40,23 @@ final class StoreReturnIntakeService
             return null;
         }
 
-        $order = ExternalOrder::query()
-            ->with('lines.product')
+        $matchedOrder = ExternalOrder::query()
             ->where('external_number', $reference)
             ->orWhere('external_id', $reference)
             ->first();
 
-        if (! $order instanceof ExternalOrder || ! $this->contactMatchesOrder($order, $contact)) {
+        if (! $matchedOrder instanceof ExternalOrder) {
             return null;
         }
 
-        return $order;
+        $rootOrder = $this->rootOrder($matchedOrder);
+
+        if (! $this->contactMatchesOrder($rootOrder, $contact)
+            && ! $this->contactMatchesOrder($matchedOrder, $contact)) {
+            return null;
+        }
+
+        return $rootOrder->load('lines.product');
     }
 
     /**
@@ -61,27 +68,32 @@ final class StoreReturnIntakeService
      */
     public function serializeOrderForStore(ExternalOrder $order): array
     {
-        $order->loadMissing('lines.product');
-        $returned = $this->returnedQuantities($order);
+        $rootOrder = $this->rootOrder($order);
+        $state = $this->familyAvailability($rootOrder);
 
         return [
             'source' => 'erp',
-            'order_id' => (string) $order->external_id,
-            'order_reference' => (string) ($order->external_number ?: $order->external_id),
-            'order_number' => (string) ($order->external_number ?: $order->external_id),
-            'currency' => (string) $order->currency,
-            'customer_email' => (string) data_get($order->billing_data, 'email', ''),
-            'customer_phone' => (string) (data_get($order->billing_data, 'phone') ?: data_get($order->shipping_data, 'phone', '')),
-            'items' => $order->lines
-                ->filter(fn (ExternalOrderLine $line): bool => (float) $line->quantity > 0)
-                ->map(function (ExternalOrderLine $line) use ($returned): array {
-                    $remaining = max(0, (float) $line->quantity - $this->returnedQuantityForLine($line, $returned));
+            'order_id' => (string) $rootOrder->external_id,
+            'wc_order_id' => (string) $rootOrder->external_id,
+            'return_order_key' => $this->returnOrderKey($rootOrder),
+            'order_reference' => (string) ($rootOrder->external_number ?: $rootOrder->external_id),
+            'order_number' => (string) ($rootOrder->external_number ?: $rootOrder->external_id),
+            'currency' => (string) $rootOrder->currency,
+            'customer_email' => (string) data_get($rootOrder->billing_data, 'email', ''),
+            'customer_phone' => (string) (data_get($rootOrder->billing_data, 'phone') ?: data_get($rootOrder->shipping_data, 'phone', '')),
+            'accounted_return_references' => $state['accounted_return_references'],
+            'items' => collect($state['groups'])
+                ->map(function (array $group): array {
+                    /** @var ExternalOrderLine $line */
+                    $line = $group['lines']->first();
 
                     return [
-                        'id' => (string) ($line->external_line_id ?: 'line-'.$line->id),
+                        'id' => $group['canonical_id'],
+                        'return_item_key' => $group['canonical_id'],
+                        'wc_order_item_id' => $group['canonical_id'],
                         'name' => (string) $line->name,
                         'sku' => (string) ($line->sku ?? ''),
-                        'quantity' => (int) floor($remaining),
+                        'quantity' => (int) floor($group['available_quantity']),
                         'image' => (string) data_get($line->raw_payload, 'image.src', ''),
                         'price' => (float) ($line->unit_gross_price ?? 0),
                     ];
@@ -106,6 +118,14 @@ final class StoreReturnIntakeService
             throw new RuntimeException('Brak identyfikatora zgłoszenia zwrotu ze sklepu.');
         }
 
+        $existingReturn = ReturnCase::query()
+            ->where('store_return_reference', $returnReference)
+            ->first();
+
+        if ($existingReturn instanceof ReturnCase) {
+            return $existingReturn;
+        }
+
         $order = $this->resolveOrderForPayload($payload);
 
         if (! $order instanceof ExternalOrder) {
@@ -124,10 +144,10 @@ final class StoreReturnIntakeService
 
         try {
             $returnCase = DB::transaction(function () use ($payload, $order, $settings, $contact, $email, $returnReference, &$created): ReturnCase {
+                $rootOrderId = (int) ($order->split_root_order_id ?: $order->id);
                 $order = ExternalOrder::query()
-                    ->with('lines.product')
                     ->lockForUpdate()
-                    ->findOrFail($order->id);
+                    ->findOrFail($rootOrderId);
                 $existing = ReturnCase::query()
                     ->where('store_return_reference', $returnReference)
                     ->lockForUpdate()
@@ -137,7 +157,9 @@ final class StoreReturnIntakeService
                     return $existing;
                 }
 
-                $items = $this->matchItems($order, (array) ($payload['items'] ?? []));
+                $family = $this->familyOrders($order, true);
+                $state = $this->familyAvailability($order, $family);
+                $items = $this->matchItems($state, (array) ($payload['items'] ?? []));
 
                 if ($items === []) {
                     throw new RuntimeException('Zgłoszenie nie zawiera pozycji możliwych do zwrotu.');
@@ -164,6 +186,8 @@ final class StoreReturnIntakeService
                         'customer_phone' => filled($payload['customer_phone'] ?? null) ? (string) $payload['customer_phone'] : null,
                         'external_order_number' => (string) ($payload['order_number'] ?? $payload['order_reference'] ?? ''),
                         'store_order_id' => filled($payload['order_id'] ?? null) ? (string) $payload['order_id'] : null,
+                        'return_order_key' => $this->returnOrderKey($order),
+                        'split_family_order_ids' => $family->pluck('id')->values()->all(),
                     ],
                 ]);
 
@@ -171,6 +195,7 @@ final class StoreReturnIntakeService
                     $returnCase->lines()->create([
                         'product_id' => $item['order_line']?->product_id,
                         'external_order_line_id' => $item['order_line']?->id,
+                        'canonical_external_line_id' => $item['canonical_id'],
                         'quantity_expected' => $item['quantity'],
                         'quantity_accepted' => $item['quantity'],
                         'condition' => $settings['default_condition'],
@@ -183,6 +208,8 @@ final class StoreReturnIntakeService
                             'store_item_name' => $item['name'],
                             'store_item_sku' => $item['sku'],
                             'store_item_reason' => $item['reason'],
+                            'canonical_external_line_id' => $item['canonical_id'],
+                            'physical_external_order_id' => $item['order_line']?->external_order_id,
                         ],
                     ]);
                 }
@@ -294,13 +321,12 @@ final class StoreReturnIntakeService
             }
 
             $order = ExternalOrder::query()
-                ->with('lines.product')
                 ->where('external_number', $value)
                 ->orWhere('external_id', $value)
                 ->first();
 
             if ($order instanceof ExternalOrder) {
-                return $order;
+                return $this->rootOrder($order);
             }
         }
 
@@ -308,16 +334,17 @@ final class StoreReturnIntakeService
     }
 
     /**
-     * Dopasowuje pozycje zgłoszenia do linii zamówienia i przycina ilości
-     * do wartości pozostałych do zwrotu.
+     * Dopasowuje logiczne pozycje formularza do aktualnych fizycznych linii
+     * zamówienia pierwotnego i wszystkich jego części wydzielonych.
      *
+     * @param  array{groups:array<string, array<string, mixed>>}  $state
      * @param  array<int, mixed>  $items
-     * @return list<array{id:string,name:string,sku:string,reason:string,quantity:float,order_line:?ExternalOrderLine}>
+     * @return list<array{id:string,canonical_id:string,name:string,sku:string,reason:string,quantity:float,order_line:ExternalOrderLine}>
      */
-    private function matchItems(?ExternalOrder $order, array $items): array
+    private function matchItems(array $state, array $items): array
     {
-        $returned = $order instanceof ExternalOrder ? $this->returnedQuantities($order) : [];
         $matched = [];
+        $seen = [];
 
         foreach ($items as $item) {
             if (! is_array($item)) {
@@ -330,54 +357,76 @@ final class StoreReturnIntakeService
                 continue;
             }
 
-            $itemId = trim((string) ($item['id'] ?? ''));
+            $itemId = trim((string) ($item['return_item_key'] ?? $item['id'] ?? ''));
             $sku = trim((string) ($item['sku'] ?? ''));
-            $orderLine = $order instanceof ExternalOrder ? $this->matchOrderLine($order, $itemId, $sku) : null;
+            $canonicalId = isset($state['groups'][$itemId]) ? $itemId : '';
 
-            if ($orderLine instanceof ExternalOrderLine) {
-                $remaining = max(0, (float) $orderLine->quantity - $this->returnedQuantityForLine($orderLine, $returned));
-                $quantity = min($quantity, $remaining);
+            if ($canonicalId === '' && $itemId === '' && $sku !== '') {
+                $bySku = collect($state['groups'])
+                    ->filter(function (array $group) use ($sku): bool {
+                        $line = $group['lines']->first();
 
-                if ($quantity <= 0) {
-                    continue;
+                        return $line instanceof ExternalOrderLine && (string) $line->sku === $sku;
+                    });
+
+                if ($bySku->count() === 1) {
+                    $canonicalId = (string) $bySku->keys()->first();
                 }
             }
 
-            $matched[] = [
-                'id' => $itemId,
-                'name' => mb_substr(trim((string) ($item['name'] ?? '')), 0, 255),
-                'sku' => mb_substr($sku, 0, 120),
-                'reason' => mb_substr(trim((string) ($item['reason'] ?? '')), 0, 255),
-                'quantity' => $quantity,
-                'order_line' => $orderLine,
-            ];
-        }
+            if ($canonicalId === '' || ! isset($state['groups'][$canonicalId])) {
+                throw new RuntimeException('Wybrana pozycja nie należy do tego zamówienia. Odśwież formularz i spróbuj ponownie.');
+            }
 
-        return $matched;
-    }
+            if (isset($seen[$canonicalId])) {
+                throw new RuntimeException('Ta sama pozycja została przesłana więcej niż raz. Odśwież formularz i spróbuj ponownie.');
+            }
 
-    private function matchOrderLine(ExternalOrder $order, string $itemId, string $sku): ?ExternalOrderLine
-    {
-        $order->loadMissing('lines');
+            $seen[$canonicalId] = true;
+            $group = $state['groups'][$canonicalId];
+            $available = (float) $group['available_quantity'];
 
-        if ($itemId !== '') {
-            $line = $order->lines->first(
-                fn (ExternalOrderLine $line): bool => (string) $line->external_line_id === $itemId
-                    || 'line-'.$line->id === $itemId,
-            );
+            if ($quantity - $available > 0.00001) {
+                throw new RuntimeException(sprintf(
+                    'Dla pozycji „%s” dostępna liczba sztuk do zwrotu to %s. Odśwież formularz.',
+                    (string) $group['lines']->first()?->name,
+                    $this->formatQuantity($available),
+                ));
+            }
 
-            if ($line instanceof ExternalOrderLine) {
-                return $line;
+            $remaining = $quantity;
+            $reason = mb_substr(trim((string) ($item['reason'] ?? '')), 0, 255);
+
+            foreach ($group['lines'] as $orderLine) {
+                $lineAvailable = (float) ($group['available_by_line'][$orderLine->id] ?? 0);
+                $take = min($remaining, $lineAvailable);
+
+                if ($take <= 0) {
+                    continue;
+                }
+
+                $matched[] = [
+                    'id' => $canonicalId,
+                    'canonical_id' => $canonicalId,
+                    'name' => mb_substr(trim((string) ($item['name'] ?? $orderLine->name)), 0, 255),
+                    'sku' => mb_substr($sku !== '' ? $sku : (string) ($orderLine->sku ?? ''), 0, 120),
+                    'reason' => $reason,
+                    'quantity' => $take,
+                    'order_line' => $orderLine,
+                ];
+                $remaining -= $take;
+
+                if ($remaining <= 0.00001) {
+                    break;
+                }
+            }
+
+            if ($remaining > 0.00001) {
+                throw new RuntimeException('Nie udało się przypisać całej ilości do pozycji zamówienia. Odśwież formularz.');
             }
         }
 
-        if ($sku !== '') {
-            return $order->lines->first(
-                fn (ExternalOrderLine $line): bool => (string) $line->sku === $sku,
-            );
-        }
-
-        return null;
+        return $matched;
     }
 
     /**
@@ -394,44 +443,263 @@ final class StoreReturnIntakeService
         return null;
     }
 
-    /**
-     * @return array<string, float>
-     */
-    private function returnedQuantities(ExternalOrder $order): array
+    private function rootOrder(ExternalOrder $order): ExternalOrder
     {
-        $rows = ReturnCaseLine::query()
-            ->selectRaw('external_order_line_id, product_id, SUM(quantity_accepted) as quantity')
-            ->whereHas('returnCase', function ($query) use ($order): void {
-                $query->where('external_order_id', $order->id)
-                    ->where('status', '!=', self::STATUS_REJECTED);
-            })
-            ->groupBy('external_order_line_id', 'product_id')
-            ->get();
+        $rootId = (int) ($order->split_root_order_id ?: 0);
 
-        $quantities = [];
+        if ($rootId > 0 && $rootId !== (int) $order->id) {
+            $root = ExternalOrder::query()->find($rootId);
 
-        foreach ($rows as $row) {
-            if ($row->external_order_line_id !== null) {
-                $quantities['line:'.$row->external_order_line_id] = (float) $row->quantity;
-
-                continue;
-            }
-
-            if ($row->product_id !== null) {
-                $key = 'product:'.$row->product_id;
-                $quantities[$key] = ($quantities[$key] ?? 0) + (float) $row->quantity;
+            if ($root instanceof ExternalOrder) {
+                return $root;
             }
         }
 
-        return $quantities;
+        $current = $order;
+        $visited = [];
+
+        while (! isset($visited[$current->id])) {
+            $visited[$current->id] = true;
+            $parentId = (int) ($current->split_parent_order_id
+                ?: data_get($current->raw_payload, 'sempre_erp_split.parent_order_id', 0));
+
+            if ($parentId <= 0 || isset($visited[$parentId])) {
+                break;
+            }
+
+            $parent = ExternalOrder::query()->find($parentId);
+
+            if (! $parent instanceof ExternalOrder) {
+                break;
+            }
+
+            $current = $parent;
+        }
+
+        return $current;
     }
 
     /**
-     * @param  array<string, float>  $returned
+     * @return Collection<int, ExternalOrder>
      */
-    private function returnedQuantityForLine(ExternalOrderLine $line, array $returned): float
+    private function familyOrders(ExternalOrder $order, bool $lock = false): Collection
     {
-        return (float) ($returned['line:'.$line->id]
-            ?? ($line->product_id !== null ? ($returned['product:'.$line->product_id] ?? 0) : 0));
+        $root = $this->rootOrder($order);
+        $query = ExternalOrder::query()
+            ->with('lines.product')
+            ->where(function ($query) use ($root): void {
+                $query->whereKey($root->id)
+                    ->orWhere('split_root_order_id', $root->id);
+            })
+            ->orderBy('id');
+
+        if ($lock) {
+            $query->lockForUpdate();
+        }
+
+        return $query->get();
+    }
+
+    /**
+     * @param  Collection<int, ExternalOrder>|null  $family
+     * @return array{groups:array<string, array<string, mixed>>,accounted_return_references:list<string>}
+     */
+    private function familyAvailability(ExternalOrder $order, ?Collection $family = null): array
+    {
+        $family ??= $this->familyOrders($order);
+        $groups = [];
+        $lineById = [];
+        $canonicalByLineId = [];
+        $availableByLine = [];
+
+        foreach ($family as $familyOrder) {
+            foreach ($familyOrder->lines->sortBy('id') as $line) {
+                if ((float) $line->quantity <= 0) {
+                    continue;
+                }
+
+                $canonicalId = $this->canonicalExternalLineId($line);
+                $lineById[(int) $line->id] = $line;
+                $canonicalByLineId[(int) $line->id] = $canonicalId;
+                $availableByLine[(int) $line->id] = (float) $line->quantity;
+
+                if (! isset($groups[$canonicalId])) {
+                    $groups[$canonicalId] = [
+                        'canonical_id' => $canonicalId,
+                        'lines' => collect(),
+                        'ordered_quantity' => 0.0,
+                        'available_quantity' => 0.0,
+                        'available_by_line' => [],
+                    ];
+                }
+
+                $groups[$canonicalId]['lines']->push($line);
+                $groups[$canonicalId]['ordered_quantity'] += (float) $line->quantity;
+            }
+        }
+
+        $familyIds = $family->pluck('id')->map(fn ($id): int => (int) $id)->all();
+        $returnCases = ReturnCase::query()
+            ->with('lines')
+            ->whereIn('external_order_id', $familyIds)
+            ->whereNotIn('status', [self::STATUS_REJECTED, 'cancelled'])
+            ->get();
+        $exactByLine = [];
+        $unassignedByCanonical = [];
+        $unassignedByProduct = [];
+
+        foreach ($returnCases as $returnCase) {
+            foreach ($returnCase->lines as $returnLine) {
+                $quantity = $this->reservedQuantity($returnLine);
+
+                if ($quantity <= 0) {
+                    continue;
+                }
+
+                $lineId = (int) ($returnLine->external_order_line_id ?: 0);
+
+                if ($lineId > 0 && isset($lineById[$lineId])) {
+                    $exactByLine[$lineId] = ($exactByLine[$lineId] ?? 0) + $quantity;
+
+                    continue;
+                }
+
+                $canonicalId = trim((string) (
+                    $returnLine->canonical_external_line_id
+                    ?: data_get($returnLine->metadata, 'canonical_external_line_id')
+                    ?: data_get($returnLine->metadata, 'store_item_id')
+                ));
+
+                if ($canonicalId !== '') {
+                    $canonicalId = $this->withoutSplitSuffix($canonicalId);
+
+                    if (isset($groups[$canonicalId])) {
+                        $unassignedByCanonical[$canonicalId] = ($unassignedByCanonical[$canonicalId] ?? 0) + $quantity;
+
+                        continue;
+                    }
+                }
+
+                if ($returnLine->product_id !== null) {
+                    $productId = (int) $returnLine->product_id;
+                    $unassignedByProduct[$productId] = ($unassignedByProduct[$productId] ?? 0) + $quantity;
+                }
+            }
+        }
+
+        foreach ($exactByLine as $lineId => $quantity) {
+            $used = min($quantity, $availableByLine[$lineId] ?? 0);
+            $availableByLine[$lineId] = max(0, ($availableByLine[$lineId] ?? 0) - $used);
+            $excess = $quantity - $used;
+
+            if ($excess > 0 && isset($canonicalByLineId[$lineId])) {
+                $canonicalId = $canonicalByLineId[$lineId];
+                $unassignedByCanonical[$canonicalId] = ($unassignedByCanonical[$canonicalId] ?? 0) + $excess;
+            }
+        }
+
+        foreach ($unassignedByCanonical as $canonicalId => $quantity) {
+            $this->consumeAvailability(
+                $groups[$canonicalId]['lines']->pluck('id')->map(fn ($id): int => (int) $id)->all(),
+                $quantity,
+                $availableByLine,
+            );
+        }
+
+        foreach ($unassignedByProduct as $productId => $quantity) {
+            $lineIds = collect($lineById)
+                ->filter(fn (ExternalOrderLine $line): bool => (int) $line->product_id === $productId)
+                ->keys()
+                ->map(fn ($id): int => (int) $id)
+                ->values()
+                ->all();
+            $this->consumeAvailability($lineIds, $quantity, $availableByLine);
+        }
+
+        foreach ($groups as $canonicalId => &$group) {
+            foreach ($group['lines'] as $line) {
+                $group['available_by_line'][(int) $line->id] = (float) ($availableByLine[(int) $line->id] ?? 0);
+            }
+
+            $group['available_quantity'] = array_sum($group['available_by_line']);
+        }
+        unset($group);
+
+        return [
+            'groups' => $groups,
+            'accounted_return_references' => $returnCases
+                ->pluck('store_return_reference')
+                ->filter(fn ($reference): bool => filled($reference))
+                ->map(fn ($reference): string => (string) $reference)
+                ->unique()
+                ->values()
+                ->all(),
+        ];
+    }
+
+    /**
+     * @param  list<int>  $lineIds
+     * @param  array<int, float>  $availableByLine
+     */
+    private function consumeAvailability(array $lineIds, float $quantity, array &$availableByLine): void
+    {
+        foreach ($lineIds as $lineId) {
+            $available = (float) ($availableByLine[$lineId] ?? 0);
+            $used = min($quantity, $available);
+            $availableByLine[$lineId] = max(0, $available - $used);
+            $quantity -= $used;
+
+            if ($quantity <= 0.00001) {
+                break;
+            }
+        }
+    }
+
+    private function canonicalExternalLineId(ExternalOrderLine $line): string
+    {
+        $canonical = trim((string) (
+            $line->canonical_external_line_id
+            ?: data_get($line->raw_payload, 'sempre_erp_split.root_external_line_id')
+            ?: data_get($line->raw_payload, 'id')
+            ?: data_get($line->raw_payload, 'sempre_erp_split.source_external_line_id')
+            ?: $line->external_line_id
+        ));
+
+        if ($canonical === '') {
+            return 'line-'.$line->id;
+        }
+
+        if (filled(data_get($line->raw_payload, 'sempre_erp_split.source_order_line_id'))) {
+            $canonical = $this->withoutSplitSuffix($canonical);
+        }
+
+        return $canonical;
+    }
+
+    private function withoutSplitSuffix(string $value): string
+    {
+        do {
+            $previous = $value;
+            $value = (string) preg_replace('/-S\d+$/', '', $value);
+        } while ($value !== $previous);
+
+        return $value;
+    }
+
+    private function reservedQuantity(ReturnCaseLine $line): float
+    {
+        $accepted = (float) $line->quantity_accepted;
+
+        return $accepted > 0 ? $accepted : max(0, (float) $line->quantity_expected);
+    }
+
+    private function returnOrderKey(ExternalOrder $order): string
+    {
+        return sprintf('erp:%d:%s', (int) $order->sales_channel_id, (string) $order->external_id);
+    }
+
+    private function formatQuantity(float $quantity): string
+    {
+        return rtrim(rtrim(number_format($quantity, 4, '.', ''), '0'), '.');
     }
 }

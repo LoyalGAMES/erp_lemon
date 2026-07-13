@@ -18,14 +18,13 @@ final class OrderSplitService
         private readonly StockReservationService $reservations,
         private readonly PackingTaskService $packingTasks,
         private readonly CustomerCommunicationService $communication,
-    ) {
-    }
+    ) {}
 
     /**
      * Wydziela pozycje zamówienia do nowego zamówienia potomnego i przelicza
      * rezerwacje oraz zadania pakowania obu zamówień.
      *
-     * @param array<int, float> $quantities mapa line_id => ilość do wydzielenia
+     * @param  array<int, float>  $quantities  mapa line_id => ilość do wydzielenia
      */
     public function split(ExternalOrder $order, array $quantities, ?string $note = null, string $source = 'manual'): ExternalOrder
     {
@@ -39,20 +38,34 @@ final class OrderSplitService
         }
 
         $splitOrder = DB::transaction(function () use ($order, $quantities, $note, $source): ExternalOrder {
-            $order = ExternalOrder::query()
-                ->with('lines')
+            $orderSnapshot = ExternalOrder::query()->findOrFail($order->id);
+            $rootOrderId = (int) ($orderSnapshot->split_root_order_id ?: $orderSnapshot->id);
+            $lockedOrders = ExternalOrder::query()
+                ->whereIn('id', array_values(array_unique([$rootOrderId, (int) $orderSnapshot->id])))
+                ->orderBy('id')
                 ->lockForUpdate()
-                ->findOrFail($order->id);
+                ->get()
+                ->keyBy('id');
+            $order = $lockedOrders->get($orderSnapshot->id);
+
+            if (! $order instanceof ExternalOrder) {
+                throw new RuntimeException('Nie znaleziono zamówienia do podziału.');
+            }
+
+            $order->load('lines');
+            $rootOrder = $lockedOrders->get($rootOrderId) ?: $order;
 
             $splitIndex = ExternalOrder::query()
                 ->where('sales_channel_id', $order->sales_channel_id)
-                ->where('external_id', 'like', $order->external_id . '-SPLIT-%')
+                ->where('external_id', 'like', $order->external_id.'-SPLIT-%')
                 ->count() + 1;
 
             $splitOrder = ExternalOrder::query()->create([
+                'split_parent_order_id' => $order->id,
+                'split_root_order_id' => $rootOrder->id,
                 'sales_channel_id' => $order->sales_channel_id,
-                'external_id' => $order->external_id . '-SPLIT-' . $splitIndex,
-                'external_number' => ($order->external_number ?: $order->external_id) . '/S' . $splitIndex,
+                'external_id' => $order->external_id.'-SPLIT-'.$splitIndex,
+                'external_number' => ($order->external_number ?: $order->external_id).'/S'.$splitIndex,
                 'status' => in_array($order->status, ['pending', 'processing', 'on-hold'], true) ? $order->status : 'processing',
                 'currency' => $order->currency,
                 'total_gross' => 0,
@@ -62,6 +75,8 @@ final class OrderSplitService
                     'sempre_erp_split' => [
                         'parent_order_id' => $order->id,
                         'parent_external_id' => $order->external_id,
+                        'root_order_id' => $rootOrder->id,
+                        'root_external_id' => $rootOrder->external_id,
                         'note' => $note,
                         'source' => $source,
                         'created_at' => now()->toISOString(),
@@ -89,7 +104,8 @@ final class OrderSplitService
 
                 $splitOrder->lines()->create([
                     'product_id' => $line->product_id,
-                    'external_line_id' => $line->external_line_id ? $line->external_line_id . '-S' . $splitIndex : null,
+                    'external_line_id' => $line->external_line_id ? $line->external_line_id.'-S'.$splitIndex : null,
+                    'canonical_external_line_id' => $this->canonicalExternalLineId($line),
                     'sku' => $line->sku,
                     'name' => $line->name,
                     'quantity' => $splitQuantity,
@@ -100,6 +116,7 @@ final class OrderSplitService
                         'sempre_erp_split' => [
                             'source_order_line_id' => $line->id,
                             'source_external_line_id' => $line->external_line_id,
+                            'root_external_line_id' => $this->canonicalExternalLineId($line),
                             'source_quantity' => $currentQuantity,
                             'split_quantity' => $splitQuantity,
                         ],
@@ -158,12 +175,34 @@ final class OrderSplitService
     }
 
     /**
-     * @param iterable<int, ExternalOrderLine> $lines
+     * @param  iterable<int, ExternalOrderLine>  $lines
      */
     private function grossTotalFromLines(iterable $lines): float
     {
         return (float) collect($lines)->sum(
             fn (ExternalOrderLine $line): float => (float) ($line->unit_gross_price ?? 0) * (float) $line->quantity,
         );
+    }
+
+    private function canonicalExternalLineId(ExternalOrderLine $line): ?string
+    {
+        $canonical = trim((string) (
+            $line->canonical_external_line_id
+            ?: data_get($line->raw_payload, 'sempre_erp_split.root_external_line_id')
+            ?: data_get($line->raw_payload, 'id')
+            ?: data_get($line->raw_payload, 'sempre_erp_split.source_external_line_id')
+            ?: $line->external_line_id
+        ));
+
+        if ($canonical === '') {
+            return null;
+        }
+
+        do {
+            $previous = $canonical;
+            $canonical = (string) preg_replace('/-S\d+$/', '', $canonical);
+        } while ($canonical !== $previous);
+
+        return $canonical;
     }
 }

@@ -716,6 +716,13 @@ final class WooCommerceImportService
                         'sales_channel_id' => $integration->sales_channel_id,
                         'external_id' => (string) $item['id'],
                     ]);
+
+                    if ($order->exists) {
+                        $order = ExternalOrder::query()
+                            ->lockForUpdate()
+                            ->findOrFail($order->id);
+                    }
+
                     $isNew = ! $order->exists;
                     $wasCreated = $isNew;
                     $previousStatus = $order->exists ? (string) $order->status : null;
@@ -753,6 +760,7 @@ final class WooCommerceImportService
                         $order->lines()->create([
                             'product_id' => $product?->id,
                             'external_line_id' => isset($line['id']) ? (string) $line['id'] : null,
+                            'canonical_external_line_id' => isset($line['id']) ? (string) $line['id'] : null,
                             'sku' => $sku !== '' ? $sku : null,
                             'name' => (string) ($line['name'] ?? 'Pozycja zamówienia'),
                             'quantity' => $quantity,
@@ -1076,7 +1084,11 @@ final class WooCommerceImportService
             return $childOrders
                 ->flatMap(function (ExternalOrder $childOrder) use ($order) {
                     return $childOrder->lines->map(function ($line) use ($childOrder, $order): array {
-                        $sourceExternalLineId = trim((string) data_get($line->raw_payload, 'sempre_erp_split.source_external_line_id', ''));
+                        $sourceExternalLineId = trim((string) (
+                            $line->canonical_external_line_id
+                            ?: data_get($line->raw_payload, 'sempre_erp_split.root_external_line_id')
+                            ?: data_get($line->raw_payload, 'sempre_erp_split.source_external_line_id', '')
+                        ));
                         $externalLineId = (string) ($line->external_line_id ?? '');
 
                         if ($sourceExternalLineId === '' && $externalLineId !== '') {

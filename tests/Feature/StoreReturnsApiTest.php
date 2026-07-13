@@ -139,7 +139,7 @@ class StoreReturnsApiTest extends TestCase
         Queue::assertPushed(SendReturnWaitingForPackageMailJob::class, 1);
     }
 
-    public function test_store_return_caps_quantity_at_remaining_returnable(): void
+    public function test_store_return_rejects_quantity_above_remaining_returnable(): void
     {
         $this->createOrder();
 
@@ -151,9 +151,345 @@ class StoreReturnsApiTest extends TestCase
             'items' => [
                 ['id' => '771', 'quantity' => 99],
             ],
+        ], $this->authHeaders())
+            ->assertStatus(422)
+            ->assertJsonPath('success', false);
+
+        $this->assertSame(0, ReturnCase::query()->count());
+    }
+
+    public function test_partial_return_leaves_only_the_remaining_quantity_and_blocks_a_duplicate(): void
+    {
+        $this->createOrder();
+
+        $this->postJson('/api/store-returns', [
+            'return_reference' => 'LLR-PARTIAL-1',
+            'order_reference' => '12345',
+            'customer_contact' => 'klient@example.test',
+            'items' => [
+                ['id' => '771', 'quantity' => 1],
+            ],
         ], $this->authHeaders())->assertOk();
 
-        $this->assertSame(2.0, (float) ReturnCase::query()->firstOrFail()->lines()->first()->quantity_expected);
+        $this->postJson('/api/store-returns/lookup-order', [
+            'order_reference' => '12345',
+            'contact' => 'klient@example.test',
+        ], $this->authHeaders())
+            ->assertOk()
+            ->assertJsonPath('order.items.0.id', '771')
+            ->assertJsonPath('order.items.0.quantity', 1)
+            ->assertJsonPath('order.accounted_return_references.0', 'LLR-PARTIAL-1');
+
+        $this->postJson('/api/store-returns', [
+            'return_reference' => 'LLR-PARTIAL-2',
+            'order_reference' => '12345',
+            'customer_contact' => 'klient@example.test',
+            'items' => [
+                ['id' => '771', 'quantity' => 1],
+            ],
+        ], $this->authHeaders())->assertOk();
+
+        $this->postJson('/api/store-returns', [
+            'return_reference' => 'LLR-PARTIAL-DUPLICATE',
+            'order_reference' => '12345',
+            'customer_contact' => 'klient@example.test',
+            'items' => [
+                ['id' => '771', 'quantity' => 1],
+            ],
+        ], $this->authHeaders())->assertStatus(422);
+
+        $this->assertSame(2, ReturnCase::query()->count());
+    }
+
+    public function test_returning_one_product_keeps_other_order_products_available(): void
+    {
+        $order = $this->createOrder();
+        $secondProduct = Product::query()->create([
+            'sku' => 'SKU-2',
+            'name' => 'Drugi produkt',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $order->lines()->create([
+            'product_id' => $secondProduct->id,
+            'external_line_id' => '772',
+            'canonical_external_line_id' => '772',
+            'sku' => 'SKU-2',
+            'name' => 'Drugi produkt',
+            'quantity' => 3,
+            'unit_gross_price' => 49.99,
+        ]);
+
+        $this->postJson('/api/store-returns', [
+            'return_reference' => 'LLR-FIRST-PRODUCT',
+            'order_reference' => '12345',
+            'customer_contact' => 'klient@example.test',
+            'items' => [
+                ['id' => '771', 'quantity' => 2],
+            ],
+        ], $this->authHeaders())->assertOk();
+
+        $response = $this->postJson('/api/store-returns/lookup-order', [
+            'order_reference' => '12345',
+            'contact' => 'klient@example.test',
+        ], $this->authHeaders())->assertOk();
+
+        $this->assertSame([['id' => '772', 'quantity' => 3]], collect($response->json('order.items'))
+            ->map(fn (array $item): array => ['id' => $item['id'], 'quantity' => $item['quantity']])
+            ->values()
+            ->all());
+    }
+
+    public function test_rejected_and_cancelled_returns_release_reserved_quantity(): void
+    {
+        $this->createOrder();
+
+        foreach (['rejected', 'cancelled'] as $index => $status) {
+            $response = $this->postJson('/api/store-returns', [
+                'return_reference' => 'LLR-RELEASE-'.$index,
+                'order_reference' => '12345',
+                'customer_contact' => 'klient@example.test',
+                'items' => [
+                    ['id' => '771', 'quantity' => 2],
+                ],
+            ], $this->authHeaders())->assertOk();
+
+            ReturnCase::query()
+                ->where('number', $response->json('external_id'))
+                ->firstOrFail()
+                ->update(['status' => $status]);
+
+            $this->postJson('/api/store-returns/lookup-order', [
+                'order_reference' => '12345',
+                'contact' => 'klient@example.test',
+            ], $this->authHeaders())
+                ->assertOk()
+                ->assertJsonPath('order.items.0.quantity', 2);
+        }
+    }
+
+    public function test_split_order_lookup_uses_root_order_and_original_woo_line_id(): void
+    {
+        $order = $this->createOrder();
+        $sourceLine = $order->lines->firstOrFail();
+        $splitOrder = ExternalOrder::query()->create([
+            'split_parent_order_id' => $order->id,
+            'split_root_order_id' => $order->id,
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_id' => '9001-SPLIT-1',
+            'external_number' => '12345/S1',
+            'status' => 'completed',
+            'currency' => 'PLN',
+            'total_gross' => 199.99,
+            'billing_data' => $order->billing_data,
+            'raw_payload' => [
+                'sempre_erp_split' => [
+                    'parent_order_id' => $order->id,
+                    'root_order_id' => $order->id,
+                ],
+            ],
+        ]);
+        $splitLine = $splitOrder->lines()->create([
+            'product_id' => $sourceLine->product_id,
+            'external_line_id' => '771-S1',
+            'canonical_external_line_id' => '771',
+            'sku' => $sourceLine->sku,
+            'name' => $sourceLine->name,
+            'quantity' => 2,
+            'unit_gross_price' => $sourceLine->unit_gross_price,
+            'raw_payload' => [
+                'sempre_erp_split' => [
+                    'source_order_line_id' => $sourceLine->id,
+                    'source_external_line_id' => '771',
+                    'root_external_line_id' => '771',
+                ],
+            ],
+        ]);
+        $sourceLine->delete();
+
+        foreach (['12345', '12345/S1'] as $reference) {
+            $this->postJson('/api/store-returns/lookup-order', [
+                'order_reference' => $reference,
+                'contact' => 'klient@example.test',
+            ], $this->authHeaders())
+                ->assertOk()
+                ->assertJsonPath('order.order_id', '9001')
+                ->assertJsonPath('order.order_reference', '12345')
+                ->assertJsonPath('order.items.0.id', '771')
+                ->assertJsonPath('order.items.0.wc_order_item_id', '771')
+                ->assertJsonPath('order.items.0.quantity', 2);
+        }
+
+        $this->postJson('/api/store-returns', [
+            'return_reference' => 'LLR-SPLIT',
+            'order_reference' => '12345/S1',
+            'customer_contact' => 'klient@example.test',
+            'items' => [
+                ['id' => '771', 'quantity' => 2],
+            ],
+        ], $this->authHeaders())->assertOk();
+
+        $returnCase = ReturnCase::query()->with('lines')->firstOrFail();
+
+        $this->assertSame($order->id, $returnCase->external_order_id);
+        $this->assertSame($splitLine->id, $returnCase->lines->first()->external_order_line_id);
+        $this->assertSame('771', $returnCase->lines->first()->canonical_external_line_id);
+    }
+
+    public function test_partial_split_allocates_successive_returns_across_physical_lines(): void
+    {
+        $order = $this->createOrder();
+        $rootLine = $order->lines->firstOrFail();
+        $rootLine->update([
+            'quantity' => 1,
+            'canonical_external_line_id' => '771',
+        ]);
+        $splitOrder = ExternalOrder::query()->create([
+            'split_parent_order_id' => $order->id,
+            'split_root_order_id' => $order->id,
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_id' => '9001-SPLIT-1',
+            'external_number' => '12345/S1',
+            'status' => 'completed',
+            'currency' => 'PLN',
+            'total_gross' => 99.99,
+            'billing_data' => $order->billing_data,
+        ]);
+        $splitLine = $splitOrder->lines()->create([
+            'product_id' => $rootLine->product_id,
+            'external_line_id' => '771-S1',
+            'canonical_external_line_id' => '771',
+            'sku' => $rootLine->sku,
+            'name' => $rootLine->name,
+            'quantity' => 1,
+            'unit_gross_price' => $rootLine->unit_gross_price,
+        ]);
+
+        foreach ([1, 2] as $index) {
+            $this->postJson('/api/store-returns', [
+                'return_reference' => 'LLR-SPLIT-PART-'.$index,
+                'order_reference' => '12345',
+                'customer_contact' => 'klient@example.test',
+                'items' => [
+                    ['id' => '771', 'quantity' => 1],
+                ],
+            ], $this->authHeaders())->assertOk();
+        }
+
+        $lineIds = ReturnCase::query()
+            ->orderBy('id')
+            ->with('lines')
+            ->get()
+            ->map(fn (ReturnCase $case): ?int => $case->lines->first()?->external_order_line_id)
+            ->all();
+
+        $this->assertSame([$rootLine->id, $splitLine->id], $lineIds);
+    }
+
+    public function test_unknown_and_duplicated_item_ids_are_rejected_without_creating_a_case(): void
+    {
+        $this->createOrder();
+
+        $this->postJson('/api/store-returns', [
+            'return_reference' => 'LLR-UNKNOWN-ITEM',
+            'order_reference' => '12345',
+            'customer_contact' => 'klient@example.test',
+            'items' => [
+                ['id' => 'not-an-order-line', 'sku' => 'SKU-1', 'quantity' => 1],
+            ],
+        ], $this->authHeaders())->assertStatus(422);
+
+        $this->postJson('/api/store-returns', [
+            'return_reference' => 'LLR-DUPLICATED-ITEM',
+            'order_reference' => '12345',
+            'customer_contact' => 'klient@example.test',
+            'items' => [
+                ['id' => '771', 'quantity' => 1],
+                ['id' => '771', 'quantity' => 1],
+            ],
+        ], $this->authHeaders())->assertStatus(422);
+
+        $this->assertSame(0, ReturnCase::query()->count());
+    }
+
+    public function test_two_order_lines_with_the_same_product_and_sku_remain_independent(): void
+    {
+        $order = $this->createOrder();
+        $firstLine = $order->lines->firstOrFail();
+        $firstLine->update(['quantity' => 1]);
+        $order->lines()->create([
+            'product_id' => $firstLine->product_id,
+            'external_line_id' => '772',
+            'canonical_external_line_id' => '772',
+            'sku' => $firstLine->sku,
+            'name' => $firstLine->name,
+            'quantity' => 1,
+            'unit_gross_price' => $firstLine->unit_gross_price,
+        ]);
+
+        $this->postJson('/api/store-returns', [
+            'return_reference' => 'LLR-SAME-SKU',
+            'order_reference' => '12345',
+            'customer_contact' => 'klient@example.test',
+            'items' => [
+                ['id' => '771', 'sku' => 'SKU-1', 'quantity' => 1],
+            ],
+        ], $this->authHeaders())->assertOk();
+
+        $response = $this->postJson('/api/store-returns/lookup-order', [
+            'order_reference' => '12345',
+            'contact' => 'klient@example.test',
+        ], $this->authHeaders())->assertOk();
+
+        $this->assertSame(['772'], collect($response->json('order.items'))->pluck('id')->all());
+        $this->assertSame(1, $response->json('order.items.0.quantity'));
+    }
+
+    public function test_existing_return_stays_reserved_after_source_line_is_moved_to_a_split(): void
+    {
+        $order = $this->createOrder();
+        $sourceLine = $order->lines->firstOrFail();
+
+        $this->postJson('/api/store-returns', [
+            'return_reference' => 'LLR-BEFORE-SPLIT',
+            'order_reference' => '12345',
+            'customer_contact' => 'klient@example.test',
+            'items' => [
+                ['id' => '771', 'quantity' => 1],
+            ],
+        ], $this->authHeaders())->assertOk();
+
+        $splitOrder = ExternalOrder::query()->create([
+            'split_parent_order_id' => $order->id,
+            'split_root_order_id' => $order->id,
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_id' => '9001-SPLIT-1',
+            'external_number' => '12345/S1',
+            'status' => 'completed',
+            'currency' => 'PLN',
+            'total_gross' => 199.99,
+            'billing_data' => $order->billing_data,
+        ]);
+        $splitOrder->lines()->create([
+            'product_id' => $sourceLine->product_id,
+            'external_line_id' => '771-S1',
+            'canonical_external_line_id' => '771',
+            'sku' => $sourceLine->sku,
+            'name' => $sourceLine->name,
+            'quantity' => 2,
+            'unit_gross_price' => $sourceLine->unit_gross_price,
+        ]);
+        $sourceLine->delete();
+
+        $this->postJson('/api/store-returns/lookup-order', [
+            'order_reference' => '12345',
+            'contact' => 'klient@example.test',
+        ], $this->authHeaders())
+            ->assertOk()
+            ->assertJsonPath('order.items.0.id', '771')
+            ->assertJsonPath('order.items.0.quantity', 1);
     }
 
     public function test_status_endpoint_reports_current_state(): void

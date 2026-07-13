@@ -15,6 +15,8 @@ class ExternalOrder extends Model
     use HasFactory;
 
     protected $fillable = [
+        'split_parent_order_id',
+        'split_root_order_id',
         'sales_channel_id',
         'customer_id',
         'customer_external_account_id',
@@ -56,6 +58,21 @@ class ExternalOrder extends Model
     public function salesChannel(): BelongsTo
     {
         return $this->belongsTo(SalesChannel::class);
+    }
+
+    public function splitParent(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'split_parent_order_id');
+    }
+
+    public function splitRoot(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'split_root_order_id');
+    }
+
+    public function splitChildren(): HasMany
+    {
+        return $this->hasMany(self::class, 'split_parent_order_id');
     }
 
     public function customer(): BelongsTo

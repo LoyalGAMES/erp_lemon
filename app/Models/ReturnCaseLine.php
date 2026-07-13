@@ -16,6 +16,7 @@ class ReturnCaseLine extends Model
         'return_case_id',
         'product_id',
         'external_order_line_id',
+        'canonical_external_line_id',
         'quantity_expected',
         'quantity_accepted',
         'condition',
