@@ -22,7 +22,7 @@ final class AddSecurityHeaders
         $response->headers->set(
             'Content-Security-Policy',
             "default-src 'self'; base-uri 'self'; connect-src 'self'; font-src 'self' data:; "
-            ."form-action 'self'; frame-ancestors 'none'; img-src 'self' https: data:; object-src 'none'; "
+            ."form-action 'self' https://accounts.google.com; frame-ancestors 'none'; img-src 'self' https: data:; object-src 'none'; "
             ."script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
         );
 

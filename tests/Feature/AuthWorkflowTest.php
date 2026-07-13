@@ -161,11 +161,19 @@ class AuthWorkflowTest extends TestCase
 
     public function test_security_headers_are_added_to_web_responses(): void
     {
-        $this->get(route('login'))
+        $response = $this->get(route('login'))
             ->assertOk()
             ->assertHeader('X-Content-Type-Options', 'nosniff')
             ->assertHeader('X-Frame-Options', 'DENY')
             ->assertHeader('Referrer-Policy', 'same-origin')
             ->assertHeader('Content-Security-Policy');
+
+        $contentSecurityPolicy = (string) $response->headers->get('Content-Security-Policy');
+
+        $this->assertStringContainsString(
+            "form-action 'self' https://accounts.google.com;",
+            $contentSecurityPolicy,
+        );
+        $this->assertStringNotContainsString('form-action *', $contentSecurityPolicy);
     }
 }
