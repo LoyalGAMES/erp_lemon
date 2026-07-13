@@ -8,6 +8,51 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'certificate-utils.ps1')
 
+function Get-ShortcutMetadata {
+    param(
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $shellApplication = New-Object -ComObject Shell.Application
+    $shortcutFolder = $null
+    $shortcutItem = $null
+    $shortcutLink = $null
+    try {
+        $shortcutFolder = $shellApplication.NameSpace((Split-Path -Parent $fullPath))
+        if ($null -eq $shortcutFolder) {
+            throw "Powłoka Windows nie otworzyła katalogu skrótu: $fullPath"
+        }
+
+        $shortcutItem = $shortcutFolder.ParseName((Split-Path -Leaf $fullPath))
+        if ($null -eq $shortcutItem -or -not [bool] $shortcutItem.IsLink) {
+            throw "Powłoka Windows nie rozpoznała pliku jako skrótu: $fullPath"
+        }
+
+        $shortcutLink = $shortcutItem.GetLink
+        if ($null -eq $shortcutLink) {
+            throw "Powłoka Windows nie odczytała metadanych skrótu: $fullPath"
+        }
+
+        $targetPath = [string] $shortcutLink.Path
+        if ([string]::IsNullOrWhiteSpace($targetPath)) {
+            throw "Skrót nie zawiera ścieżki docelowej: $fullPath"
+        }
+
+        return [pscustomobject]@{
+            TargetPath = [System.IO.Path]::GetFullPath($targetPath)
+            Arguments = [string] $shortcutLink.Arguments
+        }
+    } finally {
+        foreach ($comObject in @($shortcutLink, $shortcutItem, $shortcutFolder, $shellApplication)) {
+            if ($null -ne $comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+                [void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($comObject)
+            }
+        }
+    }
+}
+
 $root = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
     $InstallerPath = Join-Path $root 'dist\SempreERP-PrintListener-Setup.exe'
@@ -237,32 +282,21 @@ try {
             throw "Instalator nie utworzył wymaganego skrótu menu Start: $path"
         }
     }
-    $shortcutShell = New-Object -ComObject WScript.Shell
-    $settingsShortcut = $null
-    $connectionShortcut = $null
-    try {
-        $settingsShortcut = $shortcutShell.CreateShortcut($settingsShortcutPath)
-        if (-not [string]::Equals(
-            [System.IO.Path]::GetFullPath([string] $settingsShortcut.TargetPath),
-            $configuratorPath,
-            [System.StringComparison]::OrdinalIgnoreCase
-        )) {
-            throw "Skrót ustawień wskazuje nieoczekiwany plik: $($settingsShortcut.TargetPath)"
-        }
-        $connectionShortcut = $shortcutShell.CreateShortcut($connectionShortcutPath)
-        if (-not [string]::Equals(
-            [System.IO.Path]::GetFullPath([string] $connectionShortcut.TargetPath),
-            [System.IO.Path]::GetFullPath([string] $env:ComSpec),
-            [System.StringComparison]::OrdinalIgnoreCase
-        ) -or [string] $connectionShortcut.Arguments -notmatch '(?i)-check-connection') {
-            throw 'Skrót weryfikacji nie uruchamia lokalnego testu połączenia.'
-        }
-    } finally {
-        foreach ($comObject in @($settingsShortcut, $connectionShortcut, $shortcutShell)) {
-            if ($null -ne $comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
-                [void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($comObject)
-            }
-        }
+    $settingsShortcut = Get-ShortcutMetadata -Path $settingsShortcutPath
+    if (-not [string]::Equals(
+        $settingsShortcut.TargetPath,
+        $configuratorPath,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "Skrót ustawień wskazuje nieoczekiwany plik: $($settingsShortcut.TargetPath)"
+    }
+    $connectionShortcut = Get-ShortcutMetadata -Path $connectionShortcutPath
+    if (-not [string]::Equals(
+        $connectionShortcut.TargetPath,
+        [System.IO.Path]::GetFullPath([string] $env:ComSpec),
+        [System.StringComparison]::OrdinalIgnoreCase
+    ) -or $connectionShortcut.Arguments -notmatch '(?i)-check-connection') {
+        throw 'Skrót weryfikacji nie uruchamia lokalnego testu połączenia.'
     }
     if ((Get-FileHash -LiteralPath $rendererPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
         '719f689b34f47be8ca105ce8484948474dafde0e106bab599e4a89326070c3d0') {
