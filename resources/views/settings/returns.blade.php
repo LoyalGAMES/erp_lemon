@@ -151,8 +151,12 @@
                     <label>Token API (Bearer / X-API-Key)
                         <span class="token-field">
                             <input name="store_api_token" type="password" value="" maxlength="120" autocomplete="new-password" spellcheck="false" placeholder="{{ $storeApiConfigured ? 'Zostaw puste, aby zachować zapisany token' : 'Wygeneruj lub wpisz token API' }}">
-                            <button class="button secondary" type="button" data-token-generate="store_api_token">Generuj token API</button>
+                            <span class="token-actions">
+                                <button class="button secondary" type="button" data-token-generate="store_api_token">Generuj token API</button>
+                                <button class="button secondary" type="button" data-token-copy="store_api_token" disabled>Kopiuj</button>
+                            </span>
                         </span>
+                        <small data-token-copy-status="store_api_token" aria-live="polite">Wygeneruj lub wpisz nowy token, skopiuj go, a dopiero potem zapisz ustawienia.</small>
                         @if ($storeApiConfigured)
                             <small>Zapisany token: {{ $returnSettings['store_api_token_mask'] }}. Pole pozostaw puste, aby go nie zmieniać.</small>
                             <span class="check-row">
@@ -164,8 +168,12 @@
                     <label>Sekret webhooka (X-Lemon-Returns-Token)
                         <span class="token-field">
                             <input name="store_webhook_secret" type="password" value="" maxlength="120" autocomplete="new-password" spellcheck="false" placeholder="{{ $storeWebhookConfigured ? 'Zostaw puste, aby zachować zapisany sekret' : 'Wygeneruj lub wpisz sekret webhooka' }}">
-                            <button class="button secondary" type="button" data-token-generate="store_webhook_secret">Generuj sekret</button>
+                            <span class="token-actions">
+                                <button class="button secondary" type="button" data-token-generate="store_webhook_secret">Generuj sekret</button>
+                                <button class="button secondary" type="button" data-token-copy="store_webhook_secret" disabled>Kopiuj</button>
+                            </span>
                         </span>
+                        <small data-token-copy-status="store_webhook_secret" aria-live="polite">Wygeneruj lub wpisz nowy sekret, skopiuj go, a dopiero potem zapisz ustawienia.</small>
                         @if ($storeWebhookConfigured)
                             <small>Zapisany sekret: {{ $returnSettings['store_webhook_secret_mask'] }}. Pole pozostaw puste, aby go nie zmieniać.</small>
                             <span class="check-row">
@@ -243,6 +251,7 @@
         .integration-status.ready { border-color: rgba(95, 80, 69, .30); background: var(--green-soft); color: var(--green-dark); }
         .integration-status.ready strong { color: var(--green-dark); }
         .token-field { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+        .token-actions { display: flex; flex-wrap: wrap; gap: 8px; }
         .token-field .button { min-height: 42px; white-space: nowrap; }
         .settings-form .button { width: fit-content; }
         @media (max-width: 900px) {
@@ -271,7 +280,67 @@
             return Array.from(values, (value) => chars[value % chars.length]).join('');
         }
 
+        function legacyCopyReturnToken(value) {
+            const helper = document.createElement('textarea');
+            helper.value = value;
+            helper.setAttribute('readonly', '');
+            helper.style.position = 'fixed';
+            helper.style.opacity = '0';
+            document.body.appendChild(helper);
+            helper.select();
+
+            const copied = document.execCommand('copy');
+            helper.remove();
+
+            if (!copied) {
+                throw new Error('Clipboard copy failed');
+            }
+        }
+
+        async function copyReturnToken(target, button) {
+            const value = target.value;
+
+            if (!value) {
+                window.alert('Najpierw wygeneruj lub wpisz nową wartość. Zapisanej, zamaskowanej wartości nie można skopiować z tego ekranu.');
+                target.focus();
+                return;
+            }
+
+            try {
+                if (navigator.clipboard?.writeText) {
+                    try {
+                        await navigator.clipboard.writeText(value);
+                    } catch (error) {
+                        legacyCopyReturnToken(value);
+                    }
+                } else {
+                    legacyCopyReturnToken(value);
+                }
+
+                const status = document.querySelector(`[data-token-copy-status="${target.name}"]`);
+                if (status) status.textContent = 'Skopiowano do schowka. Teraz zapisz ustawienia i wklej tę samą wartość we wtyczce WooCommerce.';
+
+                const originalLabel = button.textContent;
+                button.textContent = 'Skopiowano';
+                window.setTimeout(() => {
+                    button.textContent = originalLabel;
+                }, 2000);
+            } catch (error) {
+                window.alert('Nie udało się skopiować wartości automatycznie. Zaznacz ją i skopiuj ręcznie przed zapisaniem ustawień.');
+                target.focus();
+                target.select();
+            }
+        }
+
         document.addEventListener('click', (event) => {
+            const copyButton = event.target.closest('[data-token-copy]');
+
+            if (copyButton) {
+                const target = document.querySelector(`[name="${copyButton.dataset.tokenCopy}"]`);
+                if (target) copyReturnToken(target, copyButton);
+                return;
+            }
+
             const tokenButton = event.target.closest('[data-token-generate]');
 
             if (tokenButton) {
@@ -288,6 +357,8 @@
                     target.value = generated;
                     const clearField = document.querySelector(`[name="clear_${target.name}"]`);
                     if (clearField) clearField.checked = false;
+                    const copyButton = document.querySelector(`[data-token-copy="${target.name}"]`);
+                    if (copyButton) copyButton.disabled = false;
                     target.dispatchEvent(new Event('input', { bubbles: true }));
                     target.focus();
                 }
@@ -315,9 +386,21 @@
         });
 
         document.addEventListener('input', (event) => {
-            if (!['store_api_token', 'store_webhook_secret'].includes(event.target?.name) || !event.target.value) {
+            if (!['store_api_token', 'store_webhook_secret'].includes(event.target?.name)) {
                 return;
             }
+
+            const copyButton = document.querySelector(`[data-token-copy="${event.target.name}"]`);
+            if (copyButton) copyButton.disabled = !event.target.value;
+
+            const status = document.querySelector(`[data-token-copy-status="${event.target.name}"]`);
+            if (status) {
+                status.textContent = event.target.value
+                    ? 'Nowa wartość jest gotowa. Kliknij „Kopiuj” przed zapisaniem ustawień.'
+                    : 'Wygeneruj lub wpisz nową wartość, skopiuj ją, a dopiero potem zapisz ustawienia.';
+            }
+
+            if (!event.target.value) return;
 
             const clearField = document.querySelector(`[name="clear_${event.target.name}"]`);
             if (clearField) clearField.checked = false;

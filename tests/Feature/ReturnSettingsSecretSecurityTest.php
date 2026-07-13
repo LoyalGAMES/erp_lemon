@@ -52,6 +52,10 @@ final class ReturnSettingsSecretSecurityTest extends TestCase
             ->assertSee('••••••••4321')
             ->assertSee('name="store_api_token" type="password" value=""', false)
             ->assertSee('name="store_webhook_secret" type="password" value=""', false)
+            ->assertSee('data-token-copy="store_api_token" disabled', false)
+            ->assertSee('data-token-copy="store_webhook_secret" disabled', false)
+            ->assertSee('navigator.clipboard.writeText(value)', false)
+            ->assertSee('Zapisanej, zamaskowanej wartości nie można skopiować z tego ekranu.')
             ->assertSee('window.crypto.getRandomValues(values)', false)
             ->assertDontSee('Math.random', false);
     }
