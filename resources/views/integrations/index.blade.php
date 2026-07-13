@@ -479,11 +479,11 @@
                         <form
                             method="POST"
                             action="{{ route('integrations.logs.failed.destroy') }}"
-                            onsubmit="return confirm('Usunąć wszystkie nieudane logi synchronizacji ({{ $failedLogsCount }})? Poprawne i aktywne wpisy pozostaną bez zmian.');"
+                            onsubmit="return confirm('Usunąć historyczne logi nieudanych synchronizacji ({{ $failedLogsCount }})? Bieżące problemy eksportu stanów pozostaną widoczne w Kolejce sync, dopóki nie zostaną rozwiązane lub ponowione.');"
                         >
                             @csrf
                             @method('DELETE')
-                            <button class="button danger" type="submit">Wyczyść błędy ({{ $failedLogsCount }})</button>
+                            <button class="button danger" type="submit">Wyczyść historię błędów ({{ $failedLogsCount }})</button>
                         </form>
                     @endif
                 </div>

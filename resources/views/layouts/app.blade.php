@@ -235,7 +235,7 @@
                 $topStatus = [
                     'packing_orders' => 0,
                     'return_cases' => 0,
-                    'woocommerce' => ['tone' => 'red', 'label' => 'Status niedostępny'],
+                    'woocommerce' => ['tone' => 'red', 'label' => 'Status niedostępny', 'destination' => 'integrations'],
                     'ksef' => ['tone' => 'red', 'label' => 'Status niedostępny'],
                 ];
             }
@@ -243,7 +243,7 @@
 
         $packingTopCount = (int) data_get($topStatus, 'packing_orders', 0);
         $returnsTopCount = (int) data_get($topStatus, 'return_cases', 0);
-        $woocommerceTopStatus = data_get($topStatus, 'woocommerce', ['tone' => 'red', 'label' => 'Brak statusu']);
+        $woocommerceTopStatus = data_get($topStatus, 'woocommerce', ['tone' => 'red', 'label' => 'Brak statusu', 'destination' => 'integrations']);
         $ksefTopStatus = data_get($topStatus, 'ksef', ['tone' => 'red', 'label' => 'Brak statusu']);
         $topActions = [];
 
@@ -268,9 +268,16 @@
         }
 
         if (! ($hideTopActions ?? false) && $canAccessArea('integrations')) {
+            $woocommerceStatusUrl = match ($woocommerceTopStatus['destination'] ?? 'integrations') {
+                'sync' => $canAccessArea('sync')
+                    ? route('modules.show', 'sync')
+                    : route('integrations.index'),
+                'integration_logs' => route('integrations.index').'#logs',
+                default => route('integrations.index'),
+            };
             $topActions[] = [
                 'key' => 'integrations',
-                'url' => route('integrations.index'),
+                'url' => $woocommerceStatusUrl,
                 'label' => 'WooCommerce',
                 'tone' => $woocommerceTopStatus['tone'] ?? 'red',
                 'status' => $woocommerceTopStatus['label'] ?? 'Brak statusu',

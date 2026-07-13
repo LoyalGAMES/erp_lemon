@@ -39,7 +39,7 @@ class IntegrationFailedLogCleanupTest extends TestCase
         $this->actingAs($administrator)
             ->get(route('integrations.index', ['tab' => 'logs']))
             ->assertOk()
-            ->assertSee('Wyczyść błędy (25)');
+            ->assertSee('Wyczyść historię błędów (25)');
 
         $this->actingAs($administrator)
             ->delete(route('integrations.logs.failed.destroy'))
@@ -97,7 +97,7 @@ class IntegrationFailedLogCleanupTest extends TestCase
 
         $this->get(route('integrations.index', ['tab' => 'logs']))
             ->assertOk()
-            ->assertDontSee('Wyczyść błędy');
+            ->assertDontSee('Wyczyść historię błędów');
 
         $this->delete(route('integrations.logs.failed.destroy'))
             ->assertRedirect(route('integrations.index').'#logs')

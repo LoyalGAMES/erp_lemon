@@ -454,10 +454,12 @@ class ModuleController extends Controller
     {
         $jobs = $this->databaseQueueCounts();
         $imports = $this->latestImportStatusCounts();
-        $stockExports = $this->statusCounts(StockSyncQueueItem::query());
+        $stockExports = $this->statusCounts(StockSyncQueueItem::query()->currentState());
 
         $activeImports = ($imports['queued'] ?? 0) + ($imports['running'] ?? 0);
-        $activeStockExports = ($stockExports['pending'] ?? 0) + ($stockExports['running'] ?? 0);
+        $activeStockExports = ($stockExports['pending'] ?? 0)
+            + ($stockExports['queued'] ?? 0)
+            + ($stockExports['running'] ?? 0);
         $failed = ($imports['failed'] ?? 0) + ($stockExports['failed'] ?? 0);
 
         return [
@@ -478,7 +480,7 @@ class ModuleController extends Controller
             [
                 'label' => 'Eksport stanów',
                 'value' => (string) $activeStockExports,
-                'caption' => 'pending '.($stockExports['pending'] ?? 0).' | running '.($stockExports['running'] ?? 0).' | failed '.($stockExports['failed'] ?? 0),
+                'caption' => 'pending '.($stockExports['pending'] ?? 0).' | queued '.($stockExports['queued'] ?? 0).' | running '.($stockExports['running'] ?? 0).' | failed '.($stockExports['failed'] ?? 0),
                 'tone' => ($stockExports['failed'] ?? 0) > 0 ? 'red' : ($activeStockExports > 0 ? 'blue' : 'green'),
             ],
             [

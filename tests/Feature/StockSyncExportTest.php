@@ -18,6 +18,7 @@ use App\Models\WarehouseChannelRoute;
 use App\Models\WordpressIntegration;
 use App\Services\Inventory\StockSyncQueueService;
 use App\Services\WooCommerce\StockSyncExportService;
+use App\Support\OperationalStatus;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -640,6 +641,15 @@ class StockSyncExportTest extends TestCase
             'is_active' => true,
         ]);
 
+        $queuedProduct = Product::query()->create([
+            'sku' => 'SKU-SUMMARY-QUEUED',
+            'name' => 'Queued summary product',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
         IntegrationSyncLog::query()->create([
             'sales_channel_id' => $channel->id,
             'wordpress_integration_id' => $integration->id,
@@ -674,16 +684,16 @@ class StockSyncExportTest extends TestCase
             'finished_at' => now(),
         ]);
 
-        StockSyncQueueItem::query()->create([
+        $queuedItem = StockSyncQueueItem::query()->create([
             'warehouse_id' => $warehouse->id,
-            'product_id' => $product->id,
+            'product_id' => $queuedProduct->id,
             'sales_channel_id' => $channel->id,
-            'status' => 'pending',
+            'status' => 'queued',
             'quantity_to_push' => 3,
             'available_at' => now(),
         ]);
 
-        StockSyncQueueItem::query()->create([
+        $failedItem = StockSyncQueueItem::query()->create([
             'warehouse_id' => $warehouse->id,
             'product_id' => $product->id,
             'sales_channel_id' => $channel->id,
@@ -693,16 +703,156 @@ class StockSyncExportTest extends TestCase
             'last_error' => 'Brak mapowania produktu',
         ]);
 
+        StockSyncState::query()->create([
+            'product_id' => $queuedProduct->id,
+            'sales_channel_id' => $channel->id,
+            'desired_version' => 1,
+            'desired_quantity' => 3,
+            'exported_version' => 0,
+            'queue_item_id' => $queuedItem->id,
+        ]);
+
+        StockSyncState::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'desired_version' => 1,
+            'desired_quantity' => 2,
+            'exported_version' => 0,
+            'queue_item_id' => $failedItem->id,
+        ]);
+
         $this->get(route('modules.show', 'sync'))
             ->assertOk()
             ->assertSee('Zadania techniczne')
             ->assertSee('Importy WooCommerce')
             ->assertSee('queued 1 | running 0 | failed 1')
             ->assertSee('Eksport stanów')
-            ->assertSee('pending 1 | running 0 | failed 1')
+            ->assertSee('pending 0 | queued 1 | running 0 | failed 1')
             ->assertSee('Wymaga reakcji')
             ->assertSee('Suma nieudanych importów i eksportów stanów')
             ->assertSee('SKU-SUMMARY')
             ->assertSee('Brak mapowania produktu');
+    }
+
+    public function test_woocommerce_status_uses_only_current_stock_export_state(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Sempre B2C',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'stock_export_enabled' => true,
+        ]);
+
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Main',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+
+        $product = Product::query()->create([
+            'sku' => 'SKU-CURRENT-STATUS',
+            'name' => 'Current status product',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $historicalFailure = StockSyncQueueItem::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'version' => 1,
+            'status' => 'failed',
+            'quantity_to_push' => 3,
+            'available_at' => now()->subHour(),
+            'last_error' => 'Stary błąd autoryzacji',
+        ]);
+
+        $currentSuccess = StockSyncQueueItem::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'version' => 2,
+            'status' => 'success',
+            'quantity_to_push' => 3,
+            'available_at' => now(),
+            'processed_at' => now(),
+        ]);
+
+        $state = StockSyncState::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'desired_version' => 2,
+            'desired_quantity' => 3,
+            'exported_version' => 2,
+            'queue_item_id' => $currentSuccess->id,
+        ]);
+
+        $status = app(OperationalStatus::class)->navigation()['woocommerce'];
+
+        $this->assertSame('green', $status['tone']);
+        $this->assertSame('OK', $status['label']);
+        $this->assertSame('integrations', $status['destination']);
+
+        $state->update([
+            'desired_version' => 1,
+            'exported_version' => 0,
+            'queue_item_id' => $historicalFailure->id,
+        ]);
+
+        $status = app(OperationalStatus::class)->navigation()['woocommerce'];
+
+        $this->assertSame('red', $status['tone']);
+        $this->assertSame('Eksport stanów: 1', $status['label']);
+        $this->assertSame('sync', $status['destination']);
+
+        $stockFailurePage = $this->get(route('dashboard'))->assertOk();
+
+        $this->assertMatchesRegularExpression(
+            '#<a href="'.preg_quote(route('modules.show', 'sync'), '#').'"[^>]*>\s*<strong>WooCommerce</strong>.*?Eksport stanów: 1.*?</a>#s',
+            $stockFailurePage->getContent(),
+        );
+
+        $state->update([
+            'desired_version' => 2,
+            'exported_version' => 2,
+            'queue_item_id' => $currentSuccess->id,
+        ]);
+
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $channel->id,
+            'wordpress_integration_id' => WordpressIntegration::query()->value('id'),
+            'direction' => 'in',
+            'operation' => 'import_orders',
+            'status' => 'failed',
+            'error_message' => 'Błąd importu',
+            'attempts' => 1,
+            'started_at' => now(),
+            'finished_at' => now(),
+        ]);
+
+        $status = app(OperationalStatus::class)->navigation()['woocommerce'];
+
+        $this->assertSame('red', $status['tone']);
+        $this->assertSame('Importy: 1', $status['label']);
+        $this->assertSame('integration_logs', $status['destination']);
+
+        $importFailurePage = $this->get(route('dashboard'))->assertOk();
+
+        $this->assertMatchesRegularExpression(
+            '#<a href="'.preg_quote(route('integrations.index').'#logs', '#').'"[^>]*>\s*<strong>WooCommerce</strong>.*?Importy: 1.*?</a>#s',
+            $importFailurePage->getContent(),
+        );
     }
 }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -32,6 +33,20 @@ class StockSyncQueueItem extends Model
         'processed_at' => 'datetime',
         'metadata' => 'array',
     ];
+
+    /**
+     * Limit the queue history to the item that currently represents each
+     * product/channel synchronization state.
+     */
+    public function scopeCurrentState(Builder $query): Builder
+    {
+        return $query->whereIn(
+            $query->qualifyColumn('id'),
+            StockSyncState::query()
+                ->whereNotNull('queue_item_id')
+                ->select('queue_item_id'),
+        );
+    }
 
     public function warehouse(): BelongsTo
     {

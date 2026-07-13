@@ -12,6 +12,8 @@ use App\Models\ReturnCase;
 use App\Models\StockSyncQueueItem;
 use App\Models\WordpressIntegration;
 use App\Services\Ksef\KsefClient;
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 use Throwable;
@@ -56,7 +58,7 @@ final class OperationalStatus
      * @return array{
      *     packing_orders: int,
      *     return_cases: int,
-     *     woocommerce: array{tone:string,label:string},
+     *     woocommerce: array{tone:string,label:string,destination:string},
      *     ksef: array{tone:string,label:string}
      * }
      */
@@ -116,19 +118,19 @@ final class OperationalStatus
     }
 
     /**
-     * @return array{tone:string,label:string}
+     * @return array{tone:string,label:string,destination:string}
      */
     private function woocommerceStatus(): array
     {
         try {
             if (! $this->tableExists('wordpress_integrations')) {
-                return ['tone' => 'red', 'label' => 'Brak konfiguracji'];
+                return ['tone' => 'red', 'label' => 'Brak konfiguracji', 'destination' => 'integrations'];
             }
 
             $integrations = WordpressIntegration::query()->count();
 
             if ($integrations === 0) {
-                return ['tone' => 'red', 'label' => 'Brak konfiguracji'];
+                return ['tone' => 'red', 'label' => 'Brak konfiguracji', 'destination' => 'integrations'];
             }
 
             $activeIntegrations = WordpressIntegration::query()
@@ -141,29 +143,53 @@ final class OperationalStatus
                 ->count();
             $imports = $this->latestImportStatusCounts();
             $stockExports = $this->tableExists('stock_sync_queue_items')
-                ? $this->statusCounts(StockSyncQueueItem::query())
+                && $this->tableExists('stock_sync_states')
+                ? $this->statusCounts(StockSyncQueueItem::query()->currentState())
                 : [];
-            $failed = ($imports['failed'] ?? 0) + ($stockExports['failed'] ?? 0);
-            $active = ($imports['queued'] ?? 0)
-                + ($imports['running'] ?? 0)
-                + ($stockExports['pending'] ?? 0)
+            $failedImports = $imports['failed'] ?? 0;
+            $failedStockExports = $stockExports['failed'] ?? 0;
+            $failed = $failedImports + $failedStockExports;
+            $activeImports = ($imports['queued'] ?? 0) + ($imports['running'] ?? 0);
+            $activeStockExports = ($stockExports['pending'] ?? 0)
+                + ($stockExports['queued'] ?? 0)
                 + ($stockExports['running'] ?? 0);
+            $active = $activeImports + $activeStockExports;
 
             if ($failed > 0) {
-                return ['tone' => 'red', 'label' => "Błędy: {$failed}"];
+                $label = match (true) {
+                    $failedImports > 0 && $failedStockExports === 0 => "Importy: {$failedImports}",
+                    $failedStockExports > 0 && $failedImports === 0 => "Eksport stanów: {$failedStockExports}",
+                    default => "Błędy: {$failed}",
+                };
+
+                return [
+                    'tone' => 'red',
+                    'label' => $label,
+                    'destination' => $failedStockExports > 0 ? 'sync' : 'integration_logs',
+                ];
             }
 
             if ($activeIntegrations === 0) {
-                return ['tone' => 'orange', 'label' => 'Nieaktywne'];
+                return ['tone' => 'orange', 'label' => 'Nieaktywne', 'destination' => 'integrations'];
             }
 
             if ($active > 0) {
-                return ['tone' => 'orange', 'label' => "Kolejka: {$active}"];
+                $label = match (true) {
+                    $activeImports > 0 && $activeStockExports === 0 => "Importy w kolejce: {$activeImports}",
+                    $activeStockExports > 0 && $activeImports === 0 => "Eksport stanów: {$activeStockExports}",
+                    default => "Kolejka: {$active}",
+                };
+
+                return [
+                    'tone' => 'orange',
+                    'label' => $label,
+                    'destination' => $activeStockExports > 0 ? 'sync' : 'integration_logs',
+                ];
             }
 
-            return ['tone' => 'green', 'label' => 'OK'];
+            return ['tone' => 'green', 'label' => 'OK', 'destination' => 'integrations'];
         } catch (Throwable) {
-            return ['tone' => 'red', 'label' => 'Błąd statusu'];
+            return ['tone' => 'red', 'label' => 'Błąd statusu', 'destination' => 'integrations'];
         }
     }
 
@@ -233,7 +259,7 @@ final class OperationalStatus
     }
 
     /**
-     * @param \Illuminate\Database\Eloquent\Builder<\Illuminate\Database\Eloquent\Model> $query
+     * @param  Builder<Model>  $query
      * @return array<string, int>
      */
     private function statusCounts($query): array
