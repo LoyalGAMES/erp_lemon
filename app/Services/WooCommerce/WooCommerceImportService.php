@@ -18,6 +18,7 @@ use App\Models\WarehouseChannelRoute;
 use App\Models\WordpressIntegration;
 use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Communication\CustomerCommunicationService;
+use App\Services\Customers\CustomerAccountClaimService;
 use App\Services\Inventory\SalesChannelWarehouseResolver;
 use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderStatusPolicyService;
@@ -46,6 +47,8 @@ final class WooCommerceImportService
         private readonly ProductCategoryTranslationMergeService $categoryTranslationMerge,
         private readonly ProductParameterTranslationService $parameterTranslations,
         private readonly ProductDescriptionSanitizer $descriptionSanitizer,
+        private readonly WooCommerceCustomerSyncService $customerSync,
+        private readonly CustomerAccountClaimService $customerAccountClaims,
     ) {}
 
     /**
@@ -669,6 +672,7 @@ final class WooCommerceImportService
         ?CarbonImmutable $modifiedAfter = null,
         int $firstPage = 1,
     ): array {
+        $guestInvitationBaselineAt = $this->guestInvitationBaseline($integration);
         $created = 0;
         $updated = 0;
         $lines = 0;
@@ -721,6 +725,7 @@ final class WooCommerceImportService
                     $rawPayload = $this->rawPayloadForImportedOrder($item, $existingRawPayload, $splitAllocations);
 
                     $order->fill([
+                        'wordpress_integration_id' => $integration->id,
                         'external_number' => (string) ($item['number'] ?? $item['id']),
                         'status' => (string) ($item['status'] ?? 'unknown'),
                         'currency' => (string) ($item['currency'] ?? 'PLN'),
@@ -734,6 +739,8 @@ final class WooCommerceImportService
                         'external_updated_at' => $this->wooCommerceDateTime($item, 'date_modified'),
                     ]);
                     $order->save();
+
+                    $this->customerSync->syncFromOrder($integration, $order, $item);
 
                     $order->lines()->delete();
 
@@ -796,6 +803,13 @@ final class WooCommerceImportService
                 if ($notificationTrigger !== null) {
                     $this->communication->sendOrderStatus($order, $notificationTrigger);
                 }
+
+                $this->sendGuestAccountInvitationForOrder(
+                    $integration,
+                    $order,
+                    $item,
+                    $guestInvitationBaselineAt,
+                );
             }
 
             $nextPage = $page + 1;
@@ -853,6 +867,109 @@ final class WooCommerceImportService
             'refunded' => 'order_refunded',
             default => null,
         };
+    }
+
+    /**
+     * Konto klienta nie może blokować importu zamówienia. Każda wiadomość jest
+     * deduplikowana w CustomerCommunicationService, a claim jest przypisany do
+     * dokładnie jednego zamówienia.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function sendGuestAccountInvitationForOrder(
+        WordpressIntegration $integration,
+        ExternalOrder $order,
+        array $payload,
+        CarbonImmutable $baselineAt,
+    ): void {
+        if ((int) ($payload['customer_id'] ?? 0) > 0) {
+            return;
+        }
+
+        $orderCreatedAt = $this->orderCreatedAtUtc($order);
+
+        if ($orderCreatedAt === null
+            || $orderCreatedAt->lt($baselineAt)
+            || $orderCreatedAt->lt(CarbonImmutable::instance(now())->subDays(7)->utc())
+            || in_array(mb_strtolower((string) $order->status), ['cancelled', 'refunded'], true)
+            || $order->customerMessages()
+                ->where('type', CustomerCommunicationService::TYPE_AUTOMATED)
+                ->where('trigger', 'guest_account_invitation')
+                ->whereIn('status', ['held', 'pending', 'sent', 'failed', 'skipped'])
+                ->exists()) {
+            return;
+        }
+
+        try {
+            $customer = $order->customer()->first();
+
+            if ($customer === null) {
+                return;
+            }
+
+            $claim = $this->customerAccountClaims->createOrRefresh($customer, $order, $integration);
+            $this->communication->sendGuestAccountInvitation(
+                $customer,
+                $order,
+                $this->customerAccountClaims->signedUrl($claim),
+            );
+        } catch (Throwable $exception) {
+            // Import, rezerwacje i potwierdzenie zamówienia są ważniejsze niż
+            // dodatkowa wiadomość konta. Kolejny import zamówienia ponowi próbę,
+            // dopóki nie istnieje deduplikujący wpis CustomerMessage.
+            report($exception);
+        }
+    }
+
+    /**
+     * Pierwszy import zamówień ustala granicę historyczną osobno dla każdej
+     * integracji. Blokada wiersza chroni pozostałe ustawienia przed utratą przy
+     * równoległym imporcie lub zapisie konfiguracji.
+     */
+    private function guestInvitationBaseline(WordpressIntegration $integration): CarbonImmutable
+    {
+        return DB::transaction(function () use ($integration): CarbonImmutable {
+            $lockedIntegration = WordpressIntegration::query()
+                ->lockForUpdate()
+                ->findOrFail($integration->getKey());
+            $stored = data_get($lockedIntegration->settings, 'customer_import.guest_invitation_baseline_at');
+
+            if (is_string($stored) && trim($stored) !== '') {
+                try {
+                    return CarbonImmutable::parse($stored);
+                } catch (Throwable) {
+                    // Niepoprawna wartość jest bezpiecznie zastępowana nową granicą.
+                }
+            }
+
+            $baselineAt = CarbonImmutable::instance(now())->startOfSecond();
+            $settings = (array) $lockedIntegration->settings;
+            $customerImport = (array) data_get($settings, 'customer_import', []);
+            $customerImport['guest_invitation_baseline_at'] = $baselineAt->toIso8601String();
+            $settings['customer_import'] = $customerImport;
+            $lockedIntegration->update(['settings' => $settings]);
+
+            return $baselineAt;
+        });
+    }
+
+    private function orderCreatedAtUtc(ExternalOrder $order): ?CarbonImmutable
+    {
+        $value = $order->getRawOriginal('external_created_at')
+            ?? $order->getRawOriginal('created_at');
+
+        if (! is_string($value) || trim($value) === '') {
+            return null;
+        }
+
+        try {
+            // Daty WooCommerce są zapisywane w bazie jako UTC. Parsowanie surowej
+            // wartości omija domyślną strefę castów Eloquent i daje poprawne
+            // porównanie z granicą zapisaną jako ISO 8601.
+            return CarbonImmutable::parse($value, 'UTC')->utc();
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**

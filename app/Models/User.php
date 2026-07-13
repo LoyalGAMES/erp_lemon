@@ -30,6 +30,7 @@ class User extends Authenticatable
         'warehouses' => [self::ROLE_ADMINISTRATOR, self::ROLE_OPERATOR],
         'documents' => [self::ROLE_ADMINISTRATOR, self::ROLE_OPERATOR],
         'orders' => [self::ROLE_ADMINISTRATOR, self::ROLE_OPERATOR, self::ROLE_ACCOUNTING],
+        'customers' => [self::ROLE_ADMINISTRATOR, self::ROLE_OPERATOR, self::ROLE_ACCOUNTING],
         'returns' => [self::ROLE_ADMINISTRATOR, self::ROLE_OPERATOR, self::ROLE_PACKER],
         'packing' => [self::ROLE_ADMINISTRATOR, self::ROLE_OPERATOR, self::ROLE_PACKER],
         'invoices' => [self::ROLE_ADMINISTRATOR, self::ROLE_ACCOUNTING],

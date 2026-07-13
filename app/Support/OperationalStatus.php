@@ -266,7 +266,7 @@ final class OperationalStatus
         }
 
         $latestImportIds = IntegrationSyncLog::query()
-            ->whereIn('operation', ['import_products', 'import_orders'])
+            ->whereIn('operation', ['import_products', 'import_orders', 'import_customers'])
             ->whereNotNull('wordpress_integration_id')
             ->select(DB::raw('max(id) as id'))
             ->groupBy('wordpress_integration_id', 'operation')

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Mail\CustomerMessageMail;
+use App\Models\Customer;
+use App\Models\CustomerExternalAccount;
 use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
 use App\Models\IntegrationSyncLog;
@@ -436,6 +438,50 @@ class CustomerCommunicationWorkflowTest extends TestCase
         $this->assertSame('success', $log->status);
     }
 
+    public function test_guest_account_invitation_is_sent_once_with_a_secure_claim_action(): void
+    {
+        [$customer, $order] = $this->createCustomerWithOrder(false);
+        $claimUrl = 'https://erp.example.test/customer-account/claim/test?expires=9999999999&signature=test';
+        $communication = app(CustomerCommunicationService::class);
+
+        $first = $communication->sendGuestAccountInvitation($customer, $order, $claimUrl);
+        $second = $communication->sendGuestAccountInvitation($customer, $order, $claimUrl);
+
+        $this->assertInstanceOf(CustomerMessage::class, $first);
+        $this->assertNull($second);
+        $this->assertSame($customer->id, $first->customer_id);
+        $this->assertSame($order->id, $first->external_order_id);
+        $this->assertSame('guest_account_invitation', $first->trigger);
+        $this->assertSame('sent', $first->status);
+        $this->assertSame($claimUrl, data_get($first->metadata, 'action_url'));
+        $this->assertSame('Załóż konto i przypisz zamówienie', data_get($first->metadata, 'action_label'));
+        $this->assertStringContainsString('9001', $first->subject);
+        $this->assertStringContainsString('automatycznie pojawi się', $first->body);
+
+        Mail::assertSent(CustomerMessageMail::class, 1);
+    }
+
+    public function test_account_created_confirmation_is_deduplicated_by_customer(): void
+    {
+        [$customer, $order] = $this->createCustomerWithOrder(true);
+        $communication = app(CustomerCommunicationService::class);
+
+        $first = $communication->sendCustomerAccountCreated($customer, $order);
+        $second = $communication->sendCustomerAccountCreated($customer, null);
+
+        $this->assertInstanceOf(CustomerMessage::class, $first);
+        $this->assertNull($second);
+        $this->assertSame('customer_account_created', $first->trigger);
+        $this->assertSame('customer', data_get($first->metadata, 'entity_type'));
+        $this->assertSame('https://shop.test/moje-konto/', data_get($first->metadata, 'action_url'));
+        $this->assertSame(1, CustomerMessage::query()
+            ->where('customer_id', $customer->id)
+            ->where('trigger', 'customer_account_created')
+            ->count());
+
+        Mail::assertSent(CustomerMessageMail::class, 1);
+    }
+
     private function createOrder(string $email): ExternalOrder
     {
         $channel = SalesChannel::query()->create([
@@ -460,5 +506,45 @@ class CustomerCommunicationWorkflowTest extends TestCase
             'shipping_data' => [],
             'raw_payload' => [],
         ]);
+    }
+
+    /** @return array{Customer,ExternalOrder} */
+    private function createCustomerWithOrder(bool $registered): array
+    {
+        $order = $this->createOrder('anna@example.test');
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $order->sales_channel_id,
+            'name' => 'Woo B2C',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $customer = Customer::query()->create([
+            'email' => 'anna@example.test',
+            'email_normalized' => 'anna@example.test',
+            'first_name' => 'Anna',
+            'last_name' => 'Kowalska',
+            'display_name' => 'Anna Kowalska',
+            'account_status' => $registered ? 'registered' : 'guest',
+        ]);
+        $account = CustomerExternalAccount::query()->create([
+            'customer_id' => $customer->id,
+            'wordpress_integration_id' => $integration->id,
+            'external_customer_id' => $registered ? '321' : null,
+            'email' => $customer->email,
+            'email_normalized' => $customer->email_normalized,
+            'first_name' => $customer->first_name,
+            'last_name' => $customer->last_name,
+            'display_name' => $customer->display_name,
+            'is_registered' => $registered,
+        ]);
+        $order->update([
+            'customer_id' => $customer->id,
+            'customer_external_account_id' => $account->id,
+            'wordpress_integration_id' => $integration->id,
+            'customer_match_method' => $registered ? 'external_id' : 'guest_email',
+        ]);
+
+        return [$customer, $order->fresh()];
     }
 }

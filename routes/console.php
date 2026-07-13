@@ -22,18 +22,20 @@ Artisan::command('inspire', function (): void {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
 
-Artisan::command('erp:queue-woocommerce-imports {--products : Queue product imports} {--orders : Queue order imports} {--all : Queue products and orders}', function (): int {
+Artisan::command('erp:queue-woocommerce-imports {--products : Queue product imports} {--orders : Queue order imports} {--customers : Queue customer imports} {--all : Queue products, orders and customers}', function (): int {
     $all = (bool) $this->option('all');
     $products = $all || (bool) $this->option('products');
     $orders = $all || (bool) $this->option('orders');
+    $customers = $all || (bool) $this->option('customers');
 
-    if (! $products && ! $orders) {
+    if (! $products && ! $orders && ! $customers) {
         $orders = true;
     }
 
     $result = app(WooCommerceImportQueueService::class)->queueEnabledImports(
         products: $products,
         orders: $orders,
+        customers: $customers,
     );
 
     $this->info(sprintf(
@@ -342,6 +344,11 @@ Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation chec
 Schedule::command('erp:queue-woocommerce-imports --orders')
     ->cron('*/5 * * * *')
     ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:queue-woocommerce-imports --customers')
+    ->cron('*/15 * * * *')
+    ->withoutOverlapping(20)
     ->runInBackground();
 
 Schedule::command('erp:release-stale-woocommerce-imports --minutes=60')

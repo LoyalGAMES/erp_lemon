@@ -334,6 +334,7 @@
                 <div class="workflow-filters" role="group" aria-label="Filtruj scenariusze">
                     <button type="button" class="active" data-workflow-filter="all" aria-pressed="true">Wszystkie</button>
                     <button type="button" data-workflow-filter="order" aria-pressed="false">Zamówienia</button>
+                    <button type="button" data-workflow-filter="customer" aria-pressed="false">Konta klientów</button>
                     <button type="button" data-workflow-filter="return" aria-pressed="false">Zwroty i wymiany</button>
                     <button type="button" data-workflow-filter="enabled" aria-pressed="false">Aktywne</button>
                     <button type="button" data-workflow-filter="disabled" aria-pressed="false">Wyłączone</button>

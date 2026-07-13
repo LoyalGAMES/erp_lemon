@@ -23,7 +23,11 @@ final class CustomerEmailWorkflowSettingsService
                 return [$code => [
                     'code' => $code,
                     'context' => $definition['context'],
-                    'context_label' => $definition['context'] === 'return' ? 'Zwroty i wymiany' : 'Zamówienia',
+                    'context_label' => match ($definition['context']) {
+                        'return' => 'Zwroty i wymiany',
+                        'customer' => 'Konta klientów',
+                        default => 'Zamówienia',
+                    },
                     'scenario' => $definition['scenario'] ?? $definition['context'],
                     'name' => $definition['name'],
                     'stage' => $this->text($override['stage'] ?? $definition['stage'], $definition['stage'], 160),
@@ -232,6 +236,20 @@ final class CustomerEmailWorkflowSettingsService
                 'Potwierdza rozliczenie całego zamówienia po stronie sklepu.',
                 'Rozliczyliśmy zwrot zamówienia {{order_number}}',
                 "Zamówienie zostało oznaczone jako zwrócone. Środki są rozliczane zgodnie z metodą pierwotnej płatności; czas zaksięgowania zależy od banku lub operatora płatności.\n\nZachowaj tę wiadomość jako potwierdzenie.",
+            ),
+            'customer_account_created' => $this->mail(
+                'customer', 'account', 'Konto klienta utworzone',
+                'Po utworzeniu konta w sklepie lub przez bezpieczny link z zaproszenia',
+                'Potwierdza założenie konta i prowadzi klienta do historii zamówień. Wiadomość jest wysyłana tylko raz dla danego konta.',
+                'Twoje konto w {{brand_name}} zostało utworzone',
+                "Twoje konto jest już aktywne. Możesz zalogować się, sprawdzać historię zamówień i korzystać z programu lojalnościowego.\n\nDla bezpieczeństwa nigdy nie wysyłamy hasła w wiadomości e-mail.",
+            ),
+            'guest_account_invitation' => $this->mail(
+                'customer', 'account', 'Zaproszenie do założenia konta po zakupie gościnnym',
+                'Po zapisaniu nowego zamówienia złożonego bez konta',
+                'Jednorazowy, podpisany link pozwala utworzyć konto i przypisać wyłącznie wskazane zamówienie do jego historii.',
+                'Zamówienie {{order_number}} jest zapisane — załóż konto',
+                "Zamówienie zostało złożone bez zakładania konta — nic straconego. Załóż konto, aby mieć dostęp do historii zamówień i korzystać z programu lojalnościowego.\n\nPo rejestracji zamówienie {{order_number}} automatycznie pojawi się na Twoim koncie.",
             ),
             'return_waiting_for_package' => $this->mail(
                 'return', 'return', 'Zgłoszenie zwrotu przyjęte',

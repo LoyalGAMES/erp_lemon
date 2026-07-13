@@ -276,6 +276,19 @@ class IntegrationController extends Controller
         return back()->with('status', 'Import zamówień został dodany do kolejki. Status będzie widoczny w logach synchronizacji.');
     }
 
+    public function importCustomers(
+        WordpressIntegration $integration,
+        WooCommerceImportQueueService $imports,
+    ): RedirectResponse {
+        $log = $imports->queueImport($integration, 'import_customers');
+
+        if (! $log->wasRecentlyCreated) {
+            return back()->with('status', 'Import klientów dla tej integracji jest już w kolejce albo w toku.');
+        }
+
+        return back()->with('status', 'Import klientów został dodany do kolejki. Status będzie widoczny w logach synchronizacji.');
+    }
+
     public function retryLog(
         IntegrationSyncLog $log,
         WooCommerceImportQueueService $imports,
@@ -285,7 +298,7 @@ class IntegrationController extends Controller
             return back()->with('error', 'Ponowić można tylko nieudany import.');
         }
 
-        if (! in_array($log->operation, ['import_products', 'import_orders'], true)) {
+        if (! in_array($log->operation, ['import_products', 'import_orders', 'import_customers'], true)) {
             return back()->with('error', 'Ten typ operacji nie obsługuje ręcznego ponowienia.');
         }
 

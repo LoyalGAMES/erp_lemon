@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class ExternalOrder extends Model
 {
@@ -15,6 +16,10 @@ class ExternalOrder extends Model
 
     protected $fillable = [
         'sales_channel_id',
+        'customer_id',
+        'customer_external_account_id',
+        'wordpress_integration_id',
+        'customer_match_method',
         'external_id',
         'external_number',
         'status',
@@ -51,6 +56,26 @@ class ExternalOrder extends Model
     public function salesChannel(): BelongsTo
     {
         return $this->belongsTo(SalesChannel::class);
+    }
+
+    public function customer(): BelongsTo
+    {
+        return $this->belongsTo(Customer::class);
+    }
+
+    public function customerExternalAccount(): BelongsTo
+    {
+        return $this->belongsTo(CustomerExternalAccount::class);
+    }
+
+    public function wordpressIntegration(): BelongsTo
+    {
+        return $this->belongsTo(WordpressIntegration::class);
+    }
+
+    public function customerAccountClaim(): HasOne
+    {
+        return $this->hasOne(CustomerAccountClaim::class);
     }
 
     public function lines(): HasMany

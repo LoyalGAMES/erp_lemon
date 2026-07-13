@@ -32,5 +32,9 @@ class SalesChannel extends Model
     {
         return $this->hasMany(WarehouseChannelRoute::class);
     }
-}
 
+    public function externalOrders(): HasMany
+    {
+        return $this->hasMany(ExternalOrder::class);
+    }
+}

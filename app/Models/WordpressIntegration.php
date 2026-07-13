@@ -7,6 +7,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\SoftDeletes;
 use Illuminate\Support\Facades\Crypt;
 
@@ -41,6 +42,21 @@ class WordpressIntegration extends Model
     public function salesChannel(): BelongsTo
     {
         return $this->belongsTo(SalesChannel::class);
+    }
+
+    public function customerExternalAccounts(): HasMany
+    {
+        return $this->hasMany(CustomerExternalAccount::class);
+    }
+
+    public function customerAccountClaims(): HasMany
+    {
+        return $this->hasMany(CustomerAccountClaim::class);
+    }
+
+    public function externalOrders(): HasMany
+    {
+        return $this->hasMany(ExternalOrder::class);
     }
 
     public function maskedConsumerKey(): string

@@ -196,6 +196,7 @@
         $nav = [
             ['dashboard', route('dashboard'), 'Dashboard'],
             ['orders', route('modules.show', 'orders'), 'Zamówienia'],
+            ['customers', route('customers.index'), 'Klienci'],
             ['products', route('products.index'), 'Produkty'],
             ['invoices', route('invoices.index'), 'Faktury'],
             ['documents', route('documents.index'), 'Dokumenty magazynowe'],

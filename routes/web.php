@@ -2,6 +2,8 @@
 
 use App\Http\Controllers\AuditLogController;
 use App\Http\Controllers\AuthController;
+use App\Http\Controllers\CustomerAccountClaimController;
+use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExternalOrderController;
 use App\Http\Controllers\ExternalOrderFulfillmentController;
@@ -24,8 +26,16 @@ use App\Http\Controllers\WarehouseController;
 use App\Http\Controllers\WarehouseDocumentController;
 use App\Http\Controllers\WarehouseDocumentCreateController;
 use App\Http\Middleware\EnsureErpRole;
+use App\Http\Middleware\EnsureValidCustomerAccountClaimSignature;
 use App\Http\Middleware\RequireErpSessionAuth;
 use Illuminate\Support\Facades\Route;
+
+Route::get('/konto/zamowienie/{claim:uuid}', [CustomerAccountClaimController::class, 'show'])
+    ->middleware(['throttle:30,1', EnsureValidCustomerAccountClaimSignature::class])
+    ->name('customer-account-claims.show');
+Route::post('/konto/zamowienie/{claim:uuid}', [CustomerAccountClaimController::class, 'complete'])
+    ->middleware(['throttle:5,1', EnsureValidCustomerAccountClaimSignature::class])
+    ->name('customer-account-claims.complete');
 
 Route::get('/login', [AuthController::class, 'showLogin'])->name('login');
 Route::post('/login', [AuthController::class, 'login'])->middleware('throttle:erp-login')->name('login.attempt');
@@ -217,6 +227,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/integrations/{integration}/test', [IntegrationController::class, 'test'])->name('integrations.test');
         Route::post('/integrations/{integration}/import-products', [IntegrationController::class, 'importProducts'])->name('integrations.import-products');
         Route::post('/integrations/{integration}/import-orders', [IntegrationController::class, 'importOrders'])->name('integrations.import-orders');
+        Route::post('/integrations/{integration}/import-customers', [IntegrationController::class, 'importCustomers'])->name('integrations.import-customers');
         Route::put('/integrations/{integration}/wordpress-credentials', [IntegrationController::class, 'updateWordpressCredentials'])->name('integrations.wordpress-credentials.update');
         Route::put('/integrations/{integration}/shipping-labels', [IntegrationController::class, 'updateShippingLabelSettings'])->name('integrations.shipping-labels.update');
         Route::put('/integrations/{integration}/order-statuses', [IntegrationController::class, 'updateOrderStatusSettings'])->name('integrations.order-statuses.update');
@@ -244,6 +255,11 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
 
         Route::post('/orders/{order}/invoice', [ExternalOrderInvoiceController::class, 'create'])
             ->name('orders.invoice.create');
+    });
+
+    Route::middleware(EnsureErpRole::class.':customers')->group(function (): void {
+        Route::get('/customers', [CustomerController::class, 'index'])->name('customers.index');
+        Route::get('/customers/{customer}', [CustomerController::class, 'show'])->name('customers.show');
     });
 
     Route::middleware(EnsureErpRole::class.':ksef')->group(function (): void {

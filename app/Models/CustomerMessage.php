@@ -11,6 +11,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 class CustomerMessage extends Model
 {
     protected $fillable = [
+        'customer_id',
         'external_order_id',
         'return_case_id',
         'direction',
@@ -36,6 +37,11 @@ class CustomerMessage extends Model
     public function externalOrder(): BelongsTo
     {
         return $this->belongsTo(ExternalOrder::class);
+    }
+
+    public function customer(): BelongsTo
+    {
+        return $this->belongsTo(Customer::class);
     }
 
     public function returnCase(): BelongsTo

@@ -364,6 +364,142 @@ final class WooCommerceClient
     }
 
     /**
+     * @return array<string, mixed>
+     */
+    public function order(WordpressIntegration $integration, string|int $orderId): array
+    {
+        $response = $this->request($integration)
+            ->get($this->endpoint($integration, '/orders/'.rawurlencode((string) $orderId)));
+
+        if (! $response->successful()) {
+            throw new RuntimeException("Pobranie zamówienia WooCommerce zwróciło HTTP {$response->status()}.");
+        }
+
+        $order = $response->json();
+
+        return is_array($order) ? $order : [];
+    }
+
+    /**
+     * @return iterable<array<string, mixed>>
+     */
+    public function customers(WordpressIntegration $integration): iterable
+    {
+        for ($page = 1; ; $page++) {
+            if ($page > 10_000) {
+                throw new RuntimeException('Import klientów przekroczył bezpieczny limit 1 000 000 rekordów.');
+            }
+
+            $customers = $this->customersPage($integration, $page);
+
+            if ($customers === []) {
+                break;
+            }
+
+            foreach ($customers as $customer) {
+                yield $customer;
+            }
+        }
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function customersPage(
+        WordpressIntegration $integration,
+        int $page = 1,
+        int $perPage = 100,
+    ): array {
+        // Read the terminal WordPress pagination response instead of letting
+        // PendingRequest::retry turn its intentional HTTP 400 into an exception.
+        // The queued customer import itself still has job-level retries.
+        $response = $this->request($integration, retry: false)
+            ->get($this->endpoint($integration, '/customers'), [
+                'per_page' => max(1, min(100, $perPage)),
+                'page' => max(1, $page),
+                'orderby' => 'id',
+                'order' => 'asc',
+                'role' => 'customer',
+            ]);
+
+        if ($response->status() === 400
+            && data_get($response->json(), 'code') === 'rest_post_invalid_page_number') {
+            return [];
+        }
+
+        if (! $response->successful()) {
+            throw new RuntimeException("Import klientów zwrócił HTTP {$response->status()}.");
+        }
+
+        $customers = $response->json();
+
+        return is_array($customers)
+            ? array_values(array_filter($customers, fn (mixed $customer): bool => is_array($customer)))
+            : [];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function customer(WordpressIntegration $integration, string|int $customerId): array
+    {
+        $response = $this->request($integration)
+            ->get($this->endpoint($integration, '/customers/'.rawurlencode((string) $customerId)));
+
+        if (! $response->successful()) {
+            throw new RuntimeException("Pobranie klienta WooCommerce zwróciło HTTP {$response->status()}.");
+        }
+
+        $customer = $response->json();
+
+        return is_array($customer) ? $customer : [];
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function customersByEmail(WordpressIntegration $integration, string $email): array
+    {
+        $response = $this->request($integration)
+            ->get($this->endpoint($integration, '/customers'), [
+                'email' => trim($email),
+                'per_page' => 100,
+                'role' => 'all',
+            ]);
+
+        if (! $response->successful()) {
+            throw new RuntimeException("Wyszukanie klienta WooCommerce zwróciło HTTP {$response->status()}.");
+        }
+
+        $customers = $response->json();
+
+        return is_array($customers)
+            ? array_values(array_filter($customers, fn (mixed $customer): bool => is_array($customer)))
+            : [];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    public function createCustomer(WordpressIntegration $integration, array $payload): array
+    {
+        $response = $this->request($integration, retry: false)
+            ->post($this->endpoint($integration, '/customers'), $payload);
+
+        if (! $response->successful()) {
+            $message = trim((string) data_get($response->json(), 'message', ''));
+            $details = $message !== '' ? ': '.$message : '.';
+
+            throw new RuntimeException("Utworzenie klienta WooCommerce zwróciło HTTP {$response->status()}{$details}");
+        }
+
+        $customer = $response->json();
+
+        return is_array($customer) ? $customer : [];
+    }
+
+    /**
      * @return array<int, array<string, mixed>>
      */
     public function orderNotes(WordpressIntegration $integration, string $orderId): array

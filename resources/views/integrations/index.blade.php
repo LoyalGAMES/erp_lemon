@@ -1,6 +1,11 @@
 @extends('layouts.app', ['title' => 'Integracje', 'subtitle' => 'Połączenia sklepów, KSeF, GS1 i kolejka synchronizacji w jednym uporządkowanym miejscu.', 'module' => 'integrations'])
 
 @php
+    $syncOperationLabels = [
+        'import_products' => 'Import produktów',
+        'import_orders' => 'Import zamówień',
+        'import_customers' => 'Import klientów',
+    ];
     $syncResultLabels = [
         'source_items' => 'Pozycje z WooCommerce',
         'source_products' => 'Produkty z WooCommerce',
@@ -43,6 +48,21 @@
         'reserved' => 'Zarezerwowane',
         'released' => 'Zwolnione rezerwacje',
         'reservation_skipped' => 'Pominięte rezerwacje',
+        'orders_linked' => 'Powiązane zamówienia historyczne',
+        'notification_baseline' => 'Import bazowy bez maili',
+        'notification_cutoff' => 'Powiadomienia od daty',
+        'notification_previous_success_at' => 'Poprzedni udany import klientów',
+        'notification_baseline_at' => 'Granica historycznych kont bez maili',
+        'notification_overlap_minutes' => 'Bufor powiadomień (min)',
+        'created_customer_ids_count' => 'Nowi klienci w imporcie',
+        'created_external_account_ids_count' => 'Nowe konta Woo w imporcie',
+        'notifications_eligible' => 'Nowe konta kwalifikujące się do powiadomienia',
+        'notifications_created' => 'Utworzone powiadomienia o koncie',
+        'notifications_sent' => 'Wysłane powiadomienia o koncie',
+        'notifications_held' => 'Powiadomienia oczekujące na wysyłkę',
+        'notifications_failed' => 'Nieudane powiadomienia o koncie',
+        'notifications_skipped' => 'Pominięte powiadomienia o koncie',
+        'notification_errors' => 'Błędy powiadomień o koncie',
     ];
     $syncWarningKeys = [
         'duplicate_sku_items',
@@ -51,7 +71,11 @@
         'stock_skipped_pending_export',
         'stock_skipped_waiting_reservations',
     ];
-    $syncHiddenResultKeys = ['duplicate_sku_groups'];
+    $syncHiddenResultKeys = [
+        'duplicate_sku_groups',
+        'created_customer_ids',
+        'created_external_account_ids',
+    ];
     $formatSyncResultValue = function (mixed $value): string {
         if (is_bool($value)) {
             return $value ? 'tak' : 'nie';
@@ -219,6 +243,10 @@
                             <form method="POST" action="{{ route('integrations.import-orders', $integration) }}">
                                 @csrf
                                 <button class="button" type="submit">Kolejkuj zamówienia</button>
+                            </form>
+                            <form method="POST" action="{{ route('integrations.import-customers', $integration) }}">
+                                @csrf
+                                <button class="button" type="submit">Kolejkuj klientów</button>
                             </form>
                             <form method="POST" action="{{ route('integrations.destroy', $integration) }}" onsubmit="return confirm('Usunąć integrację?');">
                                 @csrf
@@ -513,7 +541,7 @@
                             <tr>
                                 <td>{{ $log->created_at?->format('Y-m-d H:i:s') }}</td>
                                 <td>{{ $log->salesChannel?->code ?? '-' }}</td>
-                                <td>{{ $log->operation }}</td>
+                                <td>{{ $syncOperationLabels[$log->operation] ?? $log->operation }}</td>
                                 <td><span class="status {{ $statusClass }}">{{ $log->status }}</span></td>
                                 <td>
                                     @if (is_array($log->response_payload))
@@ -562,7 +590,7 @@
                                 </td>
                                 <td>{{ $log->error_message ?? '-' }}</td>
                                 <td>
-                                    @if ($log->status === 'failed' && in_array($log->operation, ['import_products', 'import_orders'], true) && $log->wordpressIntegration)
+                                    @if ($log->status === 'failed' && in_array($log->operation, ['import_products', 'import_orders', 'import_customers'], true) && $log->wordpressIntegration)
                                         <form method="POST" action="{{ route('integrations.logs.retry', $log) }}">
                                             @csrf
                                             <button class="button secondary" type="submit">Ponów import</button>

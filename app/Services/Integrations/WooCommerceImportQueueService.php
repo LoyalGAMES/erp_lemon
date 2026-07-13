@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Integrations;
 
+use App\Jobs\ImportWooCommerceCustomersJob;
 use App\Jobs\ImportWooCommerceOrdersJob;
 use App\Jobs\ImportWooCommerceProductsJob;
 use App\Models\IntegrationSyncLog;
@@ -18,11 +19,15 @@ final class WooCommerceImportQueueService
     /**
      * @return array{queued:int,skipped_active:int,integrations:int,operations:list<string>}
      */
-    public function queueEnabledImports(bool $products = false, bool $orders = true): array
-    {
+    public function queueEnabledImports(
+        bool $products = false,
+        bool $orders = true,
+        bool $customers = false,
+    ): array {
         $operations = collect([
             'import_products' => $products,
             'import_orders' => $orders,
+            'import_customers' => $customers,
         ])
             ->filter()
             ->keys()
@@ -39,7 +44,7 @@ final class WooCommerceImportQueueService
         }
 
         $integrations = WordpressIntegration::query()
-            ->when(! $products && $orders, fn ($query) => $query->where('order_import_enabled', true))
+            ->when(! $products && ($orders || $customers), fn ($query) => $query->where('order_import_enabled', true))
             ->orderBy('id')
             ->get();
 
@@ -54,6 +59,11 @@ final class WooCommerceImportQueueService
 
             if ($orders && $integration->order_import_enabled) {
                 $log = $this->queueImport($integration, 'import_orders', source: 'scheduled_command');
+                $log->wasRecentlyCreated ? $queued++ : $skipped++;
+            }
+
+            if ($customers && $integration->order_import_enabled) {
+                $log = $this->queueImport($integration, 'import_customers', source: 'scheduled_command');
                 $log->wasRecentlyCreated ? $queued++ : $skipped++;
             }
         }
@@ -72,7 +82,7 @@ final class WooCommerceImportQueueService
         ?IntegrationSyncLog $retryOf = null,
         string $source = 'erp_panel',
     ): IntegrationSyncLog {
-        if (! in_array($operation, ['import_products', 'import_orders'], true)) {
+        if (! in_array($operation, ['import_products', 'import_orders', 'import_customers'], true)) {
             throw new InvalidArgumentException("Nieobsługiwany import: {$operation}");
         }
 
@@ -124,6 +134,7 @@ final class WooCommerceImportQueueService
         match ($operation) {
             'import_products' => ImportWooCommerceProductsJob::dispatch($integration->id, $log->id),
             'import_orders' => ImportWooCommerceOrdersJob::dispatch($integration->id, $log->id),
+            'import_customers' => ImportWooCommerceCustomersJob::dispatch($integration->id, $log->id),
         };
 
         return $log;
@@ -196,7 +207,7 @@ final class WooCommerceImportQueueService
         $released = 0;
 
         IntegrationSyncLog::query()
-            ->whereIn('operation', ['import_products', 'import_orders'])
+            ->whereIn('operation', ['import_products', 'import_orders', 'import_customers'])
             ->where('status', 'running')
             ->whereNotNull('started_at')
             ->where('started_at', '<=', now()->subMinutes($minutes))

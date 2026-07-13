@@ -49,7 +49,7 @@
         ?: ($actionUrl ? (filled($metadata['payment_url'] ?? null) ? 'Przejdź do płatności' : 'Sprawdź szczegóły') : '');
     $trackingUrl = $httpUrl($metadata['tracking_url'] ?? null);
     $phoneHref = preg_replace('/[^0-9+]/', '', $supportPhone) ?: '';
-    $entityLabel = $entityType === 'return' ? 'Zwrot' : ($entityType === 'order' ? 'Zamówienie' : 'Wiadomość');
+    $entityLabel = $entityType === 'return' ? 'Zwrot' : ($entityType === 'order' ? 'Zamówienie' : ($entityType === 'customer' ? 'Konto' : 'Wiadomość'));
     $showBillingAddress = $billingAddress !== [] && $billingAddress !== $shippingAddress;
     $paymentInstruction = trim((string) ($metadata['payment_instruction'] ?? ''));
     $showPaymentInstruction = $entityType === 'order'

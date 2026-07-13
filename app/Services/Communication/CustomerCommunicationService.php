@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Communication;
 
 use App\Mail\CustomerMessageMail;
+use App\Models\Customer;
 use App\Models\CustomerMessage;
 use App\Models\CustomerPayment;
 use App\Models\ExternalOrder;
@@ -40,6 +41,7 @@ final class CustomerCommunicationService
         $templateContext = $this->mailContext->forOrder($order, $recipient, 'manual_order_message');
 
         return $this->createAndSend([
+            'customer_id' => $order->customer_id,
             'external_order_id' => $order->id,
             'type' => self::TYPE_MANUAL,
             'trigger' => 'manual_order_message',
@@ -63,6 +65,7 @@ final class CustomerCommunicationService
         $templateContext = $this->mailContext->forReturn($returnCase, $recipient, 'manual_return_message');
 
         return $this->createAndSend([
+            'customer_id' => $returnCase->externalOrder?->customer_id,
             'return_case_id' => $returnCase->id,
             'external_order_id' => $returnCase->external_order_id,
             'type' => self::TYPE_MANUAL,
@@ -114,6 +117,7 @@ final class CustomerCommunicationService
         }
 
         return $this->createAndSend([
+            'customer_id' => $order->customer_id,
             'external_order_id' => $order->id,
             'type' => self::TYPE_MANUAL,
             'trigger' => 'manual_payment_reminder',
@@ -123,6 +127,120 @@ final class CustomerCommunicationService
             'body' => $content['body'],
             'metadata' => $templateContext,
         ], true);
+    }
+
+    /**
+     * Wysyła jednorazowe zaproszenie po zakupie gościnnym. Samo otwarcie
+     * wiadomości ani linku nie przypisuje zamówienia do żadnego konta.
+     */
+    public function sendGuestAccountInvitation(
+        Customer $customer,
+        ExternalOrder $order,
+        string $claimUrl,
+    ): ?CustomerMessage {
+        $claimUrl = trim($claimUrl);
+        $scheme = mb_strtolower((string) parse_url($claimUrl, PHP_URL_SCHEME));
+
+        if (filter_var($claimUrl, FILTER_VALIDATE_URL) === false || ! in_array($scheme, ['http', 'https'], true)) {
+            throw new RuntimeException('Nie udało się przygotować bezpiecznego linku do założenia konta.');
+        }
+
+        $message = Cache::lock($this->deduplicationLockKey('order', $order->id, 'guest_account_invitation'), 180)
+            ->get(function () use ($customer, $order, $claimUrl): ?CustomerMessage {
+                if ($this->alreadySentForOrder($order, 'guest_account_invitation')) {
+                    return null;
+                }
+
+                $recipient = $this->customerRecipient($customer, $order);
+                $templateContext = $this->mailContext->forCustomer(
+                    $customer,
+                    'guest_account_invitation',
+                    $order,
+                    [
+                        'action_label' => 'Załóż konto i przypisz zamówienie',
+                        'action_url' => $claimUrl,
+                    ],
+                );
+                $content = $this->renderContent(
+                    $this->emailWorkflow->contentFor('guest_account_invitation') ?? [
+                        'subject' => 'Zamówienie {{order_number}} jest zapisane — załóż konto',
+                        'body' => "Zamówienie zostało złożone bez zakładania konta — nic straconego. Załóż konto, aby mieć dostęp do historii zamówień i korzystać z programu lojalnościowego.\n\nPo rejestracji to zamówienie automatycznie pojawi się na Twoim koncie.",
+                    ],
+                    $templateContext,
+                );
+                $attributes = [
+                    'customer_id' => $customer->id,
+                    'external_order_id' => $order->id,
+                    'trigger' => 'guest_account_invitation',
+                    'recipient_email' => $recipient['email'],
+                    'recipient_name' => $recipient['name'],
+                    'subject' => $content['subject'],
+                    'body' => $content['body'],
+                    'metadata' => $templateContext,
+                ];
+
+                if (! $this->emailWorkflow->isEnabled('guest_account_invitation')) {
+                    return $this->createWorkflowSkipped($attributes);
+                }
+
+                return $this->createAutomated($attributes);
+            });
+
+        return $message instanceof CustomerMessage ? $message : null;
+    }
+
+    /**
+     * Potwierdzenie konta jest deduplikowane po kliencie, niezależnie od tego,
+     * czy konto powstało podczas checkoutu, bez zamówienia, czy przez claim.
+     */
+    public function sendCustomerAccountCreated(
+        Customer $customer,
+        ?ExternalOrder $order = null,
+        ?string $accountUrl = null,
+    ): ?CustomerMessage {
+        $message = Cache::lock($this->deduplicationLockKey('customer', $customer->id, 'customer_account_created'), 180)
+            ->get(function () use ($customer, $order, $accountUrl): ?CustomerMessage {
+                if ($this->alreadySentForCustomer($customer, 'customer_account_created')) {
+                    return null;
+                }
+
+                $recipient = $this->customerRecipient($customer, $order);
+                $templateContext = $this->mailContext->forCustomer(
+                    $customer,
+                    'customer_account_created',
+                    $order,
+                    array_filter([
+                        'account_url' => $accountUrl,
+                        'action_url' => $accountUrl,
+                        'action_label' => 'Przejdź do swojego konta',
+                    ], static fn (mixed $value): bool => $value !== null && $value !== ''),
+                );
+                $content = $this->renderContent(
+                    $this->emailWorkflow->contentFor('customer_account_created') ?? [
+                        'subject' => 'Twoje konto w {{brand_name}} zostało utworzone',
+                        'body' => "Twoje konto jest już aktywne. Możesz zalogować się, sprawdzać historię zamówień i korzystać z programu lojalnościowego.\n\nDla bezpieczeństwa nigdy nie wysyłamy hasła w wiadomości e-mail.",
+                    ],
+                    $templateContext,
+                );
+                $attributes = [
+                    'customer_id' => $customer->id,
+                    'external_order_id' => $order?->id,
+                    'trigger' => 'customer_account_created',
+                    'recipient_email' => $recipient['email'],
+                    'recipient_name' => $recipient['name'],
+                    'subject' => $content['subject'],
+                    'body' => $content['body'],
+                    'metadata' => $templateContext,
+                ];
+
+                if (! $this->emailWorkflow->isEnabled('customer_account_created')) {
+                    return $this->createWorkflowSkipped($attributes);
+                }
+
+                return $this->createAutomated($attributes);
+            });
+
+        return $message instanceof CustomerMessage ? $message : null;
     }
 
     /**
@@ -173,6 +291,7 @@ final class CustomerCommunicationService
             $templateContext,
         );
         $attributes = [
+            'customer_id' => $order->customer_id,
             'external_order_id' => $order->id,
             'trigger' => $trigger,
             'recipient_email' => $recipient['email'],
@@ -245,6 +364,7 @@ final class CustomerCommunicationService
             $templateContext,
         );
         $attributes = [
+            'customer_id' => $returnCase->externalOrder?->customer_id,
             'return_case_id' => $returnCase->id,
             'external_order_id' => $returnCase->external_order_id,
             'trigger' => $trigger,
@@ -473,6 +593,16 @@ final class CustomerCommunicationService
             ->exists();
     }
 
+    private function alreadySentForCustomer(Customer $customer, string $trigger): bool
+    {
+        return CustomerMessage::query()
+            ->where('customer_id', $customer->id)
+            ->where('type', self::TYPE_AUTOMATED)
+            ->where('trigger', $trigger)
+            ->whereIn('status', ['held', 'pending', 'sent', 'failed', 'skipped'])
+            ->exists();
+    }
+
     private function orderTriggerCanRepeat(string $trigger): bool
     {
         return in_array($trigger, [
@@ -508,6 +638,26 @@ final class CustomerCommunicationService
         return [
             'email' => filter_var($email, FILTER_VALIDATE_EMAIL) !== false ? $email : null,
             'name' => $this->personName($order->billing_data) ?: $this->personName($order->shipping_data),
+        ];
+    }
+
+    /**
+     * @return array{email:?string,name:?string}
+     */
+    private function customerRecipient(Customer $customer, ?ExternalOrder $order = null): array
+    {
+        $email = trim((string) $customer->email);
+
+        if ($email === '' && $order instanceof ExternalOrder) {
+            return $this->orderRecipient($order);
+        }
+
+        $name = trim((string) ($customer->display_name
+            ?: trim($customer->first_name.' '.$customer->last_name)));
+
+        return [
+            'email' => filter_var($email, FILTER_VALIDATE_EMAIL) !== false ? $email : null,
+            'name' => $name !== '' ? $name : null,
         ];
     }
 

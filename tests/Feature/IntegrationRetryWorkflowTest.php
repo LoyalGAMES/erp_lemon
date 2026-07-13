@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Jobs\ImportWooCommerceCustomersJob;
 use App\Jobs\ImportWooCommerceOrdersJob;
 use App\Jobs\ImportWooCommerceProductsJob;
 use App\Models\IntegrationSyncLog;
@@ -351,6 +352,7 @@ class IntegrationRetryWorkflowTest extends TestCase
         $output = Artisan::output();
 
         $this->assertStringContainsString('erp:queue-woocommerce-imports --orders', $output);
+        $this->assertStringContainsString('erp:queue-woocommerce-imports --customers', $output);
         $this->assertStringContainsString('queue:work --stop-when-empty', $output);
         $this->assertStringContainsString('erp:release-stale-woocommerce-imports --minutes=60', $output);
     }
@@ -408,9 +410,10 @@ class IntegrationRetryWorkflowTest extends TestCase
         $this->artisan('erp:queue-woocommerce-imports', ['--all' => true])
             ->assertExitCode(0);
 
-        $this->assertSame(5, IntegrationSyncLog::query()->count());
+        $this->assertSame(7, IntegrationSyncLog::query()->count());
         $this->assertSame(3, IntegrationSyncLog::query()->where('operation', 'import_products')->count());
         $this->assertSame(2, IntegrationSyncLog::query()->where('operation', 'import_orders')->count());
+        $this->assertSame(2, IntegrationSyncLog::query()->where('operation', 'import_customers')->count());
 
         $this->assertDatabaseHas('integration_sync_logs', [
             'wordpress_integration_id' => $ordersOnlyIntegration->id,
@@ -427,18 +430,19 @@ class IntegrationRetryWorkflowTest extends TestCase
             ->whereNotNull('request_payload')
             ->get();
 
-        $this->assertCount(4, $scheduledLogs);
+        $this->assertCount(6, $scheduledLogs);
         $this->assertTrue($scheduledLogs->every(
             fn (IntegrationSyncLog $log): bool => data_get($log->request_payload, 'source') === 'scheduled_command',
         ));
 
         Queue::assertPushed(ImportWooCommerceProductsJob::class, 3);
         Queue::assertPushed(ImportWooCommerceOrdersJob::class, 1);
+        Queue::assertPushed(ImportWooCommerceCustomersJob::class, 2);
 
         $this->artisan('erp:queue-woocommerce-imports', ['--all' => true])
             ->assertExitCode(0);
 
-        $this->assertSame(5, IntegrationSyncLog::query()->count());
+        $this->assertSame(7, IntegrationSyncLog::query()->count());
     }
 
     public function test_integration_log_times_are_displayed_in_warsaw_timezone(): void

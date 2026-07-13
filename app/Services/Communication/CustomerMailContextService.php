@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Communication;
 
 use App\Models\CourierAccount;
+use App\Models\Customer;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\Product;
@@ -187,6 +188,59 @@ final class CustomerMailContextService
         ]);
     }
 
+    /**
+     * @param  array<string, mixed>  $context
+     * @return array<string, mixed>
+     */
+    public function forCustomer(
+        Customer $customer,
+        string $trigger,
+        ?ExternalOrder $order = null,
+        array $context = [],
+    ): array {
+        $integrationId = (int) ($order?->wordpress_integration_id
+            ?: $customer->externalAccounts()->value('wordpress_integration_id'));
+        $integration = $integrationId > 0
+            ? WordpressIntegration::query()->find($integrationId)
+            : null;
+        $accountUrl = $this->httpUrl($context['account_url'] ?? null)
+            ?? ($integration instanceof WordpressIntegration
+                ? rtrim($integration->base_url, '/').'/moje-konto/'
+                : null);
+        $actionUrl = $this->httpUrl($context['action_url'] ?? null) ?? $accountUrl;
+        $actionLabel = trim((string) ($context['action_label'] ?? ''));
+
+        if ($actionLabel === '') {
+            $actionLabel = $trigger === 'guest_account_invitation'
+                ? 'Załóż konto i przypisz zamówienie'
+                : 'Przejdź do swojego konta';
+        }
+
+        return array_merge($this->baseContext(), $context, [
+            'payload_version' => 2,
+            'entity_type' => 'customer',
+            'trigger' => $trigger,
+            'customer_id' => $customer->id,
+            'customer_email' => $customer->email,
+            'customer_name' => $customer->display_name
+                ?: trim($customer->first_name.' '.$customer->last_name),
+            'customer_account_status' => $customer->account_status,
+            'order_number' => $order instanceof ExternalOrder ? $this->orderNumber($order) : '',
+            'order_date' => ($order?->external_created_at ?? $order?->created_at)?->format('d.m.Y'),
+            'account_url' => $accountUrl,
+            'action_label' => $actionLabel,
+            'action_url' => $actionUrl,
+            'items' => [],
+            'items_count' => 0,
+            'totals' => [],
+            'billing_address' => [],
+            'shipping_address' => [],
+            'payment_method' => '',
+            'payment_instruction' => '',
+            'progress' => [],
+        ]);
+    }
+
     /** @return array<string, mixed> */
     public function previewContext(string $scenario, string $trigger): array
     {
@@ -246,6 +300,24 @@ final class CustomerMailContextService
                     'line2' => '60-001 Poznań',
                     'country' => 'PL',
                 ],
+            ]);
+        }
+
+        if ($scenario === 'account') {
+            return array_merge($base, [
+                'entity_type' => 'customer',
+                'action_label' => $trigger === 'guest_account_invitation'
+                    ? 'Załóż konto i przypisz zamówienie'
+                    : 'Przejdź do swojego konta',
+                'action_url' => 'https://example.com/moje-konto/',
+                'items' => [],
+                'items_count' => 0,
+                'totals' => [],
+                'billing_address' => [],
+                'shipping_address' => [],
+                'payment_method' => '',
+                'payment_instruction' => '',
+                'progress' => [],
             ]);
         }
 

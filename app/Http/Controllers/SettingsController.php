@@ -764,7 +764,7 @@ class SettingsController extends Controller
     ): JsonResponse {
         $validated = $request->validate([
             'trigger' => ['required', 'string', Rule::in(array_keys($mailWorkflow->data()))],
-            'scenario' => ['required', 'string', Rule::in(['order', 'payment', 'shipment', 'split', 'return', 'invoice'])],
+            'scenario' => ['required', 'string', Rule::in(['order', 'payment', 'shipment', 'split', 'return', 'invoice', 'account'])],
             'subject' => ['required', 'string', 'max:160'],
             'body' => ['required', 'string', 'max:5000'],
             'layout' => ['nullable', 'array'],
