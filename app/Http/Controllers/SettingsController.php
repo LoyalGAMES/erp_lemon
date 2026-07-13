@@ -682,6 +682,7 @@ class SettingsController extends Controller
             'google_client_id' => ['nullable', 'string', 'max:1000'],
             'google_client_secret' => ['nullable', 'string', 'max:2000'],
             'clear_google_client_secret' => ['nullable', 'boolean'],
+            'connect_google' => ['nullable', 'boolean'],
             'from_address' => [$enabled ? 'required' : 'nullable', 'email', 'max:255'],
             'from_name' => [$enabled ? 'required' : 'nullable', 'string', 'max:120'],
             'reply_to_address' => ['nullable', 'email', 'max:255'],
@@ -714,6 +715,27 @@ class SettingsController extends Controller
 
             $mailSettings->update($validated);
         });
+
+        if ($request->boolean('connect_google')) {
+            $user = $request->user();
+
+            if ($user === null) {
+                abort(401);
+            }
+
+            try {
+                $authorizationUrl = $googleOAuth->beginAuthorization(
+                    $request,
+                    (int) $user->getAuthIdentifier(),
+                );
+            } catch (\RuntimeException $exception) {
+                return redirect()
+                    ->route('settings.mail')
+                    ->with('error', $exception->getMessage());
+            }
+
+            return redirect()->away($authorizationUrl);
+        }
 
         return back()->with('status', 'Ustawienia poczty zostały zapisane.');
     }

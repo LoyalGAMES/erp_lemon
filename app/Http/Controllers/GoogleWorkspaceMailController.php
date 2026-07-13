@@ -13,10 +13,6 @@ use RuntimeException;
 
 final class GoogleWorkspaceMailController extends Controller
 {
-    private const SESSION_STATE_KEY = 'google_workspace_mail_oauth_state';
-
-    private const STATE_TTL_SECONDS = 600;
-
     public function connect(
         Request $request,
         GoogleWorkspaceOAuthService $oauth,
@@ -27,18 +23,9 @@ final class GoogleWorkspaceMailController extends Controller
             abort(401);
         }
 
-        $state = bin2hex(random_bytes(32));
-        $request->session()->put(self::SESSION_STATE_KEY, [
-            'hash' => hash('sha256', $state),
-            'user_id' => $user->id,
-            'expires_at' => now()->addSeconds(self::STATE_TTL_SECONDS)->getTimestamp(),
-        ]);
-
         try {
-            $authorizationUrl = $oauth->authorizationUrl($state);
+            $authorizationUrl = $oauth->beginAuthorization($request, $user->id);
         } catch (RuntimeException $exception) {
-            $request->session()->forget(self::SESSION_STATE_KEY);
-
             return redirect()
                 ->route('settings.mail')
                 ->with('error', $exception->getMessage());
@@ -51,18 +38,12 @@ final class GoogleWorkspaceMailController extends Controller
         Request $request,
         GoogleWorkspaceOAuthService $oauth,
     ): RedirectResponse {
-        $pendingState = $request->session()->pull(self::SESSION_STATE_KEY);
         $user = Auth::user();
         $state = (string) $request->query('state', '');
         $code = (string) $request->query('code', '');
 
         if (! $user instanceof User
-            || ! is_array($pendingState)
-            || ! isset($pendingState['hash'], $pendingState['user_id'], $pendingState['expires_at'])
-            || (int) $pendingState['user_id'] !== $user->id
-            || (int) $pendingState['expires_at'] < now()->getTimestamp()
-            || $state === ''
-            || ! hash_equals((string) $pendingState['hash'], hash('sha256', $state))) {
+            || ! $oauth->consumeAuthorizationState($request, $user->id, $state)) {
             return redirect()
                 ->route('settings.mail')
                 ->with('error', 'Sesja łączenia z Google wygasła lub jest nieprawidłowa. Rozpocznij ponownie.');

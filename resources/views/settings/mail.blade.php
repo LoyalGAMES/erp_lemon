@@ -126,7 +126,7 @@
                             @elseif ($googleOauthConfigured)
                                 <span>Dane aplikacji są zapisane. Połącz konto, z którego ERP ma wysyłać wiadomości.</span>
                             @else
-                                <span>Najpierw wpisz dane aplikacji OAuth i zapisz ustawienia.</span>
+                                <span>Wpisz dane aplikacji OAuth, a następnie użyj przycisku łączenia poniżej.</span>
                             @endif
                         </div>
                         <span @class(['google-status-badge', 'connected' => $googleConnected, 'warning' => $googleReauthorizationRequired])>
@@ -158,9 +158,9 @@
                         @if ($googleConnected)
                             <button class="button secondary" type="submit" form="google-mail-disconnect-form">Rozłącz konto Google</button>
                         @else
-                            <button class="button secondary" type="submit" form="google-mail-connect-form" @disabled(! $googleOauthConfigured)>Połącz z Google</button>
+                            <button class="button secondary" type="submit" name="connect_google" value="1">Zapisz i połącz z Google</button>
                         @endif
-                        <span class="form-hint">Po zmianie identyfikatora lub klucza najpierw zapisz ustawienia, a następnie połącz konto.</span>
+                        <span class="form-hint">Przycisk zapisze ustawienia i od razu otworzy autoryzację Google.</span>
                     </div>
 
                     <details class="google-setup-guide">
@@ -170,7 +170,7 @@
                             <li>Skonfiguruj ekran zgody OAuth; dla jednej organizacji Google Workspace wybierz typ <strong>Internal</strong>.</li>
                             <li>Utwórz dane logowania OAuth typu <strong>Web application</strong>.</li>
                             <li>Dodaj powyższy adres jako autoryzowany URI przekierowania i wklej tutaj Client ID oraz Client Secret.</li>
-                            <li>Zapisz ustawienia, kliknij „Połącz z Google” i zaakceptuj minimalny zakres <code>gmail.send</code>.</li>
+                            <li>Kliknij „Zapisz i połącz z Google” i zaakceptuj minimalny zakres <code>gmail.send</code>.</li>
                             <li>Jeżeli organizacja blokuje aplikację, administrator Workspace musi dopuścić ten Client ID w <strong>Security → API controls → Manage App Access</strong>.</li>
                         </ol>
                     </details>
@@ -234,9 +234,6 @@
                     <p>Aktywny mechanizm wysyłki przed zastosowaniem ustawień: <strong>{{ $runtimeMailer }}</strong>. Hasła SMTP, klucze OAuth i tokeny Google są przechowywane w bazie w formie szyfrowanej.</p>
                 </details>
                 <button class="button" type="submit">Zapisz ustawienia wysyłki</button>
-            </form>
-            <form id="google-mail-connect-form" method="POST" action="{{ route('settings.mail.google.connect') }}" hidden>
-                @csrf
             </form>
             <form id="google-mail-disconnect-form" method="POST" action="{{ route('settings.mail.google.disconnect') }}" hidden>
                 @csrf

@@ -8,6 +8,7 @@ use App\Models\GoogleMailConnection;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Response;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -26,6 +27,10 @@ final class GoogleWorkspaceOAuthService
     private const REVOKE_URL = 'https://oauth2.googleapis.com/revoke';
 
     private const REFRESH_LOCK = 'google-workspace-mail:refresh-token';
+
+    private const SESSION_STATE_KEY = 'google_workspace_mail_oauth_state';
+
+    private const STATE_TTL_SECONDS = 600;
 
     public function __construct(
         private readonly MailSettingsService $mailSettings,
@@ -121,6 +126,36 @@ final class GoogleWorkspaceOAuthService
         }
 
         return self::AUTHORIZATION_URL.'?'.http_build_query($query, '', '&', PHP_QUERY_RFC3986);
+    }
+
+    public function beginAuthorization(Request $request, int $userId): string
+    {
+        $state = bin2hex(random_bytes(32));
+        $request->session()->put(self::SESSION_STATE_KEY, [
+            'hash' => hash('sha256', $state),
+            'user_id' => $userId,
+            'expires_at' => now()->addSeconds(self::STATE_TTL_SECONDS)->getTimestamp(),
+        ]);
+
+        try {
+            return $this->authorizationUrl($state);
+        } catch (RuntimeException $exception) {
+            $request->session()->forget(self::SESSION_STATE_KEY);
+
+            throw $exception;
+        }
+    }
+
+    public function consumeAuthorizationState(Request $request, int $userId, string $state): bool
+    {
+        $pendingState = $request->session()->pull(self::SESSION_STATE_KEY);
+
+        return is_array($pendingState)
+            && isset($pendingState['hash'], $pendingState['user_id'], $pendingState['expires_at'])
+            && (int) $pendingState['user_id'] === $userId
+            && (int) $pendingState['expires_at'] >= now()->getTimestamp()
+            && $state !== ''
+            && hash_equals((string) $pendingState['hash'], hash('sha256', $state));
     }
 
     public function exchangeAuthorizationCode(string $code, int $connectedByUserId): GoogleMailConnection

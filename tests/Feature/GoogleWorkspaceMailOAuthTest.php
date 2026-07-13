@@ -53,6 +53,65 @@ class GoogleWorkspaceMailOAuthTest extends TestCase
             ->assertDontSee($clientSecret, false);
     }
 
+    public function test_connect_action_saves_new_credentials_and_immediately_starts_oauth(): void
+    {
+        $clientId = 'erp-google-client.apps.googleusercontent.com';
+        $clientSecret = 'google-client-secret-entered-in-the-form';
+
+        $response = $this->put(route('settings.mail.update'), $this->mailSettingsPayload([
+            'enabled' => '1',
+            'delivery_method' => MailSettingsService::DELIVERY_GOOGLE_WORKSPACE,
+            'google_client_id' => $clientId,
+            'google_client_secret' => $clientSecret,
+            'connect_google' => '1',
+        ]));
+
+        $response->assertRedirectContains('https://accounts.google.com/o/oauth2/v2/auth');
+        $location = (string) $response->headers->get('Location');
+        $query = $this->oauthRedirectQuery($location);
+
+        $this->assertSame($clientId, $query['client_id']);
+        $this->assertSame(route('settings.mail.google.callback'), $query['redirect_uri']);
+        $this->assertSame('powiadomienia@example.test', $query['login_hint']);
+
+        $connection = GoogleMailConnection::query()
+            ->where('purpose', GoogleMailConnection::PURPOSE_TRANSACTIONAL_MAIL)
+            ->firstOrFail();
+
+        $this->assertSame($clientId, $connection->client_id);
+        $this->assertSame($clientSecret, $connection->clientSecret());
+
+        $savedSettings = AppSetting::query()->where('key', 'mail_settings')->firstOrFail()->value;
+        $this->assertSame(MailSettingsService::DELIVERY_GOOGLE_WORKSPACE, $savedSettings['delivery_method']);
+        $this->assertTrue($savedSettings['delivery_enabled']);
+        $this->assertSame('powiadomienia@example.test', $savedSettings['from_address']);
+
+        $pendingState = session('google_workspace_mail_oauth_state');
+        $this->assertIsArray($pendingState);
+        $this->assertSame(hash('sha256', $query['state']), $pendingState['hash']);
+        $this->assertSame((int) auth()->id(), $pendingState['user_id']);
+    }
+
+    public function test_connect_button_submits_the_settings_form_before_credentials_are_stored(): void
+    {
+        $response = $this->get(route('settings.mail'));
+        $response->assertOk();
+
+        $document = new \DOMDocument;
+        @$document->loadHTML((string) $response->getContent());
+        $xpath = new \DOMXPath($document);
+        $buttons = $xpath->query(
+            '//form[@data-mail-settings-form]//button[@type="submit"][@name="connect_google"][@value="1"]',
+        );
+
+        $this->assertNotFalse($buttons);
+        $this->assertCount(1, $buttons, 'Przycisk „Połącz z Google” musi wysyłać główny formularz z wpisanymi danymi OAuth.');
+        $this->assertFalse(
+            $buttons->item(0)?->hasAttribute('disabled') ?? true,
+            'Przycisk „Połącz z Google” nie może być zablokowany przed pierwszym zapisaniem Client ID i Client Secret.',
+        );
+    }
+
     public function test_switching_to_google_workspace_preserves_the_existing_smtp_configuration(): void
     {
         app(MailSettingsService::class)->update([
