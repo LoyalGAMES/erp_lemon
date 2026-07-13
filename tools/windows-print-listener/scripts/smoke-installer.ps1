@@ -287,15 +287,20 @@ try {
         $settingsShortcut.TargetPath,
         $configuratorPath,
         [System.StringComparison]::OrdinalIgnoreCase
-    )) {
-        throw "Skrót ustawień wskazuje nieoczekiwany plik: $($settingsShortcut.TargetPath)"
+    ) -or -not [string]::IsNullOrEmpty($settingsShortcut.Arguments)) {
+        throw "Skrót ustawień ma nieoczekiwany cel lub argumenty: $($settingsShortcut.TargetPath) $($settingsShortcut.Arguments)"
     }
     $connectionShortcut = Get-ShortcutMetadata -Path $connectionShortcutPath
+    $expectedConnectionArguments = '/K ""' + $listenerPath + '" -check-connection"'
     if (-not [string]::Equals(
         $connectionShortcut.TargetPath,
         [System.IO.Path]::GetFullPath([string] $env:ComSpec),
         [System.StringComparison]::OrdinalIgnoreCase
-    ) -or $connectionShortcut.Arguments -notmatch '(?i)-check-connection') {
+    ) -or -not [string]::Equals(
+        $connectionShortcut.Arguments,
+        $expectedConnectionArguments,
+        [System.StringComparison]::OrdinalIgnoreCase
+    )) {
         throw 'Skrót weryfikacji nie uruchamia lokalnego testu połączenia.'
     }
     if ((Get-FileHash -LiteralPath $rendererPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
