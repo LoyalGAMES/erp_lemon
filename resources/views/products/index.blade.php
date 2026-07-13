@@ -50,6 +50,7 @@
         .stock-modal[hidden] { display: none; }
         html.stock-modal-open, html.stock-modal-open body { overflow: hidden; }
         .stock-modal-card { width: min(1060px, 96vw); max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; border-radius: 9px; background: var(--surface); box-shadow: 0 24px 70px rgba(0, 0, 0, .32); white-space: normal; }
+        .stock-modal-card.variant-stock-modal-card { width: min(1320px, 96vw); }
         .stock-modal-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid var(--border); }
         .stock-modal-title { min-width: 0; display: grid; gap: 2px; }
         .stock-modal-title span { font-size: 16px; font-weight: 820; }
@@ -181,22 +182,22 @@
             .stock-modal-body .stock-readonly-summary .stock-pill { min-width: 0; display: grid; align-content: center; gap: 2px; padding: 7px 4px; text-align: center; line-height: 1.2; }
             .stock-modal-body .stock-readonly-summary .stock-pill strong { margin-left: 0; font-size: 16px; }
             .stock-modal-body .stock-readonly-note { padding: 9px 10px; border-radius: 8px; background: var(--green-soft); font-size: 12px; line-height: 1.45; }
-            .stock-modal-body .stock-adjust-table-scroll { width: 100%; overflow: visible; }
-            .stock-modal-body .stock-adjust-table { width: 100%; min-width: 0; display: block; }
-            .stock-modal-body .stock-adjust-table thead { display: none; }
-            .stock-modal-body .stock-adjust-table tbody { display: grid; gap: 10px; }
-            .stock-modal-body .stock-adjust-table tr { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #fffdfb; }
-            .stock-modal-body .stock-adjust-table td { min-width: 0; display: block; padding: 0; border: 0; text-align: left; white-space: normal; }
-            .stock-modal-body .stock-adjust-table td::before { content: attr(data-stock-label); display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1.2; }
-            .stock-modal-body .stock-adjust-table td[colspan] { grid-column: 1 / -1; }
-            .stock-modal-body .stock-adjust-warehouse { grid-column: 1 / -1; padding-bottom: 10px !important; border-bottom: 1px solid var(--border) !important; }
-            .stock-modal-body .stock-adjust-warehouse strong { display: block; margin-bottom: 2px; font-size: 14px; }
-            .stock-modal-body .stock-adjust-metric { font-size: 16px; font-weight: 820; }
-            .stock-modal-body .stock-adjust-field { grid-column: 1 / -1; }
-            .stock-modal-body .stock-adjust-field input { width: 100%; min-width: 0; min-height: 48px; font-size: 16px; }
-            .stock-modal-body .stock-adjust-field .stock-adjust-error { min-height: 0; margin-top: 4px; }
-            .stock-modal-body .stock-adjust-action { grid-column: 1 / -1; }
-            .stock-modal-body .stock-adjust-action .button { width: 100%; min-height: 48px; font-size: 14px; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-table-scroll { width: 100%; overflow: visible; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-table { width: 100%; min-width: 0; display: block; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-table thead { display: none; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-table tbody { display: grid; gap: 10px; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-table tr { width: 100%; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 8px; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #fffdfb; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-table td { min-width: 0; display: block; padding: 0; border: 0; text-align: left; white-space: normal; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-table td::before { content: attr(data-stock-label); display: block; margin-bottom: 3px; color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1.2; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-table td[colspan] { grid-column: 1 / -1; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-warehouse { grid-column: 1 / -1; padding-bottom: 10px !important; border-bottom: 1px solid var(--border) !important; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-warehouse strong { display: block; margin-bottom: 2px; font-size: 14px; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-metric { font-size: 16px; font-weight: 820; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-field { grid-column: 1 / -1; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-field input { width: 100%; min-width: 0; min-height: 48px; font-size: 16px; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-field .stock-adjust-error { min-height: 0; margin-top: 4px; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-action { grid-column: 1 / -1; }
+            .stock-modal-body .stock-readonly-panel .stock-adjust-action .button { width: 100%; min-height: 48px; font-size: 14px; }
         }
     </style>
 @endpush
@@ -782,7 +783,7 @@
                                     </div>
                                     <button class="warehouse-modal-trigger" type="button" data-stock-modal-open="stock-modal-{{ $product->id }}" aria-haspopup="dialog" aria-controls="stock-modal-{{ $product->id }}" aria-expanded="false">Magazyny i korekta</button>
                                     <div class="stock-modal" id="stock-modal-{{ $product->id }}" data-stock-modal hidden aria-hidden="true">
-                                        <div class="stock-modal-card" data-stock-modal-card role="dialog" aria-modal="true" aria-labelledby="stock-modal-title-{{ $product->id }}">
+                                        <div @class(['stock-modal-card', 'variant-stock-modal-card' => $familyVariants->isNotEmpty()]) data-stock-modal-card role="dialog" aria-modal="true" aria-labelledby="stock-modal-title-{{ $product->id }}">
                                             <div class="stock-modal-header">
                                                 <div class="stock-modal-title" id="stock-modal-title-{{ $product->id }}">
                                                     <span>Magazyny i korekta</span>
@@ -791,11 +792,8 @@
                                                 <button class="stock-modal-close" type="button" data-stock-modal-close aria-label="Zamknij">&times;</button>
                                             </div>
                                             <div class="stock-modal-body" data-stock-modal-body>
-                                        @if ($variants->isNotEmpty())
-                                            <div class="toolbar-note">Stan ogółem obejmuje warianty. Korektę konkretnego wariantu wykonaj po rozwinięciu wariantów.</div>
-                                        @endif
-                                        @include('products._stock_readonly_panel', [
-                                            'stockProduct' => $product,
+                                        @include('products._stock_management_panels', [
+                                            'stockOwner' => $product,
                                             'stockWarehouses' => $warehouseOptions,
                                         ])
                                             </div>

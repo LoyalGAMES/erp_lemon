@@ -119,9 +119,13 @@ class ProductImportIssueNavigationTest extends TestCase
             ->assertSee('Rodzina produktu diagnostycznego')
             ->assertSee('Wariant dotknięty błędem')
             ->assertSee('Produkt prosty dotknięty błędem')
-            ->assertDontSee('Wariant bez błędu')
             ->assertDontSee('Produkt prosty bez błędu')
             ->assertDontSee('javascript:alert(1)', false);
+
+        $this->assertDoesNotMatchRegularExpression(
+            '/<tr\b(?=[^>]*\bdata-product-card="variant")(?=[^>]*\bdata-product-id="'.$safeVariant->id.'")[^>]*>/s',
+            $response->getContent(),
+        );
 
         $this->assertMatchesRegularExpression(
             '/<tr\b(?=[^>]*\bclass="[^"]*\bvariant-row\b[^"]*")(?=[^>]*\bdata-variant-parent="product-'.$parent->id.'")(?=[^>]*\bdata-product-card="variant")(?=[^>]*\bdata-product-id="'.$affectedVariant->id.'")(?=[^>]*\bdata-parent-product-id="'.$parent->id.'")(?![^>]*\shidden(?:\s|=|>))[^>]*>/s',
@@ -207,11 +211,15 @@ class ProductImportIssueNavigationTest extends TestCase
             ->assertSee('Wariant duplikat B')
             ->assertSee(route('products.edit', $simpleA), false)
             ->assertSee(route('products.edit', $variantA), false)
-            ->assertDontSee('Wariant bez konfliktu')
             ->assertDontSee('Produkt tylko z tym samym SKU co wariant')
             ->assertDontSee('Wariant tylko z tym samym SKU co produkt')
             ->assertDontSee('CROSS-KIND')
             ->assertDontSee('ALIAS-ONLY');
+
+        $this->assertDoesNotMatchRegularExpression(
+            '/<tr\b(?=[^>]*\bdata-product-card="variant")(?=[^>]*\bdata-product-id="'.$safeSibling->id.'")[^>]*>/s',
+            $response->getContent(),
+        );
 
         $this->assertSame(2, substr_count($response->getContent(), '<strong>DUPLICATE</strong>'));
         $this->assertStringContainsString('>Produkt<', $response->getContent());

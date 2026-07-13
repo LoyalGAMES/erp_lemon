@@ -852,6 +852,42 @@ class ProductCatalogWorkflowTest extends TestCase
             ));
         }
 
+        $listResponse = $this->get(route('products.index'))->assertOk();
+        $document = new \DOMDocument;
+        @$document->loadHTML((string) $listResponse->getContent());
+        $xpath = new \DOMXPath($document);
+        $parentModal = $xpath->query('//*[@id="stock-modal-'.$product->id.'"]')?->item(0);
+
+        $this->assertNotNull($parentModal);
+        $this->assertSame(1, $xpath->query('.//*[@data-variant-stock-table]', $parentModal)?->length);
+        $this->assertSame(4, $xpath->query('.//*[@data-variant-stock-row]', $parentModal)?->length);
+        $this->assertSame(0, $xpath->query('.//*[contains(concat(" ", normalize-space(@class), " "), " stock-readonly-panel ")]', $parentModal)?->length);
+        $this->assertSame(0, $xpath->query('.//*[@data-action="'.route('products.stock.adjust', $product).'"]', $parentModal)?->length);
+
+        foreach ($variants as $variant) {
+            $this->assertSame(2, $xpath->query(
+                './/*[@data-action="'.route('products.stock.adjust', $variant).'"]',
+                $parentModal,
+            )?->length);
+        }
+
+        $selectedVariant = $variants->first();
+        $siblingVariant = $variants->last();
+        $variantModal = $xpath->query('//*[@id="stock-modal-'.$selectedVariant->id.'"]')?->item(0);
+
+        $this->assertNotNull($variantModal);
+        $this->assertSame(0, $xpath->query('.//*[@data-variant-stock-table]', $variantModal)?->length);
+        $this->assertSame(1, $xpath->query('.//*[contains(concat(" ", normalize-space(@class), " "), " stock-readonly-panel ")]', $variantModal)?->length);
+        $this->assertSame(2, $xpath->query(
+            './/*[@data-action="'.route('products.stock.adjust', $selectedVariant).'"]',
+            $variantModal,
+        )?->length);
+        $this->assertSame(0, $xpath->query(
+            './/*[@data-action="'.route('products.stock.adjust', $siblingVariant).'"]',
+            $variantModal,
+        )?->length);
+        $this->assertStringNotContainsString($siblingVariant->sku, (string) $document->saveHTML($variantModal));
+
         $this->post(route('products.stock.adjust', $variants->first()), [
             'warehouse_id' => $warehouse->id,
             'new_quantity' => 7,
