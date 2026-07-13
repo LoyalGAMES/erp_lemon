@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -31,6 +32,21 @@ sumatraPath=C:\Program Files\SumatraPDF\SumatraPDF.exe
 	}
 	if config.Station != "station-1" || config.WorkerName != "PACK-PC-1" || config.PollSeconds != 3 {
 		t.Fatalf("unexpected station config: %#v", config)
+	}
+}
+
+func TestParseBridgeConfigNormalizesStationLikeERPSettings(t *testing.T) {
+	config, err := parseBridgeConfig(`[bridge]
+base_url=https://erp.example.test
+token=secret
+station= Station 1
+worker_name=PACK-PC-1
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Station != "station-1" {
+		t.Fatalf("station=%q, expected station-1", config.Station)
 	}
 }
 
@@ -171,6 +187,102 @@ func TestBridgeReportsPrintingFailure(t *testing.T) {
 	}
 }
 
+func TestBridgeRejectsMappedPrinterThatServiceCannotSeeBeforeDownloading(t *testing.T) {
+	downloaded := false
+	failedReported := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/print-bridge/jobs/next":
+			_, _ = io.WriteString(writer, `{"success":true,"job":{"id":8,"lease_token":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd","printer_name":"User profile Zebra","format":"zpl","label":{"filename":"label.zpl"}}}`)
+		case "/api/print-bridge/jobs/8/file":
+			downloaded = true
+			_, _ = io.WriteString(writer, "^XA^XZ")
+		case "/api/print-bridge/jobs/8/failed":
+			failedReported = true
+			_, _ = io.WriteString(writer, `{"success":true}`)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	bridge := testBridge(t, server.URL)
+	bridge.listPrinters = func() ([]printerInfo, error) {
+		return []printerInfo{{Name: "Zebra ZD421"}}, nil
+	}
+	printed := false
+	bridge.print = func(printRequest, []byte) error { printed = true; return nil }
+
+	err := bridge.pollOnce(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "not installed or visible") {
+		t.Fatalf("expected unavailable mapped printer error, got %v", err)
+	}
+	if downloaded || printed || !failedReported {
+		t.Fatalf("downloaded=%v printed=%v failedReported=%v", downloaded, printed, failedReported)
+	}
+}
+
+func TestBridgeReportsServicePrinterInventoryWithoutBlockingPolling(t *testing.T) {
+	statusReported := false
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/print-bridge/status" || request.Method != http.MethodPost {
+			http.NotFound(writer, request)
+			return
+		}
+		var payload struct {
+			Station  string        `json:"station"`
+			Worker   string        `json:"worker"`
+			Version  string        `json:"version"`
+			Printers []printerInfo `json:"printers"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Station != "station-1" || payload.Worker != "PACK-PC-1" || len(payload.Printers) != 1 {
+			t.Fatalf("unexpected status payload: %#v", payload)
+		}
+		if payload.Printers[0].Name != "Zebra ZD421" || !payload.Printers[0].Default {
+			t.Fatalf("unexpected printer inventory: %#v", payload.Printers)
+		}
+		statusReported = true
+		_, _ = io.WriteString(writer, `{"success":true}`)
+	}))
+	defer server.Close()
+
+	bridge := testBridge(t, server.URL)
+	bridge.listPrinters = func() ([]printerInfo, error) {
+		return []printerInfo{{Name: "Zebra ZD421", Driver: "ZDesigner", Port: "USB001", Default: true}}, nil
+	}
+	if err := bridge.reportStatus(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !statusReported {
+		t.Fatal("expected printer inventory status report")
+	}
+}
+
+func TestBridgeUsesLastSuccessfulInventoryWhenRefreshFails(t *testing.T) {
+	bridge := testBridge(t, "https://erp.example.test")
+	now := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	bridge.healthNow = func() time.Time { return now }
+	calls := 0
+	bridge.listPrinters = func() ([]printerInfo, error) {
+		calls++
+		if calls == 1 {
+			return []printerInfo{{Name: "Zebra ZD421"}}, nil
+		}
+		return nil, errors.New("spooler temporarily unavailable")
+	}
+
+	if printer, err := bridge.resolvePrinterName("zebra zd421"); err != nil || printer != "Zebra ZD421" {
+		t.Fatalf("initial inventory: printer=%q err=%v", printer, err)
+	}
+	now = now.Add(printerInventoryCacheTime + time.Second)
+	if printer, err := bridge.resolvePrinterName("Zebra ZD421"); err != nil || printer != "Zebra ZD421" {
+		t.Fatalf("stale successful inventory should remain usable: printer=%q err=%v", printer, err)
+	}
+}
+
 func TestBridgeHealthDoesNotExposeToken(t *testing.T) {
 	bridge := testBridge(t, "https://erp.example.test")
 	bridge.healthNow = func() time.Time { return time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC) }
@@ -185,6 +297,28 @@ func TestBridgeHealthDoesNotExposeToken(t *testing.T) {
 	}
 	if strings.Contains(response.Body.String(), "bridge-secret") || strings.Contains(response.Body.String(), "erp.example.test") {
 		t.Fatalf("health response exposed configuration: %s", response.Body.String())
+	}
+}
+
+func TestBridgeHealthSeparatesERPConnectionFromPrinterFailure(t *testing.T) {
+	bridge := testBridge(t, "https://erp.example.test")
+	bridge.healthNow = func() time.Time { return time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC) }
+	bridge.recordConnectionSuccess()
+	bridge.recordPoll(bridgeJobError{err: errors.New("mapped printer is unavailable")})
+
+	request := httptest.NewRequest(http.MethodGet, "/health", nil)
+	response := httptest.NewRecorder()
+	bridge.healthHandler().ServeHTTP(response, request)
+
+	var payload bridgeHealthResponse
+	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Connected || payload.ConnectionError != "" {
+		t.Fatalf("printer failure incorrectly marked ERP disconnected: %#v", payload)
+	}
+	if !strings.Contains(payload.LastPrintError, "printer") {
+		t.Fatalf("missing print diagnostic: %#v", payload)
 	}
 }
 
@@ -241,6 +375,7 @@ func TestPrintedJobIsNotPrintedAgainWhenAcknowledgementWasTemporarilyUnavailable
 		t.Fatal(err)
 	}
 	bridge.retryWait = func(context.Context, time.Duration) error { return nil }
+	bridge.listPrinters = func() ([]printerInfo, error) { return []printerInfo{{Name: "Zebra"}}, nil }
 	prints := 0
 	bridge.print = func(printRequest, []byte) error { prints++; return nil }
 	if err := bridge.pollOnce(context.Background()); err == nil {
@@ -282,5 +417,12 @@ func testBridge(t *testing.T, baseURL string) *printBridge {
 		t.Fatal(err)
 	}
 	bridge.retryWait = func(context.Context, time.Duration) error { return nil }
+	bridge.listPrinters = func() ([]printerInfo, error) {
+		return []printerInfo{
+			{Name: "Zebra"},
+			{Name: "Zebra ZD421"},
+			{Name: "Missing printer"},
+		}, nil
+	}
 	return bridge
 }

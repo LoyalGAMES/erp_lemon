@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -120,7 +121,7 @@ func parseBridgeConfig(text string) (bridgeConfig, error) {
 	config := bridgeConfig{
 		BaseURL:     strings.TrimRight(values["base_url"], "/"),
 		Token:       values["token"],
-		Station:     values["station"],
+		Station:     normalizeStationCode(values["station"]),
 		WorkerName:  values["worker_name"],
 		PollSeconds: pollSeconds,
 		SumatraPath: values["sumatra_path"],
@@ -132,6 +133,13 @@ func parseBridgeConfig(text string) (bridgeConfig, error) {
 		return bridgeConfig{}, err
 	}
 	return config, nil
+}
+
+var invalidStationCodeCharacters = regexp.MustCompile(`[^a-z0-9_-]+`)
+
+func normalizeStationCode(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return invalidStationCodeCharacters.ReplaceAllString(value, "-")
 }
 
 func canonicalConfigKey(key string) string {

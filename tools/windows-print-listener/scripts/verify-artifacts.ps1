@@ -58,6 +58,10 @@ $versionOutput = (& $listenerPath --version).Trim()
 if ($LASTEXITCODE -ne 0 -or $versionOutput -notmatch [regex]::Escape($Version)) {
     throw "Plik EXE nie raportuje oczekiwanej wersji ${Version}: $versionOutput"
 }
+$helpOutput = (& $listenerPath -h 2>&1 | Out-String)
+if ($LASTEXITCODE -ne 0 -or $helpOutput -notmatch '(?m)-check-connection\b') {
+    throw 'Plik EXE nie zawiera wymaganej komendy weryfikacji połączenia.'
+}
 
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.version -ne $Version) {

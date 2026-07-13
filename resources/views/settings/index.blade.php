@@ -10,6 +10,10 @@
             <strong>Zwroty</strong>
             <span>Numeracja zwrotów, domyślny magazyn przyjęcia i domyślne wartości pozycji.</span>
         </a>
+        <a class="settings-card" href="{{ route('settings.packing') }}">
+            <strong>Pakowanie i drukarki</strong>
+            <span>Połączenie aplikacji Windows, wybór drukarek z wykrytej listy, test połączenia i podział asortymentu.</span>
+        </a>
         <a class="settings-card" href="{{ route('integrations.index') }}">
             <strong>Integracje</strong>
             <span>WooCommerce, KSeF, dane WordPress REST i etykiety kurierskie.</span>
@@ -29,10 +33,6 @@
         <a class="settings-card" href="{{ route('audit.index') }}">
             <strong>Audyt</strong>
             <span>Historia operacji wykonanych w aplikacji.</span>
-        </a>
-        <a class="settings-card" href="{{ route('settings.packing') }}">
-            <strong>Stanowiska pakowania</strong>
-            <span>Stanowiska, adresy aplikacji Windows, drukarki etykiet i podział asortymentu.</span>
         </a>
         <a class="settings-card" href="{{ route('settings.products') }}">
             <strong>Edycja produktów</strong>

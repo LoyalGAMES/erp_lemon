@@ -6,13 +6,17 @@ namespace Tests\Feature;
 
 use App\Models\AppSetting;
 use App\Models\ExternalOrder;
+use App\Models\PrintBridgeClient;
 use App\Models\PrintJob;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
+use App\Models\User;
+use App\Services\Packing\PackingSettingsService;
 use App\Services\Printing\PrintBridgeTokenService;
 use App\Services\Printing\ShippingLabelPrintQueueService;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -21,6 +25,176 @@ use Tests\TestCase;
 class PrintBridgeWorkflowTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_bridge_reports_service_visible_printers_and_settings_can_verify_mapping(): void
+    {
+        config(['erp.print_bridge_token' => 'bridge-secret']);
+        app(PackingSettingsService::class)->update([
+            'stations' => [[
+                'code' => 'station-1',
+                'name' => 'Stanowisko pakowania',
+                'printer_name' => 'Zebra ZD421',
+                'segment' => 'all',
+            ]],
+        ]);
+
+        $this->postJson('/api/print-bridge/status', [
+            'station' => 'Station-1',
+            'worker' => 'PACK-PC-1',
+            'version' => '2.1.0',
+            'printers' => [
+                ['name' => 'Microsoft Print to PDF', 'driver' => 'Microsoft Print To PDF', 'port' => 'PORTPROMPT:', 'default' => false],
+                ['name' => 'Zebra ZD421', 'driver' => 'ZDesigner ZD421', 'port' => 'USB001', 'default' => true],
+            ],
+        ], ['Authorization' => 'Bearer bridge-secret'])
+            ->assertOk()
+            ->assertJsonPath('success', true);
+
+        $client = PrintBridgeClient::query()->sole();
+        $this->assertSame('station-1', $client->station_code);
+        $this->assertSame('PACK-PC-1', $client->worker_name);
+        $this->assertSame('Zebra ZD421', $client->printers[0]['name']);
+
+        $this->getJson(route('settings.packing.print-bridge.status'))
+            ->assertOk()
+            ->assertHeader('Cache-Control', 'max-age=0, no-store, private')
+            ->assertJsonPath('success', true)
+            ->assertJsonPath('stations.station-1.connected', true)
+            ->assertJsonPath('stations.station-1.status', 'online')
+            ->assertJsonPath('stations.station-1.worker', 'PACK-PC-1')
+            ->assertJsonPath('stations.station-1.version', '2.1.0')
+            ->assertJsonPath('stations.station-1.mapped_printer', 'Zebra ZD421')
+            ->assertJsonPath('stations.station-1.mapped_printer_available', true)
+            ->assertJsonPath('stations.station-1.printers.0.name', 'Zebra ZD421');
+    }
+
+    public function test_bridge_status_distinguishes_stale_connection_and_missing_mapped_printer(): void
+    {
+        app(PackingSettingsService::class)->update([
+            'stations' => [[
+                'code' => 'station-1',
+                'name' => 'Stanowisko pakowania',
+                'printer_name' => 'Zebra Missing',
+                'segment' => 'all',
+            ]],
+        ]);
+        PrintBridgeClient::query()->create([
+            'station_code' => 'station-1',
+            'worker_name' => 'PACK-PC-1',
+            'version' => '2.1.0',
+            'printers' => [['name' => 'Zebra ZD421', 'driver' => '', 'port' => 'USB001', 'default' => true]],
+            'last_seen_at' => now()->subMinutes(2),
+        ]);
+
+        $this->getJson(route('settings.packing.print-bridge.status', ['station' => 'station-1']))
+            ->assertOk()
+            ->assertJsonPath('stations.station-1.connected', false)
+            ->assertJsonPath('stations.station-1.status', 'offline')
+            ->assertJsonPath('stations.station-1.mapped_printer_available', false);
+    }
+
+    public function test_status_heartbeat_requires_the_shared_token_and_valid_inventory_payload(): void
+    {
+        config(['erp.print_bridge_token' => 'bridge-secret']);
+        $payload = [
+            'station' => 'station-1',
+            'worker' => 'PACK-PC-1',
+            'version' => '0.2.3',
+            'printers' => [[
+                'name' => 'Zebra ZD421',
+                'driver' => 'ZDesigner',
+                'port' => 'USB001',
+                'default' => true,
+            ]],
+        ];
+
+        $this->postJson('/api/print-bridge/status', $payload)
+            ->assertUnauthorized()
+            ->assertJsonPath('success', false);
+        $this->postJson('/api/print-bridge/status', $payload, [
+            'Authorization' => 'Bearer wrong-token',
+        ])->assertUnauthorized();
+        $this->assertDatabaseCount('print_bridge_clients', 0);
+
+        $this->postJson('/api/print-bridge/status', [
+            'station' => 'station-1',
+            'worker' => 'PACK-PC-1',
+        ], ['Authorization' => 'Bearer bridge-secret'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('printers');
+        $this->assertDatabaseCount('print_bridge_clients', 0);
+
+        $this->postJson('/api/print-bridge/status', array_replace($payload, [
+            'station' => 'warehouse-typo',
+        ]), ['Authorization' => 'Bearer bridge-secret'])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors('station');
+        $this->getJson('/api/print-bridge/jobs/next?station=warehouse-typo&worker=PACK-PC-1', [
+            'Authorization' => 'Bearer bridge-secret',
+        ])->assertUnprocessable()
+            ->assertJsonValidationErrors('station');
+        $this->assertDatabaseCount('print_bridge_clients', 0);
+
+        $this->postJson('/api/print-bridge/status', $payload, [
+            'Authorization' => 'Bearer bridge-secret',
+        ])->assertOk();
+        $this->assertDatabaseHas('print_bridge_clients', [
+            'station_code' => 'station-1',
+            'worker_name' => 'PACK-PC-1',
+            'version' => '0.2.3',
+        ]);
+    }
+
+    public function test_settings_status_requires_an_admin_session_and_uses_exact_online_ttl(): void
+    {
+        $this->travelTo(Carbon::parse('2026-07-13 10:00:00'));
+        app(PackingSettingsService::class)->update([
+            'stations' => [[
+                'code' => 'station-1',
+                'name' => 'Stanowisko pakowania',
+                'printer_name' => 'Zebra ZD421',
+                'segment' => 'all',
+            ]],
+        ]);
+        PrintBridgeClient::query()->create([
+            'station_code' => 'station-1',
+            'worker_name' => 'PACK-PC-1',
+            'version' => '0.2.3',
+            'printers' => [['name' => 'Zebra ZD421', 'driver' => '', 'port' => 'USB001', 'default' => true]],
+            'last_seen_at' => now(),
+        ]);
+
+        $administrator = auth()->user();
+        auth()->logout();
+        $this->getJson(route('settings.packing.print-bridge.status'))
+            ->assertUnauthorized();
+
+        $operator = User::query()->create([
+            'name' => 'Operator bez ustawień',
+            'email' => 'operator-print-bridge@sempre.invalid',
+            'password' => 'test-password-not-for-production',
+            'role' => User::ROLE_OPERATOR,
+            'is_active' => true,
+        ]);
+        $this->actingAs($operator);
+        $this->getJson(route('settings.packing.print-bridge.status'))
+            ->assertForbidden();
+
+        $this->actingAs($administrator);
+
+        $this->travelTo(Carbon::parse('2026-07-13 10:01:30'));
+        $this->getJson(route('settings.packing.print-bridge.status'))
+            ->assertOk()
+            ->assertHeader('X-Content-Type-Options', 'nosniff')
+            ->assertJsonPath('stations.station-1.status', 'online')
+            ->assertJsonPath('stations.station-1.connected', true);
+
+        $this->travelTo(Carbon::parse('2026-07-13 10:01:31'));
+        $this->getJson(route('settings.packing.print-bridge.status'))
+            ->assertOk()
+            ->assertJsonPath('stations.station-1.status', 'offline')
+            ->assertJsonPath('stations.station-1.connected', false);
+    }
 
     public function test_print_bridge_claims_downloads_and_marks_label_printed(): void
     {

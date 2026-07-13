@@ -10,6 +10,7 @@ Route::middleware(['throttle:print-bridge', VerifyPrintBridgeToken::class])
     ->prefix('print-bridge')
     ->name('api.print-bridge.')
     ->group(function (): void {
+        Route::post('/status', [PrintBridgeController::class, 'status'])->name('status');
         Route::get('/jobs/next', [PrintBridgeController::class, 'next'])->name('jobs.next');
         Route::get('/jobs/{job}/file', [PrintBridgeController::class, 'file'])->name('jobs.file');
         Route::post('/jobs/{job}/printed', [PrintBridgeController::class, 'printed'])->name('jobs.printed');

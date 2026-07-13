@@ -86,7 +86,11 @@ final class PackingFulfillmentService
         }
 
         $printJob = null;
-        if ($label instanceof ShippingLabel) {
+        if ($label instanceof ShippingLabel && $printStation === null) {
+            $warnings[] = 'Wydruk: nie wybrano stanowiska pakowania dla tej sesji.';
+        } elseif ($label instanceof ShippingLabel && trim((string) ($printStation['printer_name'] ?? '')) === '') {
+            $warnings[] = 'Wydruk: stanowisko nie ma przypisanej drukarki Windows.';
+        } elseif ($label instanceof ShippingLabel) {
             try {
                 $printJob = $this->printQueue->enqueueForStation($label, $printStation, 'packing.order.packed');
             } catch (Throwable $exception) {

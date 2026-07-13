@@ -18,9 +18,13 @@ import (
 )
 
 const (
-	bridgeHealthAddress = "127.0.0.1:17778"
-	maxBridgeResponse   = 1 << 20
-	maxLabelSize        = 25 << 20
+	bridgeHealthAddress       = "127.0.0.1:17778"
+	bridgeStatusInterval      = 30 * time.Second
+	bridgeStatusTimeout       = 15 * time.Second
+	bridgeConnectedWindow     = 90 * time.Second
+	printerInventoryCacheTime = 25 * time.Second
+	maxBridgeResponse         = 1 << 20
+	maxLabelSize              = 25 << 20
 )
 
 type bridgeJob struct {
@@ -34,33 +38,49 @@ type bridgeJob struct {
 }
 
 type bridgeState struct {
-	mu            sync.RWMutex
-	lastPollAt    time.Time
-	lastSuccessAt time.Time
-	lastError     string
+	mu                  sync.RWMutex
+	lastPollAt          time.Time
+	lastSuccessAt       time.Time
+	lastConnectionError string
+	lastPrintError      string
 }
 
+type bridgeJobError struct {
+	err error
+}
+
+func (err bridgeJobError) Error() string { return err.err.Error() }
+func (err bridgeJobError) Unwrap() error { return err.err }
+
 type printBridge struct {
-	config    bridgeConfig
-	client    *http.Client
-	print     func(printRequest, []byte) error
-	state     *bridgeState
-	healthNow func() time.Time
-	journal   *printJournal
-	retryWait func(context.Context, time.Duration) error
+	config             bridgeConfig
+	client             *http.Client
+	print              func(printRequest, []byte) error
+	listPrinters       func() ([]printerInfo, error)
+	state              *bridgeState
+	healthNow          func() time.Time
+	journal            *printJournal
+	retryWait          func(context.Context, time.Duration) error
+	printerMu          sync.Mutex
+	printerSnapshot    []printerInfo
+	printerSnapshotSet bool
+	printerLastError   error
+	printerCheckedAt   time.Time
 }
 
 type bridgeHealthResponse struct {
-	Success       bool   `json:"success"`
-	Connected     bool   `json:"connected"`
-	Message       string `json:"message"`
-	Version       string `json:"version"`
-	Mode          string `json:"mode"`
-	Station       string `json:"station"`
-	Worker        string `json:"worker"`
-	LastPollAt    string `json:"last_poll_at,omitempty"`
-	LastSuccessAt string `json:"last_success_at,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
+	Success         bool   `json:"success"`
+	Connected       bool   `json:"connected"`
+	Message         string `json:"message"`
+	Version         string `json:"version"`
+	Mode            string `json:"mode"`
+	Station         string `json:"station"`
+	Worker          string `json:"worker"`
+	LastPollAt      string `json:"last_poll_at,omitempty"`
+	LastSuccessAt   string `json:"last_success_at,omitempty"`
+	LastError       string `json:"last_error,omitempty"`
+	ConnectionError string `json:"connection_error,omitempty"`
+	LastPrintError  string `json:"last_print_error,omitempty"`
 }
 
 func newPrintBridge(config bridgeConfig, printerConfig appConfig, journalPath string) (*printBridge, error) {
@@ -79,11 +99,12 @@ func newPrintBridge(config bridgeConfig, printerConfig appConfig, journalPath st
 				return http.ErrUseLastResponse
 			},
 		},
-		print:     printerConfig.print,
-		state:     &bridgeState{},
-		healthNow: time.Now,
-		journal:   journal,
-		retryWait: waitForRetry,
+		print:        printerConfig.print,
+		listPrinters: installedPrinters,
+		state:        &bridgeState{},
+		healthNow:    time.Now,
+		journal:      journal,
+		retryWait:    waitForRetry,
 	}
 	return bridge, nil
 }
@@ -102,6 +123,7 @@ func (bridge *printBridge) Run(ctx context.Context) error {
 	go func() {
 		healthErrors <- healthServer.ListenAndServe()
 	}()
+	go bridge.runStatusReporter(ctx)
 
 	timer := time.NewTimer(0)
 	defer timer.Stop()
@@ -138,6 +160,63 @@ func (bridge *printBridge) Run(ctx context.Context) error {
 	}
 }
 
+func (bridge *printBridge) runStatusReporter(ctx context.Context) {
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			reportCtx, cancel := context.WithTimeout(ctx, bridgeStatusTimeout)
+			err := bridge.reportStatus(reportCtx)
+			cancel()
+			if err != nil && ctx.Err() == nil {
+				// Status reporting is deliberately independent from job polling. A
+				// rolling deployment can temporarily expose an older ERP without
+				// this endpoint and must not stop otherwise working printing.
+				log.Printf("Print bridge status report failed: %s", bridge.redact(err.Error()))
+			}
+			timer.Reset(bridgeStatusInterval)
+		}
+	}
+}
+
+func (bridge *printBridge) reportStatus(ctx context.Context) error {
+	printers, printerErr, _ := bridge.printerInventory(printerInventoryCacheTime)
+	if printers == nil {
+		printers = []printerInfo{}
+	}
+	payload := struct {
+		Station      string        `json:"station"`
+		Worker       string        `json:"worker"`
+		Version      string        `json:"version"`
+		Printers     []printerInfo `json:"printers"`
+		PrinterError string        `json:"printer_error,omitempty"`
+	}{
+		Station:  bridge.config.Station,
+		Worker:   bridge.config.WorkerName,
+		Version:  version,
+		Printers: printers,
+	}
+	if printerErr != nil {
+		payload.PrinterError = truncateMessage(printerErr.Error(), 1000)
+	}
+
+	var response struct {
+		Success bool `json:"success"`
+	}
+	if err := bridge.doJSON(ctx, http.MethodPost, "/api/print-bridge/status", payload, &response); err != nil {
+		return fmt.Errorf("report bridge status: %w", err)
+	}
+	if !response.Success {
+		return fmt.Errorf("ERP returned success=false while reporting bridge status")
+	}
+	bridge.recordConnectionSuccess()
+	return nil
+}
+
 func (bridge *printBridge) pollOnce(ctx context.Context) error {
 	if err := bridge.flushAcknowledgements(ctx); err != nil {
 		return err
@@ -156,15 +235,24 @@ func (bridge *printBridge) pollOnce(ctx context.Context) error {
 	if !response.Success {
 		return fmt.Errorf("ERP returned success=false while claiming a print job")
 	}
+	bridge.recordConnectionSuccess()
 	if response.Job == nil {
 		return nil
 	}
 	job := response.Job
 	if job.ID <= 0 || strings.TrimSpace(job.PrinterName) == "" || strings.TrimSpace(job.LeaseToken) == "" {
-		return fmt.Errorf("ERP returned an invalid print job")
+		return bridgeJobError{err: fmt.Errorf("ERP returned an invalid print job")}
 	}
 
-	data, mimeType, err := bridge.downloadLabel(ctx, job)
+	printerName, err := bridge.resolvePrinterName(job.PrinterName)
+	if err == nil {
+		job.PrinterName = printerName
+	}
+	var data []byte
+	var mimeType string
+	if err == nil {
+		data, mimeType, err = bridge.downloadLabel(ctx, job)
+	}
 	if err == nil {
 		err = bridge.print(printRequest{
 			PrinterName: strings.TrimSpace(job.PrinterName),
@@ -181,24 +269,80 @@ func (bridge *printBridge) pollOnce(ctx context.Context) error {
 			"error":       truncateMessage(bridge.redact(err.Error()), 2000),
 		})
 		if reportErr != nil {
-			return fmt.Errorf("print job %d failed: %v; reporting failure also failed: %w", job.ID, err, reportErr)
+			return bridgeJobError{err: fmt.Errorf("print job %d failed: %v; reporting failure also failed: %w", job.ID, err, reportErr)}
 		}
-		return fmt.Errorf("print job %d failed and was reported to ERP: %w", job.ID, err)
+		return bridgeJobError{err: fmt.Errorf("print job %d failed and was reported to ERP: %w", job.ID, err)}
 	}
 
 	record := printJournalRecord{JobID: job.ID, LeaseToken: job.LeaseToken, Worker: bridge.config.WorkerName, Station: bridge.config.Station, PrintedAt: time.Now().UTC()}
 	if err := bridge.journal.record(record); err != nil {
-		return fmt.Errorf("print job %d was spooled but its durable acknowledgement journal could not be written: %w", job.ID, err)
+		return bridgeJobError{err: fmt.Errorf("print job %d was spooled but its durable acknowledgement journal could not be written: %w", job.ID, err)}
 	}
 	if err := bridge.acknowledgePrinted(ctx, record); err != nil {
-		return fmt.Errorf("print job %d was printed but acknowledgement failed: %w", job.ID, err)
+		return bridgeJobError{err: fmt.Errorf("print job %d was printed but acknowledgement failed: %w", job.ID, err)}
 	}
 	if err := bridge.journal.remove(job.ID); err != nil {
-		return fmt.Errorf("print job %d was acknowledged but journal cleanup failed: %w", job.ID, err)
+		return bridgeJobError{err: fmt.Errorf("print job %d was acknowledged but journal cleanup failed: %w", job.ID, err)}
 	}
 
+	bridge.recordPrintSuccess()
 	log.Printf("Printed outbound job %d on %s", job.ID, job.PrinterName)
 	return nil
+}
+
+func (bridge *printBridge) resolvePrinterName(requestedName string) (string, error) {
+	requestedName = strings.TrimSpace(requestedName)
+	printers, inventoryErr, snapshotAvailable := bridge.printerInventory(printerInventoryCacheTime)
+	if !snapshotAvailable {
+		return "", fmt.Errorf("cannot verify mapped printer %q in the Windows service context: %w", requestedName, inventoryErr)
+	}
+
+	for _, printer := range printers {
+		if strings.EqualFold(strings.TrimSpace(printer.Name), requestedName) {
+			// Use the canonical spelling returned by the same service account
+			// that will open the printer in the Windows spooler.
+			return strings.TrimSpace(printer.Name), nil
+		}
+	}
+
+	available := make([]string, 0, min(len(printers), 12))
+	for _, printer := range printers {
+		if len(available) == 12 {
+			break
+		}
+		if name := strings.TrimSpace(printer.Name); name != "" {
+			available = append(available, name)
+		}
+	}
+	details := "no printers are visible"
+	if len(available) > 0 {
+		details = "available: " + strings.Join(available, ", ")
+	}
+	if inventoryErr != nil {
+		details += "; latest inventory refresh failed: " + inventoryErr.Error()
+	}
+
+	return "", fmt.Errorf("mapped printer %q is not installed or visible to the Windows service account (%s)", requestedName, details)
+}
+
+func (bridge *printBridge) printerInventory(maxAge time.Duration) ([]printerInfo, error, bool) {
+	bridge.printerMu.Lock()
+	defer bridge.printerMu.Unlock()
+
+	now := bridge.healthNow()
+	if !bridge.printerCheckedAt.IsZero() && now.Sub(bridge.printerCheckedAt) < maxAge {
+		return append([]printerInfo(nil), bridge.printerSnapshot...), bridge.printerLastError, bridge.printerSnapshotSet
+	}
+
+	printers, err := bridge.listPrinters()
+	bridge.printerCheckedAt = now
+	bridge.printerLastError = err
+	if err == nil {
+		bridge.printerSnapshot = append([]printerInfo(nil), printers...)
+		bridge.printerSnapshotSet = true
+	}
+
+	return append([]printerInfo(nil), bridge.printerSnapshot...), err, bridge.printerSnapshotSet
 }
 
 func (bridge *printBridge) downloadLabel(ctx context.Context, job *bridgeJob) ([]byte, string, error) {
@@ -356,10 +500,29 @@ func (bridge *printBridge) recordPoll(err error) {
 	bridge.state.lastPollAt = now
 	if err == nil {
 		bridge.state.lastSuccessAt = now
-		bridge.state.lastError = ""
+		bridge.state.lastConnectionError = ""
 		return
 	}
-	bridge.state.lastError = truncateMessage(bridge.redact(err.Error()), 500)
+	message := truncateMessage(bridge.redact(err.Error()), 500)
+	var jobError bridgeJobError
+	if errors.As(err, &jobError) {
+		bridge.state.lastPrintError = message
+		return
+	}
+	bridge.state.lastConnectionError = message
+}
+
+func (bridge *printBridge) recordConnectionSuccess() {
+	bridge.state.mu.Lock()
+	defer bridge.state.mu.Unlock()
+	bridge.state.lastSuccessAt = bridge.healthNow()
+	bridge.state.lastConnectionError = ""
+}
+
+func (bridge *printBridge) recordPrintSuccess() {
+	bridge.state.mu.Lock()
+	defer bridge.state.mu.Unlock()
+	bridge.state.lastPrintError = ""
 }
 
 func (bridge *printBridge) healthHandler() http.Handler {
@@ -368,18 +531,27 @@ func (bridge *printBridge) healthHandler() http.Handler {
 		bridge.state.mu.RLock()
 		lastPollAt := bridge.state.lastPollAt
 		lastSuccessAt := bridge.state.lastSuccessAt
-		lastError := bridge.state.lastError
+		connectionError := bridge.state.lastConnectionError
+		lastPrintError := bridge.state.lastPrintError
 		bridge.state.mu.RUnlock()
+		now := bridge.healthNow()
+		connected := !lastSuccessAt.IsZero() && connectionError == "" && now.Sub(lastSuccessAt) <= bridgeConnectedWindow
+		lastError := connectionError
+		if lastError == "" {
+			lastError = lastPrintError
+		}
 
 		response := bridgeHealthResponse{
-			Success:   true,
-			Connected: !lastSuccessAt.IsZero() && lastError == "",
-			Message:   "outbound bridge running",
-			Version:   version,
-			Mode:      "bridge",
-			Station:   bridge.config.Station,
-			Worker:    bridge.config.WorkerName,
-			LastError: lastError,
+			Success:         true,
+			Connected:       connected,
+			Message:         "outbound bridge running",
+			Version:         version,
+			Mode:            "bridge",
+			Station:         bridge.config.Station,
+			Worker:          bridge.config.WorkerName,
+			LastError:       lastError,
+			ConnectionError: connectionError,
+			LastPrintError:  lastPrintError,
 		}
 		if !lastPollAt.IsZero() {
 			response.LastPollAt = lastPollAt.UTC().Format(time.RFC3339)

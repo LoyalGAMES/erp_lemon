@@ -288,7 +288,7 @@
                             Stanowisko ustawia domyślny widok kompletacji i pakowania oraz drukarkę etykiet.
                         </div>
                         @if ($canManagePackingSettings)
-                            <a class="button secondary" href="{{ route('settings.packing') }}">Konfiguracja</a>
+                            <a class="button secondary" href="{{ route('settings.packing') }}">Drukarki i stanowiska</a>
                         @endif
                     </div>
                     <div class="mode-actions" aria-label="Stanowisko pakowania">
@@ -464,6 +464,15 @@
 
     @if ($packingView === 'pack')
         <div class="pack-workspace">
+            @if ($activeStation === null)
+                <div class="alert error" role="alert">
+                    Automatyczny wydruk jest wyłączony dla tej sesji. Wróć do pulpitu pakowania, otwórz „Ustawienia pracy” i wybierz stanowisko z drukarką.
+                </div>
+            @elseif (trim((string) ($activeStation['printer_name'] ?? '')) === '')
+                <div class="alert error" role="alert">
+                    Stanowisko „{{ $activeStation['name'] }}” nie ma przypisanej drukarki. Administrator może wybrać ją z listy Windows w konfiguracji stanowisk.
+                </div>
+            @endif
             <section class="queue-list" aria-label="Lista do pakowania">
                 @forelse ($readyOrders as $order)
                     @php

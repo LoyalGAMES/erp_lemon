@@ -12,6 +12,7 @@ $root = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
     $InstallerPath = Join-Path $root 'dist\SempreERP-PrintListener-Setup.exe'
 }
+$InstallerPath = [System.IO.Path]::GetFullPath($InstallerPath)
 if ([string]::IsNullOrWhiteSpace($Version)) {
     $Version = (Get-Content -LiteralPath (Join-Path $root 'VERSION') -Raw).Trim()
 }
@@ -25,7 +26,12 @@ $installDirectory = Join-Path $env:ProgramFiles 'Sempre ERP\Print Listener'
 $listenerPath = Join-Path $installDirectory 'lemon-print-listener.exe'
 $rendererPath = Join-Path $installDirectory 'SumatraPDF.exe'
 $rendererLicensePath = Join-Path $installDirectory 'SumatraPDF-COPYING.txt'
+$configuratorPath = Join-Path $installDirectory 'SempreERP-PrintListener-Configure.exe'
 $uninstallerPath = Join-Path $installDirectory 'uninstall.exe'
+$startMenuDirectory = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) 'Sempre ERP Print Listener'
+$settingsShortcutPath = Join-Path $startMenuDirectory 'Ustawienia połączenia.lnk'
+$connectionShortcutPath = Join-Path $startMenuDirectory 'Sprawdź połączenie.lnk'
+$uninstallRegistryPath = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\SempreERP.PrintListener'
 $configDirectory = Join-Path $env:ProgramData 'Sempre ERP\Print Listener'
 $configPath = Join-Path $configDirectory 'config.ini'
 $serviceName = 'SempreERPPrintListener'
@@ -207,9 +213,55 @@ try {
     if ($service.Status -ne 'Running') {
         $service.WaitForStatus('Running', [TimeSpan]::FromSeconds(20))
     }
-    foreach ($path in @($rendererPath, $rendererLicensePath)) {
+    foreach ($path in @($rendererPath, $rendererLicensePath, $configuratorPath, $uninstallerPath)) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "Instalator nie umieścił wymaganego pliku: $path"
+        }
+    }
+    if ((Get-FileHash -LiteralPath $configuratorPath -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash) {
+        throw 'Zainstalowany konfigurator nie jest dokładną kopią zweryfikowanego instalatora.'
+    }
+
+    $registration = Get-ItemProperty -LiteralPath $uninstallRegistryPath -ErrorAction Stop
+    $expectedModifyPath = '"' + $configuratorPath + '"'
+    if ([string] $registration.ModifyPath -ne $expectedModifyPath) {
+        throw "Apps & Features nie wskazuje konfiguratora w ModifyPath: $($registration.ModifyPath)"
+    }
+    if ($null -ne $registration.PSObject.Properties['NoModify'] -and [int] $registration.NoModify -ne 0) {
+        throw 'Apps & Features ukrywa akcję zmiany ustawień przez NoModify.'
+    }
+
+    foreach ($path in @($settingsShortcutPath, $connectionShortcutPath)) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Instalator nie utworzył wymaganego skrótu menu Start: $path"
+        }
+    }
+    $shortcutShell = New-Object -ComObject WScript.Shell
+    $settingsShortcut = $null
+    $connectionShortcut = $null
+    try {
+        $settingsShortcut = $shortcutShell.CreateShortcut($settingsShortcutPath)
+        if (-not [string]::Equals(
+            [System.IO.Path]::GetFullPath([string] $settingsShortcut.TargetPath),
+            $configuratorPath,
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Skrót ustawień wskazuje nieoczekiwany plik: $($settingsShortcut.TargetPath)"
+        }
+        $connectionShortcut = $shortcutShell.CreateShortcut($connectionShortcutPath)
+        if (-not [string]::Equals(
+            [System.IO.Path]::GetFullPath([string] $connectionShortcut.TargetPath),
+            [System.IO.Path]::GetFullPath([string] $env:ComSpec),
+            [System.StringComparison]::OrdinalIgnoreCase
+        ) -or [string] $connectionShortcut.Arguments -notmatch '(?i)-check-connection') {
+            throw 'Skrót weryfikacji nie uruchamia lokalnego testu połączenia.'
+        }
+    } finally {
+        foreach ($comObject in @($settingsShortcut, $connectionShortcut, $shortcutShell)) {
+            if ($null -ne $comObject -and [Runtime.InteropServices.Marshal]::IsComObject($comObject)) {
+                [void] [Runtime.InteropServices.Marshal]::FinalReleaseComObject($comObject)
+            }
         }
     }
     if ((Get-FileHash -LiteralPath $rendererPath -Algorithm SHA256).Hash.ToLowerInvariant() -ne
@@ -247,6 +299,10 @@ try {
         -not (Select-String -LiteralPath $mockLog -SimpleMatch 'authorized-outbound-poll' -Quiet)) {
         throw 'Mock ERP nie zarejestrował autoryzowanego pollingu wychodzącego.'
     }
+    $connectionCheckOutput = (& $listenerPath -check-connection 2>&1 | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $connectionCheckOutput -notmatch 'Połączenie z ERP działa') {
+        throw "Widoczny test połączenia nie potwierdził stanu usługi: $connectionCheckOutput"
+    }
 
     $serviceConfig = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
     if ($serviceConfig.PathName -match [regex]::Escape($mockToken)) {
@@ -271,16 +327,22 @@ try {
         throw 'Instalator outbound pozostawił przychodzącą regułę Zapory Windows.'
     }
 
-    # A second silent run exercises the real in-place upgrade path: the service
-    # must be stopped, updated without DeleteService, restarted and usable.
-    $upgrade = Start-Process -FilePath $InstallerPath -ArgumentList '/S' -PassThru
+    # Run the persisted configurator itself. Its interactive form is the Start
+    # Menu/Apps & Features settings flow; /S exercises the same update section
+    # while proving that self-copy is safely skipped for an in-place run.
+    $upgrade = Start-Process -FilePath $configuratorPath -ArgumentList '/S' -PassThru
     if (-not $upgrade.WaitForExit(60000)) {
         Stop-Process -Id $upgrade.Id -Force -ErrorAction SilentlyContinue
         throw 'Aktualizacja instalatora nie zakończyła się w ciągu 60 sekund.'
     }
     $upgrade.Refresh()
     if ($upgrade.ExitCode -ne 0) {
-        throw "Ponowne uruchomienie instalatora (upgrade) zakończyło się kodem $($upgrade.ExitCode)."
+        throw "Ponowne uruchomienie zainstalowanego konfiguratora zakończyło się kodem $($upgrade.ExitCode)."
+    }
+    if (-not (Test-Path -LiteralPath $configuratorPath -PathType Leaf) -or
+        (Get-FileHash -LiteralPath $configuratorPath -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash) {
+        throw 'Konfigurator uszkodził lub podmienił własny plik podczas ponownej konfiguracji.'
     }
     $service = Get-Service -Name $serviceName -ErrorAction Stop
     if ($service.Status -ne 'Running') {
@@ -306,7 +368,7 @@ try {
     }
 
     if ($RequireSignature) {
-        foreach ($path in @($InstallerPath, $listenerPath, $uninstallerPath)) {
+        foreach ($path in @($InstallerPath, $configuratorPath, $listenerPath, $uninstallerPath)) {
             [void] (Assert-AuthenticodeSigner $path $expectedSignerSubject $expectedSignerSha256)
         }
         $rendererSignature = Get-AuthenticodeSignature -FilePath $rendererPath
@@ -341,8 +403,13 @@ if (Get-NetFirewallRule -DisplayName $legacyFirewallName -ErrorAction SilentlyCo
 if (Test-Path -LiteralPath $configPath) {
     throw 'Plik z tokenem pozostał po odinstalowaniu.'
 }
+foreach ($path in @($configuratorPath, $settingsShortcutPath, $connectionShortcutPath, $uninstallRegistryPath)) {
+    if (Test-Path -LiteralPath $path) {
+        throw "Element konfiguratora pozostał po odinstalowaniu: $path"
+    }
+}
 
-Write-Host 'Outbound polling, ACL, brak tokenu w SCM, usługa, health i deinstalacja: OK.'
+Write-Host 'Outbound polling, konfigurator, skróty, ModifyPath, test połączenia, ACL, usługa i deinstalacja: OK.'
 } finally {
     Remove-TemporaryInternalCertificateTrust $trustState
     $trustCleanupFailed = $null -ne $trustState -and (

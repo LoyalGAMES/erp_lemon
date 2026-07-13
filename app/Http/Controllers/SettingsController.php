@@ -18,6 +18,7 @@ use App\Services\Inventory\WarehouseDocumentSettingsService;
 use App\Services\Packing\PackingSettingsService;
 use App\Services\Payments\MbankTransferBasketSettingsService;
 use App\Services\Payments\PayuRefundSettingsService;
+use App\Services\Printing\PrintBridgeClientRegistry;
 use App\Services\Printing\PrintBridgeTokenService;
 use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Returns\ReturnSettingsService;
@@ -119,19 +120,46 @@ class SettingsController extends Controller
 
     public function packing(
         PackingSettingsService $packingSettings,
+        PrintBridgeClientRegistry $printBridgeClients,
         PrintBridgeTokenService $printBridgeTokens,
     ): View {
+        $settings = $packingSettings->data();
+
         return view('settings.packing', [
             'title' => 'Ustawienia pakowania',
-            'subtitle' => 'Stanowiska pakowania, drukarki etykiet Zebra i podział asortymentu do kompletacji.',
+            'subtitle' => 'Stanowiska pakowania, automatyczne drukowanie etykiet w Windows i podział asortymentu do kompletacji.',
             'module' => 'settings',
-            'packingSettings' => $packingSettings->data(),
+            'packingSettings' => $settings,
+            'printBridgeStations' => $printBridgeClients->statuses($settings['stations']),
             'printListenerApp' => $this->windowsPrintListenerAppData(),
             'printBridge' => [
                 'erp_url' => url('/'),
                 'token' => $printBridgeTokens->token(),
                 'environment_override' => $printBridgeTokens->usesEnvironmentOverride(),
             ],
+        ]);
+    }
+
+    public function packingPrintBridgeStatus(
+        Request $request,
+        PackingSettingsService $packingSettings,
+        PrintBridgeClientRegistry $printBridgeClients,
+    ): JsonResponse {
+        $data = $request->validate([
+            'station' => ['nullable', 'string', 'max:40'],
+        ]);
+        $settings = $packingSettings->data();
+
+        return response()->json([
+            'success' => true,
+            'checked_at' => now()->utc()->toIso8601String(),
+            'stations' => $printBridgeClients->statuses(
+                $settings['stations'],
+                isset($data['station']) ? (string) $data['station'] : null,
+            ),
+        ])->withHeaders([
+            'Cache-Control' => 'private, no-store, max-age=0',
+            'X-Content-Type-Options' => 'nosniff',
         ]);
     }
 

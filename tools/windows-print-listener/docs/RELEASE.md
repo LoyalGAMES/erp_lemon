@@ -96,8 +96,10 @@ jednorazowego runnera.
 
 Test sprawdza usługę `SempreERPPrintListener`, wersję i połączenie outbound w
 lokalnym `/health`, dokładny ACL konfiguracji, brak sekretu w argumentach usługi,
-brak przychodzącej reguły zapory, podpis aplikacji i deinstalatora oraz usunięcie
-usługi i pliku z tokenem podczas deinstalacji.
+brak przychodzącej reguły zapory, podpis aplikacji, konfiguratora i deinstalatora,
+rejestrację `ModifyPath`, oba skróty menu Start, uruchomienie aktualizacji z
+zapisanej kopii konfiguratora oraz usunięcie usługi, skrótów i pliku z tokenem
+podczas deinstalacji.
 
 Po instalacji produkcyjnej należy dodatkowo wydrukować jedną etykietę ZPL i PDF
 na każdej wspieranej drukarce. Przypięty i zweryfikowany `SumatraPDF.exe` jest

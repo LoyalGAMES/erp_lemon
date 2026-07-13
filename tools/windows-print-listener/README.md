@@ -36,6 +36,29 @@ chroniony DACL oraz właściciela `Administrators`; pełny dostęp mają wyłąc
 `SYSTEM` i `Administrators`. Token nie trafia do argumentów usługi, rejestru ani
 logów. Ponowne uruchomienie instalatora pozwala bezpiecznie zmienić konfigurację.
 
+### Ustawienia po instalacji (od 0.2.3)
+
+Instalator zapisuje swoją podpisaną kopię w `Program Files` jako konfigurator.
+Można go uruchomić na dwa równoważne sposoby:
+
+- menu Start → **Sempre ERP Print Listener** → **Ustawienia połączenia**;
+- Windows → Zainstalowane aplikacje → Sempre ERP Print Listener → **Modyfikuj**.
+
+Windows pokaże UAC, ponieważ konfigurator odczytuje i zapisuje chroniony plik w
+`ProgramData` oraz restartuje usługę systemową. Formularz wczytuje aktualny
+adres ERP, token, kod stanowiska i nazwę komputera. Po zatwierdzeniu waliduje
+dane, zachowuje ograniczone ACL, aktualizuje usługę bez jej usuwania i uruchamia
+ją ponownie. Nie trzeba zachowywać pierwotnie pobranego instalatora.
+
+W tym samym folderze menu Start znajduje się **Sprawdź połączenie**. Polecenie
+czeka na autoryzowany polling ERP i zwraca sukces dopiero wtedy, gdy lokalny
+health potwierdzi `connected: true` oraz czas ostatniego udanego połączenia.
+Można je też uruchomić ręcznie:
+
+```bat
+"C:\Program Files\Sempre ERP\Print Listener\lemon-print-listener.exe" -check-connection
+```
+
 ## Sprawdzenie działania
 
 Na komputerze z drukarką lokalny, niewystawiony do sieci endpoint stanu działa
@@ -70,6 +93,9 @@ i drukarkami sieciowymi: konto nie zostało automatycznie zmienione na
 `LocalService`, bo mogłoby utracić dostęp do części drukarek. Powierzchnia
 renderera jest ograniczona przez przypięcie dokładnego, podpisanego pliku,
 prywatny plik tymczasowy, limit czasu procesu i brak przychodzącego portu.
+Lista przekazywana do ustawień ERP zawiera właśnie drukarki widoczne dla konta
+usługi; dzięki temu wybór nie obiecuje urządzenia, na którym automatyczny wydruk
+nie może zostać wykonany.
 
 ## Starszy tryb przychodzący
 
@@ -103,8 +129,9 @@ Lokalna walidacja bez publikacji:
 ```
 
 Smoke-test uruchamia lokalny mock ERP, tworzy konfigurację z chronionym ACL,
-instaluje usługę, potwierdza autoryzowany polling outbound, brak tokenu w SCM i
-brak przychodzącej reguły zapory, a na końcu wszystko odinstalowuje.
+instaluje usługę, potwierdza autoryzowany polling outbound, konfigurator,
+`ModifyPath`, skróty ustawień i testu połączenia, brak tokenu w SCM i brak
+przychodzącej reguły zapory, a na końcu wszystko odinstalowuje.
 
 Wydanie musi przejść przez `scripts\release.ps1`, który wymaga profilu
 `internal` albo `public`, certyfikatu Authenticode, przypiętego SHA-256 i

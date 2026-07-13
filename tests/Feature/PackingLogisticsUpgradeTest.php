@@ -61,6 +61,15 @@ class PackingLogisticsUpgradeTest extends TestCase
             ->assertDontSee('Sukienka LENA');
     }
 
+    public function test_pack_view_explains_when_automatic_printing_has_no_active_station(): void
+    {
+        $this->createMixedOrder();
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('Automatyczny wydruk jest wyłączony dla tej sesji');
+    }
+
     public function test_stations_configuration_can_be_updated_with_custom_printers(): void
     {
         $this->get(route('settings.packing'))
@@ -68,10 +77,13 @@ class PackingLogisticsUpgradeTest extends TestCase
             ->assertSee('Stanowiska i drukarki etykiet')
             ->assertSee('Most wydruku Windows')
             ->assertSee('Kod stanowiska')
-            ->assertSee('Wpisz ręcznie dokładną nazwę drukarki z Windows')
+            ->assertSee('Wybierz drukarkę z Windows')
+            ->assertSee('Sprawdź połączenie')
+            ->assertSee('Lista pojawi się po połączeniu aplikacji Windows')
             ->assertSee('Dane do instalatora')
             ->assertSee('Token mostu wydruku')
             ->assertSee('Podpisany instalator nie został jeszcze opublikowany')
+            ->assertDontSee('Wpisz ręcznie dokładną nazwę drukarki z Windows')
             ->assertDontSee('listener_url')
             ->assertDontSee('Pobierz lemon-print-listener.exe');
 
@@ -89,7 +101,7 @@ class PackingLogisticsUpgradeTest extends TestCase
         $this->assertArrayNotHasKey('listener_url', $settings['stations'][0]);
         $this->assertSame('Zebra ZD621', $settings['stations'][1]['printer_name']);
         $this->assertContains('sneakersy', $settings['footwear_keywords']);
-        $this->assertFalse(app('router')->has('settings.packing.listener.printers'));
+        $this->assertTrue(app('router')->has('settings.packing.print-bridge.status'));
     }
 
     public function test_legacy_raw_windows_executable_is_never_downloaded(): void

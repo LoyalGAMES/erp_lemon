@@ -58,6 +58,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::put('/settings/shipping/accounts/{account}', [SettingsController::class, 'updateCourierAccount'])->name('settings.shipping.accounts.update');
         Route::delete('/settings/shipping/accounts/{account}', [SettingsController::class, 'destroyCourierAccount'])->name('settings.shipping.accounts.destroy');
         Route::get('/settings/packing', [SettingsController::class, 'packing'])->name('settings.packing');
+        Route::get('/settings/packing/print-bridge/status', [SettingsController::class, 'packingPrintBridgeStatus'])->name('settings.packing.print-bridge.status');
         Route::get('/settings/products', [SettingsController::class, 'products'])->name('settings.products');
         Route::get('/settings/packing/windows-listener/download', [SettingsController::class, 'downloadWindowsPrintListener'])->name('settings.packing.windows-listener.download');
         Route::get('/settings/packing/windows-listener/certificates/publisher', [SettingsController::class, 'downloadWindowsPrintListenerPublisherCertificate'])->name('settings.packing.windows-listener.certificate.publisher');

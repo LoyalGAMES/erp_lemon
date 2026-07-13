@@ -23,6 +23,7 @@ CRCCheck force
 !define APP_NAME "Sempre ERP Print Listener"
 !define APP_PUBLISHER "Sempre ERP"
 !define APP_EXE "lemon-print-listener.exe"
+!define CONFIGURATOR_EXE "SempreERP-PrintListener-Configure.exe"
 !define APP_ID "SempreERP.PrintListener"
 !define SERVICE_NAME "SempreERPPrintListener"
 !define LEGACY_FIREWALL_RULE "Sempre ERP Print Listener (Private LAN)"
@@ -30,6 +31,7 @@ CRCCheck force
 ; With SetShellVarContext all, $APPDATA resolves to the machine-wide ProgramData.
 !define CONFIG_DIR "$APPDATA\Sempre ERP\Print Listener"
 !define CONFIG_FILE "${CONFIG_DIR}\config.ini"
+!define CONFIG_STAGED "${CONFIG_DIR}\config.ini.new"
 
 Name "${APP_NAME} ${APP_VERSION}"
 OutFile "${OUTPUT_DIR}\SempreERP-PrintListener-Setup.exe"
@@ -359,6 +361,24 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   File /oname=README.txt "${BUILD_DIR}\README.txt"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
+  ; Keep an exact, signed copy of the setup in Program Files. Running it again
+  ; is the supported configuration flow: UAC elevates it, the existing secrets
+  ; are read from the protected file, and the service is updated in place.
+  StrCmp $EXEPATH "$INSTDIR\${CONFIGURATOR_EXE}" configurator_present
+  System::Call 'kernel32::CopyFileW(w "$EXEPATH", w "$INSTDIR\${CONFIGURATOR_EXE}", i 0) i .r0'
+  ${If} $0 == 0
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zapisać podpisanej kopii konfiguratora ustawień. Instalacja została przerwana." /SD IDOK
+    SetErrorLevel 7
+    Abort
+  ${EndIf}
+  Goto configurator_ready
+  configurator_present:
+  IfFileExists "$INSTDIR\${CONFIGURATOR_EXE}" configurator_ready 0
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zainstalować konfiguratora ustawień. Instalacja została przerwana." /SD IDOK
+    SetErrorLevel 7
+    Abort
+  configurator_ready:
+
   nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -validate-renderer'
   Pop $0
   ${If} $0 != 0
@@ -378,19 +398,46 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   ${EndIf}
 
   ${If} $WriteConfig == "1"
-    ; Recreate the file inside the protected directory so no old explicit ACEs
-    ; survive an upgrade. WriteINIStr never exposes the token in a process argv.
-    Delete "${CONFIG_FILE}"
+    ; Build and validate the replacement next to the active file. Never destroy
+    ; a known-good service configuration merely because a newly entered value
+    ; is invalid or the machine loses power before validation finishes.
+    Delete "${CONFIG_STAGED}"
     ClearErrors
     SetDetailsPrint none
-    WriteINIStr "${CONFIG_FILE}" "bridge" "base_url" "$BaseUrl"
-    WriteINIStr "${CONFIG_FILE}" "bridge" "token" "$BridgeToken"
-    WriteINIStr "${CONFIG_FILE}" "bridge" "station" "$Station"
-    WriteINIStr "${CONFIG_FILE}" "bridge" "worker_name" "$Worker"
-    WriteINIStr "${CONFIG_FILE}" "bridge" "poll_seconds" "2"
-    WriteINIStr "${CONFIG_FILE}" "bridge" "sumatra_path" ""
+    WriteINIStr "${CONFIG_STAGED}" "bridge" "base_url" "$BaseUrl"
+    WriteINIStr "${CONFIG_STAGED}" "bridge" "token" "$BridgeToken"
+    WriteINIStr "${CONFIG_STAGED}" "bridge" "station" "$Station"
+    WriteINIStr "${CONFIG_STAGED}" "bridge" "worker_name" "$Worker"
+    WriteINIStr "${CONFIG_STAGED}" "bridge" "poll_seconds" "2"
+    WriteINIStr "${CONFIG_STAGED}" "bridge" "sumatra_path" ""
     IfErrors config_write_failed
     SetDetailsPrint both
+
+    nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -protect-config-file "${CONFIG_STAGED}"'
+    Pop $0
+    ${If} $0 != 0
+      MessageBox MB_ICONSTOP|MB_OK "Nie udało się zabezpieczyć nowej konfiguracji ACL. Dotychczasowe ustawienia nie zostały zmienione." /SD IDOK
+      SetErrorLevel 3
+      Goto staged_config_failed
+    ${EndIf}
+
+    nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -mode bridge -config "${CONFIG_STAGED}" -validate-config'
+    Pop $0
+    ${If} $0 != 0
+      MessageBox MB_ICONSTOP|MB_OK "Nowa konfiguracja mostu jest nieprawidłowa. Dotychczasowe ustawienia nie zostały zmienione; sprawdź adres HTTPS, token i kod stanowiska." /SD IDOK
+      SetErrorLevel 4
+      Goto staged_config_failed
+    ${EndIf}
+
+    ; MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH makes the switch
+    ; atomic and asks Windows to flush it before the installer continues.
+    System::Call 'kernel32::MoveFileExW(w "${CONFIG_STAGED}", w "${CONFIG_FILE}", i 0x9) i .r0'
+    ${If} $0 == 0
+      MessageBox MB_ICONSTOP|MB_OK "Nie udało się atomowo aktywować nowej konfiguracji. Dotychczasowe ustawienia nie zostały zmienione." /SD IDOK
+      SetErrorLevel 2
+      Goto staged_config_failed
+    ${EndIf}
+
     StrCpy $BridgeToken ""
   ${EndIf}
 
@@ -400,29 +447,46 @@ Section "Sempre ERP Print Listener" SEC_MAIN
     Abort
   config_present:
 
-  nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -protect-config-file "${CONFIG_FILE}"'
-  Pop $0
-  ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zabezpieczyć pliku konfiguracji ACL. Instalacja została przerwana." /SD IDOK
-    SetErrorLevel 3
-    Abort
-  ${EndIf}
+  ${If} $WriteConfig != "1"
+    ; Silent enterprise installs keep their pre-provisioned file. Re-assert its
+    ; ACL and validate it here; interactive installs already did both before
+    ; the atomic switch above and cannot fail after replacing the old config.
+    nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -protect-config-file "${CONFIG_FILE}"'
+    Pop $0
+    ${If} $0 != 0
+      MessageBox MB_ICONSTOP|MB_OK "Nie udało się zabezpieczyć pliku konfiguracji ACL. Instalacja została przerwana." /SD IDOK
+      SetErrorLevel 3
+      Abort
+    ${EndIf}
 
-  nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -mode bridge -config "${CONFIG_FILE}" -validate-config'
-  Pop $0
-  ${If} $0 != 0
-    MessageBox MB_ICONSTOP|MB_OK "Konfiguracja mostu jest nieprawidłowa. Sprawdź adres HTTPS, token i kod stanowiska." /SD IDOK
-    SetErrorLevel 4
-    Abort
+    nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -mode bridge -config "${CONFIG_FILE}" -validate-config'
+    Pop $0
+    ${If} $0 != 0
+      MessageBox MB_ICONSTOP|MB_OK "Konfiguracja mostu jest nieprawidłowa. Sprawdź adres HTTPS, token i kod stanowiska." /SD IDOK
+      SetErrorLevel 4
+      Abort
+    ${EndIf}
   ${EndIf}
   Goto config_ready
 
   config_write_failed:
     SetDetailsPrint both
     StrCpy $BridgeToken ""
-    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zapisać chronionej konfiguracji. Instalacja została przerwana." /SD IDOK
-    Delete "${CONFIG_FILE}"
+    MessageBox MB_ICONSTOP|MB_OK "Nie udało się zapisać nowej konfiguracji. Dotychczasowe ustawienia nie zostały zmienione." /SD IDOK
     SetErrorLevel 2
+    Goto staged_config_failed
+
+  staged_config_failed:
+    SetDetailsPrint both
+    StrCpy $BridgeToken ""
+    Delete "${CONFIG_STAGED}"
+    ${If} $ServiceExisted == "1"
+      ; The service was stopped before replacing the application binary. Its
+      ; original config is still intact, so bring it back instead of leaving a
+      ; working warehouse station offline after a rejected edit.
+      nsExec::ExecToLog '"$INSTDIR\${APP_EXE}" -service start'
+      Pop $1
+    ${EndIf}
     Abort
   config_ready:
 
@@ -445,6 +509,7 @@ Section "Sempre ERP Print Listener" SEC_MAIN
       Delete "$INSTDIR\README.txt"
       Delete "$INSTDIR\SumatraPDF.exe"
       Delete "$INSTDIR\SumatraPDF-COPYING.txt"
+      Delete "$INSTDIR\${CONFIGURATOR_EXE}"
       Delete "$INSTDIR\${APP_EXE}"
       RMDir "$INSTDIR"
     ${EndIf}
@@ -477,10 +542,20 @@ Section "Sempre ERP Print Listener" SEC_MAIN
       Delete "$INSTDIR\README.txt"
       Delete "$INSTDIR\SumatraPDF.exe"
       Delete "$INSTDIR\SumatraPDF-COPYING.txt"
+      Delete "$INSTDIR\${CONFIGURATOR_EXE}"
       Delete "$INSTDIR\${APP_EXE}"
       RMDir "$INSTDIR"
     ${EndIf}
     Abort
+  ${EndIf}
+
+  DetailPrint "Sprawdzanie autoryzowanego połączenia usługi z ERP..."
+  nsExec::ExecToLog /TIMEOUT=30000 '"$INSTDIR\${APP_EXE}" -check-connection'
+  Pop $0
+  ${If} $0 != 0
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Usługa została uruchomiona, ale nie udało się jeszcze potwierdzić połączenia z ERP. Użyj skrótu „Sprawdź połączenie” w menu Start; w razie błędu otwórz „Ustawienia połączenia” i popraw dane." /SD IDOK
+  ${Else}
+    DetailPrint "Autoryzowane połączenie z ERP zostało potwierdzone."
   ${EndIf}
 
   ; Register the application only after the service has been proven runnable.
@@ -492,10 +567,13 @@ Section "Sempre ERP Print Listener" SEC_MAIN
   WriteRegStr HKLM "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "${UNINSTALL_KEY}" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegStr HKLM "${UNINSTALL_KEY}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
-  WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoModify" 1
+  WriteRegStr HKLM "${UNINSTALL_KEY}" "ModifyPath" '"$INSTDIR\${CONFIGURATOR_EXE}"'
+  DeleteRegValue HKLM "${UNINSTALL_KEY}" "NoModify"
   WriteRegDWORD HKLM "${UNINSTALL_KEY}" "NoRepair" 1
 
   CreateDirectory "$SMPROGRAMS\Sempre ERP Print Listener"
+  CreateShortCut "$SMPROGRAMS\Sempre ERP Print Listener\Ustawienia połączenia.lnk" "$INSTDIR\${CONFIGURATOR_EXE}" "" "$INSTDIR\${APP_EXE}" 0 SW_SHOWNORMAL "" "Zmień adres ERP, token i dane stanowiska (wymaga UAC)"
+  CreateShortCut "$SMPROGRAMS\Sempre ERP Print Listener\Sprawdź połączenie.lnk" "$SYSDIR\cmd.exe" '/K ""$INSTDIR\${APP_EXE}" -check-connection"' "$INSTDIR\${APP_EXE}" 0 SW_SHOWNORMAL "" "Sprawdź połączenie usługi drukowania z ERP"
   CreateShortCut "$SMPROGRAMS\Sempre ERP Print Listener\Dokumentacja.lnk" "$INSTDIR\README.txt"
   CreateShortCut "$SMPROGRAMS\Sempre ERP Print Listener\Odinstaluj.lnk" "$INSTDIR\uninstall.exe"
   StrCpy $InternalTrustCommitted "1"
@@ -519,6 +597,8 @@ Section "Uninstall"
   Pop $0
 
   Delete "$SMPROGRAMS\Sempre ERP Print Listener\Dokumentacja.lnk"
+  Delete "$SMPROGRAMS\Sempre ERP Print Listener\Ustawienia połączenia.lnk"
+  Delete "$SMPROGRAMS\Sempre ERP Print Listener\Sprawdź połączenie.lnk"
   Delete "$SMPROGRAMS\Sempre ERP Print Listener\Odinstaluj.lnk"
   RMDir "$SMPROGRAMS\Sempre ERP Print Listener"
 
@@ -526,10 +606,12 @@ Section "Uninstall"
   Delete "$INSTDIR\SumatraPDF.exe"
   Delete "$INSTDIR\SumatraPDF-COPYING.txt"
   Delete "$INSTDIR\README.txt"
+  Delete "$INSTDIR\${CONFIGURATOR_EXE}"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
   Delete "${CONFIG_DIR}\config.ini"
+  Delete "${CONFIG_DIR}\config.ini.new"
   Delete "${CONFIG_DIR}\listener.log"
   Delete "${CONFIG_DIR}\listener.log.1"
   Delete "${CONFIG_DIR}\listener.log.2"

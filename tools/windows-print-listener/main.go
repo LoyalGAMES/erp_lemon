@@ -75,6 +75,7 @@ func main() {
 	var protectFile string
 	var validateBridgeConfig bool
 	var validateRenderer bool
+	var checkConnection bool
 	flag.StringVar(&cfg.mode, "mode", defaultRunMode, "Run mode: bridge (outbound ERP polling) or listener (legacy inbound HTTP)")
 	flag.StringVar(&cfg.configPath, "config", defaultBridgeConfigPath(), "Path to the ACL-protected outbound bridge configuration")
 	flag.StringVar(&cfg.listen, "listen", defaultLegacyListen, "Legacy HTTP listen address; non-loopback requires -token")
@@ -86,6 +87,7 @@ func main() {
 	flag.StringVar(&protectFile, "protect-config-file", "", "Apply the restricted SYSTEM/Administrators ACL to a config file")
 	flag.BoolVar(&validateBridgeConfig, "validate-config", false, "Validate the outbound bridge config and its Windows ACL, then exit")
 	flag.BoolVar(&validateRenderer, "validate-renderer", false, "Validate the pinned bundled PDF renderer, then exit")
+	flag.BoolVar(&checkConnection, "check-connection", false, "Verify that the local print bridge is authorized and connected to ERP, then exit")
 	flag.BoolVar(&showVersion, "version", false, "Print version and source commit, then exit")
 	flag.Parse()
 
@@ -136,6 +138,21 @@ func main() {
 			log.Fatal(err)
 		}
 		fmt.Printf("Pinned SumatraPDF %s renderer is valid: %s\n", bundledSumatraVersion, path)
+		return
+	}
+	if checkConnection {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		status, err := waitForBridgeConnection(ctx, defaultBridgeHealthURL, 500*time.Millisecond)
+		if err != nil {
+			log.Fatalf("Połączenie z ERP nie działa: %v", err)
+		}
+		fmt.Printf(
+			"Połączenie z ERP działa (stanowisko=%s, komputer=%s, ostatni sukces=%s).\n",
+			status.Station,
+			status.Worker,
+			status.LastSuccessAt,
+		)
 		return
 	}
 
