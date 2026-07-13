@@ -138,7 +138,11 @@ class LL_Returns_Status_Sync {
 				$response = $this->erp_client->create_return( $payload );
 
 				if ( is_wp_error( $response ) ) {
-					$this->repository->mark_failed( $request_id, $response );
+					if ( $this->is_retryable_erp_error( $response ) ) {
+						$this->repository->mark_failed( $request_id, $response );
+					} else {
+						$this->repository->mark_rejected( $request_id, $response );
+					}
 					continue;
 				}
 
@@ -169,6 +173,23 @@ class LL_Returns_Status_Sync {
 		}
 
 		return $count;
+	}
+
+	/**
+	 * Checks whether an ERP create error may succeed during a later retry.
+	 *
+	 * @param WP_Error $error ERP error.
+	 * @return bool
+	 */
+	private function is_retryable_erp_error( WP_Error $error ) {
+		if ( 'll_returns_erp_rejected' === $error->get_error_code() ) {
+			return false;
+		}
+
+		$data   = $error->get_error_data();
+		$status = is_array( $data ) && isset( $data['status'] ) ? absint( $data['status'] ) : 0;
+
+		return ! in_array( $status, array( 400, 409, 410, 422 ), true );
 	}
 
 	/**

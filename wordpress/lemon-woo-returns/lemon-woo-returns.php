@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Lemon Woo Returns
  * Description: Customer return request form for WooCommerce and Elementor with ERP handoff.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Loyal Lemon Sp. z o.o.
  * Text Domain: lemon-woo-returns
  * Requires at least: 6.2
@@ -17,7 +17,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'LL_RETURNS_VERSION', '1.1.0' );
+define( 'LL_RETURNS_VERSION', '1.2.0' );
 define( 'LL_RETURNS_FILE', __FILE__ );
 define( 'LL_RETURNS_PATH', plugin_dir_path( __FILE__ ) );
 define( 'LL_RETURNS_URL', plugin_dir_url( __FILE__ ) );

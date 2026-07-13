@@ -637,9 +637,14 @@ final class ProductDataExportService
     /**
      * @return array<string, mixed>
      */
-    private function payload(Product $product, bool $isVariation = false, ?int $salesChannelId = null, string $language = 'pl'): array
-    {
-        $product->loadMissing('stockBalances');
+    private function payload(
+        Product $product,
+        bool $isVariation = false,
+        ?int $salesChannelId = null,
+        string $language = 'pl',
+        ?bool $stockReleasePending = null,
+    ): array {
+        $product->loadMissing(['stockBalances', 'channelMappings']);
         $master = $product->masterData();
         $retailPrice = data_get($master, 'prices.retail_price_pln');
         $salePrice = data_get($master, 'prices.sale_price_pln');
@@ -656,8 +661,13 @@ final class ProductDataExportService
         );
         $hasLanguageContent = $language === 'pl' || is_array(data_get($master, "content.{$language}"));
         $images = $this->images($product);
-        $manageStock = (bool) data_get($master, 'inventory.manage_stock', true);
-        $stockQuantity = (int) floor(max(0, (float) $product->stockBalances->sum('quantity_available')));
+        $forceStorefrontStockZero = $product->forcesStorefrontStockZero();
+        $stockReleasePending ??= $salesChannelId !== null
+            && $this->mappingHasStockReleasePending($product, $salesChannelId);
+        $manageStock = $forceStorefrontStockZero || (bool) data_get($master, 'inventory.manage_stock', true);
+        $stockQuantity = $forceStorefrontStockZero
+            ? 0
+            : (int) floor(max(0, (float) $product->stockBalances->sum('quantity_available')));
 
         $payload = [
             'sku' => $product->sku,
@@ -665,8 +675,12 @@ final class ProductDataExportService
             'status' => $product->is_active ? (string) (data_get($master, 'publication_status') ?: 'publish') : 'draft',
             'manage_stock' => $manageStock,
             'stock_quantity' => $manageStock ? $stockQuantity : null,
-            'stock_status' => $manageStock ? ($stockQuantity > 0 ? 'instock' : 'outofstock') : null,
-            'backorders' => (string) data_get($master, 'inventory.backorders', 'no'),
+            'stock_status' => $manageStock
+                ? ($stockQuantity > 0 ? 'instock' : 'outofstock')
+                : ($stockReleasePending ? 'instock' : null),
+            'backorders' => $forceStorefrontStockZero
+                ? 'no'
+                : (string) data_get($master, 'inventory.backorders', 'no'),
             'low_stock_amount' => data_get($master, 'inventory.low_stock_amount') ?? '',
             'sold_individually' => (bool) data_get($master, 'inventory.sold_individually', false),
             'weight' => $product->weight_kg !== null ? $this->decimal($product->weight_kg, 4) : '',
@@ -692,7 +706,14 @@ final class ProductDataExportService
             $payload['type'] = (string) (data_get($master, 'product_type') ?: 'simple');
             $payload['attributes'] = $this->attributes($master, $language);
             $payload['categories'] = $this->categories($master, $salesChannelId, $language);
-            $payload['catalog_visibility'] = (string) (data_get($master, 'catalog_visibility') ?: 'visible');
+            $pendingRestoreVisibility = in_array(
+                $product->storefront_restore_visibility,
+                ['visible', 'catalog', 'search'],
+                true,
+            ) ? $product->storefront_restore_visibility : null;
+            $payload['catalog_visibility'] = $product->isStorefrontHidden()
+                ? 'hidden'
+                : (string) ($pendingRestoreVisibility ?? data_get($master, 'catalog_visibility') ?: 'visible');
             $payload['upsell_ids'] = $this->relatedProductIds((array) data_get($master, 'related_products.upsell_skus', []), $salesChannelId);
             $payload['cross_sell_ids'] = $this->relatedProductIds((array) data_get($master, 'related_products.cross_sell_skus', []), $salesChannelId);
 
@@ -753,7 +774,13 @@ final class ProductDataExportService
      */
     private function variationPayload(Product $parent, Product $variant, int $salesChannelId, string $language = 'pl'): array
     {
-        $payload = $this->payload($variant, true, $salesChannelId, $language);
+        $payload = $this->payload(
+            $variant,
+            true,
+            $salesChannelId,
+            $language,
+            $this->mappingHasStockReleasePending($parent, $salesChannelId),
+        );
         $parentMaster = $parent->masterData();
         $parentRegularPrice = data_get($parentMaster, 'prices.retail_price_pln');
         $parentSalePrice = data_get($parentMaster, 'prices.sale_price_pln');
@@ -779,6 +806,16 @@ final class ProductDataExportService
         $payload['attributes'] = $this->variationAttributes($parent, $variant, $language);
 
         return $payload;
+    }
+
+    private function mappingHasStockReleasePending(Product $product, int $salesChannelId): bool
+    {
+        $product->loadMissing('channelMappings');
+
+        return $product->channelMappings->contains(
+            fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $salesChannelId
+                && data_get($mapping->metadata, 'product_data_export.stock_release_pending') === true,
+        );
     }
 
     /**
@@ -919,6 +956,8 @@ final class ProductDataExportService
             '_sempre_erp_cross_sell_skus' => implode(', ', (array) data_get($master, 'related_products.cross_sell_skus', [])),
             '_sempre_erp_product_type' => data_get($master, 'product_type'),
             '_sempre_erp_variant_attribute' => data_get($master, 'variant_attribute'),
+            '_sempre_erp_storefront_hidden' => $product->isStorefrontHidden() ? '1' : '0',
+            '_sempre_erp_stock_verification_required' => $product->requiresStockVerification() ? '1' : '0',
             '_sempre_erp_updated_at' => now()->toIso8601String(),
         ])
             ->filter(fn ($value): bool => $value !== null && $value !== '')
@@ -1203,7 +1242,7 @@ final class ProductDataExportService
         $product->loadMissing(['variantChildren.channelMappings.salesChannel']);
 
         return $product->variantChildren
-            ->filter(fn (Product $variant): bool => $variant->is_active)
+            ->filter(fn (Product $variant): bool => $variant->is_active || $variant->forcesStorefrontStockZero())
             ->values();
     }
 
@@ -1631,7 +1670,10 @@ final class ProductDataExportService
         if (
             $isVariation
             || trim($product->sku) === ''
-            || ($this->dateTimeString(data_get($master, 'publication_date')) === null && ! $mediaWasEditedInErp)
+            || ($this->dateTimeString(data_get($master, 'publication_date')) === null
+                && ! $mediaWasEditedInErp
+                && ! $product->isStorefrontHidden()
+                && ! in_array($product->storefront_restore_visibility, ['visible', 'catalog', 'search'], true))
         ) {
             return [];
         }

@@ -22,6 +22,9 @@
         .product-import-issue-item small { color: var(--muted); }
         .product-import-issue-row { background: rgba(207, 54, 54, .055); box-shadow: inset 3px 0 0 rgba(207, 54, 54, .48); }
         .product-import-issue-badge { display: inline-flex; margin-left: 7px; border-radius: 999px; padding: 3px 7px; background: rgba(207, 54, 54, .1); color: var(--red); font-size: 10px; font-weight: 850; vertical-align: middle; }
+        .product-storefront-badge, .product-stock-verification-badge { display: inline-flex; margin-left: 7px; border-radius: 999px; padding: 3px 7px; font-size: 10px; font-weight: 850; vertical-align: middle; }
+        .product-storefront-badge { background: rgba(207, 54, 54, .1); color: var(--red); }
+        .product-stock-verification-badge { background: #fff4e8; color: #8b5b34; }
         .product-cell { display: grid; grid-template-columns: 34px 62px minmax(260px, 1fr); gap: 12px; align-items: center; white-space: normal; }
         .product-cell.variant { padding-left: 42px; grid-template-columns: 34px 48px minmax(220px, 1fr); }
         .product-thumb-button { width: 58px; height: 72px; border: 1px solid var(--border); border-radius: 8px; padding: 0; overflow: hidden; background: #f4f1ef; cursor: pointer; display: grid; place-items: center; color: var(--muted); font-weight: 850; font-size: 11px; }
@@ -151,8 +154,8 @@
             .products-table [data-product-card-section="stock"] > .stock-summary > .stock-pills > .stock-pill { min-width: 0; display: grid; align-content: center; gap: 2px; padding: 7px 4px; text-align: center; line-height: 1.2; }
             .products-table [data-product-card-section="stock"] > .stock-summary > .stock-pills > .stock-pill strong { margin-left: 0; font-size: 15px; }
             .products-table .warehouse-modal-trigger { width: 100%; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; border: 1px solid rgba(134, 115, 100, .34); border-radius: 8px; padding: 8px 10px; background: var(--green-soft); }
-            .products-table [data-product-card-section="actions"] .inline-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-            .products-table [data-product-card="variant"] [data-product-card-section="actions"] .inline-actions { grid-template-columns: minmax(0, 1fr); }
+            .products-table [data-product-card-section="actions"] .inline-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+            .products-table [data-product-card="variant"] [data-product-card-section="actions"] .inline-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .products-table [data-product-card-section="actions"] .inline-actions form { width: 100%; display: block; }
             .products-table [data-product-card-section="actions"] .inline-actions .button { width: 100%; min-width: 0; min-height: 44px; padding-inline: 6px; }
             .product-import-issue-items { min-width: 0; }
@@ -723,6 +726,8 @@
                             $price = $retailPrice($product, $familyVariants);
                             $externalId = $product->externalDisplayId();
                             $isImportIssueProduct = (bool) ($row['is_import_issue'] ?? false);
+                            $isStorefrontHidden = $familyProducts->contains(fn ($member): bool => $member->isStorefrontHidden());
+                            $stockVerificationRequired = $familyProducts->contains(fn ($member): bool => $member->requiresStockVerification());
                         @endphp
                         <tr @class(['parent-row', 'product-import-issue-row' => $isImportIssueProduct]) data-product-card="parent" data-product-id="{{ $product->id }}">
                             <td data-product-card-section="identity">
@@ -755,6 +760,11 @@
                                         <a class="product-title" href="{{ route('products.edit', $product) }}">{{ $product->name }}</a>
                                         @if ($isImportIssueProduct)
                                             <span class="product-import-issue-badge">Błąd importu</span>
+                                        @endif
+                                        @if ($isStorefrontHidden)
+                                            <span class="product-storefront-badge">Ukryty w sklepie</span>
+                                        @elseif ($stockVerificationRequired)
+                                            <span class="product-stock-verification-badge">Stan w sklepie: 0 — do weryfikacji</span>
                                         @endif
                                         <div class="product-meta">
                                             <span><strong>ID Woo:</strong> {{ $externalId ?: '—' }}</span>
@@ -813,6 +823,11 @@
                             <td data-product-card-section="actions">
                                 <div class="inline-actions">
                                     <a class="button secondary" href="{{ route('products.edit', $product) }}">Edytuj</a>
+                                    @include('products._storefront_actions', [
+                                        'storefrontProduct' => $product,
+                                        'storefrontHidden' => $isStorefrontHidden,
+                                        'stockVerificationRequired' => $stockVerificationRequired,
+                                    ])
                                     <form method="POST" action="{{ route('products.duplicate', $product) }}">
                                         @csrf
                                         <button class="button secondary" type="submit">Kopiuj</button>
@@ -879,6 +894,11 @@
                                             @if ($importIssue)
                                                 <span class="product-import-issue-badge">Błąd importu</span>
                                             @endif
+                                            @if ($isStorefrontHidden)
+                                                <span class="product-storefront-badge">Ukryty w sklepie</span>
+                                            @elseif ($stockVerificationRequired)
+                                                <span class="product-stock-verification-badge">Stan w sklepie: 0 — do weryfikacji</span>
+                                            @endif
                                             <div class="product-meta">
                                                 <span><strong>ID Woo:</strong> {{ $variantExternalId ?: '—' }}</span>
                                                 <span><strong>SKU:</strong> {{ $variant->displaySku() ?: '—' }}</span>
@@ -935,6 +955,11 @@
                                 <td data-product-card-section="actions">
                                     <div class="inline-actions">
                                         <a class="button secondary" href="{{ route('products.edit', $variant) }}">Edytuj</a>
+                                        @include('products._storefront_actions', [
+                                            'storefrontProduct' => $variant,
+                                            'storefrontHidden' => $isStorefrontHidden,
+                                            'stockVerificationRequired' => $stockVerificationRequired,
+                                        ])
                                     </div>
                                 </td>
                             </tr>

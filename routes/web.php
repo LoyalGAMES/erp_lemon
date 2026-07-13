@@ -121,6 +121,9 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::put('/products/{product}', [ProductController::class, 'update'])->name('products.update');
         Route::post('/products/{product}/duplicate', [ProductController::class, 'duplicate'])->name('products.duplicate');
         Route::post('/products/{product}/favorite', [ProductController::class, 'toggleFavorite'])->name('products.favorite.toggle');
+        Route::post('/products/{product}/storefront/hide', [ProductController::class, 'hideFromStorefront'])->name('products.storefront.hide');
+        Route::post('/products/{product}/storefront/reveal', [ProductController::class, 'revealOnStorefront'])->name('products.storefront.reveal');
+        Route::post('/products/{product}/storefront/verify-stock', [ProductController::class, 'verifyStorefrontStock'])->name('products.storefront.verify-stock');
         Route::post('/products/{product}/relations', [ProductController::class, 'storeRelation'])->name('products.relations.store');
         Route::delete('/products/{product}/relations/{relation}', [ProductController::class, 'destroyRelation'])->name('products.relations.destroy');
         Route::post('/products/{product}/stock-adjustments', [ProductController::class, 'adjustStock'])->name('products.stock.adjust');

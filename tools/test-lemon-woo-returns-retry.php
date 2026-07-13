@@ -79,7 +79,10 @@ function __(string $value, string $domain = ''): string
 
 function add_filter(...$args): void {}
 function add_action(...$args): void {}
-function wp_next_scheduled(...$args): bool { return false; }
+function wp_next_scheduled(...$args): bool
+{
+    return false;
+}
 function wp_schedule_event(...$args): void {}
 function wp_clear_scheduled_hook(...$args): void {}
 
@@ -152,6 +155,9 @@ final class Test_Return_Repository extends LL_Returns_Return_Repository
     /** @var list<int> */
     public array $failed = [];
 
+    /** @var list<int> */
+    public array $rejected = [];
+
     public function get_syncable_request_ids($limit = 25)
     {
         return [1, 2];
@@ -176,6 +182,12 @@ final class Test_Return_Repository extends LL_Returns_Return_Repository
     public function mark_failed($post_id, WP_Error $error)
     {
         $this->failed[] = (int) $post_id;
+    }
+
+    public function mark_rejected($post_id, WP_Error $error)
+    {
+        $this->rejected[] = (int) $post_id;
+        $this->needs[(int) $post_id] = false;
     }
 
     public function get_erp_context($post_id)
@@ -217,18 +229,21 @@ $meta[12] = [
     $prefix.'erp_external_id' => 'RET/12',
 ];
 
-$realRepository = new LL_Returns_Return_Repository();
+$realRepository = new LL_Returns_Return_Repository;
 assert_true($realRepository->needs_erp_submission(10), 'Local-mode request must be replayed to create endpoint.');
 assert_true($realRepository->needs_erp_submission(11), 'Failed request must be replayed to create endpoint.');
 assert_true(! $realRepository->needs_erp_submission(12), 'Delivered request must only use status synchronization.');
+$realRepository->mark_rejected(13, new WP_Error('ll_returns_erp_http_error', 'Quantity unavailable', ['status' => 422]));
+assert_true($meta[13][$prefix.'status'] === 'rejected', 'Permanent ERP rejection must release the local reservation.');
+assert_true(! $realRepository->needs_erp_submission(13), 'Rejected request must not remain in the ERP retry queue.');
 
-$repository = new Test_Return_Repository();
-$client = new LL_Returns_ERP_Client();
+$repository = new Test_Return_Repository;
+$client = new LL_Returns_ERP_Client;
 $sync = new LL_Returns_Status_Sync(
-    new LL_Returns_Settings(),
+    new LL_Returns_Settings,
     $repository,
     $client,
-    new LL_Returns_Refund_Service(),
+    new LL_Returns_Refund_Service,
 );
 
 assert_true($sync->sync_pending_requests(25) === 2, 'Both create delivery and status sync should be counted.');
@@ -236,19 +251,34 @@ assert_true($client->created === [1], 'Queued request must call create endpoint 
 assert_true($client->statusChecked === [2], 'Already delivered request must call status endpoint.');
 assert_true($repository->accepted === [1], 'Successful create delivery must mark the request as accepted.');
 
-$failedRepository = new Test_Return_Repository();
+$failedRepository = new Test_Return_Repository;
 $failedRepository->needs = [1 => true, 2 => true];
-$failedClient = new LL_Returns_ERP_Client();
+$failedClient = new LL_Returns_ERP_Client;
 $failedClient->createResponse = new WP_Error('http_403', 'Token missing');
 $failedSync = new LL_Returns_Status_Sync(
-    new LL_Returns_Settings(),
+    new LL_Returns_Settings,
     $failedRepository,
     $failedClient,
-    new LL_Returns_Refund_Service(),
+    new LL_Returns_Refund_Service,
 );
 
 assert_true($failedSync->sync_pending_requests(25) === 0, 'Failed creates must not be reported as synchronized.');
 assert_true($failedRepository->failed === [1, 2], 'Every failed create must remain queued as ERP failed.');
 assert_true($failedClient->statusChecked === [], 'Status endpoint must not be called before create succeeds.');
+
+$rejectedRepository = new Test_Return_Repository;
+$rejectedRepository->needs = [1 => true, 2 => true];
+$rejectedClient = new LL_Returns_ERP_Client;
+$rejectedClient->createResponse = new WP_Error('ll_returns_erp_http_error', 'Quantity unavailable', ['status' => 422]);
+$rejectedSync = new LL_Returns_Status_Sync(
+    new LL_Returns_Settings,
+    $rejectedRepository,
+    $rejectedClient,
+    new LL_Returns_Refund_Service,
+);
+
+assert_true($rejectedSync->sync_pending_requests(25) === 0, 'Rejected creates must not be reported as synchronized.');
+assert_true($rejectedRepository->rejected === [1, 2], 'Permanent ERP rejection must release every local reservation.');
+assert_true($rejectedRepository->failed === [], 'Permanent ERP rejection must not return to the retry queue.');
 
 fwrite(STDOUT, "Lemon Woo Returns retry tests passed.\n");

@@ -6,6 +6,7 @@ Modul WordPress/WooCommerce do przyjmowania zgloszen zwrotow przez klientow zalo
 
 1. Klient podaje numer zamowienia oraz e-mail albo telefon.
 2. Formularz pokazuje produkty z zamowienia i pozwala wybrac pozycje, ilosc oraz powod zwrotu.
+   Pozycje i sztuki zajete przez aktywne zgloszenia nie sa ponownie dostepne; czesciowo zwrocona pozycja zachowuje pozostala ilosc.
 3. Klient wybiera forme odeslania: wlasna przesylka albo Wygodne Zwroty.
 4. Zgloszenie zwrotu jest najpierw trwale zapisywane lokalnie, a nastepnie wysylane do ERP. Po sukcesie klient dostaje numer zgloszenia. Dla Wygodnych Zwrotow pojawia sie link do nadania.
 5. Status zgloszenia jest synchronizowany z ERP. Dopiero status finalny, np. `Zwrot zrealizowany`, tworzy natywny zwrot WooCommerce na pozycjach zgloszenia.
@@ -47,14 +48,19 @@ Minimalna odpowiedz:
   "order": {
     "source": "erp",
     "order_id": "ERP-12345",
+    "wc_order_id": "12345",
+    "return_order_key": "erp:1:ERP-12345",
     "order_reference": "12345",
     "order_number": "12345",
     "currency": "PLN",
     "customer_email": "klient@example.com",
     "customer_phone": "+48123123123",
+    "accounted_return_references": ["LLR-20260707-ABC123"],
     "items": [
       {
         "id": "line-1",
+        "return_item_key": "line-1",
+        "wc_order_item_id": "101",
         "name": "Produkt",
         "sku": "SKU-1",
         "quantity": 1,
@@ -67,6 +73,8 @@ Minimalna odpowiedz:
 ```
 
 Bez endpointu wyszukiwania wtyczka uzywa lokalnych zamowien WooCommerce.
+
+`return_order_key` identyfikuje cala rodzine zamowienia (zamowienie pierwotne i czesci wydzielone), a `return_item_key` / `wc_order_item_id` zawsze wskazuje pierwotna pozycje WooCommerce. ERP powinien zwracac w `quantity` tylko liczbe sztuk nadal dostepnych do zwrotu. Pole `accounted_return_references` zapobiega podwojnemu odjeciu zgloszenia, ktore ERP juz zapisal, ale WordPress nadal ma w kolejce po bledzie sieciowym.
 
 ### Tworzenie zwrotu
 
@@ -162,7 +170,7 @@ Po statusie finalnym z ERP wtyczka:
 - refunduje tylko pozycje i ilosci z wybranego zgloszenia,
 - nie uruchamia zwrotu platnosci przez bramke (`refund_payment=false`),
 - opcjonalnie przywraca stany magazynowe,
-- opcjonalnie ustawia status zamowienia WooCommerce na `refunded`.
+- opcjonalnie ustawia status zamowienia WooCommerce na `refunded`, ale dopiero gdy zwrocono wszystkie jego pozycje.
 
 Do utworzenia natywnego refundu payload zgloszenia musi zawierac lokalny `order_id` WooCommerce oraz identyfikatory pozycji zamowienia WooCommerce w polu `items[].id`. Fallback WooCommerce robi to automatycznie; przy wyszukiwaniu zamowienia przez ERP endpoint powinien zwrocic te lokalne identyfikatory.
 

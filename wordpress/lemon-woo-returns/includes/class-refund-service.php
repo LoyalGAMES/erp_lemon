@@ -61,7 +61,9 @@ class LL_Returns_Refund_Service {
 			return new WP_Error( 'll_returns_refund_payload_missing', __( 'Brak danych zgloszenia zwrotu.', 'lemon-woo-returns' ) );
 		}
 
-		$order_id = ! empty( $payload['order_id'] ) ? absint( $payload['order_id'] ) : 0;
+		$order_id = ! empty( $payload['wc_order_id'] )
+			? absint( $payload['wc_order_id'] )
+			: ( ! empty( $payload['order_id'] ) ? absint( $payload['order_id'] ) : 0 );
 		$order    = $order_id ? wc_get_order( $order_id ) : false;
 
 		if ( ! $order ) {
@@ -72,7 +74,9 @@ class LL_Returns_Refund_Service {
 		$refund_amount = 0.0;
 
 		foreach ( $payload['items'] as $returned_item ) {
-			$item_id = isset( $returned_item['id'] ) ? absint( $returned_item['id'] ) : 0;
+			$item_id = isset( $returned_item['wc_order_item_id'] )
+				? absint( $returned_item['wc_order_item_id'] )
+				: ( isset( $returned_item['id'] ) ? absint( $returned_item['id'] ) : 0 );
 
 			if ( ! $item_id ) {
 				continue;
@@ -152,7 +156,9 @@ class LL_Returns_Refund_Service {
 			)
 		);
 
-		if ( 'yes' === $this->settings->get( 'mark_order_refunded', 'yes' ) ) {
+		$refreshed_order = wc_get_order( $order->get_id() );
+
+		if ( 'yes' === $this->settings->get( 'mark_order_refunded', 'yes' ) && $this->is_fully_refunded( $refreshed_order ? $refreshed_order : $order ) ) {
 			$order->update_status(
 				'refunded',
 				sprintf(
@@ -165,5 +171,26 @@ class LL_Returns_Refund_Service {
 		}
 
 		return $refund_id;
+	}
+
+	/**
+	 * Checks whether every physical WooCommerce line has been refunded in full.
+	 * A partial return must leave the order in its current business status so the
+	 * remaining products can still be returned through the form.
+	 *
+	 * @param WC_Order $order WooCommerce order.
+	 * @return bool
+	 */
+	private function is_fully_refunded( $order ) {
+		foreach ( $order->get_items( 'line_item' ) as $item_id => $item ) {
+			$ordered  = absint( $item->get_quantity() );
+			$refunded = method_exists( $order, 'get_qty_refunded_for_item' ) ? absint( abs( $order->get_qty_refunded_for_item( $item_id ) ) ) : 0;
+
+			if ( $ordered > $refunded ) {
+				return false;
+			}
+		}
+
+		return true;
 	}
 }

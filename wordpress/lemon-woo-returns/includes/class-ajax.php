@@ -137,48 +137,90 @@ class LL_Returns_Ajax {
 			$this->send_error( $order->get_error_message(), 404, $order->get_error_code() );
 		}
 
-		$items = isset( $request['items'] ) && is_array( $request['items'] ) ? $request['items'] : array();
-		$items = $this->order_service->validate_return_items( $order, $items );
-
-		if ( is_wp_error( $items ) ) {
-			$this->send_error( $items->get_error_message(), 400, $items->get_error_code() );
-		}
-
 		$return_method = isset( $request['return_method'] ) ? sanitize_key( wp_unslash( $request['return_method'] ) ) : 'own_shipping';
 
 		if ( ! in_array( $return_method, array( 'own_shipping', 'wygodne_zwroty' ), true ) ) {
 			$return_method = 'own_shipping';
 		}
 
-		$payload = array(
-			'source'             => $order['source'],
-			'order_id'           => $order['order_id'],
-			'order_reference'    => $order['order_reference'],
-			'order_number'       => $order['order_number'],
-			'currency'           => $order['currency'],
-			'customer_contact'   => $contact,
-			'customer_email'     => $order['customer_email'],
-			'customer_phone'     => $order['customer_phone'],
-			'customer_user_id'   => get_current_user_id(),
-			'return_method'      => $return_method,
-			'customer_note'      => isset( $request['customer_note'] ) ? sanitize_textarea_field( wp_unslash( $request['customer_note'] ) ) : '',
-			'items'              => $items,
-			'created_at'         => current_time( 'mysql' ),
-			'site_url'           => home_url(),
-		);
+		$order_lock = $this->acquire_order_lock( isset( $order['return_order_key'] ) ? $order['return_order_key'] : $order['order_id'] );
 
-		$payload = apply_filters( 'll_returns_before_create_return_payload', $payload, $request, $order );
-		$record  = $this->repository->create_request( $payload, 'submitting' );
+		if ( is_wp_error( $order_lock ) ) {
+			$this->send_error( $order_lock->get_error_message(), 409, $order_lock->get_error_code() );
+		}
 
-		if ( is_wp_error( $record ) ) {
-			$this->send_error( $record->get_error_message(), 500, $record->get_error_code() );
+		$locked_error = null;
+		$record       = null;
+
+		try {
+			// Re-read availability while holding the canonical order-family lock.
+			$order = $this->order_service->resolve_order( $order_reference, $contact );
+
+			if ( is_wp_error( $order ) ) {
+				$locked_error = $order;
+			} else {
+				$items = isset( $request['items'] ) && is_array( $request['items'] ) ? $request['items'] : array();
+				$items = $this->order_service->validate_return_items( $order, $items );
+
+				if ( is_wp_error( $items ) ) {
+					$locked_error = $items;
+				} else {
+					$payload = array(
+						'source'             => $order['source'],
+						'order_id'           => $order['order_id'],
+						'wc_order_id'        => isset( $order['wc_order_id'] ) ? $order['wc_order_id'] : $order['order_id'],
+						'return_order_key'   => isset( $order['return_order_key'] ) ? $order['return_order_key'] : $order['order_id'],
+						'order_reference'    => $order['order_reference'],
+						'order_number'       => $order['order_number'],
+						'currency'           => $order['currency'],
+						'customer_contact'   => $contact,
+						'customer_email'     => $order['customer_email'],
+						'customer_phone'     => $order['customer_phone'],
+						'customer_user_id'   => get_current_user_id(),
+						'return_method'      => $return_method,
+						'customer_note'      => isset( $request['customer_note'] ) ? sanitize_textarea_field( wp_unslash( $request['customer_note'] ) ) : '',
+						'items'              => $items,
+						'created_at'         => current_time( 'mysql' ),
+						'site_url'           => home_url(),
+					);
+
+					$payload = apply_filters( 'll_returns_before_create_return_payload', $payload, $request, $order );
+					$record  = $this->repository->create_request( $payload, 'submitting' );
+
+					if ( is_wp_error( $record ) ) {
+						$locked_error = $record;
+					}
+				}
+			}
+		} finally {
+			$this->release_order_lock( $order_lock );
+		}
+
+		if ( is_wp_error( $locked_error ) ) {
+			$this->send_error( $locked_error->get_error_message(), 409, $locked_error->get_error_code() );
 		}
 
 		$erp_response = $this->erp_client->create_return( $record['payload'] );
 
 		if ( is_wp_error( $erp_response ) ) {
+			if ( ! $this->is_retryable_erp_error( $erp_response ) ) {
+				$this->repository->mark_rejected( $record['post_id'], $erp_response );
+				$error_data = $erp_response->get_error_data();
+				$error_status = is_array( $error_data ) && isset( $error_data['status'] ) ? absint( $error_data['status'] ) : 409;
+
+				$this->send_error( $erp_response->get_error_message(), $error_status, $erp_response->get_error_code() );
+			}
+
 			$this->repository->mark_failed( $record['post_id'], $erp_response );
-			$this->send_error( $erp_response->get_error_message(), 502, $erp_response->get_error_code() );
+			wp_send_json_success(
+				array(
+					'return_number'      => $record['return_number'],
+					'return_method'      => $return_method,
+					'wygodne_zwroty_url' => '',
+					'queued_for_erp'     => true,
+					'success_message'    => __( 'Zgloszenie zostalo zapisane i oczekuje na synchronizacje z ERP. Nie wysylaj go ponownie.', 'lemon-woo-returns' ),
+				)
+			);
 		}
 
 		if ( ! is_array( $erp_response ) ) {
@@ -216,7 +258,7 @@ class LL_Returns_Ajax {
 	}
 
 	/**
-	 * Verifies the lookup token when present.
+	 * Verifies and consumes the required one-time lookup token.
 	 *
 	 * @param string $token           Lookup token.
 	 * @param string $order_reference Order reference.
@@ -224,7 +266,7 @@ class LL_Returns_Ajax {
 	 */
 	private function verify_lookup_token( $token, $order_reference, $contact ) {
 		if ( '' === $token ) {
-			return;
+			$this->send_error( __( 'Sesja formularza wygasla. Wyszukaj zamowienie ponownie.', 'lemon-woo-returns' ), 403, 'll_returns_lookup_expired' );
 		}
 
 		$stored = get_transient( $this->get_lookup_transient_key( $token ) );
@@ -236,6 +278,84 @@ class LL_Returns_Ajax {
 		if ( $stored['order_reference'] !== $order_reference || $stored['contact_hash'] !== wp_hash( strtolower( $contact ) ) ) {
 			$this->send_error( __( 'Dane formularza nie pasuja do wyszukanego zamowienia.', 'lemon-woo-returns' ), 403, 'll_returns_lookup_mismatch' );
 		}
+
+		delete_transient( $this->get_lookup_transient_key( $token ) );
+	}
+
+	/**
+	 * Acquires an atomic short-lived lock for one canonical order family.
+	 *
+	 * @param string $order_key Canonical order key.
+	 * @return array{option:string,owner:string}|WP_Error
+	 */
+	private function acquire_order_lock( $order_key ) {
+		global $wpdb;
+
+		$option  = 'll_returns_lock_' . md5( (string) $order_key );
+		$owner   = wp_generate_uuid4();
+		$value   = array(
+			'owner'   => $owner,
+			'expires' => time() + 45,
+		);
+
+		if ( add_option( $option, $value, '', 'no' ) ) {
+			return array( 'option' => $option, 'owner' => $owner );
+		}
+
+		$current = get_option( $option, array() );
+		$current_expires = is_array( $current ) ? absint( isset( $current['expires'] ) ? $current['expires'] : 0 ) : absint( $current );
+
+		if ( $current_expires < time() ) {
+			$deleted = $wpdb->delete(
+				$wpdb->options,
+				array(
+					'option_name'  => $option,
+					'option_value' => maybe_serialize( $current ),
+				),
+				array( '%s', '%s' )
+			);
+
+			if ( 1 === $deleted ) {
+				wp_cache_delete( $option, 'options' );
+			}
+
+			if ( 1 === $deleted && add_option( $option, $value, '', 'no' ) ) {
+				return array( 'option' => $option, 'owner' => $owner );
+			}
+		}
+
+		return new WP_Error( 'll_returns_order_locked', __( 'Inne zgloszenie dla tego zamowienia jest wlasnie zapisywane. Wyszukaj zamowienie ponownie za chwile.', 'lemon-woo-returns' ) );
+	}
+
+	/**
+	 * Releases a lock acquired by acquire_order_lock().
+	 *
+	 * @param array{option:string,owner:string} $lock Lock handle.
+	 */
+	private function release_order_lock( array $lock ) {
+		$current = get_option( $lock['option'], array() );
+
+		if ( is_array( $current ) && isset( $current['owner'] ) && hash_equals( (string) $current['owner'], $lock['owner'] ) ) {
+			delete_option( $lock['option'] );
+		}
+	}
+
+	/**
+	 * Distinguishes temporary transport/configuration failures from permanent
+	 * validation conflicts. Only temporary failures stay in the retry queue.
+	 *
+	 * @param WP_Error $error ERP error.
+	 * @return bool
+	 */
+	private function is_retryable_erp_error( WP_Error $error ) {
+		if ( 'll_returns_erp_rejected' === $error->get_error_code() ) {
+			return false;
+		}
+
+		$data   = $error->get_error_data();
+		$status = is_array( $data ) && isset( $data['status'] ) ? absint( $data['status'] ) : 0;
+
+		return ! in_array( $status, array( 400, 409, 410, 422 ), true );
 	}
 
 	/**

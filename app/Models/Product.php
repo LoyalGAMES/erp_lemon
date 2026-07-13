@@ -26,6 +26,9 @@ class Product extends Model
         'is_active',
         'is_favorite',
         'is_translation',
+        'storefront_hidden_at',
+        'storefront_restore_visibility',
+        'stock_verification_required_at',
     ];
 
     protected $casts = [
@@ -33,6 +36,8 @@ class Product extends Model
         'is_active' => 'boolean',
         'is_favorite' => 'boolean',
         'is_translation' => 'boolean',
+        'storefront_hidden_at' => 'datetime',
+        'stock_verification_required_at' => 'datetime',
         'vat_rate' => 'decimal:2',
         'weight_kg' => 'decimal:4',
     ];
@@ -171,6 +176,35 @@ class Product extends Model
     public function isErpMaster(): bool
     {
         return $this->masterSource() === 'erp';
+    }
+
+    public function isStorefrontHidden(): bool
+    {
+        return $this->storefront_hidden_at !== null;
+    }
+
+    public function requiresStockVerification(): bool
+    {
+        return $this->stock_verification_required_at !== null;
+    }
+
+    public function forcesStorefrontStockZero(): bool
+    {
+        if ($this->isStorefrontHidden() || $this->requiresStockVerification()) {
+            return true;
+        }
+
+        return self::query()
+            ->whereIn('id', ProductRelation::query()
+                ->where('child_product_id', $this->id)
+                ->where('relation_type', 'variant')
+                ->select('parent_product_id'))
+            ->where(function ($parents): void {
+                $parents
+                    ->whereNotNull('storefront_hidden_at')
+                    ->orWhereNotNull('stock_verification_required_at');
+            })
+            ->exists();
     }
 
     public function isSyntheticWooSku(): bool

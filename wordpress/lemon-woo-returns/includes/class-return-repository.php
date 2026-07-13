@@ -85,6 +85,7 @@ class LL_Returns_Return_Repository {
 		update_post_meta( $post_id, self::META_PREFIX . 'payload', $payload );
 		update_post_meta( $post_id, self::META_PREFIX . 'order_reference', sanitize_text_field( $payload['order_reference'] ) );
 		update_post_meta( $post_id, self::META_PREFIX . 'order_number', sanitize_text_field( $payload['order_number'] ) );
+		update_post_meta( $post_id, self::META_PREFIX . 'return_order_key', sanitize_text_field( isset( $payload['return_order_key'] ) ? $payload['return_order_key'] : '' ) );
 		update_post_meta( $post_id, self::META_PREFIX . 'return_method', sanitize_key( $payload['return_method'] ) );
 		update_post_meta( $post_id, self::META_PREFIX . 'contact', sanitize_text_field( $payload['customer_contact'] ) );
 
@@ -150,6 +151,29 @@ class LL_Returns_Return_Repository {
 	}
 
 	/**
+	 * Marks a request rejected by ERP due to a permanent business error.
+	 * Rejected requests remain in the audit log but no longer reserve quantities
+	 * or enter the automatic delivery queue.
+	 *
+	 * @param int      $post_id Post ID.
+	 * @param WP_Error $error   ERP rejection.
+	 */
+	public function mark_rejected( $post_id, WP_Error $error ) {
+		update_post_meta( $post_id, self::META_PREFIX . 'status', 'rejected' );
+		update_post_meta( $post_id, self::META_PREFIX . 'erp_last_attempt_at', current_time( 'mysql' ) );
+		update_post_meta(
+			$post_id,
+			self::META_PREFIX . 'erp_error',
+			array(
+				'code'      => $error->get_error_code(),
+				'message'   => $error->get_error_message(),
+				'data'      => $error->get_error_data(),
+				'permanent' => true,
+			)
+		);
+	}
+
+	/**
 	 * Adds a WooCommerce order note for local visibility.
 	 *
 	 * @param array $payload       Return payload.
@@ -198,6 +222,135 @@ class LL_Returns_Return_Repository {
 		$payload = get_post_meta( $post_id, self::META_PREFIX . 'payload', true );
 
 		return is_array( $payload ) ? $payload : null;
+	}
+
+	/**
+	 * Aggregates quantities reserved by local requests that are not yet included
+	 * in the current ERP/WooCommerce availability response.
+	 *
+	 * @param array $order Normalized order data.
+	 * @return array<string, int>
+	 */
+	public function get_reserved_quantities_for_order( array $order ) {
+		$meta_query = array(
+			array(
+				'key'     => self::META_PREFIX . 'status',
+				'value'   => array( 'submitting', 'erp_failed', 'pending_package', 'received', 'processing', 'completed', 'wc_refund_failed' ),
+				'compare' => 'IN',
+			),
+		);
+		$identity_query = array( 'relation' => 'OR' );
+		$order_key      = trim( (string) ( isset( $order['return_order_key'] ) ? $order['return_order_key'] : '' ) );
+
+		if ( '' !== $order_key ) {
+			$identity_query[] = array(
+				'key'   => self::META_PREFIX . 'return_order_key',
+				'value' => $order_key,
+			);
+		}
+
+		foreach ( array_unique( array_filter( array( isset( $order['order_reference'] ) ? $order['order_reference'] : '', isset( $order['order_number'] ) ? $order['order_number'] : '' ) ) ) as $reference ) {
+			$identity_query[] = array(
+				'key'   => self::META_PREFIX . 'order_reference',
+				'value' => (string) $reference,
+			);
+			$identity_query[] = array(
+				'key'   => self::META_PREFIX . 'order_number',
+				'value' => (string) $reference,
+			);
+		}
+
+		if ( count( $identity_query ) > 1 ) {
+			$meta_query[] = $identity_query;
+		}
+
+		$ids = get_posts(
+			array(
+				'post_type'      => self::POST_TYPE,
+				'post_status'    => 'publish',
+				'fields'         => 'ids',
+				'posts_per_page' => -1,
+				'orderby'        => 'ID',
+				'order'          => 'ASC',
+				'no_found_rows'  => true,
+				'meta_query'     => $meta_query,
+			)
+		);
+		$accounted = array_fill_keys( array_map( 'strval', (array) ( isset( $order['accounted_return_references'] ) ? $order['accounted_return_references'] : array() ) ), true );
+		$reserved  = array();
+
+		foreach ( $ids as $post_id ) {
+			$payload = $this->get_payload( $post_id );
+
+			if ( ! is_array( $payload ) || ! $this->payload_matches_order( $payload, $order ) ) {
+				continue;
+			}
+
+			$return_reference = (string) get_post_meta( $post_id, self::META_PREFIX . 'return_number', true );
+
+			if ( '' !== $return_reference && isset( $accounted[ $return_reference ] ) ) {
+				continue;
+			}
+
+			if ( absint( get_post_meta( $post_id, self::META_PREFIX . 'wc_refund_id', true ) ) > 0 ) {
+				continue;
+			}
+
+			$erp_mode        = sanitize_key( get_post_meta( $post_id, self::META_PREFIX . 'erp_mode', true ) );
+			$erp_external_id = trim( (string) get_post_meta( $post_id, self::META_PREFIX . 'erp_external_id', true ) );
+
+			if ( 'erp' === ( isset( $order['source'] ) ? $order['source'] : '' ) && ( 'remote' === $erp_mode || '' !== $erp_external_id ) ) {
+				continue;
+			}
+
+			foreach ( (array) ( isset( $payload['items'] ) ? $payload['items'] : array() ) as $item ) {
+				if ( ! is_array( $item ) ) {
+					continue;
+				}
+
+				$key = sanitize_text_field( (string) ( isset( $item['return_item_key'] ) ? $item['return_item_key'] : ( isset( $item['id'] ) ? $item['id'] : '' ) ) );
+				$qty = absint( isset( $item['quantity'] ) ? $item['quantity'] : 0 );
+
+				if ( '' !== $key && $qty > 0 ) {
+					$reserved[ $key ] = ( isset( $reserved[ $key ] ) ? $reserved[ $key ] : 0 ) + $qty;
+				}
+			}
+		}
+
+		return $reserved;
+	}
+
+	/**
+	 * Checks both the new canonical key and legacy order identifiers.
+	 *
+	 * @param array $payload Stored return payload.
+	 * @param array $order   Current normalized order.
+	 * @return bool
+	 */
+	private function payload_matches_order( array $payload, array $order ) {
+		$payload_key = trim( (string) ( isset( $payload['return_order_key'] ) ? $payload['return_order_key'] : '' ) );
+		$order_key   = trim( (string) ( isset( $order['return_order_key'] ) ? $order['return_order_key'] : '' ) );
+
+		if ( '' !== $payload_key && '' !== $order_key ) {
+			return hash_equals( $order_key, $payload_key );
+		}
+
+		$payload_order_id = trim( (string) ( isset( $payload['order_id'] ) ? $payload['order_id'] : '' ) );
+		$order_id         = trim( (string) ( isset( $order['order_id'] ) ? $order['order_id'] : '' ) );
+
+		if ( '' !== $payload_order_id && '' !== $order_id && hash_equals( $order_id, $payload_order_id ) ) {
+			return true;
+		}
+
+		$references = array_filter(
+			array(
+				isset( $order['order_reference'] ) ? (string) $order['order_reference'] : '',
+				isset( $order['order_number'] ) ? (string) $order['order_number'] : '',
+			)
+		);
+
+		return in_array( (string) ( isset( $payload['order_reference'] ) ? $payload['order_reference'] : '' ), $references, true )
+			|| in_array( (string) ( isset( $payload['order_number'] ) ? $payload['order_number'] : '' ), $references, true );
 	}
 
 	/**

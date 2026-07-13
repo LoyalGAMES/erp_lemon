@@ -108,6 +108,7 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
         }
 
         DB::transaction(function (): void {
+            $product = Product::query()->lockForUpdate()->find($this->productId);
             $mappings = ProductChannelMapping::query()
                 ->where('product_id', $this->productId)
                 ->lockForUpdate()
@@ -122,9 +123,18 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
 
                 data_forget($metadata, 'product_data_export.pending_token');
                 data_forget($metadata, 'product_data_export.requested_at');
+                data_forget($metadata, 'product_data_export.stock_release_pending');
                 data_set($metadata, 'product_data_export.completed_at', now()->toISOString());
                 $mapping->forceFill(['metadata' => $metadata])->save();
             });
+
+            $hasPendingExport = $mappings->contains(fn (ProductChannelMapping $mapping): bool => filled(
+                data_get($mapping->metadata, 'product_data_export.pending_token'),
+            ));
+
+            if ($product instanceof Product && ! $product->isStorefrontHidden() && ! $hasPendingExport) {
+                $product->forceFill(['storefront_restore_visibility' => null])->save();
+            }
         });
     }
 

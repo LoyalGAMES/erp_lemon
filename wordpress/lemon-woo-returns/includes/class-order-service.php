@@ -28,14 +28,23 @@ class LL_Returns_Order_Service {
 	private $erp_client;
 
 	/**
+	 * Local return repository.
+	 *
+	 * @var LL_Returns_Return_Repository|null
+	 */
+	private $repository;
+
+	/**
 	 * Constructor.
 	 *
-	 * @param LL_Returns_Settings   $settings   Settings.
-	 * @param LL_Returns_ERP_Client $erp_client ERP client.
+	 * @param LL_Returns_Settings               $settings   Settings.
+	 * @param LL_Returns_ERP_Client             $erp_client ERP client.
+	 * @param LL_Returns_Return_Repository|null $repository Repository.
 	 */
-	public function __construct( LL_Returns_Settings $settings, LL_Returns_ERP_Client $erp_client ) {
+	public function __construct( LL_Returns_Settings $settings, LL_Returns_ERP_Client $erp_client, $repository = null ) {
 		$this->settings   = $settings;
 		$this->erp_client = $erp_client;
+		$this->repository = $repository;
 	}
 
 	/**
@@ -56,7 +65,8 @@ class LL_Returns_Order_Service {
 		$pre = apply_filters( 'll_returns_resolve_order', null, $order_reference, $contact );
 
 		if ( null !== $pre ) {
-			return is_wp_error( $pre ) ? $pre : $this->normalize_order_data( $pre );
+			$order = is_wp_error( $pre ) ? $pre : $this->normalize_order_data( $pre );
+			return is_wp_error( $order ) ? $order : $this->apply_local_reservations( $order );
 		}
 
 		if ( $this->erp_client->has_lookup_endpoint() ) {
@@ -66,10 +76,13 @@ class LL_Returns_Order_Service {
 				return $erp_order;
 			}
 
-			return $this->normalize_order_data( $erp_order );
+			$order = $this->normalize_order_data( $erp_order );
+			return is_wp_error( $order ) ? $order : $this->apply_local_reservations( $order );
 		}
 
-		return $this->resolve_woocommerce_order( $order_reference, $contact );
+		$order = $this->resolve_woocommerce_order( $order_reference, $contact );
+
+		return is_wp_error( $order ) ? $order : $this->apply_local_reservations( $order );
 	}
 
 	/**
@@ -116,6 +129,7 @@ class LL_Returns_Order_Service {
 		}
 
 		$validated = array();
+		$seen      = array();
 
 		foreach ( $submitted_items as $item ) {
 			if ( ! is_array( $item ) ) {
@@ -127,6 +141,12 @@ class LL_Returns_Order_Service {
 			if ( '' === $item_id || ! isset( $available[ $item_id ] ) ) {
 				continue;
 			}
+
+			if ( isset( $seen[ $item_id ] ) ) {
+				return new WP_Error( 'll_returns_duplicate_item', __( 'Ta sama pozycja zostala wybrana wiecej niz raz. Wyszukaj zamowienie ponownie.', 'lemon-woo-returns' ) );
+			}
+
+			$seen[ $item_id ] = true;
 
 			$max_qty = absint( $available[ $item_id ]['quantity'] );
 			$qty     = isset( $item['quantity'] ) ? absint( $item['quantity'] ) : 0;
@@ -145,6 +165,8 @@ class LL_Returns_Order_Service {
 				'max_quantity' => $max_qty,
 				'price'        => $available[ $item_id ]['price'],
 				'reason'       => $reason,
+				'return_item_key' => isset( $available[ $item_id ]['return_item_key'] ) ? $available[ $item_id ]['return_item_key'] : $item_id,
+				'wc_order_item_id' => isset( $available[ $item_id ]['wc_order_item_id'] ) ? $available[ $item_id ]['wc_order_item_id'] : $item_id,
 			);
 		}
 
@@ -206,12 +228,14 @@ class LL_Returns_Order_Service {
 			$price    = (float) $item->get_total() / $line_qty;
 
 			$items[] = array(
-				'id'       => (string) $item_id,
-				'name'     => wp_strip_all_tags( $item->get_name() ),
-				'sku'      => $sku,
-				'quantity' => $qty,
-				'image'    => $image ? $image : '',
-				'price'    => round( $price, wc_get_price_decimals() ),
+				'id'                => (string) $item_id,
+				'return_item_key'   => (string) $item_id,
+				'wc_order_item_id'  => (string) $item_id,
+				'name'              => wp_strip_all_tags( $item->get_name() ),
+				'sku'               => $sku,
+				'quantity'          => $qty,
+				'image'             => $image ? $image : '',
+				'price'             => round( $price, wc_get_price_decimals() ),
 			);
 		}
 
@@ -222,11 +246,14 @@ class LL_Returns_Order_Service {
 		return array(
 			'source'          => 'woocommerce',
 			'order_id'        => (string) $order->get_id(),
+			'wc_order_id'     => (string) $order->get_id(),
+			'return_order_key' => 'woocommerce:' . (string) $order->get_id(),
 			'order_reference' => $order_reference,
 			'order_number'    => (string) $order->get_order_number(),
 			'currency'        => $order->get_currency(),
 			'customer_email'  => (string) $order->get_billing_email(),
 			'customer_phone'  => (string) $order->get_billing_phone(),
+			'accounted_return_references' => array(),
 			'items'           => $items,
 		);
 	}
@@ -342,12 +369,14 @@ class LL_Returns_Order_Service {
 			}
 
 			$items[] = array(
-				'id'       => $item_id,
-				'name'     => $name,
-				'sku'      => isset( $item['sku'] ) ? sanitize_text_field( (string) $item['sku'] ) : '',
-				'quantity' => $qty,
-				'image'    => isset( $item['image'] ) ? esc_url_raw( (string) $item['image'] ) : '',
-				'price'    => isset( $item['price'] ) ? (float) $item['price'] : 0,
+				'id'               => $item_id,
+				'return_item_key'  => isset( $item['return_item_key'] ) ? sanitize_text_field( (string) $item['return_item_key'] ) : $item_id,
+				'wc_order_item_id' => isset( $item['wc_order_item_id'] ) ? sanitize_text_field( (string) $item['wc_order_item_id'] ) : $item_id,
+				'name'             => $name,
+				'sku'              => isset( $item['sku'] ) ? sanitize_text_field( (string) $item['sku'] ) : '',
+				'quantity'         => $qty,
+				'image'            => isset( $item['image'] ) ? esc_url_raw( (string) $item['image'] ) : '',
+				'price'            => isset( $item['price'] ) ? (float) $item['price'] : 0,
 			);
 		}
 
@@ -357,17 +386,66 @@ class LL_Returns_Order_Service {
 
 		$order_reference = isset( $data['order_reference'] ) ? sanitize_text_field( (string) $data['order_reference'] ) : '';
 		$order_number    = isset( $data['order_number'] ) ? sanitize_text_field( (string) $data['order_number'] ) : $order_reference;
+		$order_id        = isset( $data['order_id'] ) ? sanitize_text_field( (string) $data['order_id'] ) : $order_reference;
+		$return_order_key = isset( $data['return_order_key'] )
+			? sanitize_text_field( (string) $data['return_order_key'] )
+			: 'erp:' . $order_id;
+		$accounted_references = array();
+
+		foreach ( (array) ( isset( $data['accounted_return_references'] ) ? $data['accounted_return_references'] : array() ) as $reference ) {
+			$reference = sanitize_text_field( (string) $reference );
+
+			if ( '' !== $reference ) {
+				$accounted_references[] = $reference;
+			}
+		}
 
 		return array(
 			'source'          => isset( $data['source'] ) ? sanitize_key( (string) $data['source'] ) : 'erp',
-			'order_id'        => isset( $data['order_id'] ) ? sanitize_text_field( (string) $data['order_id'] ) : $order_reference,
+			'order_id'        => $order_id,
+			'wc_order_id'     => isset( $data['wc_order_id'] ) ? sanitize_text_field( (string) $data['wc_order_id'] ) : $order_id,
+			'return_order_key' => $return_order_key,
 			'order_reference' => $order_reference,
 			'order_number'    => $order_number,
 			'currency'        => isset( $data['currency'] ) ? sanitize_text_field( (string) $data['currency'] ) : '',
 			'customer_email'  => isset( $data['customer_email'] ) ? sanitize_email( (string) $data['customer_email'] ) : '',
 			'customer_phone'  => isset( $data['customer_phone'] ) ? sanitize_text_field( (string) $data['customer_phone'] ) : '',
+			'accounted_return_references' => array_values( array_unique( $accounted_references ) ),
 			'items'           => $items,
 		);
+	}
+
+	/**
+	 * Removes quantities already reserved in local requests but not yet reflected
+	 * by the selected order source.
+	 *
+	 * @param array $order Normalized order.
+	 * @return array|WP_Error
+	 */
+	private function apply_local_reservations( array $order ) {
+		if ( ! $this->repository || ! method_exists( $this->repository, 'get_reserved_quantities_for_order' ) ) {
+			return $order;
+		}
+
+		$reserved = $this->repository->get_reserved_quantities_for_order( $order );
+		$items    = array();
+
+		foreach ( $order['items'] as $item ) {
+			$key               = isset( $item['return_item_key'] ) ? (string) $item['return_item_key'] : (string) $item['id'];
+			$item['quantity']  = max( 0, absint( $item['quantity'] ) - absint( isset( $reserved[ $key ] ) ? $reserved[ $key ] : 0 ) );
+
+			if ( $item['quantity'] > 0 ) {
+				$items[] = $item;
+			}
+		}
+
+		if ( empty( $items ) ) {
+			return new WP_Error( 'll_returns_no_returnable_items', __( 'W tym zamowieniu nie ma produktow dostepnych do zwrotu.', 'lemon-woo-returns' ) );
+		}
+
+		$order['items'] = $items;
+
+		return $order;
 	}
 
 	/**

@@ -55,7 +55,9 @@ final class StockSyncExportService
             return ['skipped' => true, 'reason' => 'already_processed_or_superseded'];
         }
 
-        $item->loadMissing(['product', 'salesChannel']);
+        // Refresh relations after acquiring the per-product export lock. The
+        // storefront hold may have changed while this queue item was waiting.
+        $item->load(['product', 'salesChannel']);
 
         $integration = WordpressIntegration::query()
             ->where('sales_channel_id', $item->sales_channel_id)
@@ -76,7 +78,10 @@ final class StockSyncExportService
             throw new RuntimeException('Brak mapowania produktu do kanału WooCommerce albo synchronizacja produktu jest wyłączona.');
         }
 
-        $quantity = max(0, (float) $item->quantity_to_push);
+        $forceStorefrontStockZero = $item->product?->forcesStorefrontStockZero() ?? false;
+        $quantity = $forceStorefrontStockZero
+            ? 0
+            : max(0, (float) $item->quantity_to_push);
         $stockQuantity = (int) floor($quantity);
         $targets = collect([$mapping]);
 
@@ -115,6 +120,7 @@ final class StockSyncExportService
         $metadata = array_merge($item->metadata ?? [], [
             'woocommerce_stock_quantity' => $stockQuantity,
             'woocommerce_stock_status' => $stockQuantity > 0 ? 'instock' : 'outofstock',
+            'storefront_stock_forced_zero' => $forceStorefrontStockZero,
             'woocommerce_targets_updated' => $responses->count(),
             'woocommerce_translation_targets' => $responses->skip(1)->values()->all(),
             'processed_by' => 'ExportStockToWooCommerceJob',
@@ -131,7 +137,9 @@ final class StockSyncExportService
             'external_id' => $mapping->external_variation_id ?? $mapping->external_product_id,
             'request_payload' => [
                 'sku' => $item->product?->sku,
-                'quantity_to_push' => $quantity,
+                'quantity_to_push' => (float) $item->quantity_to_push,
+                'effective_quantity_to_push' => $quantity,
+                'storefront_stock_forced_zero' => $forceStorefrontStockZero,
                 'stock_quantity' => $stockQuantity,
             ],
             'response_payload' => [

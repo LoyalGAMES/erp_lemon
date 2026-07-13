@@ -25,6 +25,7 @@ use App\Services\Products\ProductDescriptionSanitizer;
 use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Products\ProductIdentifierService;
 use App\Services\Products\ProductImportIssueService;
+use App\Services\Products\ProductStorefrontVisibilityService;
 use App\Services\WooCommerce\ProductDataExportService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
@@ -376,7 +377,14 @@ class ProductController extends Controller
                 ->with('childProduct'),
         ]);
         [$copy, $copiedVariants] = DB::transaction(function () use ($product, $identifiers, $audit): array {
-            $copy = $product->replicate(['sku', 'created_at', 'updated_at']);
+            $copy = $product->replicate([
+                'sku',
+                'storefront_hidden_at',
+                'storefront_restore_visibility',
+                'stock_verification_required_at',
+                'created_at',
+                'updated_at',
+            ]);
             $copy->name = $this->copyName($product->name);
             $copy->sku = $identifiers->temporarySku();
             $copy->ean = null;
@@ -394,7 +402,14 @@ class ProductController extends Controller
                     continue;
                 }
 
-                $variantCopy = $sourceVariant->replicate(['sku', 'created_at', 'updated_at']);
+                $variantCopy = $sourceVariant->replicate([
+                    'sku',
+                    'storefront_hidden_at',
+                    'storefront_restore_visibility',
+                    'stock_verification_required_at',
+                    'created_at',
+                    'updated_at',
+                ]);
                 $variantCopy->name = $this->copyName($sourceVariant->name);
                 $variantCopy->sku = $identifiers->temporarySku();
                 $variantCopy->ean = null;
@@ -496,6 +511,69 @@ class ProductController extends Controller
         return back()->with('status', $product->is_favorite
             ? "Produkt {$product->name} dodano do ulubionych."
             : "Produkt {$product->name} usunięto z ulubionych.");
+    }
+
+    public function hideFromStorefront(
+        Product $product,
+        ProductStorefrontVisibilityService $storefront,
+    ): RedirectResponse {
+        try {
+            $result = $storefront->hide($product);
+        } catch (\Throwable $exception) {
+            return back()->with('error', 'Nie udało się ukryć produktu: '.$exception->getMessage());
+        }
+
+        /** @var Product $root */
+        $root = $result['root'];
+
+        return back()->with(
+            'status',
+            $result['changed']
+                ? "Produkt {$root->name} został ukryty w sklepie. Jego strona bezpośrednia pozostaje opublikowana, a stan w WooCommerce jest zablokowany na 0."
+                : "Produkt {$root->name} jest już ukryty w sklepie.",
+        );
+    }
+
+    public function revealOnStorefront(
+        Product $product,
+        ProductStorefrontVisibilityService $storefront,
+    ): RedirectResponse {
+        try {
+            $result = $storefront->reveal($product);
+        } catch (\Throwable $exception) {
+            return back()->with('error', 'Nie udało się odkryć produktu: '.$exception->getMessage());
+        }
+
+        /** @var Product $root */
+        $root = $result['root'];
+
+        return back()->with(
+            'status',
+            $result['changed']
+                ? "Produkt {$root->name} został odkryty. Stan w WooCommerce pozostaje równy 0 do ręcznego potwierdzenia."
+                : "Produkt {$root->name} jest już widoczny w sklepie.",
+        );
+    }
+
+    public function verifyStorefrontStock(
+        Product $product,
+        ProductStorefrontVisibilityService $storefront,
+    ): RedirectResponse {
+        try {
+            $result = $storefront->verifyStock($product);
+        } catch (\Throwable $exception) {
+            return back()->with('error', 'Nie udało się potwierdzić stanu produktu: '.$exception->getMessage());
+        }
+
+        /** @var Product $root */
+        $root = $result['root'];
+
+        return back()->with(
+            'status',
+            $result['changed']
+                ? "Stan produktu {$root->name} został ręcznie potwierdzony i przekazany do synchronizacji z WooCommerce."
+                : "Stan produktu {$root->name} był już potwierdzony.",
+        );
     }
 
     public function destroyRelation(Product $product, ProductRelation $relation, AuditLogService $audit): RedirectResponse
@@ -852,6 +930,7 @@ class ProductController extends Controller
         Product $product,
         ProductDataExportService $exportService,
         AuditLogService $audit,
+        ProductStorefrontVisibilityService $storefront,
     ): RedirectResponse {
         $lock = Cache::lock(
             ExportWooCommerceProductDataJob::lockKey($product->id),
@@ -864,6 +943,7 @@ class ProductController extends Controller
 
         try {
             $result = $exportService->export($product);
+            $storefront->completeSuccessfulManualExport($product);
         } catch (\Throwable $exception) {
             $audit->record('product.woocommerce_export_failed', $product, null, null, [
                 'error' => $exception->getMessage(),
@@ -1650,6 +1730,9 @@ class ProductController extends Controller
             'is_active',
             'is_favorite',
             'is_translation',
+            'storefront_hidden_at',
+            'storefront_restore_visibility',
+            'stock_verification_required_at',
             'created_at',
         ])->map(fn (string $column): string => $prefix.$column)->all();
     }

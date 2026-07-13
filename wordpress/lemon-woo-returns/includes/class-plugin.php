@@ -56,8 +56,8 @@ class LL_Returns_Plugin {
 
 		$assets        = new LL_Returns_Assets( $this->settings );
 		$erp_client    = new LL_Returns_ERP_Client( $this->settings );
-		$order_service = new LL_Returns_Order_Service( $this->settings, $erp_client );
 		$repository    = new LL_Returns_Return_Repository();
+		$order_service = new LL_Returns_Order_Service( $this->settings, $erp_client, $repository );
 		$refund_service = new LL_Returns_Refund_Service( $this->settings, $repository );
 		$status_sync   = new LL_Returns_Status_Sync( $this->settings, $repository, $erp_client, $refund_service );
 

@@ -82,6 +82,7 @@ final class WooCommerceImportService
             'stock_updated' => 0,
             'stock_skipped_ambiguous_routes' => 0,
             'stock_skipped_pending_export' => 0,
+            'stock_skipped_storefront_hold' => 0,
             'stock_skipped_waiting_reservations' => 0,
             'skipped' => 0,
             'skipped_missing_identifier' => 0,
@@ -190,6 +191,13 @@ final class WooCommerceImportService
                         $masterData,
                     );
                     $mergedMaster['media'] = $masterData['media'];
+
+                    if ($product->isStorefrontHidden()) {
+                        $mergedMaster['catalog_visibility'] = 'hidden';
+                    } elseif (in_array($product->storefront_restore_visibility, ['visible', 'catalog', 'search'], true)) {
+                        $mergedMaster['catalog_visibility'] = $product->storefront_restore_visibility;
+                    }
+
                     $attributes['master'] = $mergedMaster;
 
                     $product->fill([
@@ -1134,6 +1142,10 @@ final class WooCommerceImportService
         float $quantity,
         CarbonImmutable $observedAt,
     ): ?string {
+        if ($product->forcesStorefrontStockZero()) {
+            return 'stock_skipped_storefront_hold';
+        }
+
         $warehouse = $this->stockImportWarehouse($integration);
 
         if (! $this->stockImportIsUnambiguous($integration, $warehouse)) {
@@ -1142,6 +1154,11 @@ final class WooCommerceImportService
 
         return DB::transaction(function () use ($integration, $product, $quantity, $warehouse, $observedAt): ?string {
             $product = Product::query()->lockForUpdate()->findOrFail($product->id);
+
+            if ($product->forcesStorefrontStockZero()) {
+                return 'stock_skipped_storefront_hold';
+            }
+
             $stockGuardProductIds = ProductRelation::query()
                 ->where('child_product_id', $product->id)
                 ->where('relation_type', 'variant')
@@ -1156,9 +1173,11 @@ final class WooCommerceImportService
                 ->lockForUpdate()
                 ->get();
 
-            if ($stockGuardMappings->contains(fn (ProductChannelMapping $mapping): bool => filled(
-                data_get($mapping->metadata, 'product_data_export.pending_token'),
-            ))) {
+            if ($stockGuardMappings->contains(
+                fn (ProductChannelMapping $mapping): bool => filled(
+                    data_get($mapping->metadata, 'product_data_export.pending_token'),
+                ) || data_get($mapping->metadata, 'product_data_export.stock_release_pending') === true,
+            )) {
                 return 'stock_skipped_pending_export';
             }
 
