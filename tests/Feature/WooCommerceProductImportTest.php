@@ -130,6 +130,7 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('2026-07-08T14:20', data_get($parent->attributes, 'master.publication_date'));
         $this->assertSame(2, Product::query()->count());
         $this->assertSame('Koszula VIVIEN Biala - 36', $product->name);
+        $this->assertSame([], data_get($product->attributes, 'master.media'));
         $this->assertSame('https://shop.test/wp-content/uploads/koszula-vivien.jpg', $product->imageUrl());
         $this->assertSame('https://shop.test/produkt/koszula-vivien-biala', $product->externalProductUrl());
         $this->assertSame('https://shop.test/wp-content/uploads/koszula-vivien.jpg', $product->attributes['woocommerce_parent_image']['src']);
@@ -478,7 +479,9 @@ class WooCommerceProductImportTest extends TestCase
 
     public function test_import_keeps_duplicate_parent_and_variation_skus_as_separate_mappings(): void
     {
-        Http::fake(function ($request) {
+        $variationHasImage = true;
+
+        Http::fake(function ($request) use (&$variationHasImage) {
             $url = $request->url();
 
             if (str_contains($url, '/products/categories')) {
@@ -488,14 +491,26 @@ class WooCommerceProductImportTest extends TestCase
             if (str_contains($url, '/products/777/variations')) {
                 parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
 
-                return (int) ($query['page'] ?? 1) === 1
-                    ? Http::response([[
-                        'id' => 888,
-                        'sku' => 'DUP-SKU',
-                        'name' => 'M',
-                        'attributes' => [['name' => 'Rozmiar', 'option' => 'M']],
-                    ]])
-                    : Http::response([]);
+                if ((int) ($query['page'] ?? 1) !== 1) {
+                    return Http::response([]);
+                }
+
+                $variation = [
+                    'id' => 888,
+                    'sku' => 'DUP-SKU',
+                    'name' => 'M',
+                    'attributes' => [['name' => 'Rozmiar', 'option' => 'M']],
+                ];
+
+                if ($variationHasImage) {
+                    $variation['image'] = [
+                        'id' => 2002,
+                        'src' => 'https://shop.test/wp-content/uploads/variant-m.jpg',
+                        'alt' => 'Wariant M',
+                    ];
+                }
+
+                return Http::response([$variation]);
             }
 
             if (str_contains($url, '/products')) {
@@ -549,7 +564,14 @@ class WooCommerceProductImportTest extends TestCase
             'external_product_id' => '777',
             'external_variation_id' => '888',
         ]);
+        $this->assertSame('https://shop.test/wp-content/uploads/variant-m.jpg', data_get($variant->attributes, 'master.media.0.src'));
+        $this->assertSame('https://shop.test/wp-content/uploads/variant-m.jpg', $variant->imageUrl());
         $this->assertTrue($parent->variantChildren()->whereKey($variant->id)->exists());
+
+        $variationHasImage = false;
+        app(WooCommerceImportService::class)->importProducts($integration);
+
+        $this->assertSame([], data_get($variant->fresh()->attributes, 'master.media'));
     }
 
     public function test_import_filters_polylang_twins_when_woocommerce_ignores_the_requested_language(): void

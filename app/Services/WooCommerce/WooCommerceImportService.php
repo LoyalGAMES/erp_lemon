@@ -154,6 +154,10 @@ final class WooCommerceImportService
                 [$product, $resolvedDuplicateSku] = $this->productForWooItem($integration, $item, $sku);
                 $isNew = ! $product->exists;
 
+                if (! $isNew) {
+                    $product = Product::query()->lockForUpdate()->findOrFail($product->id);
+                }
+
                 if ($resolvedDuplicateSku) {
                     $stats['duplicate_sku_resolved']++;
                 }
@@ -181,10 +185,12 @@ final class WooCommerceImportService
                         Arr::forget($attributes, 'master.identifier_conflict');
                     }
 
-                    $attributes['master'] = array_replace_recursive(
+                    $mergedMaster = array_replace_recursive(
                         (array) data_get($attributes, 'master', []),
                         $masterData,
                     );
+                    $mergedMaster['media'] = $masterData['media'];
+                    $attributes['master'] = $mergedMaster;
 
                     $product->fill([
                         'name' => (string) ($item['name'] ?? $sku),
@@ -222,6 +228,12 @@ final class WooCommerceImportService
                     $stats['mapping_overwrites']++;
                 }
 
+                $lockedMapping = ProductChannelMapping::query()
+                    ->where('product_id', $product->id)
+                    ->where('sales_channel_id', $integration->sales_channel_id)
+                    ->lockForUpdate()
+                    ->first();
+
                 ProductChannelMapping::query()->updateOrCreate(
                     [
                         'product_id' => $product->id,
@@ -232,7 +244,7 @@ final class WooCommerceImportService
                         'external_variation_id' => $incomingExternalVariationId,
                         'external_sku' => trim((string) ($item['sku'] ?? '')) ?: $sku,
                         'stock_sync_enabled' => true,
-                        'metadata' => array_merge($currentMapping?->metadata ?? [], [
+                        'metadata' => array_merge($lockedMapping?->metadata ?? [], [
                             'source' => 'woocommerce_import',
                             'language' => $this->normalizeLanguage($item['erp_import_language'] ?? 'pl'),
                             'mapping_role' => 'primary',
@@ -1129,6 +1141,27 @@ final class WooCommerceImportService
         }
 
         return DB::transaction(function () use ($integration, $product, $quantity, $warehouse, $observedAt): ?string {
+            $product = Product::query()->lockForUpdate()->findOrFail($product->id);
+            $stockGuardProductIds = ProductRelation::query()
+                ->where('child_product_id', $product->id)
+                ->where('relation_type', 'variant')
+                ->pluck('parent_product_id')
+                ->map(fn ($id): int => (int) $id)
+                ->push((int) $product->id)
+                ->unique()
+                ->values();
+            $stockGuardMappings = ProductChannelMapping::query()
+                ->whereIn('product_id', $stockGuardProductIds->all())
+                ->where('sales_channel_id', $integration->sales_channel_id)
+                ->lockForUpdate()
+                ->get();
+
+            if ($stockGuardMappings->contains(fn (ProductChannelMapping $mapping): bool => filled(
+                data_get($mapping->metadata, 'product_data_export.pending_token'),
+            ))) {
+                return 'stock_skipped_pending_export';
+            }
+
             $now = now();
 
             DB::table('stock_balances')->insertOrIgnore([
@@ -1674,9 +1707,14 @@ final class WooCommerceImportService
                 ->unique()
                 ->values()
                 ->all();
-        $images = $this->imageList($item['images'] ?? []);
+        if (isset($item['variation_id'])) {
+            $variationImage = $this->cleanImage($item['image'] ?? null);
+            $images = $variationImage === null ? [] : [$variationImage];
+        } else {
+            $images = $this->imageList($item['images'] ?? []);
+        }
 
-        if ($images === []) {
+        if ($images === [] && ! isset($item['variation_id'])) {
             $images = $this->imageList($item['parent_images'] ?? []);
         }
 

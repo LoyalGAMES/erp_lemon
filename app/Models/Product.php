@@ -97,20 +97,39 @@ class Product extends Model
 
     public function imageUrl(): ?string
     {
-        $attributes = (array) $this->getAttribute('attributes');
+        $images = $this->mediaImages();
 
-        foreach ([
-            'master.media.0.src',
-            'master.media.0.url',
-            'woocommerce_image.src',
-            'woocommerce_image.url',
-            'woocommerce_images.0.src',
-            'woocommerce_images.0.url',
-            'woocommerce_parent_image.src',
-            'woocommerce_parent_image.url',
-            'woocommerce_parent_images.0.src',
-            'woocommerce_parent_images.0.url',
-        ] as $path) {
+        if (isset($images[0]['src'])) {
+            return $images[0]['src'];
+        }
+
+        $attributes = (array) $this->getAttribute('attributes');
+        $master = data_get($attributes, 'master');
+        $hasMasterMedia = is_array($master) && is_array($master['media'] ?? null);
+
+        if ($hasMasterMedia && data_get($master, 'product_type') !== 'variation') {
+            return null;
+        }
+
+        $fallbackPaths = $hasMasterMedia
+            ? [
+                'woocommerce_parent_image.src',
+                'woocommerce_parent_image.url',
+                'woocommerce_parent_images.0.src',
+                'woocommerce_parent_images.0.url',
+            ]
+            : [
+                'woocommerce_image.src',
+                'woocommerce_image.url',
+                'woocommerce_images.0.src',
+                'woocommerce_images.0.url',
+                'woocommerce_parent_image.src',
+                'woocommerce_parent_image.url',
+                'woocommerce_parent_images.0.src',
+                'woocommerce_parent_images.0.url',
+            ];
+
+        foreach ($fallbackPaths as $path) {
             $value = trim((string) data_get($attributes, $path, ''));
 
             if ($value !== '') {
@@ -195,13 +214,18 @@ class Product extends Model
     public function mediaImages(): array
     {
         $attributes = (array) $this->getAttribute('attributes');
+        $master = data_get($attributes, 'master');
+        $hasMasterMedia = is_array($master) && is_array($master['media'] ?? null);
         $images = [];
 
-        foreach ([
-            data_get($attributes, 'master.media', []),
-            data_get($attributes, 'woocommerce_images', []),
-            data_get($attributes, 'woocommerce_parent_images', []),
-        ] as $list) {
+        $lists = $hasMasterMedia
+            ? [$master['media']]
+            : [
+                data_get($attributes, 'woocommerce_images', []),
+                data_get($attributes, 'woocommerce_parent_images', []),
+            ];
+
+        foreach ($lists as $list) {
             if (! is_array($list)) {
                 continue;
             }
@@ -225,25 +249,27 @@ class Product extends Model
             }
         }
 
-        foreach ([
-            data_get($attributes, 'woocommerce_image'),
-            data_get($attributes, 'woocommerce_parent_image'),
-        ] as $image) {
-            if (! is_array($image)) {
-                continue;
+        if (! $hasMasterMedia) {
+            foreach ([
+                data_get($attributes, 'woocommerce_image'),
+                data_get($attributes, 'woocommerce_parent_image'),
+            ] as $image) {
+                if (! is_array($image)) {
+                    continue;
+                }
+
+                $src = trim((string) ($image['src'] ?? $image['url'] ?? ''));
+
+                if ($src === '' || isset($images[$src])) {
+                    continue;
+                }
+
+                $images[$src] = [
+                    'src' => $src,
+                    'alt' => isset($image['alt']) ? (string) $image['alt'] : null,
+                    'name' => isset($image['name']) ? (string) $image['name'] : null,
+                ];
             }
-
-            $src = trim((string) ($image['src'] ?? $image['url'] ?? ''));
-
-            if ($src === '' || isset($images[$src])) {
-                continue;
-            }
-
-            $images[$src] = [
-                'src' => $src,
-                'alt' => isset($image['alt']) ? (string) $image['alt'] : null,
-                'name' => isset($image['name']) ? (string) $image['name'] : null,
-            ];
         }
 
         return array_values($images);

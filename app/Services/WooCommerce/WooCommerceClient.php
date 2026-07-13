@@ -13,6 +13,7 @@ use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use RuntimeException;
 use Throwable;
 
@@ -602,6 +603,101 @@ final class WooCommerceClient
     }
 
     /**
+     * @param  list<array<string, mixed>>  $attributes
+     * @return array<string, mixed>|null
+     */
+    public function findProductVariation(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        ?string $primaryExternalVariationId,
+        string $sku,
+        array $attributes,
+    ): ?array {
+        $sku = trim($sku);
+        $normalizedSku = mb_strtolower($sku);
+        $primaryExternalVariationId = trim((string) $primaryExternalVariationId);
+        $candidates = [];
+
+        for ($page = 1; $page <= 50; $page++) {
+            $response = $this->request($integration)
+                ->get($this->endpoint($integration, "/products/{$externalProductId}/variations"), [
+                    'per_page' => 100,
+                    'page' => $page,
+                ]);
+
+            if (! $response->successful()) {
+                throw new RuntimeException("Wyszukanie wariantów produktu WooCommerce #{$externalProductId} zwróciło HTTP {$response->status()}.");
+            }
+
+            $pageItems = $response->json();
+
+            if (! is_array($pageItems) || $pageItems === []) {
+                break;
+            }
+
+            foreach ($pageItems as $variation) {
+                if (is_array($variation) && isset($variation['id'])) {
+                    $candidates[] = $variation;
+                }
+            }
+
+            if (count($pageItems) < 100) {
+                break;
+            }
+        }
+
+        if ($primaryExternalVariationId !== '') {
+            $translationMatches = collect($candidates)
+                ->filter(fn (array $variation): bool => in_array(
+                    $primaryExternalVariationId,
+                    $this->translationIds(
+                        $variation['lemon_erp_translations'] ?? $variation['translations'] ?? [],
+                    ),
+                    true,
+                ))
+                ->values();
+
+            if ($translationMatches->count() === 1) {
+                return $translationMatches->first();
+            }
+
+            if ($translationMatches->isNotEmpty()) {
+                $candidates = $translationMatches->all();
+            }
+        }
+
+        if ($sku !== '') {
+            $skuMatches = collect($candidates)
+                ->filter(fn (array $variation): bool => mb_strtolower(
+                    trim((string) ($variation['sku'] ?? '')),
+                ) === $normalizedSku)
+                ->values();
+
+            if ($skuMatches->count() === 1) {
+                return $skuMatches->first();
+            }
+
+            if ($skuMatches->isNotEmpty()) {
+                $candidates = $skuMatches->all();
+            }
+        }
+
+        $signature = $this->variationAttributeSignature($attributes);
+
+        if ($signature === '') {
+            return null;
+        }
+
+        $attributeMatches = collect($candidates)
+            ->filter(fn (array $variation): bool => $this->variationAttributeSignature(
+                (array) ($variation['attributes'] ?? []),
+            ) === $signature)
+            ->values();
+
+        return $attributeMatches->count() === 1 ? $attributeMatches->first() : null;
+    }
+
+    /**
      * @return array<string, mixed>
      */
     public function deleteProductVariation(
@@ -840,13 +936,14 @@ final class WooCommerceClient
     }
 
     /**
+     * @param  array<string, array<string, mixed>>  $payloadsByLanguage
      * @return list<array{language:?string,product_id:string,status:string}>
      */
-    public function updateProductPublicationDateTranslations(
+    public function updateDiscoveredProductTranslations(
         WordpressIntegration $integration,
         ProductChannelMapping $mapping,
         string $sku,
-        string $dateCreated,
+        array $payloadsByLanguage,
     ): array {
         if (filled($mapping->external_variation_id)) {
             return [];
@@ -857,14 +954,18 @@ final class WooCommerceClient
         $updatedIds = [];
 
         foreach ($integration->productImportLanguages() as $language) {
+            $language = $this->normalizeCatalogLanguage($language);
+
+            if ($language === null || $language === 'pl') {
+                continue;
+            }
+
             $query = [
                 'sku' => $sku,
                 'per_page' => 20,
             ];
 
-            if ($language !== null) {
-                $query['lang'] = $language;
-            }
+            $query['lang'] = $language;
 
             $response = $this->request($integration)
                 ->get($this->endpoint($integration, '/products'), $query);
@@ -884,24 +985,39 @@ final class WooCommerceClient
                     continue;
                 }
 
+                if (! $this->matchesRequestedLanguage($product, $language)) {
+                    continue;
+                }
+
                 $translationId = (string) $product['id'];
 
                 if ($translationId === '' || $translationId === $mainProductId || in_array($translationId, $updatedIds, true)) {
                     continue;
                 }
 
+                $translationIds = $this->translationIds(
+                    $product['lemon_erp_translations'] ?? $product['translations'] ?? [],
+                );
+
+                if ($translationIds === [] || ! in_array($mainProductId, $translationIds, true)) {
+                    continue;
+                }
+
+                $actualLanguage = $this->catalogItemLanguage($product) ?? $language;
+
                 $updateResponse = $this->request($integration)
-                    ->put($this->endpoint($integration, "/products/{$translationId}"), [
-                        'date_created' => $dateCreated,
-                    ]);
+                    ->put(
+                        $this->endpoint($integration, "/products/{$translationId}"),
+                        (array) ($payloadsByLanguage[$actualLanguage] ?? $payloadsByLanguage[$language] ?? $payloadsByLanguage['pl'] ?? []),
+                    );
 
                 if (! $updateResponse->successful()) {
-                    throw new RuntimeException("Aktualizacja daty publikacji tłumaczenia WooCommerce #{$translationId} zwróciła HTTP {$updateResponse->status()}.");
+                    throw new RuntimeException("Aktualizacja danych tłumaczenia WooCommerce #{$translationId} zwróciła HTTP {$updateResponse->status()}.");
                 }
 
                 $updatedIds[] = $translationId;
                 $updated[] = [
-                    'language' => $language,
+                    'language' => $actualLanguage,
                     'product_id' => $translationId,
                     'status' => 'updated',
                 ];
@@ -1147,7 +1263,6 @@ final class WooCommerceClient
                 $variation['parent_permalink'] = $parentProduct['permalink'] ?? null;
                 $variation['parent_images'] = $parentProduct['images'] ?? [];
                 $variation['parent_image'] = data_get($parentProduct, 'images.0');
-                $variation['image'] = $variation['image'] ?? data_get($parentProduct, 'images.0');
                 $variation['id'] = $productId;
                 $variation['parent_name'] = $parentProduct['name'] ?? null;
                 $variation['name'] = $this->variationDisplayName($parentProduct, $variation);
@@ -1489,6 +1604,35 @@ final class WooCommerceClient
         }
 
         return trim((string) ($variation['name'] ?? $variation['sku'] ?? 'Wariant'));
+    }
+
+    /**
+     * @param  list<array<string, mixed>>  $attributes
+     */
+    private function variationAttributeSignature(array $attributes): string
+    {
+        $normalized = [];
+
+        foreach ($attributes as $attribute) {
+            if (! is_array($attribute)) {
+                continue;
+            }
+
+            $name = Str::slug((string) ($attribute['name'] ?? $attribute['slug'] ?? ''));
+            $value = Str::slug((string) ($attribute['option'] ?? $attribute['value'] ?? ''));
+
+            if ($name !== '' && $value !== '') {
+                $normalized[$name] = $value;
+            }
+        }
+
+        if ($normalized === []) {
+            return '';
+        }
+
+        ksort($normalized);
+
+        return hash('sha256', json_encode($normalized, JSON_THROW_ON_ERROR));
     }
 
     private function request(WordpressIntegration $integration, bool $retry = true): PendingRequest

@@ -17,18 +17,22 @@ use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Queue\Jobs\SyncJob;
+use Illuminate\Support\Facades\Bus;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class WooCommerceProductDataExportTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_saving_catalog_visibility_runs_queued_export_with_the_new_value(): void
+    public function test_saving_legacy_product_dispatches_immediate_and_durable_export_without_losing_images(): void
     {
-        Queue::fake();
+        Bus::fake();
         Http::fake([
             'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
                 'id' => 123,
@@ -62,6 +66,9 @@ class WooCommerceProductDataExportTest extends TestCase
                     'source' => 'erp',
                     'catalog_visibility' => 'visible',
                 ],
+                'woocommerce_images' => [
+                    ['src' => 'https://shop.test/wp-content/uploads/legacy.jpg', 'alt' => 'Zdjęcie legacy'],
+                ],
             ],
         ]);
         ProductChannelMapping::query()->create([
@@ -84,12 +91,559 @@ class WooCommerceProductDataExportTest extends TestCase
         ])->assertRedirect(route('products.edit', $product));
 
         $this->assertSame('hidden', data_get($product->refresh()->masterData(), 'catalog_visibility'));
-        $job = Queue::pushed(ExportWooCommerceProductDataJob::class)->sole();
+        $this->assertSame(
+            'https://shop.test/wp-content/uploads/legacy.jpg',
+            data_get($product->masterData(), 'media.0.src'),
+        );
+        $this->assertCount(1, Bus::dispatched(ExportWooCommerceProductDataJob::class));
+        Bus::assertDispatchedAfterResponse(ExportWooCommerceProductDataJob::class, 1);
+        $job = Bus::dispatchedAfterResponse(ExportWooCommerceProductDataJob::class)->sole();
         $job->handle(app(ProductDataExportService::class));
 
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
-            && $request['catalog_visibility'] === 'hidden');
+            && $request['catalog_visibility'] === 'hidden'
+            && $request['images'][0]['src'] === 'https://shop.test/wp-content/uploads/legacy.jpg');
+        $this->assertNull(data_get(
+            ProductChannelMapping::query()->where('product_id', $product->id)->firstOrFail()->metadata,
+            'product_data_export.pending_token',
+        ));
+    }
+
+    public function test_replacing_erp_product_image_dispatches_immediate_export_with_only_the_new_gallery(): void
+    {
+        Bus::fake();
+        Http::fake(function ($request) {
+            if ($request->method() === 'GET' && str_contains($request->url(), 'lang=en')) {
+                return Http::response([
+                    [
+                        'id' => 123,
+                        'sku' => 'SKU-AUTO-IMAGE',
+                        'lang' => 'pl',
+                        'translations' => ['pl' => 123, 'en' => 124],
+                    ],
+                    [
+                        'id' => 124,
+                        'sku' => 'SKU-AUTO-IMAGE',
+                        'lang' => 'en',
+                        'translations' => ['pl' => 123, 'en' => 124],
+                    ],
+                    [
+                        'id' => 999,
+                        'sku' => 'SKU-AUTO-IMAGE',
+                        'lang' => 'en',
+                        'translations' => ['de' => 998, 'en' => 999],
+                    ],
+                ]);
+            }
+
+            if ($request->method() === 'PUT' && in_array($request->url(), [
+                'https://shop.test/wp-json/wc/v3/products/123',
+                'https://shop.test/wp-json/wc/v3/products/124',
+            ], true)) {
+                return Http::response([
+                    'id' => str_ends_with($request->url(), '/124') ? 124 : 123,
+                    'sku' => 'SKU-AUTO-IMAGE',
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-AUTO-IMAGE',
+            'name' => 'Produkt ze zdjęciem',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'media' => [
+                        ['src' => '/uploads/products/old.jpg', 'alt' => 'Stare ERP'],
+                    ],
+                ],
+                'woocommerce_images' => [
+                    ['src' => 'https://shop.test/wp-content/uploads/old-woo.jpg', 'alt' => 'Stare Woo'],
+                ],
+            ],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        $this->put(route('products.update', $product), [
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => '1',
+            'existing_media' => [
+                ['src' => '/uploads/products/old.jpg', 'alt' => 'Stare ERP', 'remove' => '1'],
+            ],
+            'new_media' => [UploadedFile::fake()->image('nowe-zdjecie.jpg', 120, 120)],
+            'new_media_alt' => 'Nowe zdjęcie ERP',
+        ])->assertRedirect(route('products.edit', $product));
+
+        $this->assertCount(1, Bus::dispatched(ExportWooCommerceProductDataJob::class));
+        Bus::assertDispatchedAfterResponse(ExportWooCommerceProductDataJob::class, 1);
+        $job = Bus::dispatchedAfterResponse(ExportWooCommerceProductDataJob::class)->sole();
+        $job->handle(app(ProductDataExportService::class));
+
+        $media = $product->fresh()->mediaImages();
+        $this->assertCount(1, $media);
+        $this->assertSame('Nowe zdjęcie ERP', $media[0]['alt']);
+        $this->assertStringContainsString('/uploads/', $media[0]['src']);
+        $this->assertStringContainsString('/'.$product->id.'/', $media[0]['src']);
+
+        Http::assertSent(function ($request) use ($product): bool {
+            if ($request->method() !== 'PUT' || $request->url() !== 'https://shop.test/wp-json/wc/v3/products/123') {
+                return false;
+            }
+
+            return count($request['images']) === 1
+                && str_contains($request['images'][0]['src'], '/uploads/')
+                && str_contains($request['images'][0]['src'], '/'.$product->id.'/')
+                && $request['images'][0]['alt'] === 'Nowe zdjęcie ERP'
+                && ! str_contains(json_encode($request['images']) ?: '', 'old-woo.jpg');
+        });
+        Http::assertSent(function ($request) use ($product): bool {
+            if ($request->method() !== 'PUT' || $request->url() !== 'https://shop.test/wp-json/wc/v3/products/124') {
+                return false;
+            }
+
+            return count($request['images']) === 1
+                && str_contains($request['images'][0]['src'], '/uploads/')
+                && str_contains($request['images'][0]['src'], '/'.$product->id.'/')
+                && $request['images'][0]['alt'] === 'Nowe zdjęcie ERP'
+                && ! str_contains(json_encode($request['images']) ?: '', 'old-woo.jpg');
+        });
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/999');
+        $this->assertNull(data_get(
+            ProductChannelMapping::query()->where('product_id', $product->id)->firstOrFail()->metadata,
+            'product_data_export.pending_token',
+        ));
+        $this->assertSame('124', data_get($product->fresh()->attributes, 'woocommerce_translations.en.product_id'));
+
+        File::delete(public_path(ltrim($media[0]['src'], '/')));
+    }
+
+    public function test_failed_immediate_export_leaves_durable_retry_pending(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
+                'message' => 'temporary WooCommerce failure',
+            ], 503),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-RETRY',
+            'name' => 'Produkt do ponowienia',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp', 'media' => []]],
+        ]);
+        $syncToken = 'sync-retry-token';
+        $mapping = ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+            'metadata' => [
+                'product_data_export' => [
+                    'pending_token' => $syncToken,
+                    'requested_at' => now()->toISOString(),
+                ],
+            ],
+        ]);
+
+        $job = new ExportWooCommerceProductDataJob($product->id, $syncToken);
+        $job->setJob(new SyncJob(app(), '{}', 'sync', 'sync'));
+        $job->handle(app(ProductDataExportService::class));
+
+        $this->assertCount(1, $job->middleware());
+        $this->assertSame($syncToken, data_get($mapping->fresh()->metadata, 'product_data_export.pending_token'));
+        $this->assertDatabaseCount('integration_sync_logs', 0);
+    }
+
+    public function test_older_export_keeps_newer_pending_token_and_newer_job_finishes_sync(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-SUPERSEDED',
+            'name' => 'Produkt zmieniany dwukrotnie',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp', 'media' => []]],
+        ]);
+        $mapping = ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+            'metadata' => [
+                'product_data_export' => [
+                    'pending_token' => 'token-older',
+                    'requested_at' => now()->toISOString(),
+                ],
+            ],
+        ]);
+        $requests = 0;
+        Http::fake(function () use ($mapping, &$requests) {
+            $requests++;
+
+            if ($requests === 1) {
+                $metadata = (array) $mapping->fresh()->metadata;
+                data_set($metadata, 'product_data_export.pending_token', 'token-newer');
+                data_set($metadata, 'product_data_export.requested_at', now()->addSecond()->toISOString());
+                $mapping->forceFill(['metadata' => $metadata])->save();
+            }
+
+            return Http::response(['id' => 123, 'sku' => 'SKU-SUPERSEDED']);
+        });
+
+        (new ExportWooCommerceProductDataJob($product->id, 'token-older'))
+            ->handle(app(ProductDataExportService::class));
+
+        $this->assertSame('token-newer', data_get($mapping->fresh()->metadata, 'product_data_export.pending_token'));
+
+        (new ExportWooCommerceProductDataJob($product->id, 'token-newer'))
+            ->handle(app(ProductDataExportService::class));
+
+        $this->assertSame(2, $requests);
+        $this->assertNull(data_get($mapping->fresh()->metadata, 'product_data_export.pending_token'));
+    }
+
+    public function test_manual_export_does_not_overlap_an_active_automatic_export(): void
+    {
+        Http::fake();
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-LOCKED',
+            'name' => 'Produkt synchronizowany',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $lock = Cache::lock(
+            ExportWooCommerceProductDataJob::lockKey($product->id),
+            ExportWooCommerceProductDataJob::LOCK_SECONDS,
+        );
+        $this->assertTrue($lock->get());
+
+        try {
+            $this->post(route('products.woocommerce.export', $product))
+                ->assertRedirect()
+                ->assertSessionHas('status');
+        } finally {
+            $lock->release();
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_discovered_translation_reference_does_not_overwrite_newer_erp_media(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-REFERENCE-RACE',
+            'name' => 'Produkt przed zmianą',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'media' => [['src' => '/uploads/products/older.jpg']],
+                'media_updated_at' => now()->toISOString(),
+                'content' => ['pl' => ['name' => 'Starsza treść']],
+            ]],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        Http::fake(function ($request) use ($product) {
+            if ($request->method() === 'GET' && str_contains($request->url(), 'lang=en')) {
+                return Http::response([[
+                    'id' => 124,
+                    'sku' => 'SKU-REFERENCE-RACE',
+                    'lang' => 'en',
+                    'translations' => ['pl' => 123, 'en' => 124],
+                ]]);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($request->url(), '/124')) {
+                $fresh = $product->fresh();
+                $attributes = (array) $fresh->attributes;
+                data_set($attributes, 'master.media', [['src' => '/uploads/products/newer.jpg']]);
+                data_set($attributes, 'master.content.pl.name', 'Nowsza treść ERP');
+                $fresh->forceFill(['attributes' => $attributes])->save();
+            }
+
+            return Http::response([
+                'id' => str_ends_with($request->url(), '/124') ? 124 : 123,
+                'sku' => 'SKU-REFERENCE-RACE',
+            ]);
+        });
+
+        app(ProductDataExportService::class)->export($product);
+
+        $fresh = $product->fresh();
+        $this->assertSame('/uploads/products/newer.jpg', data_get($fresh->attributes, 'master.media.0.src'));
+        $this->assertSame('Nowsza treść ERP', data_get($fresh->attributes, 'master.content.pl.name'));
+        $this->assertSame('124', data_get($fresh->attributes, 'woocommerce_translations.en.product_id'));
+    }
+
+    public function test_export_uses_exact_erp_gallery_and_can_remove_all_woocommerce_images(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
+                'id' => 123,
+                'sku' => 'SKU-EXACT-GALLERY',
+            ]),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-EXACT-GALLERY',
+            'name' => 'Dokładna galeria',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'media' => [
+                        ['src' => '/uploads/products/new-second.jpg', 'alt' => 'Drugie'],
+                        ['src' => '/uploads/products/new-first.jpg', 'alt' => 'Pierwsze'],
+                    ],
+                ],
+                'woocommerce_images' => [
+                    ['src' => 'https://shop.test/wp-content/uploads/stale.jpg'],
+                ],
+                'woocommerce_parent_images' => [
+                    ['src' => 'https://shop.test/wp-content/uploads/stale-parent.jpg'],
+                ],
+            ],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($product);
+
+        $firstRequest = Http::recorded()
+            ->map(fn (array $entry) => $entry[0])
+            ->first(fn ($request): bool => $request->method() === 'PUT');
+        $this->assertCount(2, $firstRequest['images']);
+        $this->assertStringEndsWith('/uploads/products/new-second.jpg', $firstRequest['images'][0]['src']);
+        $this->assertStringEndsWith('/uploads/products/new-first.jpg', $firstRequest['images'][1]['src']);
+        $this->assertStringNotContainsString('stale', json_encode($firstRequest['images']) ?: '');
+
+        $attributes = (array) $product->attributes;
+        data_set($attributes, 'master.media', []);
+        $product->forceFill(['attributes' => $attributes])->save();
+
+        app(ProductDataExportService::class)->export($product->fresh());
+
+        $lastRequest = Http::recorded()
+            ->map(fn (array $entry) => $entry[0])
+            ->filter(fn ($request): bool => $request->method() === 'PUT')
+            ->last();
+        $this->assertSame([], $lastRequest['images']);
+        $this->assertSame([], $product->fresh()->mediaImages());
+        $this->assertNull($product->fresh()->imageUrl());
+    }
+
+    public function test_export_clears_removed_erp_variant_image_in_woocommerce(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => Http::response(['id' => 123, 'sku' => 'SET-CLEAR']),
+            'https://shop.test/wp-json/wc/v3/products/123/variations/456' => Http::response(['id' => 456, 'sku' => 'SET-CLEAR-S']),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'SET-CLEAR',
+            'name' => 'Komplet',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variable',
+                    'variant_attribute' => 'Rozmiar',
+                    'media' => [],
+                ],
+            ],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'SET-CLEAR-S',
+            'name' => 'Komplet S',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variation',
+                    'media' => [],
+                    'parameters' => [
+                        ['name' => 'Rozmiar', 'value' => 'S', 'variation' => true],
+                    ],
+                ],
+                'woocommerce_image' => [
+                    'src' => 'https://shop.test/wp-content/uploads/stale-variant.jpg',
+                ],
+            ],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+            'metadata' => ['variant_attribute' => 'Rozmiar'],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($parent);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/456'
+            && $request['image'] === []);
     }
 
     public function test_erp_product_master_data_can_be_exported_to_mapped_woocommerce_product(): void
@@ -569,7 +1123,12 @@ class WooCommerceProductDataExportTest extends TestCase
                         ['id' => 123, 'sku' => 'SKU-DATE'],
                     ]),
                     'en' => Http::response([
-                        ['id' => 124, 'sku' => 'SKU-DATE'],
+                        [
+                            'id' => 124,
+                            'sku' => 'SKU-DATE',
+                            'lang' => 'en',
+                            'translations' => ['pl' => 123, 'en' => 124],
+                        ],
                     ]),
                     default => Http::response([]),
                 };
@@ -619,6 +1178,9 @@ class WooCommerceProductDataExportTest extends TestCase
                     'source' => 'erp',
                     'publication_status' => 'publish',
                     'publication_date' => '2026-07-15T09:30',
+                    'media' => [
+                        ['src' => '/uploads/products/shared-pl-en.jpg', 'alt' => 'Wspólne zdjęcie'],
+                    ],
                     'content' => [
                         'pl' => [
                             'name' => 'Produkt z datą',
@@ -642,15 +1204,15 @@ class WooCommerceProductDataExportTest extends TestCase
 
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
-            && $request['date_created'] === '2026-07-15T09:30:00');
+            && $request['date_created'] === '2026-07-15T09:30:00'
+            && str_ends_with($request['images'][0]['src'], '/uploads/products/shared-pl-en.jpg'));
 
-        Http::assertSent(fn ($request): bool => $request->method() === 'GET'
-            && str_contains($request->url(), 'lang=pl'));
         Http::assertSent(fn ($request): bool => $request->method() === 'GET'
             && str_contains($request->url(), 'lang=en'));
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
-            && $request['date_created'] === '2026-07-15T09:30:00');
+            && $request['date_created'] === '2026-07-15T09:30:00'
+            && str_ends_with($request['images'][0]['src'], '/uploads/products/shared-pl-en.jpg'));
     }
 
     public function test_erp_product_can_be_created_in_unmapped_woocommerce_channel(): void
@@ -1596,6 +2158,10 @@ class WooCommerceProductDataExportTest extends TestCase
                     'publication_status' => 'publish',
                     'publication_date' => '2026-07-15T09:30',
                     'catalog_visibility' => 'catalog',
+                    'media' => [
+                        ['src' => '/uploads/products/shared-first.jpg', 'alt' => 'Pierwsze wspólne'],
+                        ['src' => '/uploads/products/shared-second.jpg', 'alt' => 'Drugie wspólne'],
+                    ],
                     'prices' => ['retail_price_pln' => 199.99, 'sale_price_pln' => 149.99],
                     'inventory' => [
                         'manage_stock' => true,
@@ -1629,6 +2195,20 @@ class WooCommerceProductDataExportTest extends TestCase
 
         app(ProductDataExportService::class)->export($product);
 
+        $languageRequests = Http::recorded()
+            ->map(fn (array $entry) => $entry[0])
+            ->filter(fn ($request): bool => $request->method() === 'PUT'
+                && in_array($request->url(), [
+                    'https://shop.test/wp-json/wc/v3/products/123',
+                    'https://shop.test/wp-json/wc/v3/products/124',
+                ], true))
+            ->keyBy(fn ($request): string => $request->url());
+        $this->assertSame(
+            $languageRequests['https://shop.test/wp-json/wc/v3/products/123']['images'],
+            $languageRequests['https://shop.test/wp-json/wc/v3/products/124']['images'],
+        );
+        $this->assertCount(2, $languageRequests['https://shop.test/wp-json/wc/v3/products/123']['images']);
+
         Http::assertSent(function ($request): bool {
             if ($request->method() !== 'PUT' || $request->url() !== 'https://shop.test/wp-json/wc/v3/products/123') {
                 return false;
@@ -1660,9 +2240,138 @@ class WooCommerceProductDataExportTest extends TestCase
         });
     }
 
+    public function test_export_discovers_existing_english_variant_instead_of_creating_duplicate(): void
+    {
+        Http::fake(function ($request) {
+            if ($request->method() === 'GET' && str_contains($request->url(), 'lang=en')) {
+                return Http::response([[
+                    'id' => 124,
+                    'sku' => 'SET-LEGACY',
+                    'lang' => 'en',
+                    'translations' => ['pl' => 123, 'en' => 124],
+                ]]);
+            }
+
+            if ($request->method() === 'GET' && str_contains($request->url(), '/products/124/variations')) {
+                return Http::response([[
+                    'id' => 457,
+                    'sku' => '',
+                    'attributes' => [[
+                        'name' => 'Size',
+                        'option' => 'Small',
+                    ]],
+                ]]);
+            }
+
+            return match ([$request->method(), $request->url()]) {
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/123'] => Http::response(['id' => 123, 'sku' => 'SET-LEGACY']),
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/124'] => Http::response(['id' => 124, 'sku' => 'SET-LEGACY']),
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/123/variations/456'] => Http::response(['id' => 456, 'sku' => 'SET-LEGACY-S']),
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/124/variations/457'] => Http::response(['id' => 457, 'sku' => 'SET-LEGACY-S']),
+                default => Http::response([], 404),
+            };
+        });
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'SET-LEGACY',
+            'name' => 'Komplet legacy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'content' => [
+                    'pl' => ['name' => 'Komplet legacy'],
+                    'en' => ['name' => 'Legacy set'],
+                ],
+            ]],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'SET-LEGACY-S',
+            'name' => 'Komplet legacy - S',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variation',
+                'media' => [['src' => '/uploads/products/legacy-variant-new.jpg']],
+                'media_updated_at' => now()->toISOString(),
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'value' => 'S',
+                    'name_en' => 'Size',
+                    'value_en' => 'Small',
+                    'variation' => true,
+                ]],
+            ]],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($parent);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations/457'
+            && str_ends_with($request['image']['src'], '/uploads/products/legacy-variant-new.jpg'));
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/variations'));
+        $this->assertSame('124', data_get($parent->fresh()->attributes, 'woocommerce_translations.en.product_id'));
+        $this->assertSame('457', data_get($variant->fresh()->attributes, 'woocommerce_translations.en.variation_id'));
+    }
+
     public function test_export_creates_new_variant_for_polish_and_english_polylang_parents(): void
     {
         Http::fake(function ($request) {
+            if ($request->method() === 'GET' && str_contains($request->url(), 'lang=en')) {
+                return Http::response([[
+                    'id' => 124,
+                    'sku' => 'SET-NEW',
+                    'lang' => 'en',
+                    'translations' => ['pl' => 123, 'en' => 124],
+                ]]);
+            }
+
+            if ($request->method() === 'GET' && str_contains($request->url(), '/products/124/variations')) {
+                return Http::response([]);
+            }
+
             return match ([$request->method(), $request->url()]) {
                 ['PUT', 'https://shop.test/wp-json/wc/v3/products/123'] => Http::response(['id' => 123, 'sku' => 'SET-NEW']),
                 ['PUT', 'https://shop.test/wp-json/wc/v3/products/124'] => Http::response(['id' => 124, 'sku' => 'SET-NEW']),
@@ -1711,9 +2420,6 @@ class WooCommerceProductDataExportTest extends TestCase
                         'en' => ['name' => 'New set'],
                     ],
                 ],
-                'woocommerce_translations' => [
-                    'en' => ['product_id' => '124', 'variation_id' => null, 'sku' => 'SET-NEW'],
-                ],
             ],
         ]);
         $variant = Product::query()->create([
@@ -1727,6 +2433,10 @@ class WooCommerceProductDataExportTest extends TestCase
             'attributes' => ['master' => [
                 'source' => 'erp',
                 'product_type' => 'variation',
+                'media' => [
+                    ['src' => '/uploads/products/shared-variant-pl-en.jpg', 'alt' => 'Wspólne zdjęcie wariantu'],
+                ],
+                'media_updated_at' => now()->toISOString(),
                 'parameters' => [[
                     'name' => 'Rozmiar',
                     'value' => 'S',
@@ -1755,12 +2465,14 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations'
             && $request['sku'] === 'SEM-NEW-S'
-            && $request['global_unique_id'] === '5901234567890');
+            && $request['global_unique_id'] === '5901234567890'
+            && str_ends_with($request['image']['src'], '/uploads/products/shared-variant-pl-en.jpg'));
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations'
             && $request['sku'] === 'SEM-NEW-S'
             && $request['attributes'][0]['name'] === 'Sizing'
-            && $request['attributes'][0]['option'] === 'Petite');
+            && $request['attributes'][0]['option'] === 'Petite'
+            && str_ends_with($request['image']['src'], '/uploads/products/shared-variant-pl-en.jpg'));
         $this->assertDatabaseHas('product_channel_mappings', [
             'product_id' => $variant->id,
             'external_product_id' => '123',

@@ -81,7 +81,7 @@
             $parameterRows[] = ['name' => '', 'value' => '', 'variation' => false];
         }
 
-        $mediaRows = collect(data_get($master, 'media', []))
+        $mediaRows = collect(is_array($master['media'] ?? null) ? $master['media'] : $product->mediaImages())
             ->map(fn ($row): array => [
                 'src' => is_array($row) ? (string) ($row['src'] ?? $row['url'] ?? '') : '',
                 'alt' => is_array($row) ? (string) ($row['alt'] ?? '') : '',

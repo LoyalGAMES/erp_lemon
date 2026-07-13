@@ -12,6 +12,7 @@ use App\Models\ProductParameterDefinition;
 use App\Models\WordpressIntegration;
 use App\Services\Products\ProductDescriptionSanitizer;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 final class ProductDataExportService
@@ -68,7 +69,13 @@ final class ProductDataExportService
             $translationResults = $this->syncTranslations($product, $integration, $mapping, $isVariation, $variants);
 
             if ($translationResults === []) {
-                $translationResults = $this->syncDiscoveredTranslationPublicationDates($product, $integration, $mapping, $isVariation);
+                $translationResults = $this->syncDiscoveredTranslations(
+                    $product,
+                    $integration,
+                    $mapping,
+                    $isVariation,
+                    $variants,
+                );
             }
             $variantResults = $isVariation
                 ? []
@@ -367,13 +374,20 @@ final class ProductDataExportService
         ?string $externalVariationId,
         string $sku,
     ): void {
-        $attributes = (array) $product->attributes;
-        data_set($attributes, "woocommerce_translations.{$language}", [
-            'product_id' => $externalProductId,
-            'variation_id' => $externalVariationId,
-            'sku' => $sku,
-        ]);
-        $product->forceFill(['attributes' => $attributes])->save();
+        DB::transaction(function () use ($product, $language, $externalProductId, $externalVariationId, $sku): void {
+            $lockedProduct = Product::query()
+                ->lockForUpdate()
+                ->findOrFail($product->id);
+            $attributes = (array) $lockedProduct->attributes;
+            data_set($attributes, "woocommerce_translations.{$language}", [
+                'product_id' => $externalProductId,
+                'variation_id' => $externalVariationId,
+                'sku' => $sku,
+            ]);
+            $lockedProduct->forceFill(['attributes' => $attributes])->save();
+        });
+
+        $product->refresh();
     }
 
     /**
@@ -501,9 +515,28 @@ final class ProductDataExportService
                 );
                 $operation = 'updated';
             } else {
-                $response = $this->client->createProductVariation($integration, $translatedParentId, $payload);
-                $translatedVariationId = trim((string) ($response['id'] ?? ''));
-                $operation = 'created';
+                $discoveredVariation = $this->client->findProductVariation(
+                    $integration,
+                    $translatedParentId,
+                    $primaryMapping->external_variation_id,
+                    $variant->sku,
+                    (array) ($payload['attributes'] ?? []),
+                );
+                $translatedVariationId = trim((string) ($discoveredVariation['id'] ?? ''));
+
+                if ($translatedVariationId !== '') {
+                    $response = $this->client->updateProductDataByIds(
+                        $integration,
+                        $translatedParentId,
+                        $translatedVariationId,
+                        $payload,
+                    );
+                    $operation = 'updated_discovered';
+                } else {
+                    $response = $this->client->createProductVariation($integration, $translatedParentId, $payload);
+                    $translatedVariationId = trim((string) ($response['id'] ?? ''));
+                    $operation = 'created';
+                }
 
                 if ($translatedVariationId === '') {
                     throw new RuntimeException("WooCommerce nie zwrócił ID wariantu {$variant->sku} dla tłumaczenia {$language}.");
@@ -664,12 +697,12 @@ final class ProductDataExportService
             $payload['cross_sell_ids'] = $this->relatedProductIds((array) data_get($master, 'related_products.cross_sell_skus', []), $salesChannelId);
 
             $payload['images'] = $images;
-        } elseif ($hasLanguageContent) {
-            $payload['description'] = $description ?: '';
-
-            if ($images !== []) {
-                $payload['image'] = $images[0];
+        } else {
+            if ($hasLanguageContent) {
+                $payload['description'] = $description ?: '';
             }
+
+            $payload['image'] = $images[0] ?? [];
         }
 
         if ($isVariation) {
@@ -758,24 +791,31 @@ final class ProductDataExportService
         array $payload,
         array $response,
     ): void {
-        $currentMetadata = $mapping->metadata ?? [];
-        $metadata = array_merge($currentMetadata, [
-            'source' => $currentMetadata['source'] ?? 'erp',
-            'woocommerce_permalink' => $response['permalink'] ?? data_get($currentMetadata, 'woocommerce_permalink'),
-            'last_product_export_at' => now()->toDateTimeString(),
-            'last_product_export_status' => 'success',
-            'last_product_export_sku_status' => array_key_exists('sku', $payload) ? 'updated' : 'preserved_remote_duplicate',
-            'last_product_export_payload_hash' => $this->payloadHash($payload),
-        ]);
-        $responseSku = trim((string) ($response['sku'] ?? ''));
-        $externalSku = $responseSku !== ''
-            ? $responseSku
-            : (array_key_exists('sku', $payload) ? $product->sku : $mapping->external_sku);
+        DB::transaction(function () use ($mapping, $product, $payload, $response): void {
+            $lockedMapping = ProductChannelMapping::query()
+                ->lockForUpdate()
+                ->findOrFail($mapping->id);
+            $currentMetadata = $lockedMapping->metadata ?? [];
+            $metadata = array_merge($currentMetadata, [
+                'source' => $currentMetadata['source'] ?? 'erp',
+                'woocommerce_permalink' => $response['permalink'] ?? data_get($currentMetadata, 'woocommerce_permalink'),
+                'last_product_export_at' => now()->toDateTimeString(),
+                'last_product_export_status' => 'success',
+                'last_product_export_sku_status' => array_key_exists('sku', $payload) ? 'updated' : 'preserved_remote_duplicate',
+                'last_product_export_payload_hash' => $this->payloadHash($payload),
+            ]);
+            $responseSku = trim((string) ($response['sku'] ?? ''));
+            $externalSku = $responseSku !== ''
+                ? $responseSku
+                : (array_key_exists('sku', $payload) ? $product->sku : $lockedMapping->external_sku);
 
-        $mapping->update([
-            'external_sku' => $externalSku,
-            'metadata' => $metadata,
-        ]);
+            $lockedMapping->update([
+                'external_sku' => $externalSku,
+                'metadata' => $metadata,
+            ]);
+        });
+
+        $mapping->refresh();
     }
 
     /**
@@ -1575,28 +1615,63 @@ final class ProductDataExportService
     /**
      * @return list<array<string, mixed>>
      */
-    private function syncDiscoveredTranslationPublicationDates(
+    private function syncDiscoveredTranslations(
         Product $product,
         WordpressIntegration $integration,
         ProductChannelMapping $mapping,
         bool $isVariation,
+        Collection $variants,
     ): array {
-        if ($isVariation) {
+        $master = $product->masterData();
+        $mediaWasEditedInErp = filled(data_get($master, 'media_updated_at'))
+            || $variants->contains(
+                fn (Product $variant): bool => filled(data_get($variant->masterData(), 'media_updated_at')),
+            );
+
+        if (
+            $isVariation
+            || trim($product->sku) === ''
+            || ($this->dateTimeString(data_get($master, 'publication_date')) === null && ! $mediaWasEditedInErp)
+        ) {
             return [];
         }
 
-        $publicationDate = $this->dateTimeString(data_get($product->masterData(), 'publication_date'));
+        $payloads = collect($integration->productImportLanguages())
+            ->mapWithKeys(function (mixed $language) use ($product, $mapping, $variants): array {
+                $language = trim((string) $language) ?: 'pl';
+                $payload = $this->payload($product, false, (int) $mapping->sales_channel_id, $language);
+                $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $product, $mapping);
+                $payload = $this->prepareVariablePayload($product, $variants, $payload, $language);
 
-        if ($publicationDate === null || trim($product->sku) === '') {
-            return [];
-        }
+                return [$language => $payload];
+            })
+            ->all();
 
-        return $this->client->updateProductPublicationDateTranslations(
+        $results = $this->client->updateDiscoveredProductTranslations(
             $integration,
             $mapping,
             $product->sku,
-            $publicationDate,
+            $payloads,
         );
+
+        foreach ($results as $result) {
+            $language = trim((string) ($result['language'] ?? ''));
+            $externalProductId = trim((string) ($result['product_id'] ?? ''));
+
+            if ($language === '' || $language === 'pl' || $externalProductId === '') {
+                continue;
+            }
+
+            $this->saveTranslationReference(
+                $product,
+                $language,
+                $externalProductId,
+                null,
+                $product->sku,
+            );
+        }
+
+        return $results;
     }
 
     /**

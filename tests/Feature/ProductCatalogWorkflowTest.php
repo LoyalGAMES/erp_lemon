@@ -24,6 +24,7 @@ use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\StockSyncExportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
@@ -1021,9 +1022,9 @@ class ProductCatalogWorkflowTest extends TestCase
         @unlink(public_path(ltrim($mediaSrc, '/')));
     }
 
-    public function test_editing_mapped_erp_product_queues_woocommerce_data_export(): void
+    public function test_editing_mapped_erp_product_dispatches_immediate_woocommerce_data_export(): void
     {
-        Queue::fake();
+        Bus::fake();
 
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
@@ -1055,14 +1056,15 @@ class ProductCatalogWorkflowTest extends TestCase
             'is_active' => '1',
         ])
             ->assertRedirect(route('products.edit', $product))
-            ->assertSessionHas('status', 'Dane produktu zostały zapisane jako dane główne ERP. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle.');
+            ->assertSessionHas('status', 'Dane produktu zostały zapisane jako dane główne ERP. Synchronizacja zmapowanych kanałów WooCommerce została uruchomiona od razu.');
 
-        Queue::assertPushed(ExportWooCommerceProductDataJob::class, 1);
+        Bus::assertDispatchedAfterResponse(ExportWooCommerceProductDataJob::class, 1);
+        $this->assertCount(1, Bus::dispatched(ExportWooCommerceProductDataJob::class));
     }
 
-    public function test_editing_variant_updates_parent_catalog_visibility_and_queues_both_exports(): void
+    public function test_editing_variant_updates_parent_and_dispatches_complete_parent_export_immediately(): void
     {
-        Queue::fake();
+        Bus::fake();
 
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
@@ -1148,7 +1150,16 @@ class ProductCatalogWorkflowTest extends TestCase
         ])->assertRedirect(route('products.edit', $variant));
 
         $this->assertSame('hidden', data_get($parent->refresh()->masterData(), 'catalog_visibility'));
-        Queue::assertPushed(ExportWooCommerceProductDataJob::class, 2);
+        Bus::assertDispatchedAfterResponse(ExportWooCommerceProductDataJob::class, 1);
+        $this->assertCount(1, Bus::dispatched(ExportWooCommerceProductDataJob::class));
+        $this->assertNotNull(data_get(
+            ProductChannelMapping::query()->where('product_id', $parent->id)->firstOrFail()->metadata,
+            'product_data_export.pending_token',
+        ));
+        $this->assertNull(data_get(
+            ProductChannelMapping::query()->where('product_id', $variant->id)->firstOrFail()->metadata,
+            'product_data_export.pending_token',
+        ));
     }
 
     public function test_operator_can_duplicate_product_without_stock_or_channel_mappings(): void

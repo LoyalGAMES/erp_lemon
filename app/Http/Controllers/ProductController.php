@@ -33,6 +33,7 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Pagination\LengthAwarePaginator;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Str;
@@ -258,20 +259,21 @@ class ProductController extends Controller
         ];
 
         $uploadedMedia = [];
-
         try {
             [$eanResult, $generatedVariants] = DB::transaction(function () use ($product, $request, $validated, $identifiers, $audit, $before, $catalogVisibilityParent, &$uploadedMedia): array {
                 $attributes = (array) $product->attributes;
-                $currentMaster = data_get($attributes, 'master', []);
+                $currentMaster = (array) data_get($attributes, 'master', []);
                 $uploadedMedia = $this->storeUploadedMedia($product, $request);
                 $media = $request->has('existing_media') || $request->hasFile('new_media')
                 ? array_merge(
                     $this->normalizeExistingMedia((array) $request->input('existing_media', [])),
                     $uploadedMedia,
                 )
-                : (array) data_get($currentMaster, 'media', []);
+                : (array) (is_array($currentMaster['media'] ?? null)
+                    ? $currentMaster['media']
+                    : $product->mediaImages());
 
-                $attributes['master'] = $this->masterDataFromRequest($validated, $request, $media, (array) $currentMaster);
+                $attributes['master'] = $this->masterDataFromRequest($validated, $request, $media, $currentMaster);
 
                 $product->fill([
                     'sku' => $this->nullableString($validated['sku'] ?? null) ?? $product->sku,
@@ -332,11 +334,8 @@ class ProductController extends Controller
                             'variant_product_id' => $product->id,
                             'variant_sku' => $product->sku,
                         ]);
-                        $this->queueWooCommerceDataExport($catalogVisibilityParent);
                     }
                 }
-
-                $this->queueWooCommerceDataExport($product);
 
                 return [$eanResult, $generatedVariants];
             });
@@ -346,11 +345,18 @@ class ProductController extends Controller
             throw $exception;
         }
 
+        $parentExportQueued = $catalogVisibilityParent instanceof Product
+            && $this->queueWooCommerceDataExport($catalogVisibilityParent);
+
+        if (! $parentExportQueued) {
+            $this->queueWooCommerceDataExport($product);
+        }
+
         $redirect = redirect()
             ->route('products.edit', $product)
             ->with('status', $generatedVariants['created'] > 0
-                ? "Dane produktu zostały zapisane i utworzono {$generatedVariants['created']} brakujących wariantów. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle."
-                : 'Dane produktu zostały zapisane jako dane główne ERP. Zmapowane kanały WooCommerce zostaną zsynchronizowane w tle.');
+                ? "Dane produktu zostały zapisane i utworzono {$generatedVariants['created']} brakujących wariantów. Synchronizacja zmapowanych kanałów WooCommerce została uruchomiona od razu."
+                : 'Dane produktu zostały zapisane jako dane główne ERP. Synchronizacja zmapowanych kanałów WooCommerce została uruchomiona od razu.');
 
         $identifierError = $eanResult['error'] ?? $generatedVariants['error'];
 
@@ -758,13 +764,34 @@ class ProductController extends Controller
         }
     }
 
-    private function queueWooCommerceDataExport(Product $product): void
+    private function queueWooCommerceDataExport(Product $product): bool
     {
-        if (! ProductChannelMapping::query()->where('product_id', $product->id)->exists()) {
-            return;
+        $syncToken = (string) Str::uuid();
+        $mappingCount = DB::transaction(function () use ($product, $syncToken): int {
+            $mappings = ProductChannelMapping::query()
+                ->where('product_id', $product->id)
+                ->lockForUpdate()
+                ->get();
+
+            foreach ($mappings as $mapping) {
+                $metadata = (array) $mapping->metadata;
+                data_set($metadata, 'product_data_export.pending_token', $syncToken);
+                data_set($metadata, 'product_data_export.requested_at', now()->toISOString());
+                $mapping->forceFill(['metadata' => $metadata])->save();
+            }
+
+            return $mappings->count();
+        });
+
+        if ($mappingCount === 0) {
+            return false;
         }
 
-        ExportWooCommerceProductDataJob::dispatch($product->id)->afterCommit();
+        ExportWooCommerceProductDataJob::dispatch($product->id, $syncToken)
+            ->onConnection('database');
+        ExportWooCommerceProductDataJob::dispatchAfterResponse($product->id, $syncToken);
+
+        return true;
     }
 
     private function catalogVisibilityUsesParent(Product $product): bool
@@ -826,6 +853,15 @@ class ProductController extends Controller
         ProductDataExportService $exportService,
         AuditLogService $audit,
     ): RedirectResponse {
+        $lock = Cache::lock(
+            ExportWooCommerceProductDataJob::lockKey($product->id),
+            ExportWooCommerceProductDataJob::LOCK_SECONDS,
+        );
+
+        if (! $lock->get()) {
+            return back()->with('status', 'Synchronizacja tego produktu z WooCommerce już trwa. Nowsze dane zostaną wysłane po jej zakończeniu.');
+        }
+
         try {
             $result = $exportService->export($product);
         } catch (\Throwable $exception) {
@@ -834,6 +870,8 @@ class ProductController extends Controller
             ]);
 
             return back()->with('error', $exception->getMessage());
+        } finally {
+            $lock->release();
         }
 
         $product->refresh();
@@ -1146,6 +1184,9 @@ class ProductController extends Controller
             ],
             'parameters' => $this->normalizeParameters((array) $request->input('parameters', [])),
             'media' => $media,
+            'media_updated_at' => $request->has('existing_media') || $request->hasFile('new_media')
+                ? now()->toISOString()
+                : data_get($existingMaster, 'media_updated_at'),
             'suppliers' => $request->has('suppliers')
                 ? $this->normalizeSuppliers((array) $request->input('suppliers', []))
                 : array_values((array) data_get($existingMaster, 'suppliers', [])),

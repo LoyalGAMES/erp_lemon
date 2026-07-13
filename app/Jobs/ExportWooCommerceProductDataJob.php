@@ -6,13 +6,16 @@ namespace App\Jobs;
 
 use App\Models\IntegrationSyncLog;
 use App\Models\Product;
+use App\Models\ProductChannelMapping;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\ProductDataExportService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\DB;
 use Throwable;
 
 final class ExportWooCommerceProductDataJob implements ShouldQueue
@@ -22,25 +25,107 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
     use Queueable;
     use SerializesModels;
 
-    public int $tries = 2;
+    public int $tries = 70;
 
-    public int $timeout = 300;
+    public int $timeout = 840;
+
+    public const LOCK_SECONDS = 3600;
 
     public function __construct(
         private readonly int $productId,
+        private readonly ?string $syncToken = null,
     ) {}
+
+    /**
+     * @return list<object>
+     */
+    public function middleware(): array
+    {
+        if ($this->syncToken === null) {
+            return [];
+        }
+
+        return [
+            (new WithoutOverlapping(self::lockKey($this->productId)))
+                ->releaseAfter(60)
+                ->expireAfter(self::LOCK_SECONDS)
+                ->withPrefix('')
+                ->shared(),
+        ];
+    }
+
+    public static function lockKey(int $productId): string
+    {
+        return "woocommerce-product-data:{$productId}";
+    }
 
     public function handle(ProductDataExportService $exporter): void
     {
-        $product = Product::query()
-            ->with('channelMappings.salesChannel')
-            ->find($this->productId);
+        try {
+            $product = Product::query()
+                ->with('channelMappings.salesChannel')
+                ->find($this->productId);
 
-        if (! $product instanceof Product || $product->channelMappings->isEmpty()) {
+            if (! $product instanceof Product || $product->channelMappings->isEmpty()) {
+                return;
+            }
+
+            if (! $this->hasCurrentSyncToken($product)) {
+                return;
+            }
+
+            $exporter->export($product);
+            $this->clearCurrentSyncToken();
+        } catch (Throwable $exception) {
+            if ($this->job?->getConnectionName() === 'sync' && $this->syncToken !== null) {
+                report($exception);
+
+                return;
+            }
+
+            throw $exception;
+        }
+    }
+
+    private function hasCurrentSyncToken(Product $product): bool
+    {
+        if ($this->syncToken === null) {
+            return true;
+        }
+
+        return $product->channelMappings->contains(
+            fn (ProductChannelMapping $mapping): bool => data_get(
+                $mapping->metadata,
+                'product_data_export.pending_token',
+            ) === $this->syncToken,
+        );
+    }
+
+    private function clearCurrentSyncToken(): void
+    {
+        if ($this->syncToken === null) {
             return;
         }
 
-        $exporter->export($product);
+        DB::transaction(function (): void {
+            $mappings = ProductChannelMapping::query()
+                ->where('product_id', $this->productId)
+                ->lockForUpdate()
+                ->get();
+
+            $mappings->each(function (ProductChannelMapping $mapping): void {
+                $metadata = (array) $mapping->metadata;
+
+                if (data_get($metadata, 'product_data_export.pending_token') !== $this->syncToken) {
+                    return;
+                }
+
+                data_forget($metadata, 'product_data_export.pending_token');
+                data_forget($metadata, 'product_data_export.requested_at');
+                data_set($metadata, 'product_data_export.completed_at', now()->toISOString());
+                $mapping->forceFill(['metadata' => $metadata])->save();
+            });
+        });
     }
 
     public function failed(Throwable $exception): void
@@ -77,5 +162,34 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
                 'finished_at' => now(),
             ]);
         }
+
+        $this->markCurrentSyncTokenFailed($exception);
+    }
+
+    private function markCurrentSyncTokenFailed(Throwable $exception): void
+    {
+        if ($this->syncToken === null) {
+            return;
+        }
+
+        DB::transaction(function () use ($exception): void {
+            ProductChannelMapping::query()
+                ->where('product_id', $this->productId)
+                ->lockForUpdate()
+                ->get()
+                ->each(function (ProductChannelMapping $mapping) use ($exception): void {
+                    $metadata = (array) $mapping->metadata;
+
+                    if (data_get($metadata, 'product_data_export.pending_token') !== $this->syncToken) {
+                        return;
+                    }
+
+                    data_forget($metadata, 'product_data_export.pending_token');
+                    data_forget($metadata, 'product_data_export.requested_at');
+                    data_set($metadata, 'product_data_export.failed_at', now()->toISOString());
+                    data_set($metadata, 'product_data_export.error', $exception->getMessage());
+                    $mapping->forceFill(['metadata' => $metadata])->save();
+                });
+        });
     }
 }
