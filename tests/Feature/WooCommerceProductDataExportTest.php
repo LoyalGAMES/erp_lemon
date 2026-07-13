@@ -103,6 +103,7 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
             && $request['catalog_visibility'] === 'hidden'
+            && ! array_key_exists('low_stock_amount', $request->data())
             && $request['images'][0]['src'] === 'https://shop.test/wp-content/uploads/legacy.jpg');
         $this->assertNull(data_get(
             ProductChannelMapping::query()->where('product_id', $product->id)->firstOrFail()->metadata,

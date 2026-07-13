@@ -651,6 +651,7 @@ final class ProductDataExportService
         $salePriceStartsAt = data_get($master, 'prices.sale_price_starts_at');
         $salePriceEndsAt = data_get($master, 'prices.sale_price_ends_at');
         $publicationDate = $this->dateTimeString(data_get($master, 'publication_date'));
+        $lowStockAmount = data_get($master, 'inventory.low_stock_amount');
         $description = $this->descriptionSanitizer->sanitize(
             data_get($master, "content.{$language}.description")
                 ?? data_get($master, 'content.pl.description'),
@@ -681,7 +682,6 @@ final class ProductDataExportService
             'backorders' => $forceStorefrontStockZero
                 ? 'no'
                 : (string) data_get($master, 'inventory.backorders', 'no'),
-            'low_stock_amount' => data_get($master, 'inventory.low_stock_amount') ?? '',
             'sold_individually' => (bool) data_get($master, 'inventory.sold_individually', false),
             'weight' => $product->weight_kg !== null ? $this->decimal($product->weight_kg, 4) : '',
             'dimensions' => [
@@ -694,6 +694,10 @@ final class ProductDataExportService
 
         if ($publicationDate !== null) {
             $payload['date_created'] = $publicationDate;
+        }
+
+        if ($lowStockAmount !== null && $lowStockAmount !== '') {
+            $payload['low_stock_amount'] = $lowStockAmount;
         }
 
         if (! $isVariation) {
