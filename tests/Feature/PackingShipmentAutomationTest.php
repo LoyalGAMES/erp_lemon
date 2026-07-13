@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
 use App\Models\PackingTask;
 use App\Models\Product;
@@ -26,6 +27,171 @@ class PackingShipmentAutomationTest extends TestCase
     use RefreshDatabase;
 
     private int $sequence = 1200;
+
+    public function test_selecting_parcel_size_generates_prints_and_completes_order_in_one_request(): void
+    {
+        Storage::fake('local');
+        $channel = $this->createChannel();
+        $this->createIntegration($channel);
+        [$order, $task] = $this->createOrderWithTask($channel, 'picked', 'InPost');
+        $trackingNumber = '520000000000000000001201';
+
+        app(PackingSettingsService::class)->update([
+            'stations' => [[
+                'code' => 'station-auto',
+                'name' => 'Stanowisko automatyczne',
+                'printer_name' => 'Zebra AUTO',
+                'segment' => 'all',
+            ]],
+        ]);
+
+        Http::fake([
+            'https://shop.test/wp-json/ship/v1/orders/*/label' => Http::response([
+                'label_base64' => base64_encode('%PDF-1.4 one-click-label'),
+                'filename' => 'one-click-label.pdf',
+                'provider' => 'inpost',
+                'label_number' => 'AUTO-ONE-CLICK',
+                'tracking_number' => $trackingNumber,
+            ], 200),
+            'https://shop.test/wp-json/wc/v3/orders/*' => Http::response([
+                'status' => 'ready-to-ship',
+            ], 200),
+        ]);
+
+        $response = $this
+            ->withSession(['packing_station' => 'station-auto'])
+            ->postJson(route('packing.orders.complete-with-label', $order), [
+                'parcel_template' => 'large',
+            ]);
+
+        $label = ShippingLabel::query()->sole();
+
+        $response
+            ->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonPath('order_id', $order->id)
+            ->assertJsonPath('fulfillment_status', 'awaiting_courier')
+            ->assertJsonPath('label.id', $label->id)
+            ->assertJsonPath('print_job.status', 'pending')
+            ->assertJsonPath('already_completed', false);
+
+        $this->assertSame('shipment', $label->purpose);
+        $this->assertSame('generated', $label->status);
+        $this->assertSame($trackingNumber, $label->tracking_number);
+        $this->assertSame('large', data_get($label->response_payload, 'parcel_template'));
+        Storage::disk('local')->assertExists($label->path);
+
+        $this->assertDatabaseHas('print_jobs', [
+            'shipping_label_id' => $label->id,
+            'status' => 'pending',
+            'source' => 'packing.order.packed',
+            'station_code' => 'station-auto',
+            'printer_name' => 'Zebra AUTO',
+        ]);
+        $this->assertSame('packed', $task->fresh()->status);
+        $this->assertSame('awaiting_courier', $order->fresh()->fulfillment_status);
+        $this->assertSame(1, ShippingLabel::query()->shipments()->count());
+
+        Http::assertSent(fn ($request): bool => str_contains($request->url(), '/wp-json/ship/v1/orders/')
+            && data_get($request->data(), 'parcel_template') === 'large');
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && str_contains($request->url(), '/wp-json/wc/v3/orders/')
+            && data_get($request->data(), 'status') === 'ready-to-ship');
+    }
+
+    public function test_complete_with_label_without_selected_station_is_blocked_before_calling_api(): void
+    {
+        Storage::fake('local');
+        $channel = $this->createChannel();
+        $this->createIntegration($channel);
+        [$order, $task] = $this->createOrderWithTask($channel, 'picked', 'InPost');
+
+        Http::fake();
+
+        $this
+            ->withSession(['packing_station' => ''])
+            ->postJson(route('packing.orders.complete-with-label', $order), [
+                'parcel_template' => 'small',
+            ])
+            ->assertConflict()
+            ->assertJsonPath('ok', false);
+
+        Http::assertNothingSent();
+        $this->assertSame('picked', $task->fresh()->status);
+        $this->assertSame('ready_to_pack', $order->fresh()->fulfillment_status);
+        $this->assertDatabaseCount('shipping_labels', 0);
+        $this->assertDatabaseCount('print_jobs', 0);
+    }
+
+    public function test_complete_with_label_retry_is_idempotent(): void
+    {
+        Storage::fake('local');
+        $channel = $this->createChannel();
+        $this->createIntegration($channel);
+        [$order, $task] = $this->createOrderWithTask($channel, 'picked', 'InPost');
+
+        app(PackingSettingsService::class)->update([
+            'stations' => [[
+                'code' => 'station-auto',
+                'name' => 'Stanowisko automatyczne',
+                'printer_name' => 'Zebra AUTO',
+                'segment' => 'all',
+            ]],
+        ]);
+
+        Http::fake([
+            'https://shop.test/wp-json/ship/v1/orders/*/label' => Http::response([
+                'label_base64' => base64_encode('%PDF-1.4 retry-label'),
+                'filename' => 'retry-label.pdf',
+                'provider' => 'inpost',
+                'label_number' => 'AUTO-RETRY',
+                'tracking_number' => '520000000000000000001202',
+            ], 200),
+            'https://shop.test/wp-json/wc/v3/orders/*' => Http::response([
+                'status' => 'ready-to-ship',
+            ], 200),
+        ]);
+
+        $route = route('packing.orders.complete-with-label', $order);
+        $payload = ['parcel_template' => 'small'];
+
+        $this
+            ->withSession(['packing_station' => 'station-auto'])
+            ->postJson($route, $payload)
+            ->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonPath('already_completed', false);
+
+        $label = ShippingLabel::query()->sole();
+
+        $this
+            ->withSession(['packing_station' => 'station-auto'])
+            ->postJson($route, $payload)
+            ->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonPath('order_id', $order->id)
+            ->assertJsonPath('fulfillment_status', 'awaiting_courier')
+            ->assertJsonPath('label.id', $label->id)
+            ->assertJsonPath('print_job.status', 'pending')
+            ->assertJsonPath('already_completed', true);
+
+        $this->assertDatabaseCount('shipping_labels', 1);
+        $this->assertDatabaseCount('print_jobs', 1);
+        $this->assertSame('packed', $task->fresh()->status);
+        $this->assertSame('awaiting_courier', $order->fresh()->fulfillment_status);
+
+        $labelRequests = Http::recorded()
+            ->filter(fn (array $record): bool => str_contains($record[0]->url(), '/wp-json/ship/v1/orders/'));
+
+        $this->assertCount(1, $labelRequests);
+        $this->assertSame(
+            1,
+            CustomerMessage::query()
+                ->where('external_order_id', $order->id)
+                ->where('trigger', 'order_packed')
+                ->count(),
+        );
+    }
 
     public function test_finishing_collection_requires_manual_gabaryt_selection_before_generating_label(): void
     {

@@ -614,7 +614,7 @@ final class CustomerMailContextService
             'current' => $current,
             'total' => 5,
             'labels' => ['Złożone', 'W realizacji', 'Spakowane', 'W drodze', 'Dostarczone'],
-            'cancelled' => in_array($trigger, ['order_cancelled', 'order_payment_failed', 'order_refunded'], true),
+            'cancelled' => in_array($trigger, ['order_cancelled', 'order_cancelled_problem', 'order_payment_failed', 'order_refunded'], true),
         ];
     }
 
@@ -667,7 +667,7 @@ final class CustomerMailContextService
             'order_payment_failed' => 'Płatność online nie została potwierdzona — możesz bezpiecznie ponowić ją przyciskiem w tej wiadomości.',
             'order_received', 'order_packed', 'order_invoice_ready', 'order_packing_rollback', 'order_courier_picked_up', 'order_delivered' => 'Płatność online została potwierdzona.',
             'order_payment_received' => 'Wpłata została zaksięgowana w zamówieniu.',
-            'order_cancelled', 'order_refunded' => '',
+            'order_cancelled', 'order_cancelled_problem', 'order_refunded' => '',
             default => 'Płatność online — jeśli poprzednia próba nie została ukończona, możesz bezpiecznie wrócić do płatności.',
         };
     }

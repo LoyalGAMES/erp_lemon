@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
 use App\Models\Invoice;
 use App\Models\PackingTask;
@@ -16,6 +17,7 @@ use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\Invoices\InvoiceSettingsService;
+use App\Services\Packing\PackingTaskService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -133,7 +135,7 @@ class PackingWorkflowTest extends TestCase
         $this->get(route('packing.index', ['view' => 'pack']))
             ->assertOk()
             ->assertSee('Zamówienie 501')
-            ->assertSee('Spakuj')
+            ->assertSee('Wybierz gabaryt paczki')
             ->assertSee('Uwagi z WooCommerce')
             ->assertSee('Notatka z WooCommerce')
             ->assertSee('Proszę zapakować na prezent.')
@@ -294,9 +296,11 @@ class PackingWorkflowTest extends TestCase
         $task = PackingTask::query()->firstOrFail();
         $this->assertSame('A-01-03', data_get($task->metadata, 'warehouse_location'));
 
-        $this->post(route('packing.groups.pick'), ['task_ids' => [$task->id]])
-            ->assertRedirect()
-            ->assertSessionHas('status');
+        $this->postJson(route('packing.groups.pick'), ['task_ids' => [$task->id]])
+            ->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonPath('action', 'collect.picked')
+            ->assertJsonPath('ui.remove_submitted_card', true);
 
         $task->refresh();
         $this->assertSame('picked', $task->status);
@@ -306,7 +310,7 @@ class PackingWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee('Pakowanie')
             ->assertSee('Zamówienie 601')
-            ->assertSee('Spakuj');
+            ->assertSee('Wybierz gabaryt paczki');
 
         $this->post(route('packing.orders.pack', $order))
             ->assertRedirect()
@@ -839,7 +843,7 @@ class PackingWorkflowTest extends TestCase
         $this->get(route('packing.index', ['view' => 'pack']))
             ->assertOk()
             ->assertSee('Zamówienie 901')
-            ->assertSee('Spakuj');
+            ->assertSee('Wybierz gabaryt paczki');
 
         Http::assertSent(function ($request): bool {
             $data = $request->data();
@@ -938,13 +942,30 @@ class PackingWorkflowTest extends TestCase
             ->assertDontSee('Zamówienie 912');
     }
 
-    public function test_operator_can_move_pick_group_to_problem_queue_and_restore_it(): void
+    public function test_pick_group_problem_requires_reason_and_cancelled_problem_remains_read_only(): void
     {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/orders/701*' => Http::response([
+                'id' => 701,
+                'number' => '701',
+                'status' => 'cancelled',
+            ], 200),
+        ]);
+
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
             'name' => 'Sklep B2C',
             'type' => 'woocommerce',
             'is_active' => true,
+        ]);
+
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Sempre WooCommerce',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
         ]);
 
         $product = Product::query()->create([
@@ -963,6 +984,11 @@ class PackingWorkflowTest extends TestCase
             'status' => 'processing',
             'currency' => 'PLN',
             'total_gross' => 149,
+            'billing_data' => [
+                'first_name' => 'Anna',
+                'last_name' => 'Kowalska',
+                'email' => 'anna@example.test',
+            ],
             'raw_payload' => [
                 'shipping_lines' => [
                     ['method_title' => 'DPD'],
@@ -985,37 +1011,84 @@ class PackingWorkflowTest extends TestCase
 
         $this->post(route('packing.groups.problem'), [
             'task_ids' => [$task->id],
-            'reason' => 'Brak produktu na półce',
         ])
             ->assertRedirect()
-            ->assertSessionHas('status');
+            ->assertSessionHasErrors('reason');
+
+        $this->assertSame('open', $task->fresh()->status);
+        $this->assertSame('processing', $order->fresh()->status);
+        $this->assertSame(0, CustomerMessage::query()->count());
+
+        $this->postJson(route('packing.groups.problem'), [
+            'task_ids' => [$task->id],
+            'reason' => 'Brak produktu na półce',
+        ])
+            ->assertOk()
+            ->assertJsonPath('ok', true)
+            ->assertJsonPath('action', 'collect.problem')
+            ->assertJsonPath('ui.destination', 'problems');
 
         $task->refresh();
+        $order->refresh();
         $this->assertSame('problem', $task->status);
+        $this->assertSame('cancelled', $order->status);
         $this->assertSame('Brak produktu na półce', data_get($task->metadata, 'packing_problem.reason'));
 
-        $this->get(route('packing.index', ['view' => 'problems']))
+        $message = CustomerMessage::query()->sole();
+        $this->assertSame($order->id, $message->external_order_id);
+        $this->assertSame('order_cancelled_problem', $message->trigger);
+        $this->assertSame('Brak produktu na półce', data_get($message->metadata, 'problem_note'));
+        $this->assertStringContainsString('Brak produktu na półce', $message->renderedBody());
+
+        app(PackingTaskService::class)->syncReadyOrders();
+
+        $this->assertSame('problem', $task->fresh()->status);
+
+        $response = $this->get(route('packing.index', ['view' => 'problems']));
+
+        $response
             ->assertOk()
             ->assertSee('Do wyjaśnienia')
             ->assertSee('Brak produktu na półce')
-            ->assertSee('Przywróć do kolejki');
+            ->assertDontSee('Przywróć do kolejki');
+
+        $this->assertStringContainsString('anulowan', mb_strtolower(strip_tags($response->getContent())));
 
         $this->post(route('packing.tasks.reopen', $task))
             ->assertRedirect()
-            ->assertSessionHas('status');
+            ->assertSessionHas('error');
 
-        $task->refresh();
-        $this->assertSame('open', $task->status);
-        $this->assertNull(data_get($task->metadata, 'packing_problem'));
+        $this->assertSame('problem', $task->fresh()->status);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && str_contains($request->url(), '/wp-json/wc/v3/orders/701')
+            && ($request->data()['status'] ?? null) === 'cancelled');
     }
 
-    public function test_operator_can_move_ready_order_to_problem_queue(): void
+    public function test_ready_order_problem_requires_reason_and_cancels_order_with_customer_message(): void
     {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/orders/702*' => Http::response([
+                'id' => 702,
+                'number' => '702',
+                'status' => 'cancelled',
+            ], 200),
+        ]);
+
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
             'name' => 'Sklep B2C',
             'type' => 'woocommerce',
             'is_active' => true,
+        ]);
+
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Sempre WooCommerce',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
         ]);
 
         $product = Product::query()->create([
@@ -1034,6 +1107,11 @@ class PackingWorkflowTest extends TestCase
             'status' => 'processing',
             'currency' => 'PLN',
             'total_gross' => 819,
+            'billing_data' => [
+                'first_name' => 'Maria',
+                'last_name' => 'Nowak',
+                'email' => 'maria@example.test',
+            ],
             'raw_payload' => [
                 'shipping_lines' => [
                     ['method_title' => 'InPost Kurier'],
@@ -1058,6 +1136,14 @@ class PackingWorkflowTest extends TestCase
             ->assertRedirect()
             ->assertSessionHas('status');
 
+        $this->post(route('packing.orders.problem', $order), [])
+            ->assertRedirect()
+            ->assertSessionHasErrors('reason');
+
+        $this->assertSame('picked', $task->fresh()->status);
+        $this->assertSame('processing', $order->fresh()->status);
+        $this->assertSame(0, CustomerMessage::query()->count());
+
         $this->post(route('packing.orders.problem', $order), [
             'reason' => 'Adres wymaga wyjaśnienia',
         ])
@@ -1065,13 +1151,30 @@ class PackingWorkflowTest extends TestCase
             ->assertSessionHas('status');
 
         $task->refresh();
+        $order->refresh();
         $this->assertSame('problem', $task->status);
+        $this->assertSame('cancelled', $order->status);
         $this->assertSame('Adres wymaga wyjaśnienia', data_get($task->metadata, 'packing_problem.reason'));
 
-        $this->get(route('packing.index', ['view' => 'problems']))
+        $message = CustomerMessage::query()->sole();
+        $this->assertSame($order->id, $message->external_order_id);
+        $this->assertSame('order_cancelled_problem', $message->trigger);
+        $this->assertSame('Adres wymaga wyjaśnienia', data_get($message->metadata, 'problem_note'));
+        $this->assertStringContainsString('Adres wymaga wyjaśnienia', $message->renderedBody());
+
+        $response = $this->get(route('packing.index', ['view' => 'problems']));
+
+        $response
             ->assertOk()
             ->assertSee('Do wyjaśnienia')
-            ->assertSee('Adres wymaga wyjaśnienia');
+            ->assertSee('Adres wymaga wyjaśnienia')
+            ->assertDontSee('Przywróć do kolejki');
+
+        $this->assertStringContainsString('anulowan', mb_strtolower(strip_tags($response->getContent())));
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && str_contains($request->url(), '/wp-json/wc/v3/orders/702')
+            && ($request->data()['status'] ?? null) === 'cancelled');
     }
 
     public function test_on_hold_order_is_not_available_for_mobile_picking(): void

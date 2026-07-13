@@ -150,6 +150,13 @@
         .problem-card { border: 1px solid #f0c3c3; border-radius: 8px; padding: 12px; background: #fffafa; display: grid; gap: 8px; }
         .problem-card-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
         .problem-reason { color: var(--red); font-weight: 780; }
+        .problem-order-items { display: grid; gap: 6px; }
+        .problem-order-item { border-top: 1px solid #f0dada; padding-top: 7px; }
+        .packing-action-toast { position: fixed; z-index: 110; right: 18px; bottom: 18px; width: min(460px, calc(100vw - 36px)); border: 1px solid rgba(42, 111, 73, .35); border-radius: 8px; padding: 13px 15px; background: #eff9f2; color: var(--green-dark); font-weight: 760; box-shadow: 0 16px 40px rgba(33, 28, 24, .2); }
+        .packing-action-toast.error { border-color: #efb9b9; background: #fff0f0; color: var(--red); }
+        .packing-action-error { grid-column: 1 / -1; border: 1px solid #efb9b9; border-radius: 7px; padding: 9px 11px; background: #fff0f0; color: var(--red); font-weight: 720; }
+        [data-packing-card][aria-busy="true"] { opacity: .66; pointer-events: none; }
+        [data-packing-card].packing-card-removing { opacity: 0; transform: translateY(-4px); transition: opacity .16s ease, transform .16s ease; }
         @media (max-width: 1100px) {
             .packing-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
             .order-actions { grid-template-columns: 1fr; }
@@ -235,14 +242,17 @@
             ? $activeStation['name'] . ($activeStation['printer_name'] !== '' ? ' · ' . $activeStation['printer_name'] : '')
             : 'Bez stanowiska';
         $shippingProviderResolver = app(\App\Services\Shipping\ShippingProviderResolver::class);
+        $problemOrders = $problemTasks->groupBy('external_order_id');
         $workflowTabs = [
             'collect' => ['label' => 'Kompletacja', 'count' => $collectOrdersCount],
             'pack' => ['label' => 'Pakowanie', 'count' => $readyOrders->count()],
             'waiting' => ['label' => 'Oczekuje na kuriera', 'count' => $waitingCourierOrders],
             'shipped' => ['label' => 'Wysłane', 'count' => $shippedOrdersCount],
-            'problems' => ['label' => 'Problemy', 'count' => $problemTasks->count()],
+            'problems' => ['label' => 'Problemy', 'count' => $problemOrders->count()],
         ];
     @endphp
+
+    <div class="packing-action-toast" data-packing-action-toast role="status" aria-live="polite" hidden></div>
 
     @if ($packingView === 'home')
         <section class="packing-toolbar" aria-label="Ustawienia pracy pakowania">
@@ -373,7 +383,7 @@
                     @php
                         $problemFormId = 'problem-order-' . md5(implode('-', $collectOrder['task_ids']));
                     @endphp
-                    <article class="order-card collect-order-card">
+                    <article class="order-card collect-order-card" data-packing-card>
                         <div class="order-card-header">
                             <div>
                                 <div class="order-title">Zamówienie {{ $collectOrder['order_number'] }}</div>
@@ -416,15 +426,15 @@
                         </div>
 
                         <div class="collect-actions">
-                            <form id="{{ $problemFormId }}" method="POST" action="{{ route('packing.groups.problem') }}">
+                            <form id="{{ $problemFormId }}" method="POST" action="{{ route('packing.groups.problem') }}" data-packing-ajax>
                                 @csrf
                                 @foreach ($collectOrder['task_ids'] as $taskId)
                                     <input type="hidden" name="task_ids[]" value="{{ $taskId }}">
                                 @endforeach
-                                <input name="reason" placeholder="Notatka problemu">
+                                <input name="reason" placeholder="Notatka problemu dla klienta" required maxlength="1000">
                                 <button class="button danger" type="submit">Problem</button>
                             </form>
-                            <form method="POST" action="{{ route('packing.groups.pick') }}">
+                            <form method="POST" action="{{ route('packing.groups.pick') }}" data-packing-ajax>
                                 @csrf
                                 @foreach ($collectOrder['task_ids'] as $taskId)
                                     <input type="hidden" name="task_ids[]" value="{{ $taskId }}">
@@ -495,7 +505,7 @@
                         $email = data_get($billing, 'email') ?: '-';
                         $payment = data_get($firstTask?->metadata, 'payment_method') ?: '-';
                     @endphp
-                    <article class="order-card">
+                    <article class="order-card" data-packing-card>
                         <div class="order-card-header">
                             <div>
                                 <div class="order-title"><a href="{{ route('orders.show', $order) }}">Zamówienie {{ $order->external_number }}</a></div>
@@ -571,7 +581,7 @@
                                     </div>
                                 </div>
                             @else
-                                <form class="label-account-form" method="POST" action="{{ route('packing.orders.label', $order) }}">
+                                <form class="label-account-form" method="POST" action="{{ route('packing.orders.complete-with-label', $order) }}" data-packing-ajax>
                                     @csrf
                                     @if ($courierAccounts->isNotEmpty())
                                         <select name="courier_account_id" aria-label="Konto nadawcze InPost">
@@ -582,27 +592,29 @@
                                         </select>
                                     @endif
                                     <div class="label-size-actions" role="group" aria-label="Wybierz gabaryt paczki">
-                                        <button class="button secondary" type="submit" name="parcel_template" value="small" aria-label="Generuj etykietę, gabaryt A">
+                                        <button class="button secondary" type="submit" name="parcel_template" value="small" aria-label="Generuj etykietę, wydrukuj i spakuj, gabaryt A">
                                             A<small>mała</small>
                                         </button>
-                                        <button class="button secondary" type="submit" name="parcel_template" value="medium" aria-label="Generuj etykietę, gabaryt B">
+                                        <button class="button secondary" type="submit" name="parcel_template" value="medium" aria-label="Generuj etykietę, wydrukuj i spakuj, gabaryt B">
                                             B<small>średnia</small>
                                         </button>
-                                        <button class="button secondary" type="submit" name="parcel_template" value="large" aria-label="Generuj etykietę, gabaryt C">
+                                        <button class="button secondary" type="submit" name="parcel_template" value="large" aria-label="Generuj etykietę, wydrukuj i spakuj, gabaryt C">
                                             C<small>duża</small>
                                         </button>
                                     </div>
                                 </form>
                             @endif
-                            <form class="order-problem-form" method="POST" action="{{ route('packing.orders.problem', $order) }}">
+                            <form class="order-problem-form" method="POST" action="{{ route('packing.orders.problem', $order) }}" data-packing-ajax>
                                 @csrf
-                                <input name="reason" placeholder="Notatka problemu">
+                                <input name="reason" placeholder="Notatka problemu dla klienta" required maxlength="1000">
                                 <button class="button danger" type="submit">Problem</button>
                             </form>
-                            <form method="POST" action="{{ route('packing.orders.pack', $order) }}">
-                                @csrf
-                                <button class="button" type="submit">Spakuj</button>
-                            </form>
+                            @if ($shippingLabel)
+                                <form method="POST" action="{{ route('packing.orders.pack', $order) }}" data-packing-ajax>
+                                    @csrf
+                                    <button class="button" type="submit">Spakuj i wydrukuj</button>
+                                </form>
+                            @endif
                         </div>
                     </article>
                 @empty
@@ -717,32 +729,53 @@
                 <section class="card problem-panel">
                     <div class="panel-header">
                         <span>Do wyjaśnienia</span>
-                        <span>{{ $problemTasks->count() }} pozycji</span>
+                        <span>{{ $problemOrders->count() }} zam. · {{ $problemTasks->count() }} poz.</span>
                     </div>
                     <div class="problem-list">
-                        @forelse ($problemTasks as $task)
+                        @forelse ($problemOrders as $tasksForProblemOrder)
                             @php
-                                $problemReason = data_get($task->metadata, 'packing_problem.reason', 'Do wyjaśnienia');
-                                $problemAt = data_get($task->metadata, 'packing_problem.reported_at');
-                                $problemLocation = data_get($task->metadata, 'warehouse_location')
-                                    ?: data_get($task->product?->attributes, 'master.stock.location')
-                                    ?: data_get($task->product?->attributes, 'warehouse_location')
-                                    ?: '-';
+                                $problemTask = $tasksForProblemOrder->first();
+                                $problemOrder = $problemTask?->order;
+                                $problemReason = data_get($problemTask?->metadata, 'packing_problem.reason', 'Do wyjaśnienia');
+                                $problemAt = data_get($problemTask?->metadata, 'packing_problem.reported_at');
+                                $problemMailStatus = data_get($problemTask?->metadata, 'packing_problem.customer_message_status');
                             @endphp
                             <article class="problem-card">
                                 <div class="problem-card-header">
                                     <div>
-                                        <strong>{{ $task->product_name }}</strong><br>
-                                        <span class="muted">{{ $task->sku ?: 'brak SKU' }} · lok. {{ $problemLocation }} · zam. {{ $task->order_number }} · {{ $task->courier ?: 'Kurier' }}</span>
+                                        <strong>
+                                            @if ($problemOrder)
+                                                <a href="{{ route('orders.show', $problemOrder) }}">Zamówienie {{ $problemOrder->external_number }}</a>
+                                            @else
+                                                Zamówienie {{ $problemTask?->order_number }}
+                                            @endif
+                                        </strong><br>
+                                        <span class="muted">{{ $problemTask?->customer_name ?: '-' }} · {{ $problemTask?->courier ?: 'Kurier' }} · {{ $tasksForProblemOrder->count() }} poz.</span>
                                     </div>
-                                    <span class="status red">Problem</span>
+                                    <span class="status red">{{ $problemOrder?->status === 'cancelled' ? 'Anulowane' : 'Problem' }}</span>
                                 </div>
-                                <div class="problem-reason">{{ $problemReason }}</div>
-                                <div class="muted">Zgłoszono: {{ $problemAt ? \Illuminate\Support\Carbon::parse($problemAt)->format('Y-m-d H:i') : $task->updated_at?->format('Y-m-d H:i') }}</div>
-                                <form method="POST" action="{{ route('packing.tasks.reopen', $task) }}">
-                                    @csrf
-                                    <button class="button secondary" type="submit">Przywróć do kolejki</button>
-                                </form>
+                                <div class="problem-reason">Notatka: {{ $problemReason }}</div>
+                                <div class="problem-order-items">
+                                    @foreach ($tasksForProblemOrder as $task)
+                                        @php
+                                            $problemLocation = data_get($task->metadata, 'warehouse_location')
+                                                ?: data_get($task->product?->attributes, 'master.stock.location')
+                                                ?: data_get($task->product?->attributes, 'warehouse_location')
+                                                ?: '-';
+                                        @endphp
+                                        <div class="problem-order-item">
+                                            <strong>{{ $task->product_name }}</strong>
+                                            <span class="muted"> · {{ $task->sku ?: 'brak SKU' }} · lok. {{ $problemLocation }} · {{ $qty($task->quantity_required) }} szt.</span>
+                                        </div>
+                                    @endforeach
+                                </div>
+                                <div class="muted">
+                                    Zgłoszono: {{ $problemAt ? \Illuminate\Support\Carbon::parse($problemAt)->format('Y-m-d H:i') : $problemTask?->updated_at?->format('Y-m-d H:i') }}
+                                    · Status WooCommerce: {{ $problemOrder?->status ?: '-' }}
+                                    @if ($problemMailStatus)
+                                        · E-mail: {{ $problemMailStatus }}
+                                    @endif
+                                </div>
                             </article>
                         @empty
                             <div class="packing-empty">Nie ma pozycji wymagających wyjaśnienia.</div>
@@ -918,6 +951,151 @@
                     closeDrawer();
                 }
             });
+        })();
+
+        (() => {
+            const forms = document.querySelectorAll('form[data-packing-ajax]');
+            const toast = document.querySelector('[data-packing-action-toast]');
+            let toastTimer = null;
+
+            if (forms.length === 0) {
+                return;
+            }
+
+            const showMessage = (message, isError = false) => {
+                if (!toast) {
+                    return;
+                }
+
+                window.clearTimeout(toastTimer);
+                toast.textContent = message;
+                toast.classList.toggle('error', isError);
+                toast.setAttribute('role', isError ? 'alert' : 'status');
+                toast.hidden = false;
+                toastTimer = window.setTimeout(() => {
+                    toast.hidden = true;
+                }, 7000);
+            };
+
+            const errorMessage = (payload, fallback) => {
+                const validationMessage = Object.values(payload?.errors ?? {})
+                    .flat()
+                    .find((message) => typeof message === 'string' && message !== '');
+
+                return validationMessage || payload?.message || fallback;
+            };
+
+            const showCardError = (card, message) => {
+                if (!card) {
+                    return;
+                }
+
+                let box = card.querySelector('[data-packing-action-error]');
+                if (!box) {
+                    box = document.createElement('div');
+                    box.className = 'packing-action-error';
+                    box.dataset.packingActionError = '';
+                    box.setAttribute('role', 'alert');
+                    card.append(box);
+                }
+                box.textContent = message;
+            };
+
+            const updateCurrentCount = (container) => {
+                const remaining = container?.querySelectorAll(':scope > [data-packing-card]').length ?? 0;
+                const workflowCount = document.querySelector('.packing-workflow-tab.active .packing-workflow-tab-count');
+                const segmentCount = document.querySelector('.segment-tab.active .segment-tab-count');
+
+                if (workflowCount) {
+                    workflowCount.textContent = String(remaining);
+                }
+                if (segmentCount) {
+                    segmentCount.textContent = String(remaining);
+                }
+            };
+
+            forms.forEach((form) => form.addEventListener('submit', async (event) => {
+                event.preventDefault();
+
+                if (form.dataset.packingSubmitting === 'true') {
+                    return;
+                }
+
+                const card = form.closest('[data-packing-card]');
+                const container = card?.parentElement ?? null;
+                const scrollPosition = window.scrollY;
+                const formData = new FormData(form);
+                const submitter = event.submitter;
+
+                if (submitter?.name) {
+                    formData.set(submitter.name, submitter.value);
+                }
+
+                const controls = card
+                    ? Array.from(card.querySelectorAll('button, input, select, textarea'))
+                    : Array.from(form.querySelectorAll('button, input, select, textarea'));
+                const disabledState = controls.map((control) => control.disabled);
+                let removeCardAfterSuccess = false;
+
+                form.dataset.packingSubmitting = 'true';
+                card?.setAttribute('aria-busy', 'true');
+                card?.querySelector('[data-packing-action-error]')?.remove();
+                controls.forEach((control) => {
+                    control.disabled = true;
+                });
+
+                try {
+                    const response = await fetch(form.action, {
+                        method: form.method || 'POST',
+                        body: formData,
+                        credentials: 'same-origin',
+                        headers: {
+                            'Accept': 'application/json',
+                            'X-Requested-With': 'XMLHttpRequest',
+                        },
+                    });
+                    const payload = await response.json().catch(() => ({}));
+
+                    if (!response.ok || payload.ok !== true) {
+                        throw new Error(errorMessage(payload, `Nie udało się wykonać akcji (HTTP ${response.status}).`));
+                    }
+
+                    showMessage(payload.message || 'Akcja została wykonana.');
+
+                    if (payload.ui?.remove_submitted_card && card) {
+                        removeCardAfterSuccess = true;
+                        card.classList.add('packing-card-removing');
+                        window.setTimeout(() => {
+                            card.remove();
+                            updateCurrentCount(container);
+
+                            if (container && !container.querySelector('[data-packing-card]')) {
+                                const empty = document.createElement('div');
+                                empty.className = 'packing-empty';
+                                empty.textContent = 'Brak kolejnych zamówień na tej liście.';
+                                container.append(empty);
+                            }
+
+                            const maxScroll = Math.max(0, document.documentElement.scrollHeight - window.innerHeight);
+                            window.scrollTo({top: Math.min(scrollPosition, maxScroll), behavior: 'auto'});
+                        }, 170);
+                    }
+                } catch (error) {
+                    const message = error instanceof Error
+                        ? error.message
+                        : 'Nie udało się wykonać akcji. Sprawdź połączenie i spróbuj ponownie.';
+                    showCardError(card, message);
+                    showMessage(message, true);
+                } finally {
+                    form.dataset.packingSubmitting = 'false';
+                    if (!removeCardAfterSuccess) {
+                        card?.removeAttribute('aria-busy');
+                        controls.forEach((control, index) => {
+                            control.disabled = disabledState[index];
+                        });
+                    }
+                }
+            }));
         })();
     </script>
 @endpush

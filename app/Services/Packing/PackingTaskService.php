@@ -43,7 +43,7 @@ final class PackingTaskService
         });
 
         $cancelledQuery = PackingTask::query()
-            ->whereIn('status', ['open', 'picked', 'problem'])
+            ->whereIn('status', ['open', 'picked'])
             ->whereHas('order', fn ($query) => $query->whereNotIn('status', $this->statusPolicy->packingReadyStatuses()));
         $cancelledOrderIds = (clone $cancelledQuery)->pluck('external_order_id')->unique();
         $cancelled += $cancelledQuery->update(['status' => 'cancelled']);
@@ -168,7 +168,7 @@ final class PackingTaskService
 
         $query = PackingTask::query()
             ->where('external_order_id', $order->id)
-            ->whereIn('status', ['open', 'picked', 'problem']);
+            ->whereIn('status', ['open', 'picked']);
 
         if ($activeExternalLineIds->isNotEmpty()) {
             $query->where(function ($query) use ($activeExternalLineIds): void {
@@ -402,10 +402,36 @@ final class PackingTaskService
         return $this->markProblemMany($taskIds, $reason);
     }
 
+    /**
+     * @param  array<string, mixed>  $details
+     */
+    public function annotateOrderProblem(ExternalOrder $order, array $details): void
+    {
+        PackingTask::query()
+            ->where('external_order_id', $order->id)
+            ->where('status', 'problem')
+            ->get()
+            ->each(function (PackingTask $task) use ($details): void {
+                $metadata = (array) $task->metadata;
+                $metadata['packing_problem'] = array_merge(
+                    (array) ($metadata['packing_problem'] ?? []),
+                    $details,
+                );
+
+                $task->update(['metadata' => $metadata]);
+            });
+    }
+
     public function reopenProblem(PackingTask $task): PackingTask
     {
         if ($task->status !== 'problem') {
             throw new RuntimeException('Tylko pozycję w statusie problem można przywrócić do kolejki.');
+        }
+
+        $task->loadMissing('order');
+        if ($task->order?->status === 'cancelled'
+            || filled(data_get($task->metadata, 'packing_problem.cancelled_at'))) {
+            throw new RuntimeException('Anulowane zamówienie z listy problemów jest tylko do odczytu.');
         }
 
         $metadata = (array) $task->metadata;

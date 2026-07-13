@@ -154,6 +154,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/packing/orders/{order}/pack', [PackingController::class, 'packOrder'])->name('packing.orders.pack');
         Route::post('/packing/orders/{order}/unpack', [PackingController::class, 'unpackOrder'])->name('packing.orders.unpack');
         Route::post('/packing/orders/{order}/problem', [PackingController::class, 'problemOrder'])->name('packing.orders.problem');
+        Route::post('/packing/orders/{order}/complete-with-label', [PackingController::class, 'completeWithLabel'])->name('packing.orders.complete-with-label');
         Route::post('/packing/orders/{order}/label', [PackingController::class, 'label'])->name('packing.orders.label');
         Route::post('/packing/couriers/check-pickups', [PackingController::class, 'checkCourierPickups'])->name('packing.couriers.check-pickups');
         Route::post('/packing/couriers/pickup', [PackingController::class, 'courierPickup'])->name('packing.couriers.pickup');

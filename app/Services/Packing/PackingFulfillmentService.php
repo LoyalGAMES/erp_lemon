@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Packing;
 
+use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\Invoice;
 use App\Models\PackingTask;
@@ -18,6 +19,7 @@ use App\Services\Invoices\OrderInvoiceService;
 use App\Services\Orders\OrderFulfillmentStatusService;
 use App\Services\Orders\OrderWzDocumentService;
 use App\Services\Printing\ShippingLabelPrintQueueService;
+use App\Services\Shipping\ShippingLabelService;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use App\Services\WooCommerce\WooCommerceOrderStatusService;
 use Illuminate\Contracts\Cache\LockTimeoutException;
@@ -42,6 +44,7 @@ final class PackingFulfillmentService
         private readonly DocumentAutomationSettingsService $automationSettings,
         private readonly ShippingLabelPrintQueueService $printQueue,
         private readonly CustomerCommunicationService $communication,
+        private readonly ShippingLabelService $shippingLabels,
     ) {}
 
     /**
@@ -62,25 +65,125 @@ final class PackingFulfillmentService
     }
 
     /**
+     * Generuje etykietę, kolejkuje jej wydruk i kończy pakowanie jako jedną
+     * idempotentną operację użytkownika.
+     *
+     * @param  array{code:string,name:string,printer_name:string,segment:string}|null  $printStation
+     * @return array{packed:int,label:ShippingLabel,print_job:PrintJob,wz:list<WarehouseDocument>,invoice:?Invoice,woo_status:?string,warnings:list<string>,already_completed:bool}
+     */
+    public function completePackedOrderWithLabel(
+        ExternalOrder $order,
+        ?CourierAccount $courierAccount,
+        string $parcelTemplate,
+        ?array $printStation,
+    ): array {
+        if ($printStation === null) {
+            throw new RuntimeException('Wybierz stanowisko pakowania z przypisaną drukarką Windows.');
+        }
+
+        if (trim((string) ($printStation['printer_name'] ?? '')) === '') {
+            throw new RuntimeException('Wybrane stanowisko nie ma przypisanej drukarki Windows.');
+        }
+
+        try {
+            return Cache::lock($this->orderLockKey($order), self::ORDER_LOCK_SECONDS)
+                ->block(15, fn (): array => $this->completePackedOrderWithLabelWhileLocked(
+                    $order,
+                    $courierAccount,
+                    $parcelTemplate,
+                    $printStation,
+                ));
+        } catch (LockTimeoutException $exception) {
+            throw new RuntimeException(
+                'To zamówienie jest właśnie pakowane. Spróbuj ponownie za chwilę.',
+                previous: $exception,
+            );
+        }
+    }
+
+    /**
+     * @param  array{code:string,name:string,printer_name:string,segment:string}  $printStation
+     * @return array{packed:int,label:ShippingLabel,print_job:PrintJob,wz:list<WarehouseDocument>,invoice:?Invoice,woo_status:?string,warnings:list<string>,already_completed:bool}
+     */
+    private function completePackedOrderWithLabelWhileLocked(
+        ExternalOrder $order,
+        ?CourierAccount $courierAccount,
+        string $parcelTemplate,
+        array $printStation,
+    ): array {
+        $order = ExternalOrder::query()->with('invoices')->findOrFail($order->id);
+        $tasks = PackingTask::query()
+            ->where('external_order_id', $order->id)
+            ->where('status', '!=', 'cancelled')
+            ->get();
+
+        if ($tasks->isEmpty()) {
+            throw new RuntimeException('Brak pozycji pakowania dla tego zamówienia.');
+        }
+
+        if ($order->fulfillment_status === 'awaiting_courier'
+            && $tasks->every(fn (PackingTask $task): bool => $task->status === 'packed')) {
+            $label = $this->generatedLabelFor($order);
+
+            if (! $label instanceof ShippingLabel) {
+                throw new RuntimeException('Zamówienie jest spakowane, ale nie ma zapisanej etykiety wysyłkowej.');
+            }
+
+            $printJob = $this->printQueue->enqueueForStation($label, $printStation, 'packing.order.packed');
+
+            if (! $printJob instanceof PrintJob) {
+                throw new RuntimeException('Nie udało się dodać etykiety do kolejki automatycznego wydruku.');
+            }
+
+            return [
+                'packed' => $tasks->count(),
+                'label' => $label,
+                'print_job' => $printJob,
+                'wz' => [],
+                'invoice' => $order->invoices->sortByDesc('id')->first(),
+                'woo_status' => $order->status,
+                'warnings' => [],
+                'already_completed' => true,
+            ];
+        }
+
+        if ($tasks->contains(fn (PackingTask $task): bool => $task->status !== 'picked')) {
+            throw new RuntimeException('Najpierw zbierz wszystkie pozycje z tego zamówienia.');
+        }
+
+        $label = $this->shippingLabels->generateForOrder($order, $courierAccount, $parcelTemplate);
+
+        [$packed, $printJob] = DB::transaction(function () use ($order, $label, $printStation): array {
+            $packed = $this->packingTasks->markOrderPacked($order);
+            $printJob = $this->printQueue->enqueueForStation($label, $printStation, 'packing.order.packed');
+
+            if (! $printJob instanceof PrintJob) {
+                throw new RuntimeException('Nie udało się dodać etykiety do kolejki automatycznego wydruku.');
+            }
+
+            return [$packed, $printJob];
+        });
+
+        return $this->finishPackedOrderAutomation(
+            $order,
+            $printStation,
+            $label,
+            $packed,
+            $printJob,
+            [],
+        ) + ['already_completed' => false];
+    }
+
+    /**
      * @param  array{code:string,name:string,printer_name:string,segment:string}|null  $printStation
      * @return array{packed:int,label:?ShippingLabel,print_job:?PrintJob,wz:list<WarehouseDocument>,invoice:?Invoice,woo_status:?string,warnings:list<string>}
      */
     private function completePackedOrderWhileLocked(ExternalOrder $order, ?array $printStation = null): array
     {
         $warnings = [];
-        $createWzIfMissing = $this->automationSettings->actionEnabled('packing.order.packed', 'order.wz.create_if_missing');
-        $postWz = $this->automationSettings->actionEnabled('packing.order.packed', 'order.wz.post');
-        $issueInvoiceOnPack = $this->automationSettings->actionEnabled('packing.order.packed', 'order.invoice.create_upload');
-        $label = ShippingLabel::query()
-            ->shipments()
-            ->where('external_order_id', $order->id)
-            ->where('status', 'generated')
-            ->latest('generated_at')
-            ->latest('id')
-            ->first();
+        $label = $this->generatedLabelFor($order);
 
         $packed = $this->packingTasks->markOrderPacked($order);
-        $order = ExternalOrder::query()->with('invoices')->findOrFail($order->id);
 
         $printJob = null;
         if (! $label instanceof ShippingLabel) {
@@ -96,6 +199,45 @@ final class PackingFulfillmentService
                 $warnings[] = 'Wydruk: '.$exception->getMessage();
             }
         }
+
+        return $this->finishPackedOrderAutomation(
+            $order,
+            $printStation,
+            $label,
+            $packed,
+            $printJob,
+            $warnings,
+        );
+    }
+
+    private function generatedLabelFor(ExternalOrder $order): ?ShippingLabel
+    {
+        return ShippingLabel::query()
+            ->shipments()
+            ->where('external_order_id', $order->id)
+            ->where('status', 'generated')
+            ->latest('generated_at')
+            ->latest('id')
+            ->first();
+    }
+
+    /**
+     * @param  array{code:string,name:string,printer_name:string,segment:string}|null  $printStation
+     * @param  list<string>  $warnings
+     * @return array{packed:int,label:?ShippingLabel,print_job:?PrintJob,wz:list<WarehouseDocument>,invoice:?Invoice,woo_status:?string,warnings:list<string>}
+     */
+    private function finishPackedOrderAutomation(
+        ExternalOrder $order,
+        ?array $printStation,
+        ?ShippingLabel $label,
+        int $packed,
+        ?PrintJob $printJob,
+        array $warnings,
+    ): array {
+        $createWzIfMissing = $this->automationSettings->actionEnabled('packing.order.packed', 'order.wz.create_if_missing');
+        $postWz = $this->automationSettings->actionEnabled('packing.order.packed', 'order.wz.post');
+        $issueInvoiceOnPack = $this->automationSettings->actionEnabled('packing.order.packed', 'order.invoice.create_upload');
+        $order = ExternalOrder::query()->with('invoices')->findOrFail($order->id);
 
         $wzDocuments = [];
         if ($postWz) {

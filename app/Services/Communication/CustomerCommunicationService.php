@@ -563,6 +563,10 @@ final class CustomerCommunicationService
                 'subject' => "Zamówienie {$number} zostało spakowane",
                 'body' => "Dzień dobry,\n\nzamówienie {$number} zostało spakowane i czeka na odbiór przez kuriera.",
             ],
+            'order_cancelled_problem' => [
+                'subject' => "Zamówienie {$number} zostało anulowane",
+                'body' => "Dzień dobry,\n\nTwoje zamówienie zostało anulowane, poniżej znajduje się notatka dodana podczas szykowania Twojego zamówienia:\n\n".($context['problem_note'] ?? '')."\n\nJeśli Twoje zamówienie zostało opłacone, środki zostaną zwrócone tą samą metodą płatności.",
+            ],
             'order_courier_picked_up' => [
                 'subject' => "Paczka zamówienia {$number} została odebrana przez kuriera",
                 'body' => "Dzień dobry,\n\npaczka zamówienia {$number} została odebrana przez kuriera i jest w drodze.{$trackingLine}",

@@ -131,7 +131,7 @@ final class PaymentMethodClassifier
             };
         }
 
-        if (in_array($trigger, ['order_cancelled', 'order_refunded'], true)) {
+        if (in_array($trigger, ['order_cancelled', 'order_cancelled_problem', 'order_refunded'], true)) {
             return '';
         }
 

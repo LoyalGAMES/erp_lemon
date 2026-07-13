@@ -43,6 +43,19 @@ final class WooCommerceOrderStatusService
     /**
      * @return array<string, mixed>
      */
+    public function markCancelledForPackingProblem(ExternalOrder $order): array
+    {
+        return $this->updateStatus(
+            $order,
+            settingsKey: null,
+            defaultStatus: 'cancelled',
+            operation: 'order_cancelled_from_packing_problem',
+        );
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
     public function updateManually(ExternalOrder $order, string $status): array
     {
         return $this->updateStatus(

@@ -212,6 +212,13 @@ final class CustomerEmailWorkflowSettingsService
                 'Zamówienie {{order_number}} zostało anulowane',
                 "Zamówienie zostało anulowane i nie będzie dalej realizowane. Jeśli płatność została pobrana, zwrot środków zostanie rozliczony tą samą metodą płatności.\n\nW razie pytań odpowiedz na tę wiadomość.",
             ),
+            'order_cancelled_problem' => $this->mail(
+                'order', 'order', 'Anulowanie po problemie podczas kompletacji',
+                'Po użyciu akcji „Problem” w kompletacji lub pakowaniu',
+                'Anuluje zamówienie i przekazuje klientowi notatkę zapisaną przez magazyn.',
+                'Zamówienie {{order_number}} zostało anulowane',
+                "Dzień dobry,\n\nTwoje zamówienie zostało anulowane, poniżej znajduje się notatka dodana podczas szykowania Twojego zamówienia:\n\n{{problem_note}}\n\nJeśli Twoje zamówienie zostało opłacone, środki zostaną zwrócone tą samą metodą płatności.",
+            ),
             'order_payment_failed' => $this->mail(
                 'order', 'payment', 'Płatność nieudana',
                 'Po zmianie płatności online na failed',

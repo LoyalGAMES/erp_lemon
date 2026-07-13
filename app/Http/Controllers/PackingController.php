@@ -10,12 +10,14 @@ use App\Models\PackingTask;
 use App\Models\PrintJob;
 use App\Models\ShippingLabel;
 use App\Services\Packing\PackingFulfillmentService;
+use App\Services\Packing\PackingProblemService;
 use App\Services\Packing\PackingSettingsService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippingLabelService;
 use App\Services\Shipping\ShippingProviderResolver;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -227,7 +229,7 @@ class PackingController extends Controller
     public function pick(
         Request $request,
         PackingTaskService $packing,
-    ): RedirectResponse {
+    ): RedirectResponse|JsonResponse {
         $data = $request->validate([
             'task_ids' => ['required', 'array', 'min:1'],
             'task_ids.*' => ['integer', 'exists:packing_tasks,id'],
@@ -236,31 +238,47 @@ class PackingController extends Controller
         try {
             $count = $packing->markPickedMany($data['task_ids']);
         } catch (RuntimeException $exception) {
-            return back()->with('error', $exception->getMessage());
+            return $this->packingActionError($request, $exception->getMessage());
         }
 
         $message = "Oznaczono {$count} pozycji jako zebrane. Zamówienia trafiły do kolejki pakowania.";
 
-        return back()->with('status', $message);
+        return $this->packingActionSuccess($request, $message, [
+            'action' => 'collect.picked',
+            'tasks' => $count,
+            'ui' => ['remove_submitted_card' => true, 'destination' => 'pack'],
+        ]);
     }
 
-    public function problem(Request $request, PackingTaskService $packing): RedirectResponse
+    public function problem(Request $request, PackingProblemService $problems): RedirectResponse|JsonResponse
     {
         $data = $request->validate([
             'task_ids' => ['required', 'array', 'min:1'],
             'task_ids.*' => ['integer', 'exists:packing_tasks,id'],
-            'reason' => ['nullable', 'string', 'max:120'],
+            'reason' => ['required', 'string', 'max:1000'],
         ]);
 
-        $reason = trim((string) ($data['reason'] ?? '')) ?: 'Do wyjaśnienia';
+        $reason = trim((string) $data['reason']);
 
         try {
-            $count = $packing->markProblemMany($data['task_ids'], $reason);
+            $result = $problems->reportTasks($data['task_ids'], $reason);
         } catch (RuntimeException $exception) {
-            return back()->with('error', $exception->getMessage());
+            return $this->packingActionError($request, $exception->getMessage());
         }
 
-        return back()->with('status', "Oznaczono {$count} pozycji jako problem: {$reason}.");
+        $message = "Anulowano {$result['orders']} zamówień i przeniesiono {$result['tasks']} pozycji do listy problemów.";
+
+        if ($result['warnings'] !== []) {
+            $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
+        }
+
+        return $this->packingActionSuccess($request, $message, [
+            'action' => 'collect.problem',
+            'tasks' => $result['tasks'],
+            'orders' => $result['orders'],
+            'warnings' => $result['warnings'],
+            'ui' => ['remove_submitted_card' => true, 'destination' => 'problems'],
+        ]);
     }
 
     public function pack(PackingTask $task, PackingTaskService $packing): RedirectResponse
@@ -275,17 +293,18 @@ class PackingController extends Controller
     }
 
     public function packOrder(
+        Request $request,
         ExternalOrder $order,
         PackingFulfillmentService $fulfillment,
         PackingSettingsService $settings,
-    ): RedirectResponse {
+    ): RedirectResponse|JsonResponse {
         try {
             $result = $fulfillment->completePackedOrder(
                 $order,
                 $settings->station((string) session('packing_station', '')),
             );
         } catch (RuntimeException $exception) {
-            return back()->with('error', $exception->getMessage());
+            return $this->packingActionError($request, $exception->getMessage());
         }
 
         $message = "Spakowano zamówienie {$order->external_number}: {$result['packed']} pozycji. Zamówienie trafiło do listy oczekujących na kuriera.";
@@ -298,7 +317,13 @@ class PackingController extends Controller
             $message .= ' Ostrzeżenia automatyzacji: '.implode(' | ', $result['warnings']);
         }
 
-        return back()->with('status', $message);
+        return $this->packingActionSuccess($request, $message, [
+            'action' => 'packing.completed',
+            'order_id' => $order->id,
+            'fulfillment_status' => 'awaiting_courier',
+            'warnings' => $result['warnings'],
+            'ui' => ['remove_submitted_card' => true, 'destination' => 'waiting'],
+        ]);
     }
 
     public function unpackOrder(Request $request, ExternalOrder $order, PackingFulfillmentService $fulfillment): RedirectResponse
@@ -375,21 +400,94 @@ class PackingController extends Controller
         return back()->with('status', $message);
     }
 
-    public function problemOrder(Request $request, ExternalOrder $order, PackingTaskService $packing): RedirectResponse
+    public function problemOrder(Request $request, ExternalOrder $order, PackingProblemService $problems): RedirectResponse|JsonResponse
     {
         $data = $request->validate([
-            'reason' => ['nullable', 'string', 'max:120'],
+            'reason' => ['required', 'string', 'max:1000'],
         ]);
 
-        $reason = trim((string) ($data['reason'] ?? '')) ?: 'Problem z zamówieniem';
+        $reason = trim((string) $data['reason']);
 
         try {
-            $count = $packing->markOrderProblem($order, $reason);
+            $result = $problems->reportOrder($order, $reason);
         } catch (RuntimeException $exception) {
-            return back()->with('error', $exception->getMessage());
+            return $this->packingActionError($request, $exception->getMessage());
         }
 
-        return back()->with('status', "Przeniesiono zamówienie {$order->external_number} do wyjaśnienia: {$count} pozycji.");
+        $message = "Anulowano zamówienie {$order->external_number} i przeniesiono {$result['tasks']} pozycji do listy problemów.";
+
+        if ($result['warnings'] !== []) {
+            $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
+        }
+
+        return $this->packingActionSuccess($request, $message, [
+            'action' => 'packing.problem',
+            'order_id' => $order->id,
+            'tasks' => $result['tasks'],
+            'warnings' => $result['warnings'],
+            'ui' => ['remove_submitted_card' => true, 'destination' => 'problems'],
+        ]);
+    }
+
+    public function completeWithLabel(
+        Request $request,
+        ExternalOrder $order,
+        PackingFulfillmentService $fulfillment,
+        PackingSettingsService $settings,
+    ): RedirectResponse|JsonResponse {
+        $data = $request->validate([
+            'courier_account_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('courier_accounts', 'id')->where(fn ($query) => $query
+                    ->where('provider', 'inpost')
+                    ->where('is_active', true)),
+            ],
+            'parcel_template' => ['required', 'string', 'in:small,medium,large'],
+        ]);
+
+        $account = filled($data['courier_account_id'] ?? null)
+            ? CourierAccount::query()->where('is_active', true)->find((int) $data['courier_account_id'])
+            : null;
+
+        try {
+            $result = $fulfillment->completePackedOrderWithLabel(
+                $order,
+                $account,
+                $data['parcel_template'],
+                $settings->station((string) session('packing_station', '')),
+            );
+        } catch (RuntimeException $exception) {
+            return $this->packingActionError($request, $exception->getMessage());
+        }
+
+        $message = $result['already_completed']
+            ? "Zamówienie {$order->external_number} było już spakowane. Etykieta pozostaje w kolejce automatycznego wydruku."
+            : "Wygenerowano etykietę i spakowano zamówienie {$order->external_number}. Zamówienie oczekuje na kuriera.";
+
+        $message .= $this->printJobMessage($result['print_job']);
+
+        if ($result['warnings'] !== []) {
+            $message .= ' Ostrzeżenia automatyzacji: '.implode(' | ', $result['warnings']);
+        }
+
+        return $this->packingActionSuccess($request, $message, [
+            'action' => 'packing.completed_with_label',
+            'order_id' => $order->id,
+            'fulfillment_status' => 'awaiting_courier',
+            'label' => [
+                'id' => $result['label']->id,
+                'tracking_number' => $result['label']->trackingIdentifier(),
+            ],
+            'print_job' => [
+                'id' => $result['print_job']->id,
+                'status' => $result['print_job']->status,
+                'printer_name' => $result['print_job']->printer_name,
+            ],
+            'warnings' => $result['warnings'],
+            'already_completed' => $result['already_completed'],
+            'ui' => ['remove_submitted_card' => true, 'destination' => 'waiting'],
+        ]);
     }
 
     public function reopen(PackingTask $task, PackingTaskService $packing): RedirectResponse
@@ -472,6 +570,41 @@ class PackingController extends Controller
         }
 
         return " Etykieta została dodana do kolejki wydruku: {$printJob->printer_name}.";
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function packingActionSuccess(
+        Request $request,
+        string $message,
+        array $payload = [],
+    ): RedirectResponse|JsonResponse {
+        if ($request->expectsJson()) {
+            return response()->json(array_merge([
+                'ok' => true,
+                'message' => $message,
+                'warnings' => [],
+            ], $payload));
+        }
+
+        return back()->with('status', $message);
+    }
+
+    private function packingActionError(
+        Request $request,
+        string $message,
+        int $status = 409,
+    ): RedirectResponse|JsonResponse {
+        if ($request->expectsJson()) {
+            return response()->json([
+                'ok' => false,
+                'message' => $message,
+                'errors' => [],
+            ], $status);
+        }
+
+        return back()->with('error', $message);
     }
 
     /**
