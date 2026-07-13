@@ -8,6 +8,7 @@ use App\Mail\CustomerMessageMail;
 use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
 use App\Models\ReturnCase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Mail;
 use RuntimeException;
 use Throwable;
@@ -119,6 +120,21 @@ final class CustomerCommunicationService
      */
     public function sendOrderStatus(ExternalOrder $order, string $trigger, array $context = []): ?CustomerMessage
     {
+        if ($this->orderTriggerCanRepeat($trigger)) {
+            return $this->sendOrderStatusWhileLocked($order, $trigger, $context);
+        }
+
+        $message = Cache::lock($this->deduplicationLockKey('order', $order->id, $trigger), 180)
+            ->get(fn (): ?CustomerMessage => $this->sendOrderStatusWhileLocked($order, $trigger, $context));
+
+        return $message instanceof CustomerMessage ? $message : null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $context
+     */
+    private function sendOrderStatusWhileLocked(ExternalOrder $order, string $trigger, array $context): ?CustomerMessage
+    {
         if ($this->alreadySentForOrder($order, $trigger)) {
             return null;
         }
@@ -150,6 +166,21 @@ final class CustomerCommunicationService
      * Wysyłka automatyczna nie przerywa obsługi zwrotu.
      */
     public function sendReturnStatus(ReturnCase $returnCase, string $trigger, array $context = []): ?CustomerMessage
+    {
+        if ($this->returnTriggerCanRepeat($trigger)) {
+            return $this->sendReturnStatusWhileLocked($returnCase, $trigger, $context);
+        }
+
+        $message = Cache::lock($this->deduplicationLockKey('return', $returnCase->id, $trigger), 180)
+            ->get(fn (): ?CustomerMessage => $this->sendReturnStatusWhileLocked($returnCase, $trigger, $context));
+
+        return $message instanceof CustomerMessage ? $message : null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $context
+     */
+    private function sendReturnStatusWhileLocked(ReturnCase $returnCase, string $trigger, array $context): ?CustomerMessage
     {
         if ($this->alreadySentForReturn($returnCase, $trigger)) {
             return null;
@@ -280,17 +311,33 @@ final class CustomerCommunicationService
             throw new RuntimeException('Najpierw włącz SMTP i zapisz poprawną konfigurację.');
         }
 
+        $limit = max(1, min(500, $limit));
+        $timeout = (int) ($this->mailSettings->data()['timeout'] ?? 15);
+        $lockSeconds = max(300, min(14400, $limit * ($timeout + 5)));
+        $result = Cache::lock('customer-mail:retry-unsent', $lockSeconds)
+            ->get(fn (): array => $this->retryUnsentWhileLocked($limit));
+
+        if (! is_array($result)) {
+            throw new RuntimeException('Ponawianie niewysłanych wiadomości już trwa. Poczekaj na zakończenie bieżącej operacji.');
+        }
+
+        return $result;
+    }
+
+    /** @return array{selected:int,sent:int,failed:int} */
+    private function retryUnsentWhileLocked(int $limit): array
+    {
         $messages = CustomerMessage::query()
             ->where('direction', 'outgoing')
             ->where(function ($query): void {
                 $query->whereIn('status', ['held', 'failed'])
                     ->orWhere(function ($query): void {
                         $query->where('status', 'pending')
-                            ->where('created_at', '<=', now()->subMinutes(5));
+                            ->where('updated_at', '<=', now()->subMinutes(5));
                     });
             })
             ->oldest('created_at')
-            ->limit(max(1, min(500, $limit)))
+            ->limit($limit)
             ->get();
 
         $sent = 0;
@@ -344,7 +391,7 @@ final class CustomerCommunicationService
 
     private function alreadySentForOrder(ExternalOrder $order, string $trigger): bool
     {
-        if (in_array($trigger, ['order_partial_created', 'order_updated', 'order_payment_received', 'order_packed', 'order_packing_rollback'], true)) {
+        if ($this->orderTriggerCanRepeat($trigger)) {
             return false;
         }
 
@@ -352,13 +399,13 @@ final class CustomerCommunicationService
             ->where('external_order_id', $order->id)
             ->where('type', self::TYPE_AUTOMATED)
             ->where('trigger', $trigger)
-            ->whereIn('status', ['held', 'pending', 'sent', 'skipped'])
+            ->whereIn('status', ['held', 'pending', 'sent', 'failed', 'skipped'])
             ->exists();
     }
 
     private function alreadySentForReturn(ReturnCase $returnCase, string $trigger): bool
     {
-        if (in_array($trigger, ['exchange_payment_requested', 'exchange_payment_received', 'exchange_label_ready'], true)) {
+        if ($this->returnTriggerCanRepeat($trigger)) {
             return false;
         }
 
@@ -366,8 +413,33 @@ final class CustomerCommunicationService
             ->where('return_case_id', $returnCase->id)
             ->where('type', self::TYPE_AUTOMATED)
             ->where('trigger', $trigger)
-            ->whereIn('status', ['held', 'pending', 'sent', 'skipped'])
+            ->whereIn('status', ['held', 'pending', 'sent', 'failed', 'skipped'])
             ->exists();
+    }
+
+    private function orderTriggerCanRepeat(string $trigger): bool
+    {
+        return in_array($trigger, [
+            'order_partial_created',
+            'order_updated',
+            'order_payment_received',
+            'order_packed',
+            'order_packing_rollback',
+        ], true);
+    }
+
+    private function returnTriggerCanRepeat(string $trigger): bool
+    {
+        return in_array($trigger, [
+            'exchange_payment_requested',
+            'exchange_payment_received',
+            'exchange_label_ready',
+        ], true);
+    }
+
+    private function deduplicationLockKey(string $entity, int $entityId, string $trigger): string
+    {
+        return sprintf('customer-mail:%s:%d:%s', $entity, $entityId, hash('sha256', $trigger));
     }
 
     /**

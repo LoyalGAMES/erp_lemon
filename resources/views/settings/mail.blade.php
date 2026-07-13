@@ -6,6 +6,14 @@
         'return' => 'Zwroty',
         default => 'Zamówienia i zwroty',
     };
+    $queueTotal = $mailQueue['held'] + $mailQueue['pending'] + $mailQueue['failed'];
+    $activeWorkflowCount = collect($mailWorkflow)->where('enabled', true)->count();
+    $queuedStatusLabel = fn (string $status): string => match ($status) {
+        'held' => 'wstrzymana',
+        'pending' => 'oczekuje',
+        'failed' => 'błąd',
+        default => $status,
+    };
 @endphp
 
 @section('content')
@@ -13,11 +21,27 @@
         <a class="button secondary" href="{{ route('settings.index') }}">Wróć do ustawień</a>
     </div>
 
+    <section @class(['mail-status-banner', 'inactive' => ! $mailSettings['enabled']]) aria-label="Stan komunikacji mailowej">
+        <div class="mail-status-indicator" aria-hidden="true"></div>
+        <div class="mail-status-copy">
+            <strong>{{ $mailSettings['enabled'] ? 'Wysyłka maili jest aktywna' : 'Wysyłka maili jest wstrzymana' }}</strong>
+            <span>
+                {{ $mailSettings['enabled']
+                    ? 'ERP wysyła komunikację przez zapisane konto SMTP.'
+                    : 'Nowe wiadomości nie znikają — trafiają do listy niewysłanych i czekają na ręczne ponowienie.' }}
+            </span>
+        </div>
+        <div class="mail-status-facts">
+            <span>{{ $activeWorkflowCount }} z {{ count($mailWorkflow) }} scenariuszy aktywnych</span>
+            <span>{{ $queueTotal === 0 ? 'Brak niewysłanych maili' : $queueTotal.' niewysłanych maili' }}</span>
+        </div>
+    </section>
+
     <section class="mail-settings-grid">
-        <article class="card settings-panel">
+        <article class="card settings-panel" id="mail-smtp">
             <div class="panel-header">
-                <span>SMTP</span>
-                <span>{{ $mailSettings['enabled'] ? 'Włączone' : 'Wyłączone' }}</span>
+                <span>Serwer wysyłkowy (SMTP)</span>
+                <span @class(['mail-panel-state', 'inactive' => ! $mailSettings['enabled']])>{{ $mailSettings['enabled'] ? 'Aktywny' : 'Wyłączony' }}</span>
             </div>
             <form method="POST" action="{{ route('settings.mail.update') }}" class="form-grid settings-form">
                 @csrf
@@ -27,7 +51,7 @@
                     <input type="checkbox" name="enabled" value="1" @checked(old('enabled', $mailSettings['enabled']))>
                     <span>
                         <strong>Używaj konfiguracji SMTP z panelu</strong>
-                        <small>Po włączeniu automatyczne i ręczne maile do klientów będą wysyłane przez poniższe konto SMTP.</small>
+                        <small>Gdy opcja jest wyłączona, automatyczne i ręczne maile są bezpiecznie wstrzymywane. Samo ponowne włączenie nie wysyła zaległości.</small>
                     </span>
                 </label>
 
@@ -71,7 +95,7 @@
 
                 <div class="settings-subsection">
                     <div>
-                        <strong>Wygląd maili do klientów</strong>
+                        <strong>Wygląd i dane kontaktowe</strong>
                         <span class="muted">Wspólna oprawa wszystkich automatycznych i ręcznych wiadomości. Podgląd uwzględnia także niezapisane zmiany.</span>
                     </div>
                     <div class="mail-settings-fields">
@@ -100,11 +124,14 @@
                     <label>Stopka
                         <textarea name="footer_text" rows="3" maxlength="1000">{{ old('footer_text', $mailSettings['footer_text']) }}</textarea>
                     </label>
-                    <button class="button secondary" type="button" data-layout-preview>Podgląd wyglądu</button>
+                    <button class="button secondary" type="button" data-layout-preview>Podejrzyj mail z tym wyglądem</button>
                 </div>
 
-                <p class="muted">Aktywny mailer runtime przed zastosowaniem ustawień: {{ $runtimeMailer }}. Hasło SMTP jest zapisywane w bazie w formie szyfrowanej.</p>
-                <button class="button" type="submit">Zapisz SMTP i wygląd maili</button>
+                <details class="technical-details">
+                    <summary>Informacje techniczne i bezpieczeństwo</summary>
+                    <p>Aktywny mechanizm wysyłki przed zastosowaniem ustawień: <strong>{{ $runtimeMailer }}</strong>. Hasło SMTP jest przechowywane w bazie w formie szyfrowanej.</p>
+                </details>
+                <button class="button" type="submit">Zapisz ustawienia wysyłki</button>
             </form>
         </article>
 
@@ -118,7 +145,10 @@
                 <label>Adres testowy
                     <input name="recipient" type="email" value="{{ old('recipient', $mailSettings['from_address']) }}" required maxlength="255">
                 </label>
-                <button class="button secondary" type="submit">Wyślij mail testowy</button>
+                <button class="button secondary" type="submit" @disabled(! $mailSettings['enabled'])>Wyślij wiadomość testową</button>
+                @if (! $mailSettings['enabled'])
+                    <p class="form-hint warning">Najpierw włącz i zapisz SMTP, aby wysłać wiadomość testową.</p>
+                @endif
             </form>
             <div class="deliverability-box">
                 <strong>Dostarczalność</strong>
@@ -144,7 +174,7 @@
                 <div class="mail-queue-header">
                     <div>
                         <strong>Niewysłane wiadomości</strong>
-                        <span>SMTP wyłączone: {{ $mailQueue['held'] }} · w toku: {{ $mailQueue['pending'] }} · błędy: {{ $mailQueue['failed'] }}</span>
+                        <span>Wstrzymane: {{ $mailQueue['held'] }} · oczekujące: {{ $mailQueue['pending'] }} · błędy: {{ $mailQueue['failed'] }}</span>
                     </div>
                     <form method="POST" action="{{ route('settings.mail.retry-unsent') }}">
                         @csrf
@@ -157,7 +187,7 @@
                     <div class="mail-queue-list">
                         @foreach ($mailQueue['recent'] as $queuedMessage)
                             <div>
-                                <span class="status {{ $queuedMessage->status === 'failed' ? 'orange' : 'blue' }}">{{ $queuedMessage->status }}</span>
+                                <span class="status {{ $queuedMessage->status === 'failed' ? 'orange' : 'blue' }}">{{ $queuedStatusLabel($queuedMessage->status) }}</span>
                                 <strong>{{ \Illuminate\Support\Str::limit($queuedMessage->subject, 55) }}</strong>
                                 <small>{{ $queuedMessage->recipient_email ?: 'brak odbiorcy' }} · {{ $queuedMessage->created_at?->format('d.m H:i') }}</small>
                             </div>
@@ -168,10 +198,10 @@
         </article>
     </section>
 
-    <section class="card settings-panel mail-workflow-panel">
+    <section class="card settings-panel mail-workflow-panel" id="mail-workflow">
         <div class="panel-header">
-            <span>Workflow maili do klientów</span>
-            <span>{{ count($mailWorkflow) }} sytuacji klienta</span>
+            <span>Automatyczna komunikacja z klientem</span>
+            <span>{{ $activeWorkflowCount }} z {{ count($mailWorkflow) }} aktywnych</span>
         </div>
         <form method="POST" action="{{ route('settings.mail.workflow.update') }}" class="mail-workflow-body">
             @csrf
@@ -179,25 +209,40 @@
 
             <div class="workflow-intro">
                 <div>
-                    <strong>Automatyczne wiadomości statusowe</strong>
-                    <span class="muted">ERP odpowiada za całą komunikację, niezależnie od wyłączonych maili WooCommerce. Każdą sytuację możesz włączyć, opisać i zobaczyć dokładnie tak, jak klient.</span>
+                    <strong>Scenariusze na całej ścieżce zamówienia</strong>
+                    <span class="muted">ERP odpowiada za całą komunikację, niezależnie od wyłączonych maili WooCommerce. Każdy scenariusz możesz włączyć, opisać i zobaczyć dokładnie tak, jak klient.</span>
                 </div>
-                <button class="button" type="submit">Zapisz workflow maili</button>
+                <button class="button" type="submit">Zapisz zmiany</button>
             </div>
 
-            <div class="workflow-mail-list">
+            <div class="workflow-tools">
+                <label class="workflow-search">
+                    <span class="sr-only">Szukaj scenariusza</span>
+                    <input type="search" data-workflow-search placeholder="Szukaj po nazwie lub momencie wysyłki…" autocomplete="off" aria-controls="workflow-mail-list">
+                </label>
+                <div class="workflow-filters" role="group" aria-label="Filtruj scenariusze">
+                    <button type="button" class="active" data-workflow-filter="all" aria-pressed="true">Wszystkie</button>
+                    <button type="button" data-workflow-filter="order" aria-pressed="false">Zamówienia</button>
+                    <button type="button" data-workflow-filter="return" aria-pressed="false">Zwroty i wymiany</button>
+                    <button type="button" data-workflow-filter="enabled" aria-pressed="false">Aktywne</button>
+                    <button type="button" data-workflow-filter="disabled" aria-pressed="false">Wyłączone</button>
+                </div>
+                <span class="workflow-results" data-workflow-results aria-live="polite"></span>
+            </div>
+
+            <div class="workflow-mail-list" id="workflow-mail-list">
                 @foreach ($mailWorkflow as $workflowMail)
                     @php
                         $workflowCode = $workflowMail['code'];
                         $workflowEnabled = (bool) old('workflow.'.$workflowCode.'.enabled', $workflowMail['enabled']);
                     @endphp
-                    <details @class(['workflow-mail-card', 'disabled' => ! $workflowEnabled]) data-mail-workflow-card data-trigger="{{ $workflowCode }}" data-scenario="{{ $workflowMail['scenario'] }}" @if($loop->first) open @endif>
+                    <details @class(['workflow-mail-card', 'disabled' => ! $workflowEnabled]) data-mail-workflow-card data-trigger="{{ $workflowCode }}" data-scenario="{{ $workflowMail['scenario'] }}" data-context="{{ $workflowMail['context'] }}" data-enabled="{{ $workflowEnabled ? '1' : '0' }}" data-search="{{ Illuminate\Support\Str::lower($workflowMail['name'].' '.$workflowMail['stage'].' '.$workflowMail['description']) }}" @if($loop->first) open @endif>
                         <summary class="workflow-mail-summary">
                             <div>
                                 <strong>{{ $workflowMail['name'] }}</strong>
-                                <span>{{ $workflowMail['context_label'] }} · {{ $workflowCode }}</span>
+                                <span><b>{{ $workflowMail['context_label'] }}</b> · <span data-workflow-stage-summary>{{ $workflowMail['stage'] }}</span></span>
                             </div>
-                            <span class="workflow-mail-state">{{ $workflowEnabled ? 'Aktywny' : 'Wyłączony' }} <b>⌄</b></span>
+                            <span class="workflow-mail-state"><span data-workflow-state>{{ $workflowEnabled ? 'Aktywny' : 'Wyłączony' }}</span> <b aria-hidden="true">⌄</b></span>
                         </summary>
                         <div class="workflow-mail-editor">
                             <div class="workflow-mail-actions">
@@ -205,11 +250,12 @@
                                 <label class="inline-flag workflow-toggle">
                                     <input type="hidden" name="workflow[{{ $workflowCode }}][enabled]" value="0">
                                     <input type="checkbox" name="workflow[{{ $workflowCode }}][enabled]" value="1" @checked($workflowEnabled)>
-                                    Wysyłaj
+                                    Wysyłaj automatycznie
                                 </label>
                             </div>
 
                             <p class="muted">{{ $workflowMail['description'] }}</p>
+                            <p class="workflow-code">Kod zdarzenia: <code>{{ $workflowCode }}</code></p>
 
                             <div class="mail-settings-fields">
                                 <label>Moment wysyłki
@@ -226,6 +272,11 @@
                         </div>
                     </details>
                 @endforeach
+                <div class="workflow-empty" data-workflow-empty hidden>Nie znaleziono scenariuszy pasujących do wybranego filtra.</div>
+            </div>
+            <div class="workflow-save-footer">
+                <span>Zapis obejmie wszystkie scenariusze, także te zwinięte.</span>
+                <button class="button" type="submit">Zapisz wszystkie zmiany</button>
             </div>
         </form>
     </section>
@@ -236,16 +287,21 @@
             <span>{{ $emailTemplates->count() }} szablonów</span>
         </div>
         <div class="template-settings-body">
-            <div class="template-variable-help">
-                <strong>Dostępne zmienne</strong>
-                <div class="template-variable-list">
-                    @foreach ($templateVariables as $variable => $description)
-                        @php $placeholder = sprintf('{{%s}}', $variable); @endphp
-                        <span title="{{ $description }}">{{ $placeholder }}</span>
-                    @endforeach
+            <details class="template-variable-help">
+                <summary>
+                    <strong>Dostępne zmienne</strong>
+                    <span>{{ count($templateVariables) }} pól do personalizacji</span>
+                </summary>
+                <div class="template-variable-content">
+                    <div class="template-variable-list">
+                        @foreach ($templateVariables as $variable => $description)
+                            @php $placeholder = sprintf('{{%s}}', $variable); @endphp
+                            <span title="{{ $description }}">{{ $placeholder }}</span>
+                        @endforeach
+                    </div>
+                    <p class="muted">Zmienne są renderowane po stronie systemu, więc zadziałają również wtedy, gdy wpiszesz je ręcznie w temacie lub treści.</p>
                 </div>
-                <p class="muted">Zmienne są teraz renderowane również po stronie backendu, więc zadziałają w mailu nawet wtedy, gdy ktoś wpisze je ręcznie w temacie lub treści.</p>
-            </div>
+            </details>
             <form method="POST" action="{{ route('settings.mail.templates.store') }}" class="template-form">
                 @csrf
                 <div class="mail-settings-fields">
@@ -326,27 +382,27 @@
         </div>
     </section>
 
-    <div class="mail-preview-overlay" data-mail-preview-overlay hidden>
-        <section class="mail-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="mail-preview-title">
+    <div class="mail-preview-overlay" data-mail-preview-overlay aria-hidden="true" hidden>
+        <section class="mail-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="mail-preview-title" tabindex="-1">
             <header>
                 <div>
                     <span>Podgląd wiadomości</span>
-                    <strong id="mail-preview-title" data-mail-preview-title>Ładowanie…</strong>
+                    <strong id="mail-preview-title" data-mail-preview-title aria-live="polite">Ładowanie…</strong>
                 </div>
-                <button type="button" class="mail-preview-close" data-mail-preview-close aria-label="Zamknij">×</button>
+                <button type="button" class="mail-preview-close" data-mail-preview-close aria-label="Zamknij podgląd">×</button>
             </header>
             <div class="mail-preview-toolbar">
                 <div class="mail-preview-tabs" role="tablist">
-                    <button type="button" class="active" data-preview-mode="html">HTML</button>
-                    <button type="button" data-preview-mode="text">Tekst</button>
+                    <button type="button" class="active" role="tab" aria-selected="true" data-preview-mode="html">Wiadomość</button>
+                    <button type="button" role="tab" aria-selected="false" data-preview-mode="text">Wersja tekstowa</button>
                 </div>
-                <div class="mail-preview-tabs" role="tablist">
-                    <button type="button" class="active" data-preview-width="680">Komputer</button>
-                    <button type="button" data-preview-width="390">Telefon</button>
+                <div class="mail-preview-tabs" role="group" aria-label="Szerokość podglądu">
+                    <button type="button" class="active" aria-pressed="true" data-preview-width="680">Komputer</button>
+                    <button type="button" aria-pressed="false" data-preview-width="390">Telefon</button>
                 </div>
             </div>
-            <div class="mail-preview-diagnostics" data-mail-preview-diagnostics hidden></div>
-            <div class="mail-preview-stage" data-mail-preview-stage>
+            <div class="mail-preview-diagnostics" role="alert" data-mail-preview-diagnostics hidden></div>
+            <div class="mail-preview-stage" data-mail-preview-stage aria-busy="false">
                 <iframe title="Podgląd wiadomości e-mail" sandbox referrerpolicy="no-referrer" data-mail-preview-frame></iframe>
                 <pre data-mail-preview-text hidden></pre>
             </div>
@@ -356,8 +412,20 @@
 
 @push('styles')
     <style>
+        .sr-only { position: absolute !important; width: 1px !important; height: 1px !important; padding: 0 !important; margin: -1px !important; overflow: hidden !important; clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important; }
+        .mail-status-banner { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 13px; align-items: center; margin-bottom: 14px; padding: 15px 18px; border: 1px solid rgba(47, 111, 79, .22); border-radius: 10px; background: rgba(47, 111, 79, .075); }
+        .mail-status-banner.inactive { border-color: rgba(176, 112, 38, .28); background: rgba(226, 167, 84, .1); }
+        .mail-status-indicator { width: 11px; height: 11px; border-radius: 50%; background: var(--green-dark); box-shadow: 0 0 0 5px rgba(47, 111, 79, .12); }
+        .mail-status-banner.inactive .mail-status-indicator { background: #b06f26; box-shadow: 0 0 0 5px rgba(176, 112, 38, .12); }
+        .mail-status-copy { display: grid; gap: 3px; }
+        .mail-status-copy strong { font-size: 15px; }
+        .mail-status-copy span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+        .mail-status-facts { display: flex; gap: 7px; flex-wrap: wrap; justify-content: flex-end; }
+        .mail-status-facts span { display: inline-flex; min-height: 29px; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px; background: var(--surface); color: var(--muted); font-size: 11px; font-weight: 760; }
         .mail-settings-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, .65fr); gap: 14px; }
         .settings-panel { align-self: start; }
+        .mail-panel-state { color: var(--green-dark) !important; }
+        .mail-panel-state.inactive { color: #9a5d19 !important; }
         .settings-form,
         .template-settings-body { padding: 16px; }
         .settings-form .button,
@@ -367,6 +435,11 @@
         .settings-subsection > div:first-child { display: grid; gap: 4px; }
         .settings-subsection strong { font-size: 15px; }
         .mail-clear-password { align-self: end; min-height: 42px; }
+        .technical-details { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: rgba(134, 115, 100, .025); color: var(--muted); font-size: 12px; }
+        .technical-details summary { color: var(--text); font-weight: 740; cursor: pointer; }
+        .technical-details p { margin: 9px 0 0; line-height: 1.5; }
+        .form-hint { margin: -2px 0 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+        .form-hint.warning { color: #8a5818; }
         .deliverability-box { display: grid; gap: 12px; padding: 16px; border-top: 1px solid var(--border); }
         .deliverability-meta { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
         .deliverability-list { display: grid; gap: 10px; }
@@ -399,13 +472,23 @@
         .workflow-intro { display: flex; justify-content: space-between; gap: 14px; align-items: flex-start; }
         .workflow-intro > div { display: grid; gap: 4px; max-width: 760px; }
         .workflow-intro .button { white-space: nowrap; }
-        .workflow-mail-list { display: grid; gap: 12px; }
+        .workflow-tools { display: grid; grid-template-columns: minmax(230px, .8fr) minmax(0, 1.2fr) auto; gap: 10px; align-items: center; padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: #faf9f7; }
+        .workflow-search input { min-height: 40px; background: var(--surface); }
+        .workflow-filters { display: flex; gap: 5px; flex-wrap: wrap; }
+        .workflow-filters button { min-height: 34px; border: 1px solid var(--border); border-radius: 999px; padding: 5px 11px; background: var(--surface); color: var(--muted); font: inherit; font-size: 11px; font-weight: 760; cursor: pointer; }
+        .workflow-filters button.active { border-color: var(--brand-dark); background: var(--brand-dark); color: #fff; }
+        .workflow-results { color: var(--muted); font-size: 11px; font-weight: 720; white-space: nowrap; }
+        .workflow-mail-list { display: grid; gap: 10px; }
         .workflow-mail-card { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+        .workflow-mail-card[hidden] { display: none; }
         .workflow-mail-card.disabled { background: rgba(134, 115, 100, 0.045); }
         .workflow-mail-summary { display: flex; justify-content: space-between; gap: 12px; align-items: center; min-height: 62px; padding: 12px 14px; cursor: pointer; list-style: none; }
+        .workflow-mail-summary:hover { background: rgba(134, 115, 100, .035); }
+        .workflow-mail-summary:focus-visible { outline: 3px solid rgba(47, 111, 79, .24); outline-offset: -3px; }
         .workflow-mail-summary::-webkit-details-marker { display: none; }
         .workflow-mail-summary > div { display: grid; gap: 2px; }
-        .workflow-mail-summary > div span { color: var(--muted); font-size: 12px; font-weight: 720; }
+        .workflow-mail-summary > div > span { color: var(--muted); font-size: 12px; font-weight: 600; line-height: 1.4; }
+        .workflow-mail-summary > div > span b { color: var(--text); font-weight: 740; }
         .workflow-mail-state { display: inline-flex; align-items: center; gap: 9px; color: var(--green-dark); font-size: 12px; font-weight: 780; }
         .workflow-mail-card.disabled .workflow-mail-state { color: var(--muted); }
         .workflow-mail-state b { font-size: 18px; line-height: 1; transition: transform .16s ease; }
@@ -417,10 +500,19 @@
         .workflow-mail-actions { display: flex; justify-content: flex-end; gap: 8px; align-items: center; flex-wrap: wrap; }
         .button.compact { min-height: 34px; padding: 6px 11px; }
         .workflow-toggle { min-height: 34px; border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: #fff; }
-        .workflow-external-note { border: 1px dashed var(--border); border-radius: 8px; padding: 10px 12px; background: #fffdfb; color: var(--muted); font-size: 13px; line-height: 1.45; }
+        .workflow-code { margin: -3px 0 1px; color: var(--muted); font-size: 11px; }
+        .workflow-code code { color: var(--brand-dark); }
+        .workflow-empty { border: 1px dashed var(--border); border-radius: 8px; padding: 28px 18px; color: var(--muted); text-align: center; }
+        .workflow-empty[hidden] { display: none; }
+        .workflow-save-footer { display: flex; justify-content: space-between; gap: 14px; align-items: center; padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: #faf9f7; }
+        .workflow-save-footer span { color: var(--muted); font-size: 12px; }
         .template-settings-panel { margin-top: 14px; }
         .template-settings-body { display: grid; gap: 18px; }
-        .template-variable-help { display: grid; gap: 9px; border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: #fffdfb; }
+        .template-variable-help { border: 1px solid var(--border); border-radius: 8px; background: #fffdfb; overflow: hidden; }
+        .template-variable-help summary { display: flex; justify-content: space-between; gap: 12px; align-items: center; min-height: 48px; padding: 10px 12px; cursor: pointer; }
+        .template-variable-help summary span { color: var(--muted); font-size: 12px; }
+        .template-variable-content { display: grid; gap: 9px; padding: 0 12px 12px; border-top: 1px solid var(--border); }
+        .template-variable-content .template-variable-list { padding-top: 12px; }
         .template-variable-list { display: flex; flex-wrap: wrap; gap: 7px; }
         .template-variable-list span { display: inline-flex; min-height: 27px; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; background: var(--surface); color: var(--brand-dark); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 12px; font-weight: 760; }
         .template-form { display: grid; gap: 10px; }
@@ -437,6 +529,10 @@
         .mail-preview-dialog > header span { color: var(--muted); font-size: 12px; font-weight: 760; text-transform: uppercase; letter-spacing: .5px; }
         .mail-preview-dialog > header strong { font-size: 16px; }
         .mail-preview-close { width: 38px; height: 38px; border: 1px solid var(--border); border-radius: 50%; background: var(--surface); color: var(--text); font-size: 25px; line-height: 1; cursor: pointer; }
+        .mail-preview-close:hover { background: #f3f1ee; }
+        .mail-preview-close:focus-visible,
+        .mail-preview-tabs button:focus-visible,
+        .workflow-filters button:focus-visible { outline: 3px solid rgba(47, 111, 79, .28); outline-offset: 2px; }
         .mail-preview-toolbar { display: flex; justify-content: space-between; gap: 12px; padding: 10px 18px; border-bottom: 1px solid var(--border); background: #faf9f7; }
         .mail-preview-tabs { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 9px; background: #fff; }
         .mail-preview-tabs button { border: 0; border-radius: 6px; padding: 7px 11px; background: transparent; color: var(--muted); font: inherit; font-size: 12px; font-weight: 760; cursor: pointer; }
@@ -448,14 +544,29 @@
         .mail-preview-stage iframe[hidden],
         .mail-preview-stage pre[hidden] { display: none; }
         @media (max-width: 900px) {
+            .mail-status-banner { grid-template-columns: auto minmax(0, 1fr); }
+            .mail-status-facts { grid-column: 2; justify-content: flex-start; }
             .mail-settings-grid,
             .mail-settings-fields,
             .template-list { grid-template-columns: 1fr; }
             .workflow-intro { display: grid; }
+            .workflow-tools { grid-template-columns: 1fr; }
+            .workflow-results { white-space: normal; }
             .mail-queue-header { display: grid; }
             .mail-preview-overlay { padding: 0; }
             .mail-preview-dialog { width: 100vw; height: 100vh; border-radius: 0; }
             .mail-preview-stage { padding: 12px; }
+        }
+        @media (max-width: 560px) {
+            .mail-status-banner { padding: 13px; }
+            .mail-status-facts { grid-column: 1 / -1; }
+            .workflow-intro .button,
+            .workflow-save-footer .button { width: 100%; }
+            .workflow-save-footer { display: grid; }
+            .workflow-mail-summary { align-items: flex-start; }
+            .workflow-mail-state { flex: 0 0 auto; }
+            .mail-preview-toolbar { display: grid; }
+            .mail-preview-tabs { overflow-x: auto; }
         }
     </style>
 @endpush
@@ -470,8 +581,10 @@
             const textPreview = overlay.querySelector('[data-mail-preview-text]');
             const title = overlay.querySelector('[data-mail-preview-title]');
             const diagnostics = overlay.querySelector('[data-mail-preview-diagnostics]');
+            const dialog = overlay.querySelector('.mail-preview-dialog');
+            const stage = overlay.querySelector('[data-mail-preview-stage]');
             const layoutForm = document.querySelector('form[action="{{ route('settings.mail.update') }}"]');
-            let previewData = null;
+            let lastFocused = null;
 
             const fieldValue = (scope, selector) => scope?.querySelector(selector)?.value ?? '';
             const layout = () => Object.fromEntries([
@@ -479,13 +592,88 @@
                 'footer_text', 'support_email', 'support_phone',
             ].map((name) => [name, fieldValue(layoutForm, `[name="${name}"]`)]));
 
+            const workflowCards = [...document.querySelectorAll('[data-mail-workflow-card]')];
+            const workflowSearch = document.querySelector('[data-workflow-search]');
+            const workflowResults = document.querySelector('[data-workflow-results]');
+            const workflowEmpty = document.querySelector('[data-workflow-empty]');
+            let workflowFilter = 'all';
+
+            const refreshWorkflow = () => {
+                const query = (workflowSearch?.value ?? '').trim().toLocaleLowerCase('pl');
+                let visible = 0;
+
+                workflowCards.forEach((card) => {
+                    const enabled = card.dataset.enabled === '1';
+                    const stageValue = fieldValue(card, 'input[name$="[stage]"]');
+                    const subjectValue = fieldValue(card, 'input[name$="[subject]"]');
+                    const searchable = `${card.dataset.search ?? ''} ${stageValue} ${subjectValue}`.toLocaleLowerCase('pl');
+                    const matchesQuery = query === '' || searchable.includes(query);
+                    const matchesFilter = workflowFilter === 'all'
+                        || workflowFilter === card.dataset.context
+                        || (workflowFilter === 'enabled' && enabled)
+                        || (workflowFilter === 'disabled' && !enabled);
+                    const show = matchesQuery && matchesFilter;
+                    card.hidden = !show;
+                    if (show) visible += 1;
+                });
+
+                if (workflowResults) workflowResults.textContent = `Widoczne: ${visible} z ${workflowCards.length}`;
+                if (workflowEmpty) workflowEmpty.hidden = visible !== 0;
+            };
+
+            document.querySelectorAll('[data-workflow-filter]').forEach((button) => {
+                button.addEventListener('click', () => {
+                    workflowFilter = button.dataset.workflowFilter;
+                    document.querySelectorAll('[data-workflow-filter]').forEach((item) => {
+                        const active = item === button;
+                        item.classList.toggle('active', active);
+                        item.setAttribute('aria-pressed', active ? 'true' : 'false');
+                    });
+                    refreshWorkflow();
+                });
+            });
+            workflowSearch?.addEventListener('input', refreshWorkflow);
+            workflowCards.forEach((card) => {
+                const toggle = card.querySelector('input[type="checkbox"][name$="[enabled]"]');
+                const stageInput = card.querySelector('input[name$="[stage]"]');
+                const stageSummary = card.querySelector('[data-workflow-stage-summary]');
+                toggle?.addEventListener('change', () => {
+                    card.dataset.enabled = toggle.checked ? '1' : '0';
+                    card.classList.toggle('disabled', !toggle.checked);
+                    const state = card.querySelector('[data-workflow-state]');
+                    if (state) state.textContent = toggle.checked ? 'Aktywny' : 'Wyłączony';
+                    refreshWorkflow();
+                });
+                stageInput?.addEventListener('input', () => {
+                    if (stageSummary) stageSummary.textContent = stageInput.value || 'Nie określono momentu wysyłki';
+                    refreshWorkflow();
+                });
+            });
+            refreshWorkflow();
+
+            const setPreviewMode = (mode) => {
+                overlay.querySelectorAll('[data-preview-mode]').forEach((item) => {
+                    const active = item.dataset.previewMode === mode;
+                    item.classList.toggle('active', active);
+                    item.setAttribute('aria-selected', active ? 'true' : 'false');
+                });
+                const textMode = mode === 'text';
+                frame.hidden = textMode;
+                textPreview.hidden = !textMode;
+            };
+
             const openPreview = async ({trigger, scenario, subject, body}) => {
+                lastFocused = document.activeElement;
                 overlay.hidden = false;
+                overlay.setAttribute('aria-hidden', 'false');
                 document.body.style.overflow = 'hidden';
+                stage.setAttribute('aria-busy', 'true');
                 title.textContent = 'Generowanie podglądu…';
                 frame.srcdoc = '<!doctype html><html><body style="font-family:Arial;padding:32px;color:#666">Przygotowujemy wiadomość…</body></html>';
                 textPreview.textContent = '';
                 diagnostics.hidden = true;
+                setPreviewMode('html');
+                dialog.focus();
 
                 try {
                     const response = await fetch(@json(route('settings.mail.preview')), {
@@ -503,7 +691,6 @@
                         throw new Error(errors[0] ?? data.message ?? 'Nie udało się przygotować podglądu.');
                     }
 
-                    previewData = data;
                     title.textContent = data.subject;
                     frame.srcdoc = data.html;
                     textPreview.textContent = data.text;
@@ -516,6 +703,8 @@
                 } catch (error) {
                     title.textContent = 'Błąd podglądu';
                     frame.srcdoc = `<!doctype html><html><body style="font-family:Arial;padding:32px;color:#8b1e1e">${String(error.message ?? error).replace(/[<>&"]/g, '')}</body></html>`;
+                } finally {
+                    stage.setAttribute('aria-busy', 'false');
                 }
             };
 
@@ -557,25 +746,51 @@
 
             const close = () => {
                 overlay.hidden = true;
+                overlay.setAttribute('aria-hidden', 'true');
                 document.body.style.overflow = '';
                 frame.srcdoc = '';
-                previewData = null;
+                textPreview.textContent = '';
+                if (lastFocused instanceof HTMLElement && lastFocused.isConnected) lastFocused.focus();
+                lastFocused = null;
             };
             overlay.querySelector('[data-mail-preview-close]').addEventListener('click', close);
             overlay.addEventListener('click', (event) => { if (event.target === overlay) close(); });
-            document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && !overlay.hidden) close(); });
+            document.addEventListener('keydown', (event) => {
+                if (overlay.hidden) return;
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    close();
+                    return;
+                }
+                if (event.key !== 'Tab') return;
+                const focusable = [...dialog.querySelectorAll('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+                    .filter((element) => element instanceof HTMLElement && element.offsetParent !== null);
+                if (focusable.length === 0) {
+                    event.preventDefault();
+                    dialog.focus();
+                    return;
+                }
+                const first = focusable[0];
+                const last = focusable[focusable.length - 1];
+                if (event.shiftKey && document.activeElement === first) {
+                    event.preventDefault();
+                    last.focus();
+                } else if (!event.shiftKey && document.activeElement === last) {
+                    event.preventDefault();
+                    first.focus();
+                }
+            });
 
             overlay.querySelectorAll('[data-preview-mode]').forEach((button) => {
-                button.addEventListener('click', () => {
-                    overlay.querySelectorAll('[data-preview-mode]').forEach((item) => item.classList.toggle('active', item === button));
-                    const textMode = button.dataset.previewMode === 'text';
-                    frame.hidden = textMode;
-                    textPreview.hidden = !textMode;
-                });
+                button.addEventListener('click', () => setPreviewMode(button.dataset.previewMode));
             });
             overlay.querySelectorAll('[data-preview-width]').forEach((button) => {
                 button.addEventListener('click', () => {
-                    overlay.querySelectorAll('[data-preview-width]').forEach((item) => item.classList.toggle('active', item === button));
+                    overlay.querySelectorAll('[data-preview-width]').forEach((item) => {
+                        const active = item === button;
+                        item.classList.toggle('active', active);
+                        item.setAttribute('aria-pressed', active ? 'true' : 'false');
+                    });
                     const width = `${button.dataset.previewWidth}px`;
                     frame.style.width = width;
                     textPreview.style.width = width;

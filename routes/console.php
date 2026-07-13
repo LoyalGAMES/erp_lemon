@@ -8,6 +8,7 @@ use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Invoices\OrderInvoiceService;
 use App\Services\Ksef\KsefSubmissionService;
 use App\Services\Packing\PackingLabelAutomationService;
+use App\Services\Payments\PayuRefundService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippedOrderWooSyncService;
 use Illuminate\Foundation\Inspiring;
@@ -216,6 +217,24 @@ Artisan::command('erp:retry-shipped-woo-sync {--limit=25 : Maximum number of shi
     return 0;
 })->purpose('Retry WooCommerce shipped status after temporary API failures.');
 
+Artisan::command('erp:refresh-payu-refunds {--limit=25 : Maximum number of pending PayU refunds to refresh}', function (): int {
+    $result = app(PayuRefundService::class)->refreshPending(max(1, (int) $this->option('limit')));
+
+    $this->info(sprintf(
+        'PayU refunds refreshed: checked %d, finalized %d, pending %d, failed %d.',
+        $result['checked'],
+        $result['finalized'],
+        $result['pending'],
+        $result['failed'],
+    ));
+
+    foreach ($result['warnings'] as $warning) {
+        $this->warn($warning);
+    }
+
+    return $result['failed'] > 0 ? 1 : 0;
+})->purpose('Refresh pending PayU refunds and send the final customer confirmation.');
+
 Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation check}', function (): int {
     $failures = 0;
     $runCheck = function (string $label, callable $callback) use (&$failures): void {
@@ -354,6 +373,11 @@ Schedule::command('erp:generate-ready-packing-labels --limit=25')
 
 Schedule::command('erp:retry-shipped-woo-sync --limit=25')
     ->cron('*/5 * * * *')
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:refresh-payu-refunds --limit=25')
+    ->cron('*/10 * * * *')
     ->withoutOverlapping(10)
     ->runInBackground();
 

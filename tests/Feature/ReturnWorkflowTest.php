@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
 use App\Models\Invoice;
 use App\Models\Product;
@@ -955,6 +956,11 @@ class ReturnWorkflowTest extends TestCase
         $this->assertSame('correction', data_get($correction->metadata, 'woocommerce_upload.invoice_type'));
         $this->assertSame('lemon_plugin', data_get($correction->metadata, 'woocommerce_upload.delivery_mode'));
         $this->assertSame('https://shop.test/wp-json/lemon-erp/v1/orders/9001/invoice/download?token=correction-token', data_get($correction->metadata, 'woocommerce_upload.file_url'));
+        $this->assertTrue(CustomerMessage::query()
+            ->where('return_case_id', $returnCase->id)
+            ->where('trigger', 'return_correction_issued')
+            ->whereIn('status', ['held', 'sent'])
+            ->exists());
 
         Http::assertSent(fn ($request): bool => $request->url() === 'https://shop.test/wp-json/lemon-erp/v1/orders/9001/invoice'
             && data_get($request->data(), 'invoice_type') === 'correction'

@@ -19,6 +19,7 @@ use App\Services\Communication\MailSettingsService;
 use App\Services\WooCommerce\WooCommerceOrderStatusService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 use Tests\TestCase;
@@ -136,6 +137,74 @@ class CustomerCommunicationWorkflowTest extends TestCase
         Mail::assertSent(CustomerMessageMail::class, function (CustomerMessageMail $mail): bool {
             return $mail->customerMessage->trigger === 'order_received';
         });
+    }
+
+    public function test_failed_automated_message_is_not_recreated_before_explicit_retry(): void
+    {
+        $order = $this->createOrder('client@example.test');
+        CustomerMessage::query()->create([
+            'external_order_id' => $order->id,
+            'direction' => 'outgoing',
+            'type' => 'automated',
+            'trigger' => 'order_received',
+            'status' => 'failed',
+            'recipient_email' => 'client@example.test',
+            'subject' => 'Zamówienie przyjęte',
+            'body' => 'Pierwsza próba nie została wysłana.',
+            'failed_at' => now(),
+            'error_message' => 'SMTP timeout',
+        ]);
+
+        $message = app(CustomerCommunicationService::class)
+            ->sendOrderStatus($order, 'order_received');
+
+        $this->assertNull($message);
+        $this->assertSame(1, CustomerMessage::query()
+            ->where('external_order_id', $order->id)
+            ->where('trigger', 'order_received')
+            ->count());
+        Mail::assertNothingSent();
+    }
+
+    public function test_retry_does_not_reselect_a_pending_message_that_was_just_claimed(): void
+    {
+        $order = $this->createOrder('client@example.test');
+        $recentlyClaimed = CustomerMessage::query()->create([
+            'external_order_id' => $order->id,
+            'direction' => 'outgoing',
+            'type' => 'automated',
+            'trigger' => 'order_received',
+            'status' => 'pending',
+            'recipient_email' => 'client@example.test',
+            'subject' => 'Niedawno podjęta wiadomość',
+            'body' => 'Ta wiadomość jest właśnie wysyłana.',
+        ]);
+        $stalePending = CustomerMessage::query()->create([
+            'external_order_id' => $order->id,
+            'direction' => 'outgoing',
+            'type' => 'automated',
+            'trigger' => 'order_delivered',
+            'status' => 'pending',
+            'recipient_email' => 'client@example.test',
+            'subject' => 'Osierocona wiadomość',
+            'body' => 'Tę wiadomość można bezpiecznie ponowić.',
+        ]);
+
+        DB::table('customer_messages')->where('id', $recentlyClaimed->id)->update([
+            'created_at' => now()->subHour(),
+            'updated_at' => now(),
+        ]);
+        DB::table('customer_messages')->where('id', $stalePending->id)->update([
+            'created_at' => now()->subHour(),
+            'updated_at' => now()->subMinutes(10),
+        ]);
+
+        $result = app(CustomerCommunicationService::class)->retryUnsent();
+
+        $this->assertSame(['selected' => 1, 'sent' => 1, 'failed' => 0], $result);
+        $this->assertSame('pending', $recentlyClaimed->fresh()->status);
+        $this->assertSame('sent', $stalePending->fresh()->status);
+        Mail::assertSent(CustomerMessageMail::class, 1);
     }
 
     public function test_disabled_workflow_message_is_logged_as_skipped_and_not_sent(): void
@@ -287,6 +356,49 @@ class CustomerCommunicationWorkflowTest extends TestCase
         $this->assertStringContainsString('Sukienka Luna', $html);
         $this->assertStringContainsString('264,80', $html);
         $this->assertStringContainsString('Sprawdź szczegóły zamówienia', $html);
+    }
+
+    public function test_order_mail_uses_gross_woocommerce_amounts_for_items_shipping_and_discounts(): void
+    {
+        $order = $this->createOrder('client@example.test');
+        $order->update([
+            'total_gross' => 123.00,
+            'raw_payload' => [
+                'discount_total' => '10.00',
+                'discount_tax' => '2.30',
+                'shipping_total' => '10.00',
+                'shipping_tax' => '2.30',
+                'total_tax' => '23.00',
+            ],
+        ]);
+        $order->lines()->create([
+            'external_line_id' => 'VAT-1',
+            'sku' => 'SKU-VAT',
+            'name' => 'Produkt opodatkowany',
+            'quantity' => 1,
+            'unit_gross_price' => 90.00,
+            'raw_payload' => [
+                'quantity' => 1,
+                'subtotal' => '100.00',
+                'subtotal_tax' => '23.00',
+                'total' => '90.00',
+                'total_tax' => '20.70',
+            ],
+        ]);
+
+        $message = app(CustomerCommunicationService::class)
+            ->sendOrderStatus($order->fresh(), 'order_received');
+
+        $this->assertSame(110.7, (float) data_get($message?->metadata, 'items.0.line_total'));
+        $this->assertSame('110,70', data_get($message?->metadata, 'items.0.line_total_formatted'));
+        $this->assertSame('123,00', data_get($message?->metadata, 'totals.subtotal_formatted'));
+        $this->assertSame('12,30', data_get($message?->metadata, 'totals.discount_formatted'));
+        $this->assertSame('12,30', data_get($message?->metadata, 'totals.shipping_formatted'));
+        $this->assertSame('123,00', data_get($message?->metadata, 'totals.grand_total_formatted'));
+
+        $html = (new CustomerMessageMail($message))->render();
+        $this->assertStringContainsString('110,70 PLN', $html);
+        $this->assertStringContainsString('−12,30 PLN', $html);
     }
 
     public function test_woocommerce_status_sync_is_independent_from_customer_email_workflow(): void

@@ -41,6 +41,7 @@
     $trackingUrl = $httpUrl($metadata['tracking_url'] ?? null);
     $phoneHref = preg_replace('/[^0-9+]/', '', $supportPhone) ?: '';
     $entityLabel = $entityType === 'return' ? 'Zwrot' : ($entityType === 'order' ? 'Zamówienie' : 'Wiadomość');
+    $showBillingAddress = $billingAddress !== [] && $billingAddress !== $shippingAddress;
 @endphp
 <!doctype html>
 <html lang="pl">
@@ -48,17 +49,28 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="x-apple-disable-message-reformatting">
+    <meta name="color-scheme" content="light only">
+    <meta name="supported-color-schemes" content="light only">
     <title>{{ $subjectText !== '' ? $subjectText : 'Wiadomość' }}</title>
     <style>
+        table { border-spacing: 0; }
+        a[x-apple-data-detectors] { color: inherit !important; text-decoration: none !important; }
         @media only screen and (max-width: 680px) {
+            .mail-outer-pad { padding: 16px 6px 28px !important; }
             .mail-shell { width: 100% !important; }
-            .mail-pad { padding-left: 22px !important; padding-right: 22px !important; }
-            .mail-title { font-size: 30px !important; line-height: 1.12 !important; }
+            .mail-pad { padding-left: 20px !important; padding-right: 20px !important; }
+            .mail-title { font-size: 29px !important; line-height: 1.14 !important; letter-spacing: -.7px !important; overflow-wrap: anywhere !important; }
+            .mail-action-table { width: 100% !important; }
+            .mail-action-link { display: block !important; min-width: 0 !important; padding-left: 18px !important; padding-right: 18px !important; }
             .mail-two-col, .mail-two-col > tbody, .mail-two-col > tbody > tr, .mail-two-col > tbody > tr > td { display: block !important; width: 100% !important; }
             .mail-two-col > tbody > tr > td { padding-left: 0 !important; padding-right: 0 !important; }
             .mail-progress-label { font-size: 9px !important; }
-            .mail-product-image { width: 72px !important; height: 88px !important; }
-            .mail-product-price { width: 82px !important; }
+            .mail-product-image-cell { width: 82px !important; padding-right: 10px !important; }
+            .mail-product-image { width: 68px !important; height: 82px !important; line-height: 82px !important; }
+            .mail-product-price-desktop { display: none !important; mso-hide: all !important; }
+            .mail-product-price-mobile { display: block !important; max-height: none !important; overflow: visible !important; margin-top: 8px !important; color: #191919 !important; font-size: 14px !important; line-height: 1.4 !important; font-weight: 800 !important; }
+            .mail-contact-link { display: block !important; margin-top: 6px !important; }
+            .mail-contact-separator { display: none !important; }
         }
     </style>
 </head>
@@ -69,7 +81,7 @@
 
     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" bgcolor="#f2f1ee" style="width:100%; margin:0; padding:0; background:#f2f1ee;">
         <tr>
-            <td align="center" style="padding:28px 10px 44px;">
+            <td class="mail-outer-pad" align="center" style="padding:28px 10px 44px;">
                 <!--[if mso]><table role="presentation" width="680" cellspacing="0" cellpadding="0" border="0"><tr><td><![endif]-->
                 <table role="presentation" class="mail-shell" width="680" cellspacing="0" cellpadding="0" border="0" style="width:100%; max-width:680px; border-collapse:separate;">
                     <tr>
@@ -128,10 +140,10 @@
                             <div style="font-size:16px; line-height:1.65; color:#353535;">{!! nl2br(e($bodyText)) !!}</div>
 
                             @if ($actionUrl !== null)
-                                <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:26px 0 0;">
+                                <table role="presentation" class="mail-action-table" cellspacing="0" cellpadding="0" border="0" style="margin:26px 0 0;">
                                     <tr>
-                                        <td bgcolor="{{ $accentColor }}" style="background:{{ $accentColor }}; border-radius:999px; mso-padding-alt:0;">
-                                            <a href="{{ $actionUrl }}" style="display:inline-block; min-width:220px; padding:15px 25px; color:{{ $accentText }}; text-decoration:none; text-align:center; font-size:15px; line-height:1.2; font-weight:800;">{{ $actionLabel }} &nbsp;→</a>
+                                        <td align="center" bgcolor="{{ $accentColor }}" style="background:{{ $accentColor }}; border-radius:999px; mso-padding-alt:15px 25px;">
+                                            <a class="mail-action-link" href="{{ $actionUrl }}" style="display:inline-block; min-width:220px; padding:15px 25px; color:{{ $accentText }}; text-decoration:none; text-align:center; font-size:15px; line-height:1.2; font-weight:800;">{{ $actionLabel }} &nbsp;→</a>
                                         </td>
                                     </tr>
                                 </table>
@@ -168,7 +180,7 @@
                                 <td class="mail-pad" bgcolor="#f8f8f5" style="background:#f8f8f5; padding:0 42px;">
                                     <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="border-top:1px solid #deded9;">
                                         <tr>
-                                            <td width="104" valign="middle" style="width:104px; padding:18px 14px 18px 0;">
+                                            <td class="mail-product-image-cell" width="104" valign="middle" style="width:104px; padding:18px 14px 18px 0;">
                                                 @if ($imageUrl)
                                                     @if ($productUrl)<a href="{{ $productUrl }}" style="text-decoration:none;">@endif
                                                     <img class="mail-product-image" src="{{ $imageUrl }}" alt="{{ $productName }}" width="88" height="106" style="display:block; width:88px; height:106px; object-fit:contain; background:#ffffff; border:0; border-radius:8px;">
@@ -187,9 +199,12 @@
                                                     <div style="margin-top:5px; color:#777773; font-size:12px; line-height:1.4;">SKU: {{ $item['sku'] }}</div>
                                                 @endif
                                                 <div style="margin-top:5px; color:#4b4b49; font-size:13px; line-height:1.4;">Ilość: {{ $item['quantity'] ?? 1 }}</div>
+                                                @if ($entityType === 'order' && filled($item['line_total_formatted'] ?? null))
+                                                    <div class="mail-product-price-mobile" style="display:none; max-height:0; overflow:hidden; mso-hide:all;">{{ $item['line_total_formatted'] }} {{ $currency }}</div>
+                                                @endif
                                             </td>
                                             @if ($entityType === 'order' && filled($item['line_total_formatted'] ?? null))
-                                                <td class="mail-product-price" width="105" align="right" valign="middle" style="width:105px; padding:18px 0 18px 10px; color:#191919; font-size:15px; line-height:1.4; font-weight:800; white-space:nowrap;">{{ $item['line_total_formatted'] }} {{ $currency }}</td>
+                                                <td class="mail-product-price-desktop" width="105" align="right" valign="middle" style="width:105px; padding:18px 0 18px 10px; color:#191919; font-size:15px; line-height:1.4; font-weight:800; white-space:nowrap;">{{ $item['line_total_formatted'] }} {{ $currency }}</td>
                                             @endif
                                         </tr>
                                     </table>
@@ -218,7 +233,7 @@
                         </tr>
                     @endif
 
-                    @if ($shippingAddress !== [] || filled($metadata['shipping_method'] ?? null) || filled($metadata['payment_method'] ?? null) || filled($metadata['invoice_number'] ?? null))
+                    @if ($shippingAddress !== [] || $showBillingAddress || filled($metadata['shipping_method'] ?? null) || filled($metadata['payment_method'] ?? null) || filled($metadata['invoice_number'] ?? null))
                         <tr>
                             <td class="mail-pad" bgcolor="#ffffff" style="background:#ffffff; padding:8px 42px 34px;">
                                 <table role="presentation" class="mail-two-col" width="100%" cellspacing="0" cellpadding="0" border="0">
@@ -243,6 +258,20 @@
                                         </td>
                                     </tr>
                                 </table>
+                                @if ($showBillingAddress)
+                                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                                        <tr>
+                                            <td valign="top" style="padding:18px 0; border-top:1px solid #deded9;">
+                                                <div style="font-size:12px; line-height:1.4; color:#70706c; text-transform:uppercase; letter-spacing:.7px; font-weight:800;">Dane do dokumentu</div>
+                                                <div style="margin-top:9px; font-size:13px; line-height:1.55; color:#4a4a47;">
+                                                    @foreach (['name', 'company', 'line1', 'line2', 'country'] as $part)
+                                                        @if (filled($billingAddress[$part] ?? null)){{ $billingAddress[$part] }}<br>@endif
+                                                    @endforeach
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </table>
+                                @endif
                             </td>
                         </tr>
                     @endif
@@ -250,12 +279,14 @@
                     <tr>
                         <td class="mail-pad" bgcolor="#e8efeb" style="background:#e8efeb; padding:30px 42px; border-top:1px solid #d8e2dc;">
                             <h2 style="margin:0; font-size:22px; line-height:1.25; letter-spacing:-.35px; color:#17221c;">Masz pytanie? Jesteśmy dla Ciebie.</h2>
-                            <div style="margin-top:9px; font-size:14px; line-height:1.55; color:#4a5b51;">Odpowiedz na tę wiadomość lub skontaktuj się z naszym zespołem obsługi klienta.</div>
+                            <div style="margin-top:9px; font-size:14px; line-height:1.55; color:#4a5b51;">
+                                {{ $supportEmail !== '' ? 'Odpowiedz na tę wiadomość lub skontaktuj się z naszym zespołem obsługi klienta.' : 'Skontaktuj się z naszym zespołem obsługi klienta — chętnie pomożemy.' }}
+                            </div>
                             @if ($supportEmail !== '' || $supportPhone !== '')
                                 <div style="margin-top:16px; font-size:14px; line-height:1.8;">
-                                    @if ($supportEmail !== '')<a href="mailto:{{ $supportEmail }}" style="color:{{ $accentColor }}; font-weight:800; text-decoration:underline;">{{ $supportEmail }}</a>@endif
-                                    @if ($supportEmail !== '' && $supportPhone !== '')<span style="color:#829087;"> &nbsp;·&nbsp; </span>@endif
-                                    @if ($supportPhone !== '')<a href="tel:{{ $phoneHref }}" style="color:{{ $accentColor }}; font-weight:800; text-decoration:underline;">{{ $supportPhone }}</a>@endif
+                                    @if ($supportEmail !== '')<a class="mail-contact-link" href="mailto:{{ $supportEmail }}" style="color:{{ $accentColor }}; font-weight:800; text-decoration:underline;">{{ $supportEmail }}</a>@endif
+                                    @if ($supportEmail !== '' && $supportPhone !== '')<span class="mail-contact-separator" style="color:#829087;"> &nbsp;·&nbsp; </span>@endif
+                                    @if ($supportPhone !== '')<a class="mail-contact-link" href="tel:{{ $phoneHref }}" style="color:{{ $accentColor }}; font-weight:800; text-decoration:underline;">{{ $supportPhone }}</a>@endif
                                 </div>
                             @endif
                         </td>

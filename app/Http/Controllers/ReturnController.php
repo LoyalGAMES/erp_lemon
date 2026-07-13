@@ -520,6 +520,12 @@ class ReturnController extends Controller
             return back()->with('error', $exception->getMessage());
         }
 
+        $freshReturn = $returnCase->fresh() ?? $returnCase;
+
+        $communication->sendReturnStatus($freshReturn, 'return_correction_issued', [
+            'invoice_number' => $invoice->number,
+        ]);
+
         try {
             $uploader->upload($invoice);
         } catch (RuntimeException $exception) {
@@ -528,12 +534,6 @@ class ReturnController extends Controller
                 "Wystawiono fakturę korygującą {$invoice->number}, ale nie dodano jej do zamówienia WooCommerce: {$exception->getMessage()} Po poprawieniu integracji kliknij Wyślij do WooCommerce przy tej korekcie.",
             );
         }
-
-        $freshReturn = $returnCase->fresh() ?? $returnCase;
-
-        $communication->sendReturnStatus($freshReturn, 'return_correction_issued', [
-            'invoice_number' => $invoice->number,
-        ]);
 
         try {
             $payuPayment = $payuRefunds->attemptAutomaticRefund($freshReturn, $invoice);

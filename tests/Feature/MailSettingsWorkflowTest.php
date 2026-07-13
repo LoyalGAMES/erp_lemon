@@ -8,6 +8,7 @@ use App\Mail\CustomerMessageMail;
 use App\Models\AppSetting;
 use App\Models\CustomerMessage;
 use App\Models\EmailTemplate;
+use App\Services\Communication\CustomerMailPresentationService;
 use App\Services\Communication\MailSettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
@@ -152,8 +153,27 @@ class MailSettingsWorkflowTest extends TestCase
             'subject' => 'Dopłata do wymiany {{return_number}}',
             'body' => 'Prosimy o opłacenie dopłaty {{payment_url}}.',
             'metadata' => [
+                'entity_type' => 'order',
                 'return_number' => 'RET/1',
                 'payment_url' => 'https://pay.example.test/ret/1',
+                'currency' => 'PLN',
+                'items' => [[
+                    'name' => 'Lniana sukienka Luna',
+                    'sku' => 'LUNA-M',
+                    'quantity' => 1,
+                    'line_total_formatted' => '249,00',
+                ]],
+                'shipping_address' => [
+                    'name' => 'Anna Kowalska',
+                    'line1' => 'Kwiatowa 7',
+                    'line2' => '00-001 Warszawa',
+                ],
+                'billing_address' => [
+                    'name' => 'Anna Kowalska',
+                    'company' => 'Sempre Faktury sp. z o.o.',
+                    'line1' => 'Różana 12',
+                    'line2' => '00-002 Warszawa',
+                ],
             ],
         ]);
 
@@ -166,8 +186,16 @@ class MailSettingsWorkflowTest extends TestCase
         $this->assertStringNotContainsString('{{return_number}}', $html);
         $this->assertStringContainsString('Przejdź do płatności', $html);
         $this->assertStringContainsString('https://pay.example.test/ret/1', $html);
+        $this->assertStringContainsString('mail-product-price-mobile', $html);
+        $this->assertStringContainsString('mso-padding-alt:15px 25px', $html);
+        $this->assertStringContainsString('Dane do dokumentu', $html);
+        $this->assertStringContainsString('Sempre Faktury sp. z o.o.', $html);
         $this->assertStringContainsString('Sempre WL - wiadomość systemowa.', $html);
         $this->assertStringContainsString('bok@example.test', $html);
+
+        $text = app(CustomerMailPresentationService::class)->text($message);
+        $this->assertStringContainsString('DANE DO DOKUMENTU', $text);
+        $this->assertStringContainsString('Sempre Faktury sp. z o.o.', $text);
 
         $mailable = new CustomerMessageMail($message);
         $mailable->build();
@@ -195,7 +223,13 @@ class MailSettingsWorkflowTest extends TestCase
         $this->get(route('settings.mail'))
             ->assertOk()
             ->assertSee('Dostarczalność')
-            ->assertSee('Workflow maili do klientów')
+            ->assertSee('Automatyczna komunikacja z klientem')
+            ->assertSee('Wysyłka maili jest aktywna')
+            ->assertSee('Szukaj po nazwie lub momencie wysyłki')
+            ->assertSee('Wersja tekstowa')
+            ->assertSee('aria-hidden="true"', false)
+            ->assertSee('const workflowCards = [...document.querySelectorAll', false)
+            ->assertSee('const focusable = [...dialog.querySelectorAll', false)
             ->assertSee('order_created')
             ->assertSee('return_refunded')
             ->assertSee('Przesyłka dostarczona')
@@ -263,6 +297,8 @@ class MailSettingsWorkflowTest extends TestCase
         $text = (string) $response->json('text');
         $this->assertStringContainsString('Sempre Preview', $html);
         $this->assertStringContainsString('Lniana sukienka Luna', $html);
+        $this->assertStringContainsString('Dane do dokumentu', $html);
+        $this->assertStringContainsString('Kwiat Studio Anna Kowalska', $html);
         $this->assertStringContainsString('Śledź przesyłkę', $html);
         $this->assertStringContainsString('620012345678901234567890', $text);
         $this->assertSame($messageCount, CustomerMessage::query()->count());

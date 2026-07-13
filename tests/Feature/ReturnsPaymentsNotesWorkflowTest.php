@@ -18,6 +18,7 @@ use App\Models\ShippingLabel;
 use App\Models\Warehouse;
 use App\Services\Communication\MailSettingsService;
 use App\Services\Payments\MbankTransferBasketSettingsService;
+use App\Services\Payments\PayuRefundService;
 use App\Services\Payments\PayuRefundSettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
@@ -295,6 +296,11 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
                 ],
                 'status' => ['statusCode' => 'SUCCESS'],
             ]),
+            'https://secure.snd.payu.com/api/v2_1/orders/PAYU123/refunds/REF-1' => Http::response([
+                'refundId' => 'REF-1',
+                'extRefundId' => 'ERP-RET-1-1-12345',
+                'status' => 'FINALIZED',
+            ]),
         ]);
 
         $order = $this->createOrder([
@@ -327,6 +333,18 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
             return $request->url() === 'https://secure.snd.payu.com/api/v2_1/orders/PAYU123/refunds'
                 && data_get($request->data(), 'refund.amount') === '12345';
         });
+
+        $refresh = app(PayuRefundService::class)->refreshPending();
+
+        $this->assertSame(1, $refresh['checked']);
+        $this->assertSame(1, $refresh['finalized']);
+        $this->assertSame('paid', $payment->fresh()->status);
+        $this->assertNotNull($payment->fresh()->paid_at);
+        $this->assertDatabaseHas('customer_messages', [
+            'return_case_id' => $returnCase->id,
+            'trigger' => 'return_refunded',
+            'status' => 'sent',
+        ]);
     }
 
     public function test_payu_refund_can_retry_the_same_payment_after_oauth_failure(): void

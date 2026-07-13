@@ -184,7 +184,7 @@ final class CustomerMailContextService
             'order_url' => 'https://example.com/moje-konto/zamowienia/10482',
             'shipping_method' => 'Kurier InPost',
             'payment_method' => 'Płatność online',
-            'billing_address' => $this->sampleAddress(),
+            'billing_address' => $this->sampleBillingAddress(),
             'shipping_address' => $this->sampleAddress(),
             'items' => $this->sampleItems(),
             'items_count' => 3,
@@ -259,7 +259,21 @@ final class CustomerMailContextService
     private function orderItem(ExternalOrder $order, ExternalOrderLine $line): array
     {
         $quantity = (float) $line->quantity;
-        $unitPrice = (float) ($line->unit_gross_price ?? 0);
+        $sourceQuantity = $this->decimal(data_get($line->raw_payload, 'sempre_erp_source_quantity'))
+            ?? $this->decimal(data_get($line->raw_payload, 'quantity'))
+            ?? $quantity;
+        $rawTotal = $this->numeric(data_get($line->raw_payload, 'total'));
+        $rawTotalTax = $this->numeric(data_get($line->raw_payload, 'total_tax')) ?? 0.0;
+        $rawSubtotal = $this->numeric(data_get($line->raw_payload, 'subtotal'));
+        $rawSubtotalTax = $this->numeric(data_get($line->raw_payload, 'subtotal_tax')) ?? 0.0;
+        $unitPrice = $rawTotal !== null && $sourceQuantity > 0
+            ? ($rawTotal + $rawTotalTax) / $sourceQuantity
+            : (float) ($line->unit_gross_price ?? 0);
+        $unitSubtotal = $rawSubtotal !== null && $sourceQuantity > 0
+            ? ($rawSubtotal + $rawSubtotalTax) / $sourceQuantity
+            : $unitPrice;
+        $lineTotal = round($unitPrice * $quantity, 2);
+        $lineSubtotal = round($unitSubtotal * $quantity, 2);
         $product = $line->product;
 
         return [
@@ -268,8 +282,10 @@ final class CustomerMailContextService
             'quantity' => $this->quantity($quantity),
             'unit_price' => $unitPrice,
             'unit_price_formatted' => $this->money($unitPrice),
-            'line_total' => round($unitPrice * $quantity, 2),
-            'line_total_formatted' => $this->money($unitPrice * $quantity),
+            'line_total' => $lineTotal,
+            'line_total_formatted' => $this->money($lineTotal),
+            'line_subtotal' => $lineSubtotal,
+            'line_discount' => max(0, round($lineSubtotal - $lineTotal, 2)),
             'image_url' => $this->imageUrl($line, $product),
             'product_url' => $this->productUrl($order, $line, $product),
         ];
@@ -316,12 +332,31 @@ final class CustomerMailContextService
      */
     private function orderTotals(ExternalOrder $order, array $items): array
     {
-        $subtotal = round((float) collect($items)->sum('line_total'), 2);
-        $shipping = $this->numeric(data_get($order->raw_payload, 'shipping_total'))
+        $lineTotal = round((float) collect($items)->sum('line_total'), 2);
+        $subtotal = round((float) collect($items)->sum(
+            fn (array $item): float => (float) ($item['line_subtotal'] ?? $item['line_total'] ?? 0),
+        ), 2);
+        $discount = round((float) collect($items)->sum('line_discount'), 2);
+        $orderDiscount = round(
+            ($this->numeric(data_get($order->raw_payload, 'discount_total')) ?? 0.0)
+            + ($this->numeric(data_get($order->raw_payload, 'discount_tax')) ?? 0.0),
+            2,
+        );
+
+        if ($discount <= 0 && $orderDiscount > 0) {
+            $discount = $orderDiscount;
+            $subtotal = round($lineTotal + $discount, 2);
+        }
+
+        $shippingNet = $this->numeric(data_get($order->raw_payload, 'shipping_total'))
             ?? round((float) collect((array) data_get($order->raw_payload, 'shipping_lines', []))->sum(
                 fn ($line): float => is_array($line) ? (float) ($line['total'] ?? 0) : 0,
             ), 2);
-        $discount = $this->numeric(data_get($order->raw_payload, 'discount_total')) ?? 0.0;
+        $shippingTax = $this->numeric(data_get($order->raw_payload, 'shipping_tax'))
+            ?? round((float) collect((array) data_get($order->raw_payload, 'shipping_lines', []))->sum(
+                fn ($line): float => is_array($line) ? (float) ($line['total_tax'] ?? 0) : 0,
+            ), 2);
+        $shipping = round($shippingNet + $shippingTax, 2);
         $tax = $this->numeric(data_get($order->raw_payload, 'total_tax')) ?? 0.0;
         $grandTotal = (float) $order->total_gross;
 
@@ -536,6 +571,11 @@ final class CustomerMailContextService
         return is_numeric($value) ? round((float) $value, 2) : null;
     }
 
+    private function decimal(mixed $value): ?float
+    {
+        return is_numeric($value) ? (float) $value : null;
+    }
+
     /** @return array<string, string> */
     private function sampleAddress(): array
     {
@@ -545,6 +585,18 @@ final class CustomerMailContextService
             'line2' => '62-070 Poznań',
             'country' => 'PL',
             'phone' => '+48 500 600 700',
+        ];
+    }
+
+    /** @return array<string, string> */
+    private function sampleBillingAddress(): array
+    {
+        return [
+            'name' => 'Anna Kowalska',
+            'company' => 'Kwiat Studio Anna Kowalska',
+            'line1' => 'ul. Różana 8',
+            'line2' => '62-070 Poznań',
+            'country' => 'PL',
         ];
     }
 

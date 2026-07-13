@@ -10,6 +10,8 @@
     $items = array_values(array_filter((array) ($metadata['items'] ?? []), 'is_array'));
     $totals = is_array($metadata['totals'] ?? null) ? $metadata['totals'] : [];
     $address = is_array($metadata['shipping_address'] ?? null) ? $metadata['shipping_address'] : [];
+    $billingAddress = is_array($metadata['billing_address'] ?? null) ? $metadata['billing_address'] : [];
+    $showBillingAddress = $billingAddress !== [] && $billingAddress !== $address;
     $actionUrl = trim((string) ($metadata['action_url'] ?? $metadata['payment_url'] ?? ''));
 @endphp
 {{ $subjectText !== '' ? $subjectText : 'Wiadomość' }}
@@ -58,6 +60,13 @@ DOSTAWA
 @endif
 @endforeach
 @endif
+@if ($showBillingAddress)
+
+DANE DO DOKUMENTU
+@foreach (['name', 'company', 'line1', 'line2', 'country'] as $part)@if (filled($billingAddress[$part] ?? null)){{ $billingAddress[$part] }}
+@endif
+@endforeach
+@endif
 @if (filled($metadata['payment_method'] ?? null) || filled($metadata['invoice_number'] ?? null))
 
 PŁATNOŚĆ I DOKUMENTY
@@ -72,6 +81,7 @@ PŁATNOŚĆ I DOKUMENTY
 @endif
 
 ---
-Kontakt: {{ trim($supportEmail.($supportEmail !== '' && $supportPhone !== '' ? ' · ' : '').$supportPhone) }}
+@if ($supportEmail !== '' || $supportPhone !== '')Kontakt: {{ trim($supportEmail.($supportEmail !== '' && $supportPhone !== '' ? ' · ' : '').$supportPhone) }}
+@endif
 @if ($footerText !== ''){{ $footerText }}
 @endif

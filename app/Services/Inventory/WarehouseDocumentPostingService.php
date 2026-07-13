@@ -444,10 +444,10 @@ final class WarehouseDocumentPostingService
             try {
                 $returnCase = ReturnCase::query()->findOrFail($returnCaseId);
                 $invoice = $this->returnCorrections->createForReturn($returnCase);
-                $this->invoiceUpload->upload($invoice);
                 $this->communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_correction_issued', [
                     'invoice_number' => $invoice->number,
                 ]);
+                $this->invoiceUpload->upload($invoice);
                 $payment = $this->payuRefunds->attemptAutomaticRefund($returnCase->fresh() ?? $returnCase, $invoice);
 
                 if ($payment instanceof CustomerPayment) {

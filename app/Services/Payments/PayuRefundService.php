@@ -7,6 +7,7 @@ namespace App\Services\Payments;
 use App\Models\CustomerPayment;
 use App\Models\Invoice;
 use App\Models\ReturnCase;
+use App\Services\Communication\CustomerCommunicationService;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
@@ -16,6 +17,7 @@ final class PayuRefundService
     public function __construct(
         private readonly PayuRefundSettingsService $settings,
         private readonly PaymentMethodClassifier $classifier,
+        private readonly CustomerCommunicationService $communication,
     ) {}
 
     public function attemptAutomaticRefund(ReturnCase $returnCase, Invoice $invoice): ?CustomerPayment
@@ -161,6 +163,113 @@ final class PayuRefundService
         }
 
         return $payment->refresh();
+    }
+
+    /**
+     * @return array{checked:int,finalized:int,pending:int,failed:int,warnings:list<string>}
+     */
+    public function refreshPending(int $limit = 25): array
+    {
+        $settings = $this->settings->data();
+        $secret = $this->settings->clientSecret();
+
+        if (! $settings['enabled'] || $settings['client_id'] === '' || $secret === null) {
+            return ['checked' => 0, 'finalized' => 0, 'pending' => 0, 'failed' => 0, 'warnings' => []];
+        }
+
+        $payments = CustomerPayment::query()
+            ->with('returnCase.correctionInvoice')
+            ->where('direction', 'outgoing')
+            ->where('method', 'payu')
+            ->where('status', 'pending')
+            ->whereNotNull('return_case_id')
+            ->oldest('updated_at')
+            ->limit(max(1, min(100, $limit)))
+            ->get();
+
+        if ($payments->isEmpty()) {
+            return ['checked' => 0, 'finalized' => 0, 'pending' => 0, 'failed' => 0, 'warnings' => []];
+        }
+
+        $token = $this->token($settings['client_id'], $secret);
+        $finalized = 0;
+        $pending = 0;
+        $failed = 0;
+        $warnings = [];
+
+        foreach ($payments as $payment) {
+            $payuOrderId = trim((string) data_get($payment->metadata, 'payu.order_id'));
+            $refundId = trim((string) data_get($payment->metadata, 'payu.refund_id'));
+
+            if ($payuOrderId === '' || $refundId === '') {
+                $failed++;
+                $warnings[] = "Płatność #{$payment->id}: brak identyfikatora zamówienia lub refundu PayU.";
+
+                continue;
+            }
+
+            try {
+                $response = Http::baseUrl($this->settings->baseUrl())
+                    ->withToken($token)
+                    ->acceptJson()
+                    ->timeout(20)
+                    ->get('/api/v2_1/orders/'.rawurlencode($payuOrderId).'/refunds/'.rawurlencode($refundId));
+
+                if ($response->failed()) {
+                    throw new RuntimeException("PayU zwróciło HTTP {$response->status()} podczas sprawdzania refundu {$refundId}.");
+                }
+
+                $body = (array) $response->json();
+                $refund = (array) (data_get($body, 'refund') ?: $body);
+                $status = mb_strtolower(trim((string) ($refund['status'] ?? 'pending')));
+                $metadata = $payment->metadata ?? [];
+                data_set($metadata, 'payu.status', $refund['status'] ?? $status);
+                data_set($metadata, 'payu.status_response', $body);
+                data_set($metadata, 'payu.status_checked_at', now()->toISOString());
+
+                if (in_array($status, ['finalized', 'completed', 'success'], true)) {
+                    $payment->update([
+                        'status' => 'paid',
+                        'paid_at' => now(),
+                        'metadata' => $metadata,
+                    ]);
+                    $returnCase = $payment->returnCase;
+
+                    if ($returnCase instanceof ReturnCase) {
+                        $this->communication->sendReturnStatus($returnCase, 'return_refunded', [
+                            'invoice_number' => $returnCase->correctionInvoice?->number,
+                            'payment_reference' => $payment->reference,
+                            'payment_status' => 'paid',
+                        ]);
+                    }
+
+                    $finalized++;
+
+                    continue;
+                }
+
+                if (in_array($status, ['canceled', 'cancelled', 'rejected', 'failed'], true)) {
+                    $payment->update(['status' => 'failed', 'metadata' => $metadata]);
+                    $failed++;
+
+                    continue;
+                }
+
+                $payment->update(['metadata' => $metadata]);
+                $pending++;
+            } catch (\Throwable $exception) {
+                $failed++;
+                $warnings[] = "Refund PayU {$refundId}: {$exception->getMessage()}";
+            }
+        }
+
+        return [
+            'checked' => $payments->count(),
+            'finalized' => $finalized,
+            'pending' => $pending,
+            'failed' => $failed,
+            'warnings' => $warnings,
+        ];
     }
 
     /**
