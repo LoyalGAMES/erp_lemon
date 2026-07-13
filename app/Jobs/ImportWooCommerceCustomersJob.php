@@ -172,7 +172,7 @@ final class ImportWooCommerceCustomersJob implements ShouldBeUnique, ShouldQueue
             ->where('wordpress_integration_id', $integration->id)
             ->where('is_registered', true)
             ->whereNotNull('account_created_at')
-            ->where('account_created_at', '>=', $cutoff->utc());
+            ->where('account_created_at', '>=', $cutoff);
         $stats['notifications_eligible'] = (clone $eligible)->count();
         $candidates = (clone $eligible)
             ->whereDoesntHave('customer.messages', fn ($messages) => $messages->where('trigger', 'customer_account_created'));

@@ -153,6 +153,30 @@ class WooCommerceCustomerSyncTest extends TestCase
         $this->assertSame(1, Customer::query()->count());
     }
 
+    public function test_customer_gmt_timestamp_is_normalized_before_warsaw_dst_gap_write(): void
+    {
+        [, $integration] = $this->integration('DST');
+
+        $account = app(WooCommerceCustomerSyncService::class)->syncCustomer($integration, [
+            'id' => 88,
+            'email' => 'dst@example.test',
+            'date_created' => '2026-03-29T04:15:26',
+            'date_created_gmt' => '2026-03-29T02:15:26',
+        ]);
+
+        $this->assertNotNull($account);
+
+        $account = $account->fresh();
+        $customer = $account->customer->fresh();
+
+        $this->assertSame('2026-03-29 04:15:26', $account->getRawOriginal('account_created_at'));
+        $this->assertSame('2026-03-29 04:15:26', $customer->getRawOriginal('account_created_at'));
+        $this->assertSame(
+            '2026-03-29 02:15:26',
+            $account->account_created_at?->utc()->toDateTimeString(),
+        );
+    }
+
     public function test_client_exposes_safe_customer_and_order_operations(): void
     {
         [, $integration] = $this->integration('CLIENT');

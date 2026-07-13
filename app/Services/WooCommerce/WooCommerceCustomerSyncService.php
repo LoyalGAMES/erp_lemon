@@ -267,9 +267,7 @@ final class WooCommerceCustomerSyncService
             $lastName = $this->text($profile['last_name'] ?? $billing['last_name'] ?? null);
             $displayName = $this->displayName($profile, $billing, $email);
             $phone = $this->text($billing['phone'] ?? $shipping['phone'] ?? null);
-            $accountCreatedAt = $this->dateTime(
-                $profile['date_created_gmt'] ?? $profile['date_created'] ?? null,
-            );
+            $accountCreatedAt = $this->accountCreatedAt($profile);
             $accountAttributes = $this->withoutNullValues([
                 'external_customer_id' => $externalCustomerId,
                 'email' => $email,
@@ -481,14 +479,46 @@ final class WooCommerceCustomerSyncService
         return $value !== '' ? Str::limit($value, 255, '') : null;
     }
 
-    private function dateTime(mixed $value): ?CarbonImmutable
+    /**
+     * WooCommerce exposes both an absolute UTC value and a store-local value.
+     * Keep the resulting Carbon instance in the application's timezone before
+     * Eloquent serializes it: MySQL TIMESTAMP input is interpreted in the
+     * connection timezone and a bare UTC 02:xx may fall into Warsaw's DST gap.
+     *
+     * @param  array<string, mixed>  $profile
+     */
+    private function accountCreatedAt(array $profile): ?CarbonImmutable
     {
+        $applicationTimezone = (string) config('app.timezone', 'UTC');
+        $gmt = $this->dateTime(
+            $profile['date_created_gmt'] ?? null,
+            'UTC',
+            $applicationTimezone,
+        );
+
+        if ($gmt !== null) {
+            return $gmt;
+        }
+
+        return $this->dateTime(
+            $profile['date_created'] ?? null,
+            $applicationTimezone,
+            $applicationTimezone,
+        );
+    }
+
+    private function dateTime(
+        mixed $value,
+        string $sourceTimezone,
+        string $targetTimezone,
+    ): ?CarbonImmutable {
         if (! is_scalar($value) || trim((string) $value) === '') {
             return null;
         }
 
         try {
-            return CarbonImmutable::parse((string) $value, 'UTC')->utc();
+            return CarbonImmutable::parse((string) $value, $sourceTimezone)
+                ->setTimezone($targetTimezone);
         } catch (Throwable) {
             return null;
         }
