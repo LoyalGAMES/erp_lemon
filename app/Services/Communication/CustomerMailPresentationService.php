@@ -27,6 +27,7 @@ final class CustomerMailPresentationService
             'messageBody' => $message->renderedBody(),
             'mailLayout' => $layout,
             'accentForeground' => $this->contrastColor($layout['accent_color']),
+            'accentLinkColor' => $this->readableAccentColor($layout['accent_color']),
         ];
     }
 
@@ -97,6 +98,80 @@ final class CustomerMailPresentationService
         $luminance = (($red * 299) + ($green * 587) + ($blue * 114)) / 1000;
 
         return $luminance > 155 ? '#171717' : '#ffffff';
+    }
+
+    private function readableAccentColor(string $hex): string
+    {
+        if (preg_match('/^#[0-9a-fA-F]{6}$/', $hex) !== 1) {
+            return '#2f6f4f';
+        }
+
+        $accent = $this->hexToRgb($hex);
+        $backgrounds = array_map(
+            fn (string $background): array => $this->hexToRgb($background),
+            ['#ffffff', '#f6f6f3', '#e8efeb'],
+        );
+
+        for ($percentage = 100; $percentage >= 0; $percentage--) {
+            $candidate = array_map(
+                static fn (int $channel): int => (int) round($channel * ($percentage / 100)),
+                $accent,
+            );
+
+            $readable = true;
+
+            foreach ($backgrounds as $background) {
+                if ($this->contrastRatio($candidate, $background) < 4.5) {
+                    $readable = false;
+
+                    break;
+                }
+            }
+
+            if ($readable) {
+                return sprintf('#%02x%02x%02x', ...$candidate);
+            }
+        }
+
+        return '#171717';
+    }
+
+    /** @return array{0: int, 1: int, 2: int} */
+    private function hexToRgb(string $hex): array
+    {
+        $hex = ltrim($hex, '#');
+
+        return [
+            hexdec(substr($hex, 0, 2)),
+            hexdec(substr($hex, 2, 2)),
+            hexdec(substr($hex, 4, 2)),
+        ];
+    }
+
+    /**
+     * @param  array{0: int, 1: int, 2: int}  $foreground
+     * @param  array{0: int, 1: int, 2: int}  $background
+     */
+    private function contrastRatio(array $foreground, array $background): float
+    {
+        $lighter = max($this->relativeLuminance($foreground), $this->relativeLuminance($background));
+        $darker = min($this->relativeLuminance($foreground), $this->relativeLuminance($background));
+
+        return ($lighter + 0.05) / ($darker + 0.05);
+    }
+
+    /** @param array{0: int, 1: int, 2: int} $rgb */
+    private function relativeLuminance(array $rgb): float
+    {
+        [$red, $green, $blue] = array_map(static function (int $channel): float {
+            $value = $channel / 255;
+
+            return $value <= 0.04045
+                ? $value / 12.92
+                : (($value + 0.055) / 1.055) ** 2.4;
+        }, $rgb);
+
+        return (0.2126 * $red) + (0.7152 * $green) + (0.0722 * $blue);
     }
 
     private function httpUrl(string $url): ?string

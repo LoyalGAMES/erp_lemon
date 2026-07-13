@@ -1,13 +1,13 @@
 <?php
 
 use App\Models\Invoice;
+use App\Services\Communication\UnpaidOrderReminderService;
 use App\Services\Integrations\WooCommerceImportQueueService;
 use App\Services\Inventory\StockSyncQueueService;
 use App\Services\Invoices\InvoiceSettingsService;
 use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Invoices\OrderInvoiceService;
 use App\Services\Ksef\KsefSubmissionService;
-use App\Services\Packing\PackingLabelAutomationService;
 use App\Services\Payments\PayuRefundService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippedOrderWooSyncService;
@@ -181,25 +181,6 @@ Artisan::command('erp:track-courier-pickups {--limit=50 : Maximum number of ship
     return 0;
 })->purpose('Check courier tracking for packed orders and mark physically picked up parcels as shipped.');
 
-Artisan::command('erp:generate-ready-packing-labels {--limit=25 : Maximum number of ready orders to reconcile}', function (): int {
-    $limit = max(1, (int) $this->option('limit'));
-    $result = app(PackingLabelAutomationService::class)->generateReadyOrders($limit);
-
-    $this->info(sprintf(
-        'Packing labels: checked %d, generated %d, existing %d, failed %d.',
-        $result['checked'],
-        $result['generated'],
-        $result['existing'],
-        $result['failed'],
-    ));
-
-    foreach ($result['warnings'] as $warning) {
-        $this->warn($warning);
-    }
-
-    return 0;
-})->purpose('Generate missing shipment labels after order collection and retry temporary failures.');
-
 Artisan::command('erp:retry-shipped-woo-sync {--limit=25 : Maximum number of shipped orders to retry}', function (): int {
     $result = app(ShippedOrderWooSyncService::class)->retry(max(1, (int) $this->option('limit')));
 
@@ -234,6 +215,23 @@ Artisan::command('erp:refresh-payu-refunds {--limit=25 : Maximum number of pendi
 
     return $result['failed'] > 0 ? 1 : 0;
 })->purpose('Refresh pending PayU refunds and send the final customer confirmation.');
+
+Artisan::command('erp:send-unpaid-order-reminders {--limit=100 : Maximum number of reminders to create}', function (): int {
+    $result = app(UnpaidOrderReminderService::class)->dispatchDue(max(1, (int) $this->option('limit')));
+
+    $this->info(sprintf(
+        'Unpaid reminders: scanned %d, eligible %d, created %d, sent %d, held %d, failed %d, skipped %d.',
+        $result['scanned'],
+        $result['eligible'],
+        $result['created'],
+        $result['sent'],
+        $result['held'],
+        $result['failed'],
+        $result['skipped'],
+    ));
+
+    return $result['failed'] > 0 ? 1 : 0;
+})->purpose('Send delayed reminders only for orders that are still unpaid.');
 
 Artisan::command('erp:preflight {--skip-views : Skip Blade view compilation check}', function (): int {
     $failures = 0;
@@ -366,11 +364,6 @@ Schedule::command('erp:track-courier-pickups --limit=50')
     ->withoutOverlapping(10)
     ->runInBackground();
 
-Schedule::command('erp:generate-ready-packing-labels --limit=25')
-    ->cron('*/5 * * * *')
-    ->withoutOverlapping(10)
-    ->runInBackground();
-
 Schedule::command('erp:retry-shipped-woo-sync --limit=25')
     ->cron('*/5 * * * *')
     ->withoutOverlapping(10)
@@ -378,6 +371,11 @@ Schedule::command('erp:retry-shipped-woo-sync --limit=25')
 
 Schedule::command('erp:refresh-payu-refunds --limit=25')
     ->cron('*/10 * * * *')
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:send-unpaid-order-reminders --limit=100')
+    ->cron('*/5 * * * *')
     ->withoutOverlapping(10)
     ->runInBackground();
 

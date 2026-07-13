@@ -143,7 +143,7 @@ class PackingWorkflowTest extends TestCase
             ->assertSee('ul. Magazynowa 5')
             ->assertSee('199,00 PLN');
 
-        $this->post(route('packing.orders.label', $order))
+        $this->post(route('packing.orders.label', $order), ['parcel_template' => 'small'])
             ->assertRedirect()
             ->assertSessionHas('error');
 
@@ -471,7 +471,7 @@ class PackingWorkflowTest extends TestCase
         $this->assertSame(1, substr_count($response->getContent(), 'Zamówienie 613'));
     }
 
-    public function test_packed_order_generates_label_wz_invoice_status_and_courier_queue(): void
+    public function test_packed_order_with_manually_selected_label_generates_wz_invoice_status_and_courier_queue(): void
     {
         Storage::fake('local');
 
@@ -654,6 +654,10 @@ class PackingWorkflowTest extends TestCase
             ->assertRedirect()
             ->assertSessionHas('status');
 
+        $this->post(route('packing.orders.label', $order), ['parcel_template' => 'small'])
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'gabaryt A'));
+
         $this->post(route('packing.orders.pack', $order))
             ->assertRedirect()
             ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'Spakowano zamówienie 801')
@@ -679,7 +683,8 @@ class PackingWorkflowTest extends TestCase
             ->assertSee('Odebrano');
 
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
-            && $request->url() === 'https://shop.test/wp-json/ship/v1/orders/801/label');
+            && $request->url() === 'https://shop.test/wp-json/ship/v1/orders/801/label'
+            && data_get($request->data(), 'parcel_template') === 'small');
 
         Http::assertSent(function ($request): bool {
             $data = $request->data();
@@ -1145,7 +1150,7 @@ class PackingWorkflowTest extends TestCase
             'external_created_at' => now(),
         ]);
 
-        $this->post(route('packing.orders.label', $order))
+        $this->post(route('packing.orders.label', $order), ['parcel_template' => 'small'])
             ->assertRedirect()
             ->assertSessionHas('status');
 

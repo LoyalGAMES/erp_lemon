@@ -824,8 +824,12 @@ final class WooCommerceClient
     /**
      * @return array{contents:string,mime_type:string,filename:?string,source_url:?string,response_payload:?array<string,mixed>}
      */
-    public function generateShippingLabel(WordpressIntegration $integration, string $orderId, string $orderNumber): array
-    {
+    public function generateShippingLabel(
+        WordpressIntegration $integration,
+        string $orderId,
+        string $orderNumber,
+        ?string $parcelTemplate = null,
+    ): array {
         $settings = $integration->shippingLabelSettings();
         $endpoint = trim((string) $settings['endpoint']);
 
@@ -840,6 +844,10 @@ final class WooCommerceClient
             'order_number' => $orderNumber,
             'idempotency_key' => "sempre-shipment:{$integration->id}:{$orderId}",
         ];
+
+        if ($parcelTemplate !== null) {
+            $payload['parcel_template'] = $parcelTemplate;
+        }
 
         $request = $this->shippingLabelRequest($integration, $settings, retry: $method === 'GET')
             ->withHeaders([

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Http\Controllers;
 
-use App\Jobs\GeneratePackingLabelJob;
 use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\PackingTask;
@@ -22,6 +21,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use RuntimeException;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -129,7 +129,7 @@ class PackingController extends Controller
             'activeStation' => $activeStation,
             'courierAccounts' => CourierAccount::query()
                 ->where('is_active', true)
-                ->orderBy('provider')
+                ->where('provider', 'inpost')
                 ->orderByDesc('is_default')
                 ->orderBy('name')
                 ->get(),
@@ -221,11 +221,6 @@ class PackingController extends Controller
             number_format((float) $task->quantity_required, 0, ',', ' '),
         );
 
-        if ($this->orderIsReadyForAutomaticLabel($task->external_order_id)) {
-            GeneratePackingLabelJob::dispatch($task->external_order_id)->afterCommit();
-            $message .= ' Zlecono automatyczne generowanie etykiety.';
-        }
-
         return back()->with('status', $message);
     }
 
@@ -238,11 +233,6 @@ class PackingController extends Controller
             'task_ids.*' => ['integer', 'exists:packing_tasks,id'],
         ]);
 
-        $orderIds = PackingTask::query()
-            ->whereIn('id', $data['task_ids'])
-            ->pluck('external_order_id')
-            ->unique();
-
         try {
             $count = $packing->markPickedMany($data['task_ids']);
         } catch (RuntimeException $exception) {
@@ -250,12 +240,6 @@ class PackingController extends Controller
         }
 
         $message = "Oznaczono {$count} pozycji jako zebrane. Zamówienia trafiły do kolejki pakowania.";
-        foreach ($orderIds as $orderId) {
-            if ($this->orderIsReadyForAutomaticLabel((int) $orderId)) {
-                GeneratePackingLabelJob::dispatch((int) $orderId)->afterCommit();
-                $message .= ' Zlecono automatyczne generowanie etykiety.';
-            }
-        }
 
         return back()->with('status', $message);
     }
@@ -425,7 +409,14 @@ class PackingController extends Controller
         ShippingLabelService $shippingLabels,
     ): RedirectResponse {
         $data = $request->validate([
-            'courier_account_id' => ['nullable', 'integer', 'exists:courier_accounts,id'],
+            'courier_account_id' => [
+                'nullable',
+                'integer',
+                Rule::exists('courier_accounts', 'id')->where(fn ($query) => $query
+                    ->where('provider', 'inpost')
+                    ->where('is_active', true)),
+            ],
+            'parcel_template' => ['required', 'string', 'in:small,medium,large'],
         ]);
 
         $account = filled($data['courier_account_id'] ?? null)
@@ -433,12 +424,20 @@ class PackingController extends Controller
             : null;
 
         try {
-            $label = $shippingLabels->generateForOrder($order, $account);
+            $label = $shippingLabels->generateForOrder($order, $account, $data['parcel_template']);
         } catch (RuntimeException $exception) {
             return back()->with('error', 'Nie udało się wygenerować etykiety: '.$exception->getMessage());
         }
 
-        $message = "Etykieta dla zamówienia {$order->external_number} została pobrana do ERP: {$label->filename()}.";
+        $recordedTemplate = data_get($label->response_payload, 'parcel_template');
+        $size = match ($recordedTemplate) {
+            'small' => 'A',
+            'medium' => 'B',
+            'large' => 'C',
+            default => null,
+        };
+        $sizeDescription = $size !== null ? " (gabaryt {$size})" : '';
+        $message = "Etykieta dla zamówienia {$order->external_number}{$sizeDescription} została pobrana do ERP: {$label->filename()}.";
 
         if ($account instanceof CourierAccount) {
             $message .= " Konto nadawcze: {$account->name}.";
@@ -473,18 +472,6 @@ class PackingController extends Controller
         }
 
         return " Etykieta została dodana do kolejki wydruku: {$printJob->printer_name}.";
-    }
-
-    private function orderIsReadyForAutomaticLabel(int $orderId): bool
-    {
-        return PackingTask::query()
-            ->where('external_order_id', $orderId)
-            ->whereIn('status', ['picked', 'packed'])
-            ->exists()
-            && ! PackingTask::query()
-                ->where('external_order_id', $orderId)
-                ->whereIn('status', ['open', 'problem'])
-                ->exists();
     }
 
     /**
@@ -628,9 +615,8 @@ class PackingController extends Controller
                             'tracking_status' => $label?->tracking_status,
                             'tracking_checked_at' => $label?->tracking_checked_at,
                             'tracking_error' => $label?->tracking_last_error,
-                            'label_error' => data_get($first->metadata, 'label_automation.message')
-                                ?: collect((array) data_get($first->metadata, 'packing_completion.warnings', []))
-                                    ->first(fn ($warning): bool => str_starts_with((string) $warning, 'Etykieta:')),
+                            'label_error' => collect((array) data_get($first->metadata, 'packing_completion.warnings', []))
+                                ->first(fn ($warning): bool => str_starts_with((string) $warning, 'Etykieta:')),
                         ];
                     })
                     ->filter()

@@ -10,7 +10,6 @@ use App\Models\Product;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
 use App\Models\WordpressIntegration;
-use App\Services\Packing\PackingLabelAutomationService;
 use App\Services\Packing\PackingSettingsService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippedOrderWooSyncService;
@@ -28,7 +27,7 @@ class PackingShipmentAutomationTest extends TestCase
 
     private int $sequence = 1200;
 
-    public function test_finishing_collection_generates_label_without_printing_and_pack_prints_it(): void
+    public function test_finishing_collection_requires_manual_gabaryt_selection_before_generating_label(): void
     {
         Storage::fake('local');
         $channel = $this->createChannel();
@@ -38,8 +37,8 @@ class PackingShipmentAutomationTest extends TestCase
 
         Http::fake([
             'https://shop.test/wp-json/ship/v1/orders/*/label' => Http::response([
-                'label_base64' => base64_encode('%PDF-1.4 automatic-label'),
-                'filename' => 'automatic-label.pdf',
+                'label_base64' => base64_encode('%PDF-1.4 manual-label'),
+                'filename' => 'manual-label.pdf',
                 'provider' => 'inpost',
                 'label_number' => 'AUTO-1201',
                 'tracking_number' => $trackingNumber,
@@ -62,20 +61,34 @@ class PackingShipmentAutomationTest extends TestCase
 
         $this->post(route('packing.groups.pick'), ['task_ids' => [$task->id]])
             ->assertRedirect()
-            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'automatyczne generowanie etykiety'));
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'trafiły do kolejki pakowania'));
 
-        $label = ShippingLabel::query()->sole();
         $task->refresh();
         $order->refresh();
 
         $this->assertSame('picked', $task->status);
         $this->assertSame('ready_to_pack', $order->fulfillment_status);
+        $this->assertDatabaseCount('shipping_labels', 0);
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee('gabaryt A', false)
+            ->assertSee('gabaryt B', false)
+            ->assertSee('gabaryt C', false);
+
+        $this->post(route('packing.orders.label', $order), ['parcel_template' => 'large'])
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'gabaryt C'));
+
+        $label = ShippingLabel::query()->sole();
         $this->assertSame('shipment', $label->purpose);
         $this->assertSame('generated', $label->status);
         $this->assertSame($trackingNumber, $label->tracking_number);
-        $this->assertSame('generated', data_get($task->metadata, 'label_automation.status'));
+        $this->assertSame('large', data_get($label->response_payload, 'parcel_template'));
         $this->assertDatabaseMissing('print_jobs', ['shipping_label_id' => $label->id]);
         Storage::disk('local')->assertExists($label->path);
+        Http::assertSent(fn ($request): bool => str_contains($request->url(), '/wp-json/ship/v1/orders/')
+            && data_get($request->data(), 'parcel_template') === 'large');
 
         $this->post(route('packing.orders.pack', $order))
             ->assertRedirect()
@@ -482,24 +495,16 @@ class PackingShipmentAutomationTest extends TestCase
         $this->assertSame('shipped', $order->fresh()->fulfillment_status);
     }
 
-    public function test_delayed_label_retry_preserves_print_intent_from_pack(): void
+    public function test_packing_without_a_manually_generated_label_does_not_generate_or_print_one(): void
     {
         Storage::fake('local');
         $channel = $this->createChannel();
         $this->createIntegration($channel);
         [$order, $task] = $this->createOrderWithTask($channel, 'open', 'InPost');
-        $allowLabel = false;
 
-        Http::fake(function ($request) use (&$allowLabel) {
+        Http::fake(function ($request) {
             if (str_contains($request->url(), '/wp-json/ship/v1/orders/')) {
-                return $allowLabel
-                    ? Http::response([
-                        'label_base64' => base64_encode('%PDF-1.4 delayed-label'),
-                        'filename' => 'delayed-label.pdf',
-                        'provider' => 'inpost',
-                        'tracking_number' => '520000000000000000006666',
-                    ], 200)
-                    : Http::response(['message' => 'temporary label outage'], 503);
+                return Http::response(['message' => 'label endpoint must not be called automatically'], 500);
             }
 
             if (str_contains($request->url(), '/wp-json/wc/v3/orders/')) {
@@ -520,27 +525,18 @@ class PackingShipmentAutomationTest extends TestCase
         $this->post(route('packing.station'), ['station' => 'station-retry'])->assertRedirect();
         $this->post(route('packing.groups.pick'), ['task_ids' => [$task->id]])->assertRedirect();
 
-        $this->assertSame('failed', data_get($task->fresh()->metadata, 'label_automation.status'));
         $this->assertSame(0, ShippingLabel::query()->count());
 
-        $this->post(route('packing.orders.pack', $order))->assertRedirect();
+        $this->post(route('packing.orders.pack', $order))
+            ->assertRedirect()
+            ->assertSessionHas(
+                'status',
+                fn (string $message): bool => str_contains($message, 'najpierw wygeneruj etykietę'),
+            );
         $this->assertSame('packed', $task->fresh()->status);
         $this->assertSame('station-retry', data_get($task->fresh()->metadata, 'packing_completion.print_station.code'));
         $this->assertDatabaseCount('print_jobs', 0);
-
-        $allowLabel = true;
-        $this->travel(5)->minutes();
-        $result = app(PackingLabelAutomationService::class)->generateReadyOrders();
-
-        $this->assertSame(1, $result['generated']);
-        $label = ShippingLabel::query()->sole();
-        $this->assertDatabaseHas('print_jobs', [
-            'shipping_label_id' => $label->id,
-            'status' => 'pending',
-            'source' => 'packing.label.retry',
-            'station_code' => 'station-retry',
-            'printer_name' => 'Zebra RETRY',
-        ]);
+        Http::assertNotSent(fn ($request): bool => str_contains($request->url(), '/wp-json/ship/v1/orders/'));
     }
 
     public function test_failed_woo_shipped_status_is_retried_without_returning_order_to_courier_queue(): void

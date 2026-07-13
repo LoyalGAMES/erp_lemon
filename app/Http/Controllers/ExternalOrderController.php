@@ -228,7 +228,6 @@ class ExternalOrderController extends Controller
         $freshOrder = $order->fresh();
         $notificationTrigger = match ((string) $freshOrder->status) {
             'processing' => 'order_received',
-            'on-hold' => 'order_on_hold',
             'cancelled' => 'order_cancelled',
             'failed' => 'order_payment_failed',
             'refunded' => 'order_refunded',

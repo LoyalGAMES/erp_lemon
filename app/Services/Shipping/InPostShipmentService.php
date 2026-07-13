@@ -39,13 +39,16 @@ final class InPostShipmentService
      *
      * @return array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>}
      */
-    public function createShipmentWithLabel(ExternalOrder $order, CourierAccount $account): array
-    {
+    public function createShipmentWithLabel(
+        ExternalOrder $order,
+        CourierAccount $account,
+        ?string $parcelTemplate = null,
+    ): array {
         $shipment = $this->findExistingShipment($order, $account);
         $reused = $shipment !== null;
 
         if ($shipment === null) {
-            $shipment = $this->createShipment($order, $account);
+            $shipment = $this->createShipment($order, $account, $parcelTemplate);
         }
 
         $shipmentId = (string) $shipment['id'];
@@ -221,9 +224,9 @@ final class InPostShipmentService
     /**
      * @return array<string, mixed>
      */
-    private function createShipment(ExternalOrder $order, CourierAccount $account): array
+    private function createShipment(ExternalOrder $order, CourierAccount $account, ?string $parcelTemplate = null): array
     {
-        return $this->postShipment($account, $this->shipmentPayload($order, $account));
+        return $this->postShipment($account, $this->shipmentPayload($order, $account, $parcelTemplate));
     }
 
     /**
@@ -297,8 +300,11 @@ final class InPostShipmentService
     /**
      * @return array<string, mixed>
      */
-    private function shipmentPayload(ExternalOrder $order, CourierAccount $account): array
-    {
+    private function shipmentPayload(
+        ExternalOrder $order,
+        CourierAccount $account,
+        ?string $parcelTemplate = null,
+    ): array {
         $shipping = (array) ($order->shipping_data ?? []);
         $billing = (array) ($order->billing_data ?? []);
         $phone = preg_replace('/\D+/', '', (string) (data_get($shipping, 'phone') ?: data_get($billing, 'phone', ''))) ?? '';
@@ -320,7 +326,7 @@ final class InPostShipmentService
         $payload = [
             'receiver' => $receiver,
             'parcels' => [
-                ['template' => $account->default_parcel_template ?: 'small'],
+                ['template' => $parcelTemplate ?: $account->default_parcel_template ?: 'small'],
             ],
             'service' => $targetPoint !== null ? 'inpost_locker_standard' : 'inpost_courier_standard',
             'reference' => (string) ($order->external_number ?: $order->external_id),

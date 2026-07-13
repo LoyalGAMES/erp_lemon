@@ -522,13 +522,11 @@ class ReturnController extends Controller
 
         $freshReturn = $returnCase->fresh() ?? $returnCase;
 
-        $communication->sendReturnStatus($freshReturn, 'return_correction_issued', [
-            'invoice_number' => $invoice->number,
-        ]);
-
         try {
             $uploader->upload($invoice);
         } catch (RuntimeException $exception) {
+            $communication->sendReturnSettlement($freshReturn, null, $invoice->number);
+
             return back()->with(
                 'error',
                 "Wystawiono fakturę korygującą {$invoice->number}, ale nie dodano jej do zamówienia WooCommerce: {$exception->getMessage()} Po poprawieniu integracji kliknij Wyślij do WooCommerce przy tej korekcie.",
@@ -539,6 +537,7 @@ class ReturnController extends Controller
             $payuPayment = $payuRefunds->attemptAutomaticRefund($freshReturn, $invoice);
         } catch (RuntimeException $exception) {
             $this->appendAutomationWarning($freshReturn, 'payu_refund', $exception->getMessage());
+            $communication->sendReturnSettlement($freshReturn, null, $invoice->number);
 
             return back()->with(
                 'error',
@@ -546,21 +545,13 @@ class ReturnController extends Controller
             );
         }
 
+        $communication->sendReturnSettlement(
+            $freshReturn,
+            isset($payuPayment) && $payuPayment instanceof CustomerPayment ? $payuPayment : null,
+            $invoice->number,
+        );
+
         if (isset($payuPayment) && $payuPayment instanceof CustomerPayment) {
-            $communication->sendReturnStatus($freshReturn, 'return_payout_queued', [
-                'invoice_number' => $invoice->number,
-                'payment_reference' => $payuPayment->reference,
-                'payment_status' => $payuPayment->status,
-            ]);
-
-            if ($payuPayment->status === 'paid') {
-                $communication->sendReturnStatus($freshReturn, 'return_refunded', [
-                    'invoice_number' => $invoice->number,
-                    'payment_reference' => $payuPayment->reference,
-                    'payment_status' => $payuPayment->status,
-                ]);
-            }
-
             return back()->with('status', "Wystawiono fakturę korygującą {$invoice->number} i wysłano refund PayU dla zwrotu {$returnCase->number}.");
         }
 
@@ -781,19 +772,11 @@ class ReturnController extends Controller
         }
 
         $returnCase->loadMissing('correctionInvoice');
-        $communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_payout_queued', [
-            'invoice_number' => $returnCase->correctionInvoice?->number,
-            'payment_reference' => $payment->reference,
-            'payment_status' => $payment->status,
-        ]);
-
-        if ($payment->status === 'paid') {
-            $communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_refunded', [
-                'invoice_number' => $returnCase->correctionInvoice?->number,
-                'payment_reference' => $payment->reference,
-                'payment_status' => $payment->status,
-            ]);
-        }
+        $communication->sendReturnSettlement(
+            $returnCase->fresh() ?? $returnCase,
+            $payment,
+            $returnCase->correctionInvoice?->number,
+        );
 
         return back()->with('status', "Refund PayU dla zwrotu {$returnCase->number} został wysłany. Status: {$payment->status}.");
     }

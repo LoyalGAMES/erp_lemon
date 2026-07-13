@@ -31,6 +31,14 @@ final class CustomerEmailWorkflowSettingsService
                     'subject' => $this->text($override['subject'] ?? $definition['subject'], $definition['subject'], 160),
                     'body' => $this->text($override['body'] ?? $definition['body'], $definition['body'], 5000),
                     'editable_content' => true,
+                    'reminder_delay_minutes' => $this->minutes(
+                        $override['reminder_delay_minutes'] ?? $definition['reminder_delay_minutes'] ?? 0,
+                        (int) ($definition['reminder_delay_minutes'] ?? 0),
+                    ),
+                    'bank_transfer_delay_minutes' => $this->minutes(
+                        $override['bank_transfer_delay_minutes'] ?? $definition['bank_transfer_delay_minutes'] ?? 0,
+                        (int) ($definition['bank_transfer_delay_minutes'] ?? 0),
+                    ),
                     'enabled' => array_key_exists('enabled', $override)
                         ? (bool) $override['enabled']
                         : (bool) $definition['enabled'],
@@ -41,7 +49,7 @@ final class CustomerEmailWorkflowSettingsService
 
     /**
      * @param  array<string, mixed>  $rows
-     * @return array<string, array{enabled:bool,stage:string,subject:string,body:string}>
+     * @return array<string, array{enabled:bool,stage:string,subject:string,body:string,reminder_delay_minutes:int,bank_transfer_delay_minutes:int}>
      */
     public function update(array $rows): array
     {
@@ -55,6 +63,14 @@ final class CustomerEmailWorkflowSettingsService
                 'stage' => $this->text($row['stage'] ?? null, $definition['stage'], 160),
                 'subject' => $this->text($row['subject'] ?? null, $definition['subject'], 160),
                 'body' => $this->text($row['body'] ?? null, $definition['body'], 5000),
+                'reminder_delay_minutes' => $this->minutes(
+                    $row['reminder_delay_minutes'] ?? null,
+                    (int) ($definition['reminder_delay_minutes'] ?? 0),
+                ),
+                'bank_transfer_delay_minutes' => $this->minutes(
+                    $row['bank_transfer_delay_minutes'] ?? null,
+                    (int) ($definition['bank_transfer_delay_minutes'] ?? 0),
+                ),
             ];
         }
 
@@ -66,6 +82,17 @@ final class CustomerEmailWorkflowSettingsService
     public function isEnabled(string $trigger): bool
     {
         return (bool) ($this->data()[$trigger]['enabled'] ?? true);
+    }
+
+    public function unpaidReminderDelayMinutes(string $paymentCategory): int
+    {
+        $workflow = $this->data()['order_on_hold'] ?? [];
+
+        if ($paymentCategory === 'bank_transfer') {
+            return max(5, (int) ($workflow['bank_transfer_delay_minutes'] ?? 1440));
+        }
+
+        return max(5, (int) ($workflow['reminder_delay_minutes'] ?? 30));
     }
 
     /** @return array{subject:string,body:string}|null */
@@ -86,30 +113,41 @@ final class CustomerEmailWorkflowSettingsService
         return mb_substr($text !== '' ? $text : $fallback, 0, $limit);
     }
 
+    private function minutes(mixed $value, int $fallback): int
+    {
+        if (! is_numeric($value)) {
+            return max(0, min(10080, $fallback));
+        }
+
+        return max(0, min(10080, (int) $value));
+    }
+
     /** @return array<string, array<string, mixed>> */
     private function definitions(): array
     {
         return [
             'order_created' => $this->mail(
                 'order', 'payment', 'Potwierdzenie złożenia zamówienia',
-                'Nowe zamówienie oczekujące na płatność',
+                'Bezpośrednio po zapisaniu nowego zamówienia',
                 'Pierwsza wiadomość po złożeniu zamówienia. Zawiera produkty, kwotę, dostawę i — jeśli jest dostępny — przycisk płatności.',
                 'Dziękujemy za zamówienie {{order_number}}',
-                "Otrzymaliśmy Twoje zamówienie i zapisaliśmy wszystkie szczegóły. Jeżeli wybrana płatność nie została jeszcze ukończona, możesz bezpiecznie wrócić do niej przyciskiem poniżej.\n\nO kolejnym etapie poinformujemy Cię osobną wiadomością.",
+                "Otrzymaliśmy Twoje zamówienie i zapisaliśmy wszystkie szczegóły.\n\n{{payment_instruction}}\n\nO kolejnym etapie poinformujemy Cię osobną wiadomością.",
             ),
             'order_on_hold' => $this->mail(
                 'order', 'payment', 'Zamówienie wstrzymane / oczekuje na płatność',
-                'Po przejściu zamówienia na status on-hold',
-                'Informuje, że realizacja jeszcze nie ruszyła i wyjaśnia klientowi kolejny krok.',
+                'Po skonfigurowanym opóźnieniu, jeśli zamówienie nadal jest nieopłacone',
+                'Domyślnie po 30 min dla płatności online i po 24 h dla przelewu tradycyjnego. Przed wysyłką ERP ponownie sprawdza status oraz wpłaty. Pobranie jest wykluczone.',
                 'Zamówienie {{order_number}} czeka na płatność',
-                "Zamówienie jest zapisane, ale jego realizacja pozostaje wstrzymana do czasu zaksięgowania płatności.\n\nJeśli płatność została już wykonana, nie musisz nic robić — potwierdzenie wyślemy po jej odnotowaniu.",
+                "Zamówienie jest zapisane, ale jego realizacja pozostaje wstrzymana do czasu zaksięgowania płatności.\n\n{{payment_instruction}}\n\nJeśli płatność została już wykonana, nie musisz nic robić — potwierdzenie wyślemy po jej odnotowaniu.",
+                reminderDelayMinutes: 30,
+                bankTransferDelayMinutes: 1440,
             ),
             'order_received' => $this->mail(
-                'order', 'order', 'Płatność potwierdzona / przyjęte do realizacji',
+                'order', 'order', 'Zamówienie przyjęte do realizacji',
                 'Po opłaceniu lub przekazaniu do realizacji',
-                'Potwierdza płatność albo rozpoczęcie realizacji i pokazuje pełne podsumowanie zamówienia.',
-                'Płatność przyjęta — realizujemy zamówienie {{order_number}}',
-                "Płatność została potwierdzona, a zamówienie trafiło do realizacji. Teraz kompletujemy produkty i przygotowujemy je do bezpiecznej wysyłki.\n\nDam Ci znać, gdy paczka będzie gotowa.",
+                'Potwierdza rozpoczęcie realizacji i poprawnie opisuje płatność online, przelew albo pobranie.',
+                'Realizujemy zamówienie {{order_number}}',
+                "Zamówienie trafiło do realizacji. Teraz kompletujemy produkty i przygotowujemy je do bezpiecznej wysyłki.\n\n{{payment_instruction}}\n\nDam Ci znać, gdy paczka będzie gotowa.",
             ),
             'order_payment_received' => $this->mail(
                 'order', 'order', 'Wpłata ręczna zaksięgowana',
@@ -176,8 +214,8 @@ final class CustomerEmailWorkflowSettingsService
             ),
             'order_payment_failed' => $this->mail(
                 'order', 'payment', 'Płatność nieudana',
-                'Po zmianie statusu na failed',
-                'Wyjaśnia brak płatności i prowadzi klienta do ponownej próby.',
+                'Po zmianie płatności online na failed',
+                'Wyjaśnia brak płatności online i prowadzi klienta do ponownej próby. Nie jest wysyłany dla pobrania ani przelewu tradycyjnego.',
                 'Płatność za zamówienie {{order_number}} nie powiodła się',
                 "Nie udało się potwierdzić płatności. Zamówienie nie trafi do realizacji, dopóki płatność nie zostanie ukończona.\n\nSpróbuj ponownie przyciskiem poniżej lub skontaktuj się z nami, jeśli problem się powtarza.",
             ),
@@ -193,14 +231,14 @@ final class CustomerEmailWorkflowSettingsService
                 'Po utworzeniu zgłoszenia zwrotu',
                 'Potwierdza numer sprawy i pokazuje produkty objęte zgłoszeniem.',
                 'Przyjęliśmy zgłoszenie zwrotu {{return_number}}',
-                "Zgłoszenie zostało zapisane. Przygotuj produkty do odesłania zgodnie z instrukcją zwrotu i zachowaj potwierdzenie nadania.\n\nPoinformujemy Cię, gdy paczka dotrze do magazynu.",
+                "Zgłoszenie zostało zapisane. Przygotuj wskazane poniżej produkty do odesłania na adres zwrotu podany w wiadomości i zachowaj potwierdzenie nadania.\n\nPoinformujemy Cię, gdy magazyn zaksięguje przyjęcie paczki.",
             ),
             'return_approved' => $this->mail(
                 'return', 'return', 'Zwrot zaakceptowany',
                 'Po zaakceptowaniu zgłoszenia przez obsługę',
                 'Potwierdza, że zgłoszenie spełnia warunki i może zostać odesłane.',
                 'Zwrot {{return_number}} został zaakceptowany',
-                "Zgłoszenie zwrotu zostało zaakceptowane. Możesz wysłać wskazane produkty zgodnie z otrzymaną instrukcją.\n\nO przyjęciu paczki i rozpoczęciu rozliczenia poinformujemy w kolejnych wiadomościach.",
+                "Zgłoszenie zwrotu zostało zaakceptowane. Możesz wysłać wskazane produkty zgodnie z otrzymaną instrukcją.\n\nO dalszym etapie poinformujemy Cię jedną zbiorczą wiadomością — po przyjęciu paczki albo po rozpoczęciu jej rozliczenia.",
             ),
             'return_rejected' => $this->mail(
                 'return', 'return', 'Zwrot odrzucony',
@@ -218,8 +256,8 @@ final class CustomerEmailWorkflowSettingsService
             ),
             'return_received_warehouse' => $this->mail(
                 'return', 'return', 'Paczka zwrotna przyjęta w magazynie',
-                'Po zaksięgowaniu przyjęcia zwrotu',
-                'Wysyłane, gdy magazyn przyjmie produkty zwracane przez klienta.',
+                '10 minut po zaksięgowaniu ostatniego dokumentu RX, jeśli rozliczenie jeszcze nie ruszyło',
+                'Wysyłane po zaksięgowaniu wszystkich dokumentów przyjęcia zwrotu, tylko gdy w tym czasie nie wystawiono korekty ani nie rozpoczęto wypłaty.',
                 'Paczka zwrotna {{return_number}} dotarła do nas',
                 "Paczka została przyjęta przez magazyn. Teraz sprawdzamy zgodność produktów ze zgłoszeniem i przygotowujemy rozliczenie.\n\nO wyniku weryfikacji i wypłacie środków poinformujemy osobno.",
             ),
@@ -228,21 +266,21 @@ final class CustomerEmailWorkflowSettingsService
                 'Po wystawieniu korekty, przed wypłatą',
                 'Precyzyjnie oddziela wystawienie dokumentu od faktycznej wypłaty środków.',
                 'Wystawiliśmy korektę dla zwrotu {{return_number}}',
-                "Weryfikacja zwrotu została zakończona i wystawiliśmy dokument korygujący {{invoice_number}}. To etap księgowy poprzedzający wypłatę.\n\nOsobno potwierdzimy przekazanie środków do banku lub operatora płatności.",
+                "Paczka została przyjęta, wskazane produkty zweryfikowane, a dokument korygujący {{invoice_number}} wystawiony. To etap księgowy poprzedzający wypłatę.\n\nO przekazaniu środków do banku lub operatora płatności poinformujemy osobno.",
             ),
             'return_payout_queued' => $this->mail(
                 'return', 'return', 'Wypłata zwrotu rozpoczęta',
                 'Po dodaniu do kolejki wypłat',
                 'Informuje o zleceniu wypłaty, ale nie obiecuje jeszcze zaksięgowania środków.',
                 'Rozpoczęliśmy wypłatę za zwrot {{return_number}}',
-                "Zleciliśmy zwrot środków zgodnie z metodą płatności. Bank lub operator płatności może potrzebować kilku dni roboczych na zaksięgowanie kwoty.\n\nDokument rozliczeniowy: {{invoice_number}}.",
+                'Paczka została przyjęta, wskazane produkty zweryfikowane, dokument korygujący {{invoice_number}} wystawiony, a zwrot środków zlecony. Bank lub operator płatności może potrzebować kilku dni roboczych na zaksięgowanie kwoty.',
             ),
             'return_refunded' => $this->mail(
                 'return', 'return', 'Wypłata zwrotu zakończona',
                 'Dopiero po potwierdzeniu wypłaty',
                 'Końcowy mail wysyłany wyłącznie po potwierdzeniu, że środki zostały wypłacone.',
                 'Zwrot {{return_number}} został rozliczony',
-                "Rozliczenie zwrotu zostało zakończone, a środki wysłane zgodnie z metodą płatności. Data ich pojawienia się na rachunku zależy od banku.\n\nDokument rozliczeniowy: {{invoice_number}}.",
+                'Paczka została przyjęta, wskazane produkty zweryfikowane, dokument korygujący {{invoice_number}} wystawiony, a środki wysłane zgodnie z metodą płatności. Data ich pojawienia się na rachunku zależy od banku.',
             ),
             'exchange_payment_requested' => $this->mail(
                 'return', 'return', 'Dopłata do wymiany',
@@ -278,7 +316,12 @@ final class CustomerEmailWorkflowSettingsService
         string $subject,
         string $body,
         bool $enabled = true,
+        int $reminderDelayMinutes = 0,
+        int $bankTransferDelayMinutes = 0,
     ): array {
-        return compact('context', 'scenario', 'name', 'stage', 'description', 'subject', 'body', 'enabled');
+        return compact('context', 'scenario', 'name', 'stage', 'description', 'subject', 'body', 'enabled') + [
+            'reminder_delay_minutes' => $reminderDelayMinutes,
+            'bank_transfer_delay_minutes' => $bankTransferDelayMinutes,
+        ];
     }
 }

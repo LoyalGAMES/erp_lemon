@@ -697,6 +697,8 @@ class SettingsController extends Controller
             'workflow.*.stage' => ['nullable', 'string', 'max:160'],
             'workflow.*.subject' => ['nullable', 'string', 'max:160'],
             'workflow.*.body' => ['nullable', 'string', 'max:5000'],
+            'workflow.*.reminder_delay_minutes' => ['nullable', 'integer', 'min:5', 'max:10080'],
+            'workflow.*.bank_transfer_delay_minutes' => ['nullable', 'integer', 'min:5', 'max:10080'],
         ]);
 
         $mailWorkflow->update((array) ($validated['workflow'] ?? []));

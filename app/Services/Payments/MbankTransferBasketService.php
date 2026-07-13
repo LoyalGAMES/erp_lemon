@@ -16,8 +16,7 @@ final class MbankTransferBasketService
     public function __construct(
         private readonly MbankTransferBasketSettingsService $settings,
         private readonly PaymentMethodClassifier $classifier,
-    ) {
-    }
+    ) {}
 
     /**
      * @return Collection<int, ReturnCase>
@@ -31,7 +30,8 @@ final class MbankTransferBasketService
                 'lines.externalOrderLine',
                 'customerPayments',
             ])
-            ->whereIn('status', ['completed', 'corrected'])
+            ->where('status', 'corrected')
+            ->whereNotNull('correction_invoice_id')
             ->whereNotNull('external_order_id')
             ->latest()
             ->get()
@@ -105,6 +105,10 @@ final class MbankTransferBasketService
     private function isEligible(ReturnCase $returnCase): bool
     {
         if ($returnCase->externalOrder === null || ! $this->classifier->isCashOnDelivery($returnCase->externalOrder)) {
+            return false;
+        }
+
+        if ($returnCase->status !== 'corrected' || ! $returnCase->correctionInvoice instanceof Invoice) {
             return false;
         }
 

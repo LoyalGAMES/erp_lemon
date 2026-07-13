@@ -191,6 +191,7 @@ class PackingLogisticsUpgradeTest extends TestCase
 
         $this->post(route('packing.orders.label', $order), [
             'courier_account_id' => $secondAccount->id,
+            'parcel_template' => 'large',
         ])->assertRedirect()->assertSessionHas('status');
 
         $label = ShippingLabel::query()->firstOrFail();
@@ -199,6 +200,10 @@ class PackingLogisticsUpgradeTest extends TestCase
         $this->assertSame($secondAccount->id, $label->courier_account_id);
         $this->assertSame('520000123456789012345678', $label->tracking_number);
         $this->assertSame('drugie', data_get($label->response_payload, 'courier_account'));
+        $this->assertSame('large', data_get($label->response_payload, 'parcel_template'));
+        Http::assertSent(fn ($request): bool => str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/shipments')
+            && $request->method() === 'POST'
+            && data_get($request->data(), 'parcels.0.template') === 'large');
         $this->assertDatabaseMissing('print_jobs', [
             'shipping_label_id' => $label->id,
         ]);
@@ -214,6 +219,58 @@ class PackingLogisticsUpgradeTest extends TestCase
             'printer_name' => 'Zebra ZD421',
             'source' => 'packing.order.packed',
         ]);
+    }
+
+    public function test_packing_label_rejects_an_account_that_is_not_active_inpost(): void
+    {
+        [$order] = $this->createMixedOrder();
+        $account = new CourierAccount([
+            'provider' => 'blpaczka',
+            'code' => 'other-provider',
+            'name' => 'Inny przewoźnik',
+            'organization_id' => '999',
+            'is_default' => false,
+            'is_active' => true,
+        ]);
+        $account->setApiToken('token-other');
+        $account->save();
+
+        $this->post(route('packing.orders.label', $order), [
+            'courier_account_id' => $account->id,
+            'parcel_template' => 'large',
+        ])->assertRedirect()->assertSessionHasErrors('courier_account_id');
+
+        $this->assertDatabaseCount('shipping_labels', 0);
+    }
+
+    public function test_idempotent_label_retry_reports_the_size_of_the_existing_label(): void
+    {
+        Http::fake();
+        [$order] = $this->createMixedOrder();
+        ShippingLabel::query()->create([
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_order_id' => $order->id,
+            'purpose' => 'shipment',
+            'idempotency_key' => 'shipment:order:'.$order->id,
+            'status' => 'generated',
+            'provider' => 'inpost',
+            'tracking_number' => '520000999888777666555444',
+            'disk' => 'local',
+            'path' => 'shipping-labels/existing.pdf',
+            'response_payload' => ['parcel_template' => 'small'],
+            'generated_at' => now(),
+        ]);
+
+        $this->post(route('packing.orders.label', $order), [
+            'parcel_template' => 'large',
+        ])->assertRedirect()->assertSessionHas(
+            'status',
+            fn (string $message): bool => str_contains($message, 'gabaryt A')
+                && ! str_contains($message, 'gabaryt C'),
+        );
+
+        $this->assertDatabaseCount('shipping_labels', 1);
+        Http::assertNothingSent();
     }
 
     public function test_tracking_command_marks_picked_up_parcels_as_shipped(): void

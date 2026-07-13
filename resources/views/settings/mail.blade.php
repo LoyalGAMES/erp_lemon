@@ -266,6 +266,20 @@
                                 </label>
                             </div>
 
+                            @if ($workflowCode === 'order_on_hold')
+                                <div class="mail-settings-fields">
+                                    <label>Opóźnienie dla płatności online (minuty)
+                                        <input name="workflow[{{ $workflowCode }}][reminder_delay_minutes]" value="{{ old('workflow.'.$workflowCode.'.reminder_delay_minutes', $workflowMail['reminder_delay_minutes']) }}" type="number" min="5" max="10080" step="5">
+                                        <small class="form-hint">Domyślnie 30 minut. Zakres: od 5 minut do 7 dni.</small>
+                                    </label>
+                                    <label>Opóźnienie dla przelewu tradycyjnego (minuty)
+                                        <input name="workflow[{{ $workflowCode }}][bank_transfer_delay_minutes]" value="{{ old('workflow.'.$workflowCode.'.bank_transfer_delay_minutes', $workflowMail['bank_transfer_delay_minutes']) }}" type="number" min="5" max="10080" step="5">
+                                        <small class="form-hint">Domyślnie 1440 minut (24 godziny). Zakres: do 7 dni.</small>
+                                    </label>
+                                </div>
+                                <p class="muted">Pobranie jest wykluczone z przypomnień. Przed wysyłką ERP ponownie sprawdza status WooCommerce i lokalnie zaksięgowane wpłaty.</p>
+                            @endif
+
                             <label>Treść automatycznego maila
                                 <textarea name="workflow[{{ $workflowCode }}][body]" rows="4" maxlength="5000">{{ old('workflow.'.$workflowCode.'.body', $workflowMail['body']) }}</textarea>
                             </label>

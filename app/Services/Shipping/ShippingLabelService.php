@@ -31,11 +31,18 @@ final class ShippingLabelService
         private readonly AuditLogService $audit,
     ) {}
 
-    public function generateForOrder(ExternalOrder $order, ?CourierAccount $courierAccount = null): ShippingLabel
-    {
+    public function generateForOrder(
+        ExternalOrder $order,
+        ?CourierAccount $courierAccount = null,
+        ?string $parcelTemplate = null,
+    ): ShippingLabel {
+        if ($parcelTemplate !== null && ! in_array($parcelTemplate, ['small', 'medium', 'large'], true)) {
+            throw new RuntimeException('Nieprawidłowy gabaryt paczki. Wybierz A, B albo C.');
+        }
+
         try {
             return Cache::lock('shipping-label-order-'.$order->id, self::GENERATION_LOCK_SECONDS)
-                ->block(15, fn (): ShippingLabel => $this->generateForOrderWhileLocked($order, $courierAccount));
+                ->block(15, fn (): ShippingLabel => $this->generateForOrderWhileLocked($order, $courierAccount, $parcelTemplate));
         } catch (LockTimeoutException $exception) {
             throw new RuntimeException(
                 'Generowanie etykiety dla tego zamówienia już trwa. Spróbuj ponownie za chwilę.',
@@ -44,8 +51,11 @@ final class ShippingLabelService
         }
     }
 
-    private function generateForOrderWhileLocked(ExternalOrder $order, ?CourierAccount $courierAccount = null): ShippingLabel
-    {
+    private function generateForOrderWhileLocked(
+        ExternalOrder $order,
+        ?CourierAccount $courierAccount = null,
+        ?string $parcelTemplate = null,
+    ): ShippingLabel {
         $idempotencyKey = 'shipment:order:'.$order->id;
         $existing = ShippingLabel::query()
             ->where('idempotency_key', $idempotencyKey)
@@ -70,7 +80,7 @@ final class ShippingLabelService
         if ($courierAccount instanceof CourierAccount) {
             return $courierAccount->provider === 'blpaczka'
                 ? $this->generateViaBLPaczka($order, $courierAccount)
-                : $this->generateViaInPost($order, $courierAccount);
+                : $this->generateViaInPost($order, $courierAccount, $parcelTemplate);
         }
 
         $order = ExternalOrder::query()
@@ -90,7 +100,7 @@ final class ShippingLabelService
                 $inpostAccount = CourierAccount::defaultFor('inpost');
 
                 if ($inpostAccount instanceof CourierAccount) {
-                    return $this->generateViaInPost($order, $inpostAccount);
+                    return $this->generateViaInPost($order, $inpostAccount, $parcelTemplate);
                 }
             } else {
                 $blpaczkaAccount = CourierAccount::defaultFor('blpaczka');
@@ -112,6 +122,7 @@ final class ShippingLabelService
                 $integration,
                 (string) $order->external_id,
                 (string) $order->external_number,
+                $parcelTemplate,
             );
 
             $contents = (string) $labelData['contents'];
@@ -119,6 +130,11 @@ final class ShippingLabelService
             $filename = $this->filename($order, $labelData, $mimeType);
             $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
             $orderShipmentData = $this->shipmentDataFromOrder($order);
+            $responsePayload = (array) ($labelData['response_payload'] ?? []);
+
+            if ($parcelTemplate !== null) {
+                $responsePayload['parcel_template'] = $parcelTemplate;
+            }
 
             Storage::disk('local')->put($path, $contents);
 
@@ -142,7 +158,7 @@ final class ShippingLabelService
                 'size' => strlen($contents),
                 'sha256' => hash('sha256', $contents),
                 'source_url' => (string) ($labelData['source_url'] ?? ''),
-                'response_payload' => $labelData['response_payload'] ?? null,
+                'response_payload' => $responsePayload,
                 'generated_at' => now(),
             ]);
 
@@ -151,12 +167,14 @@ final class ShippingLabelService
                 'path' => $label->path,
                 'source_url' => $label->source_url,
                 'tracking_number' => $label->tracking_number,
+                'parcel_template' => $parcelTemplate,
             ]);
 
             $this->audit->record('shipping_label.generated', $label, null, [
                 'order_number' => $order->external_number,
                 'label_id' => $label->id,
                 'tracking_number' => $label->tracking_number,
+                'parcel_template' => $parcelTemplate,
             ], [
                 'sales_channel' => $order->salesChannel?->code,
                 'integration_id' => $integration->id,
@@ -295,16 +313,28 @@ final class ShippingLabelService
         }
     }
 
-    private function generateViaInPost(ExternalOrder $order, CourierAccount $account): ShippingLabel
-    {
+    private function generateViaInPost(
+        ExternalOrder $order,
+        CourierAccount $account,
+        ?string $parcelTemplate = null,
+    ): ShippingLabel {
         $order = ExternalOrder::query()
             ->with('salesChannel')
             ->findOrFail($order->id);
 
         try {
-            $labelData = $this->inpost->createShipmentWithLabel($order, $account);
+            $labelData = $this->inpost->createShipmentWithLabel($order, $account, $parcelTemplate);
 
             $contents = $labelData['contents'];
+            $shipmentPayload = (array) $labelData['response_payload'];
+            $reportedParcelTemplate = (string) (
+                data_get($shipmentPayload, 'parcels.0.template')
+                ?: data_get($shipmentPayload, 'parcel.template')
+            );
+            $reusedExistingShipment = (bool) data_get($shipmentPayload, 'reused_existing_shipment', false);
+            $recordedParcelTemplate = in_array($reportedParcelTemplate, ['small', 'medium', 'large'], true)
+                ? $reportedParcelTemplate
+                : ($reusedExistingShipment ? null : ($parcelTemplate ?: $account->default_parcel_template ?: 'small'));
             $filename = 'inpost-'.($order->external_number ?: $order->external_id ?: $order->id);
             $filename = preg_replace('/[^A-Za-z0-9._-]+/', '-', $filename)
                 .'-order-'.$order->id.'-'.now()->format('YmdHis').'-'.Str::lower((string) Str::ulid()).'.pdf';
@@ -329,7 +359,8 @@ final class ShippingLabelService
                 'sha256' => hash('sha256', $contents),
                 'response_payload' => [
                     'courier_account' => $account->code,
-                    'shipment' => $labelData['response_payload'],
+                    'parcel_template' => $recordedParcelTemplate,
+                    'shipment' => $shipmentPayload,
                 ],
                 'generated_at' => now(),
             ]);
@@ -340,6 +371,7 @@ final class ShippingLabelService
                 'tracking_number' => $label->tracking_number,
                 'provider' => 'inpost',
                 'courier_account' => $account->code,
+                'parcel_template' => $recordedParcelTemplate,
             ], [
                 'sales_channel' => $order->salesChannel?->code,
             ]);

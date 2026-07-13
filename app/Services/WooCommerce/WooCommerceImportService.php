@@ -847,8 +847,7 @@ final class WooCommerceImportService
     {
         return match (mb_strtolower(trim($status))) {
             'processing' => 'order_received',
-            'pending' => $created ? 'order_created' : 'order_on_hold',
-            'on-hold' => 'order_on_hold',
+            'pending', 'on-hold' => $created ? 'order_created' : null,
             'cancelled' => 'order_cancelled',
             'failed' => 'order_payment_failed',
             'refunded' => 'order_refunded',

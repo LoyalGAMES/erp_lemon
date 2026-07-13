@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\Inventory;
 
 use App\Domain\Inventory\Enums\WarehouseDocumentType;
+use App\Jobs\SendReturnReceivedMailJob;
 use App\Models\CustomerPayment;
 use App\Models\ReturnCase;
 use App\Models\StockBalance;
@@ -162,8 +163,8 @@ final class WarehouseDocumentPostingService
             );
         }, 3);
 
-        $this->notifyReturnReceivedAfterPosting($completedReturnCaseIds);
         $this->issueReturnCorrectionsAfterPosting($completedReturnCaseIds);
+        $this->queueReturnReceivedAfterPosting($completedReturnCaseIds);
     }
 
     public function cancel(WarehouseDocument $document): void
@@ -417,14 +418,11 @@ final class WarehouseDocumentPostingService
     /**
      * @param  list<int>  $returnCaseIds
      */
-    private function notifyReturnReceivedAfterPosting(array $returnCaseIds): void
+    private function queueReturnReceivedAfterPosting(array $returnCaseIds): void
     {
         foreach (array_unique($returnCaseIds) as $returnCaseId) {
-            $returnCase = ReturnCase::query()->find($returnCaseId);
-
-            if ($returnCase instanceof ReturnCase) {
-                $this->communication->sendReturnStatus($returnCase, 'return_received_warehouse');
-            }
+            SendReturnReceivedMailJob::dispatch((int) $returnCaseId)
+                ->delay(now()->addMinutes(10));
         }
     }
 
@@ -441,36 +439,31 @@ final class WarehouseDocumentPostingService
         }
 
         foreach (array_unique($returnCaseIds) as $returnCaseId) {
+            $invoice = null;
+
             try {
                 $returnCase = ReturnCase::query()->findOrFail($returnCaseId);
                 $invoice = $this->returnCorrections->createForReturn($returnCase);
-                $this->communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_correction_issued', [
-                    'invoice_number' => $invoice->number,
-                ]);
                 $this->invoiceUpload->upload($invoice);
                 $payment = $this->payuRefunds->attemptAutomaticRefund($returnCase->fresh() ?? $returnCase, $invoice);
-
-                if ($payment instanceof CustomerPayment) {
-                    $freshReturn = $returnCase->fresh() ?? $returnCase;
-                    $this->communication->sendReturnStatus($freshReturn, 'return_payout_queued', [
-                        'invoice_number' => $invoice->number,
-                        'payment_reference' => $payment->reference,
-                        'payment_status' => $payment->status,
-                    ]);
-
-                    if ($payment->status === 'paid') {
-                        $this->communication->sendReturnStatus($freshReturn, 'return_refunded', [
-                            'invoice_number' => $invoice->number,
-                            'payment_reference' => $payment->reference,
-                            'payment_status' => $payment->status,
-                        ]);
-                    }
-                }
+                $this->communication->sendReturnSettlement(
+                    $returnCase->fresh() ?? $returnCase,
+                    $payment instanceof CustomerPayment ? $payment : null,
+                    $invoice->number,
+                );
             } catch (Throwable $exception) {
                 $returnCase = ReturnCase::query()->find($returnCaseId);
 
                 if (! $returnCase instanceof ReturnCase) {
                     continue;
+                }
+
+                if ($invoice !== null) {
+                    $this->communication->sendReturnSettlement(
+                        $returnCase->fresh() ?? $returnCase,
+                        null,
+                        $invoice->number,
+                    );
                 }
 
                 $warnings = (array) data_get($returnCase->metadata, 'automation_warnings', []);

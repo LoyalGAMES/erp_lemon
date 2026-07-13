@@ -18,7 +18,6 @@ use App\Services\Invoices\OrderInvoiceService;
 use App\Services\Orders\OrderFulfillmentStatusService;
 use App\Services\Orders\OrderWzDocumentService;
 use App\Services\Printing\ShippingLabelPrintQueueService;
-use App\Services\Shipping\ShippingLabelService;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use App\Services\WooCommerce\WooCommerceOrderStatusService;
 use Illuminate\Contracts\Cache\LockTimeoutException;
@@ -33,7 +32,6 @@ final class PackingFulfillmentService
 
     public function __construct(
         private readonly PackingTaskService $packingTasks,
-        private readonly ShippingLabelService $shippingLabels,
         private readonly OrderFulfillmentStatusService $fulfillmentStatus,
         private readonly OrderWzDocumentService $orderWzDocuments,
         private readonly WarehouseDocumentPostingService $documentPosting,
@@ -73,24 +71,25 @@ final class PackingFulfillmentService
         $createWzIfMissing = $this->automationSettings->actionEnabled('packing.order.packed', 'order.wz.create_if_missing');
         $postWz = $this->automationSettings->actionEnabled('packing.order.packed', 'order.wz.post');
         $issueInvoiceOnPack = $this->automationSettings->actionEnabled('packing.order.packed', 'order.invoice.create_upload');
-        $packed = $this->packingTasks->markOrderPacked($order);
-        $order = ExternalOrder::query()->with(['shipmentLabels', 'invoices'])->findOrFail($order->id);
+        $label = ShippingLabel::query()
+            ->shipments()
+            ->where('external_order_id', $order->id)
+            ->where('status', 'generated')
+            ->latest('generated_at')
+            ->latest('id')
+            ->first();
 
-        $label = $order->shipmentLabels->firstWhere('status', 'generated');
-        if (! $label instanceof ShippingLabel) {
-            try {
-                $label = $this->shippingLabels->generateForOrder($order);
-            } catch (Throwable $exception) {
-                $warnings[] = 'Etykieta: '.$exception->getMessage();
-            }
-        }
+        $packed = $this->packingTasks->markOrderPacked($order);
+        $order = ExternalOrder::query()->with('invoices')->findOrFail($order->id);
 
         $printJob = null;
-        if ($label instanceof ShippingLabel && $printStation === null) {
+        if (! $label instanceof ShippingLabel) {
+            $warnings[] = 'Wydruk: najpierw wygeneruj etykietę, wybierając gabaryt paczki A, B albo C.';
+        } elseif ($printStation === null) {
             $warnings[] = 'Wydruk: nie wybrano stanowiska pakowania dla tej sesji.';
-        } elseif ($label instanceof ShippingLabel && trim((string) ($printStation['printer_name'] ?? '')) === '') {
+        } elseif (trim((string) ($printStation['printer_name'] ?? '')) === '') {
             $warnings[] = 'Wydruk: stanowisko nie ma przypisanej drukarki Windows.';
-        } elseif ($label instanceof ShippingLabel) {
+        } else {
             try {
                 $printJob = $this->printQueue->enqueueForStation($label, $printStation, 'packing.order.packed');
             } catch (Throwable $exception) {

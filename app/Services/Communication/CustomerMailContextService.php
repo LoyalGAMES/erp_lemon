@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\Communication;
 
+use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\Product;
@@ -12,6 +13,7 @@ use App\Models\ReturnCaseLine;
 use App\Models\ShippingLabel;
 use App\Models\WordpressIntegration;
 use App\Services\Orders\OrderPaymentLinkService;
+use App\Services\Payments\PaymentMethodClassifier;
 use App\Services\Shipping\ShippingProviderResolver;
 
 final class CustomerMailContextService
@@ -20,6 +22,7 @@ final class CustomerMailContextService
         private readonly MailSettingsService $mailSettings,
         private readonly OrderPaymentLinkService $paymentLinks,
         private readonly ShippingProviderResolver $shippingProviders,
+        private readonly PaymentMethodClassifier $paymentMethods,
     ) {}
 
     /**
@@ -41,7 +44,14 @@ final class CustomerMailContextService
         $trackingUrl = $this->httpUrl($context['tracking_url'] ?? null)
             ?? ($trackingLabel instanceof ShippingLabel ? $this->shippingProviders->trackingUrl($trackingLabel) : null);
         $orderUrl = $this->orderUrl($order);
-        [$actionLabel, $actionUrl] = $this->orderAction($trigger, $paymentUrl, $trackingUrl, $orderUrl);
+        $paymentCategory = $this->paymentMethods->category($order);
+        [$actionLabel, $actionUrl] = $this->orderAction(
+            $trigger,
+            $paymentCategory,
+            $paymentUrl,
+            $trackingUrl,
+            $orderUrl,
+        );
         $lines = $order->lines
             ->filter(fn (ExternalOrderLine $line): bool => (float) $line->quantity > 0)
             ->map(fn (ExternalOrderLine $line): array => $this->orderItem($order, $line))
@@ -73,7 +83,7 @@ final class CustomerMailContextService
             'customer_email' => $recipient['email'],
             'customer_name' => $recipient['name'],
             'currency' => $order->currency ?: ($context['currency'] ?? 'PLN'),
-            'amount' => $totals['grand_total_formatted'],
+            'amount' => trim((string) ($context['amount'] ?? $totals['grand_total_formatted'])),
             'items' => $lines,
             'items_count' => count($lines),
             'totals' => $totals,
@@ -84,6 +94,8 @@ final class CustomerMailContextService
                 data_get($order->raw_payload, 'payment_method_title')
                 ?: data_get($order->raw_payload, 'payment_method')
             )),
+            'payment_method_type' => $paymentCategory,
+            'payment_instruction' => $this->paymentMethods->customerInstruction($order, $trigger),
             'tracking_number' => $trackingNumber,
             'tracking_url' => $trackingUrl,
             'courier_name' => $trackingLabel instanceof ShippingLabel
@@ -123,9 +135,11 @@ final class CustomerMailContextService
         $orderUrl = $order instanceof ExternalOrder ? $this->orderUrl($order) : null;
         [$actionLabel, $actionUrl] = $this->returnAction($trigger, $paymentUrl, $trackingUrl, $orderUrl);
         $items = $returnCase->lines
+            ->filter(fn (ReturnCaseLine $line): bool => $this->returnQuantity($line) > 0)
             ->map(fn (ReturnCaseLine $line): array => $this->returnItem($returnCase, $line))
             ->values()
             ->all();
+        $returnAddress = $this->returnAddress($returnCase);
         $amount = trim((string) ($context['amount'] ?? ''));
         $currency = (string) ($context['currency'] ?? $order?->currency ?? 'PLN');
         $attachmentInvoiceFileIds = in_array($trigger, ['return_correction_issued', 'return_payout_queued', 'return_refunded'], true)
@@ -146,7 +160,10 @@ final class CustomerMailContextService
             'items' => $items,
             'items_count' => count($items),
             'return_reason' => (string) ($returnCase->reason ?? ''),
-            'shipping_address' => $order instanceof ExternalOrder ? $this->address($this->deliveryAddress($order)) : [],
+            'shipping_address' => $trigger === 'exchange_label_ready' && $order instanceof ExternalOrder
+                ? $this->address($this->deliveryAddress($order))
+                : [],
+            'return_address' => $returnAddress,
             'tracking_number' => trim((string) (
                 $context['tracking_number']
                 ?? $trackingLabel?->trackingIdentifier()
@@ -184,6 +201,8 @@ final class CustomerMailContextService
             'order_url' => 'https://example.com/moje-konto/zamowienia/10482',
             'shipping_method' => 'Kurier InPost',
             'payment_method' => 'Płatność online',
+            'payment_method_type' => PaymentMethodClassifier::ONLINE,
+            'payment_instruction' => $this->previewPaymentInstruction($trigger),
             'billing_address' => $this->sampleBillingAddress(),
             'shipping_address' => $this->sampleAddress(),
             'items' => $this->sampleItems(),
@@ -209,13 +228,24 @@ final class CustomerMailContextService
                 'entity_type' => 'return',
                 'return_number' => 'ZW/2026/0041',
                 'return_reason' => 'Zmiana rozmiaru',
-                'invoice_number' => 'KOR/2026/000127',
+                'invoice_number' => in_array($trigger, ['return_correction_issued', 'return_payout_queued', 'return_refunded'], true)
+                    ? 'KOR/2026/000127'
+                    : '',
                 'amount' => '249,00',
                 'progress' => $this->returnProgress($trigger),
                 'action_label' => 'Sprawdź zamówienie',
                 'action_url' => $base['order_url'],
                 'items' => [$this->sampleItems()[0]],
                 'items_count' => 1,
+                'billing_address' => [],
+                'shipping_address' => [],
+                'payment_method' => '',
+                'return_address' => [
+                    'name' => 'Sempre — Magazyn zwrotów',
+                    'line1' => 'ul. Przykładowa 12',
+                    'line2' => '60-001 Poznań',
+                    'country' => 'PL',
+                ],
             ]);
         }
 
@@ -223,6 +253,7 @@ final class CustomerMailContextService
         $trackingUrl = 'https://inpost.pl/sledzenie-przesylek?number=620012345678901234567890';
         [$actionLabel, $actionUrl] = $this->orderAction(
             $trigger,
+            PaymentMethodClassifier::ONLINE,
             in_array($scenario, ['payment', 'order'], true) ? $paymentUrl : null,
             $scenario === 'shipment' ? $trackingUrl : null,
             $base['order_url'],
@@ -308,7 +339,7 @@ final class CustomerMailContextService
             ?: $product?->sku
             ?: ''
         ));
-        $quantity = (float) ($line->quantity_accepted ?: $line->quantity_expected);
+        $quantity = $this->returnQuantity($line);
         $order = $returnCase->externalOrder;
 
         return [
@@ -375,6 +406,13 @@ final class CustomerMailContextService
         ];
     }
 
+    private function returnQuantity(ReturnCaseLine $line): float
+    {
+        $accepted = (float) $line->quantity_accepted;
+
+        return $accepted > 0 ? $accepted : (float) $line->quantity_expected;
+    }
+
     /** @return array<string, mixed> */
     private function address(array $data): array
     {
@@ -402,6 +440,57 @@ final class CustomerMailContextService
     {
         return $order->shipmentLabels
             ->first(fn (ShippingLabel $label): bool => filled($label->trackingIdentifier()));
+    }
+
+    /** @return array<string, string> */
+    private function returnAddress(ReturnCase $returnCase): array
+    {
+        $labelAccount = $returnCase->shippingLabels
+            ->first(fn (ShippingLabel $label): bool => $label->purpose === 'return' && $label->courierAccount !== null)
+            ?->courierAccount;
+        $account = $labelAccount instanceof CourierAccount && $this->hasReturnDestination($labelAccount)
+            ? $labelAccount
+            : CourierAccount::query()
+                ->where('provider', 'inpost')
+                ->where('is_active', true)
+                ->whereNotNull('metadata')
+                ->orderByDesc('is_default')
+                ->orderBy('id')
+                ->get()
+                ->first(fn (CourierAccount $candidate): bool => $this->hasReturnDestination($candidate));
+
+        if (! $account instanceof CourierAccount) {
+            return [];
+        }
+
+        $return = (array) data_get($account->metadata, 'return', []);
+        $targetPoint = strtoupper(trim((string) ($return['target_point'] ?? '')));
+        $street = trim(implode(' ', array_filter([
+            $return['street'] ?? null,
+            $return['building_number'] ?? null,
+        ])));
+
+        return array_filter([
+            'name' => trim((string) ($return['name'] ?? '')),
+            'line1' => $targetPoint !== '' ? 'Paczkomat '.$targetPoint : $street,
+            'line2' => $targetPoint !== '' ? 'Nadaj paczkę w dowolnym Paczkomacie InPost' : trim(implode(' ', array_filter([
+                $return['post_code'] ?? null,
+                $return['city'] ?? null,
+            ]))),
+            'country' => trim((string) ($return['country_code'] ?? 'PL')) ?: 'PL',
+            'phone' => trim((string) ($return['phone'] ?? '')),
+        ], fn (string $value): bool => $value !== '');
+    }
+
+    private function hasReturnDestination(CourierAccount $account): bool
+    {
+        $return = (array) data_get($account->metadata, 'return', []);
+
+        return filled($return['name'] ?? null)
+            && (filled($return['target_point'] ?? null)
+                || (filled($return['street'] ?? null)
+                    && filled($return['post_code'] ?? null)
+                    && filled($return['city'] ?? null)));
     }
 
     /** @return array<string, mixed> */
@@ -476,10 +565,16 @@ final class CustomerMailContextService
     }
 
     /** @return array{0:?string,1:?string} */
-    private function orderAction(string $trigger, ?string $paymentUrl, ?string $trackingUrl, ?string $orderUrl): array
-    {
+    private function orderAction(
+        string $trigger,
+        string $paymentCategory,
+        ?string $paymentUrl,
+        ?string $trackingUrl,
+        ?string $orderUrl,
+    ): array {
         if (in_array($trigger, ['order_created', 'order_on_hold', 'order_payment_failed', 'manual_payment_reminder'], true)
-            && $paymentUrl !== null) {
+            && $paymentUrl !== null
+            && in_array($paymentCategory, [PaymentMethodClassifier::ONLINE, PaymentMethodClassifier::OTHER], true)) {
             return ['Przejdź do płatności', $paymentUrl];
         }
 
@@ -564,6 +659,17 @@ final class CustomerMailContextService
     private function quantity(float $value): string
     {
         return rtrim(rtrim(number_format($value, 4, '.', ''), '0'), '.');
+    }
+
+    private function previewPaymentInstruction(string $trigger): string
+    {
+        return match ($trigger) {
+            'order_payment_failed' => 'Płatność online nie została potwierdzona — możesz bezpiecznie ponowić ją przyciskiem w tej wiadomości.',
+            'order_received', 'order_packed', 'order_invoice_ready', 'order_packing_rollback', 'order_courier_picked_up', 'order_delivered' => 'Płatność online została potwierdzona.',
+            'order_payment_received' => 'Wpłata została zaksięgowana w zamówieniu.',
+            'order_cancelled', 'order_refunded' => '',
+            default => 'Płatność online — jeśli poprzednia próba nie została ukończona, możesz bezpiecznie wrócić do płatności.',
+        };
     }
 
     private function numeric(mixed $value): ?float

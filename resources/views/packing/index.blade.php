@@ -83,12 +83,13 @@
         .pick-badge.segment-clothing { background: var(--brand-soft); color: var(--brand-dark); }
         .label-account-form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
         .label-account-form select { min-height: 42px; }
-        .label-account-form .button { min-height: 42px; }
+        .label-size-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+        .label-size-actions .button { min-height: 42px; padding: 7px 8px; font-size: 16px; }
+        .label-size-actions .button small { display: block; margin-top: 2px; font-size: 10px; font-weight: 720; opacity: .82; }
         .shipment-label-panel { display: grid; gap: 7px; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--green-soft); }
         .shipment-label-number { color: var(--green-dark); font-weight: 850; overflow-wrap: anywhere; }
         .shipment-label-actions { display: flex; flex-wrap: wrap; gap: 7px; }
         .shipment-label-actions .button { min-height: 42px; width: auto; font-size: 14px; }
-        .shipment-label-error { border: 1px solid #f0c3c3; border-radius: 8px; padding: 9px 11px; background: #fff5f5; color: var(--red); font-size: 13px; overflow-wrap: anywhere; }
         @media (max-width: 760px) {
             .packing-toolbar { display: grid; }
             .packing-settings-overlay { grid-template-columns: 1fr; }
@@ -493,8 +494,6 @@
                         $phone = data_get($shipping, 'phone') ?: data_get($billing, 'phone') ?: '-';
                         $email = data_get($billing, 'email') ?: '-';
                         $payment = data_get($firstTask?->metadata, 'payment_method') ?: '-';
-                        $labelAutomationStatus = data_get($firstTask?->metadata, 'label_automation.status');
-                        $labelAutomationMessage = trim((string) data_get($firstTask?->metadata, 'label_automation.message', ''));
                     @endphp
                     <article class="order-card">
                         <div class="order-card-header">
@@ -558,13 +557,6 @@
                             </div>
                         </details>
 
-                        @if (! $shippingLabel && $labelAutomationStatus === 'failed' && $labelAutomationMessage !== '')
-                            <div class="shipment-label-error">
-                                Automatyczne generowanie etykiety nie powiodło się. System ponowi próbę; możesz też użyć przycisku poniżej.<br>
-                                {{ $labelAutomationMessage }}
-                            </div>
-                        @endif
-
                         <div class="order-actions">
                             @if ($shippingLabel)
                                 <div class="shipment-label-panel">
@@ -585,11 +577,21 @@
                                         <select name="courier_account_id" aria-label="Konto nadawcze InPost">
                                             <option value="">Etykieta ze sklepu</option>
                                             @foreach ($courierAccounts as $courierAccount)
-                                                <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default && $courierAccount->provider === 'inpost')>{{ $courierAccount->provider === 'blpaczka' ? 'BLPaczka' : 'InPost' }}: {{ $courierAccount->name }}</option>
+                                                <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default)>InPost: {{ $courierAccount->name }}</option>
                                             @endforeach
                                         </select>
                                     @endif
-                                    <button class="button secondary" type="submit">Ponów etykietę</button>
+                                    <div class="label-size-actions" role="group" aria-label="Wybierz gabaryt paczki">
+                                        <button class="button secondary" type="submit" name="parcel_template" value="small" aria-label="Generuj etykietę, gabaryt A">
+                                            A<small>mała</small>
+                                        </button>
+                                        <button class="button secondary" type="submit" name="parcel_template" value="medium" aria-label="Generuj etykietę, gabaryt B">
+                                            B<small>średnia</small>
+                                        </button>
+                                        <button class="button secondary" type="submit" name="parcel_template" value="large" aria-label="Generuj etykietę, gabaryt C">
+                                            C<small>duża</small>
+                                        </button>
+                                    </div>
                                 </form>
                             @endif
                             <form class="order-problem-form" method="POST" action="{{ route('packing.orders.problem', $order) }}">
@@ -678,7 +680,7 @@
                                                         <br>Ostatni błąd: {{ $queuedOrder['tracking_error'] }}
                                                     @endif
                                                 @else
-                                                    Brak numeru śledzenia — automat ponowi generowanie etykiety.
+                                                    Brak etykiety — cofnij pakowanie, wybierz gabaryt A/B/C i wygeneruj ją.
                                                     @if ($queuedOrder['label_error'])
                                                         <br>{{ $queuedOrder['label_error'] }}
                                                     @endif

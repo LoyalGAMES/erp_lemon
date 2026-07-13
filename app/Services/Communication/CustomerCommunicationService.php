@@ -6,8 +6,10 @@ namespace App\Services\Communication;
 
 use App\Mail\CustomerMessageMail;
 use App\Models\CustomerMessage;
+use App\Models\CustomerPayment;
 use App\Models\ExternalOrder;
 use App\Models\ReturnCase;
+use App\Services\Payments\PaymentMethodClassifier;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Mail;
 use RuntimeException;
@@ -24,6 +26,7 @@ final class CustomerCommunicationService
         private readonly EmailTemplateRenderer $templateRenderer,
         private readonly CustomerEmailWorkflowSettingsService $emailWorkflow,
         private readonly CustomerMailContextService $mailContext,
+        private readonly PaymentMethodClassifier $paymentMethods,
     ) {}
 
     public function sendManualForOrder(ExternalOrder $order, string $subject, string $body): CustomerMessage
@@ -74,6 +77,13 @@ final class CustomerCommunicationService
 
     public function sendPaymentReminderForOrder(ExternalOrder $order, string $paymentUrl): CustomerMessage
     {
+        if (in_array($this->paymentMethods->category($order), [
+            PaymentMethodClassifier::CASH_ON_DELIVERY,
+            PaymentMethodClassifier::BANK_TRANSFER,
+        ], true)) {
+            throw new RuntimeException('To zamówienie nie wymaga płatności online — przypomnienie z linkiem nie zostało wysłane.');
+        }
+
         $recipient = $this->orderRecipient($order);
 
         if ($recipient['email'] === null) {
@@ -135,6 +145,23 @@ final class CustomerCommunicationService
      */
     private function sendOrderStatusWhileLocked(ExternalOrder $order, string $trigger, array $context): ?CustomerMessage
     {
+        $paymentCategory = $this->paymentMethods->category($order);
+
+        if ($trigger === 'order_on_hold' && ! ($context['scheduled_unpaid_reminder'] ?? false)) {
+            return null;
+        }
+
+        if ($trigger === 'order_on_hold' && $paymentCategory === PaymentMethodClassifier::CASH_ON_DELIVERY) {
+            return null;
+        }
+
+        if ($trigger === 'order_payment_failed' && in_array($paymentCategory, [
+            PaymentMethodClassifier::CASH_ON_DELIVERY,
+            PaymentMethodClassifier::BANK_TRANSFER,
+        ], true)) {
+            return null;
+        }
+
         if ($this->alreadySentForOrder($order, $trigger)) {
             return null;
         }
@@ -175,6 +202,30 @@ final class CustomerCommunicationService
             ->get(fn (): ?CustomerMessage => $this->sendReturnStatusWhileLocked($returnCase, $trigger, $context));
 
         return $message instanceof CustomerMessage ? $message : null;
+    }
+
+    public function sendReturnSettlement(
+        ReturnCase $returnCase,
+        ?CustomerPayment $payment,
+        ?string $invoiceNumber = null,
+    ): ?CustomerMessage {
+        $trigger = ! $payment instanceof CustomerPayment
+            ? 'return_correction_issued'
+            : match (mb_strtolower((string) $payment->status)) {
+                'paid', 'settled' => 'return_refunded',
+                'pending' => 'return_payout_queued',
+                default => null,
+            };
+
+        if ($trigger === null) {
+            return null;
+        }
+
+        return $this->sendReturnStatus($returnCase, $trigger, [
+            'invoice_number' => $invoiceNumber,
+            'payment_reference' => $payment?->reference,
+            'payment_status' => $payment?->status,
+        ]);
     }
 
     /**

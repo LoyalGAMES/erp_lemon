@@ -30,6 +30,7 @@ final class EmailTemplateRenderer
             'order_status' => 'Status zamówienia',
             'shipping_method' => 'Sposób dostawy',
             'payment_method' => 'Sposób płatności',
+            'payment_instruction' => 'Instrukcja właściwa dla płatności online, przelewu albo pobrania',
             'order_url' => 'Link do szczegółów zamówienia',
             'return_reason' => 'Powód zwrotu',
             'from_name' => 'Nazwa nadawcy',

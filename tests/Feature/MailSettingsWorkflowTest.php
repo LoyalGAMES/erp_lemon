@@ -257,6 +257,14 @@ class MailSettingsWorkflowTest extends TestCase
                     'subject' => 'Spakowaliśmy {{order_number}}',
                     'body' => 'Paczka {{order_number}} czeka na kuriera.',
                 ],
+                'order_on_hold' => [
+                    'enabled' => '1',
+                    'stage' => 'Po czasie na płatność',
+                    'subject' => 'Dokończ płatność {{order_number}}',
+                    'body' => 'Zamówienie nadal czeka na płatność.',
+                    'reminder_delay_minutes' => 45,
+                    'bank_transfer_delay_minutes' => 720,
+                ],
             ],
         ])->assertRedirect()->assertSessionHas('status');
 
@@ -266,6 +274,8 @@ class MailSettingsWorkflowTest extends TestCase
         $this->assertSame('Po płatności - ręczna decyzja', $setting->value['order_received']['stage']);
         $this->assertSame('Spakowaliśmy {{order_number}}', $setting->value['order_packed']['subject']);
         $this->assertSame('Paczka {{order_number}} czeka na kuriera.', $setting->value['order_packed']['body']);
+        $this->assertSame(45, $setting->value['order_on_hold']['reminder_delay_minutes']);
+        $this->assertSame(720, $setting->value['order_on_hold']['bank_transfer_delay_minutes']);
     }
 
     public function test_mail_preview_uses_production_views_without_saving_or_sending(): void
@@ -300,6 +310,11 @@ class MailSettingsWorkflowTest extends TestCase
         $this->assertStringContainsString('Dane do dokumentu', $html);
         $this->assertStringContainsString('Kwiat Studio Anna Kowalska', $html);
         $this->assertStringContainsString('Śledź przesyłkę', $html);
+        $this->assertStringContainsString('class="mail-progress-axis"', $html);
+        $this->assertStringNotContainsString('margin-top:-13px', $html);
+        $this->assertStringContainsString('Napisz do nas', $html);
+        $this->assertStringContainsString('Numer śledzenia</span>', $html);
+        $this->assertStringContainsString('color:#7a6a2f !important', $html);
         $this->assertStringContainsString('620012345678901234567890', $text);
         $this->assertSame($messageCount, CustomerMessage::query()->count());
         Mail::assertNothingSent();
@@ -321,5 +336,24 @@ class MailSettingsWorkflowTest extends TestCase
         $this->assertStringNotContainsString('<script>alert(1)</script>', $html);
         $this->assertStringContainsString('&lt;script&gt;alert(1)&lt;/script&gt;', $html);
         $this->assertStringNotContainsString('<img src=x onerror=alert(1)>', $html);
+    }
+
+    public function test_order_preview_does_not_repeat_the_same_payment_instruction(): void
+    {
+        $response = $this->postJson(route('settings.mail.preview'), [
+            'trigger' => 'order_received',
+            'scenario' => 'order',
+            'subject' => 'Realizujemy zamówienie {{order_number}}',
+            'body' => "Zamówienie trafiło do realizacji.\n\n{{payment_instruction}}",
+            'layout' => [],
+        ])->assertOk();
+
+        $instruction = 'Płatność online została potwierdzona.';
+        $html = html_entity_decode((string) $response->json('html'));
+        $text = html_entity_decode((string) $response->json('text'));
+
+        // HTML contains the text once in the hidden preheader and once in the visible body.
+        $this->assertSame(2, substr_count($html, $instruction));
+        $this->assertSame(1, substr_count($text, $instruction));
     }
 }

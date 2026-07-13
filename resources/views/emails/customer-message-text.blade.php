@@ -11,8 +11,16 @@
     $totals = is_array($metadata['totals'] ?? null) ? $metadata['totals'] : [];
     $address = is_array($metadata['shipping_address'] ?? null) ? $metadata['shipping_address'] : [];
     $billingAddress = is_array($metadata['billing_address'] ?? null) ? $metadata['billing_address'] : [];
+    $returnAddress = is_array($metadata['return_address'] ?? null) ? $metadata['return_address'] : [];
     $showBillingAddress = $billingAddress !== [] && $billingAddress !== $address;
-    $actionUrl = trim((string) ($metadata['action_url'] ?? $metadata['payment_url'] ?? ''));
+    $actionUrl = trim((string) ($metadata['action_url'] ?? ''));
+    if ($actionUrl === '' && !array_key_exists('action_url', $metadata)) {
+        $actionUrl = trim((string) ($metadata['payment_url'] ?? ''));
+    }
+    $paymentInstruction = trim((string) ($metadata['payment_instruction'] ?? ''));
+    $showPaymentInstruction = ($metadata['entity_type'] ?? null) === 'order'
+        && $paymentInstruction !== ''
+        && !str_contains(trim((string) $messageBody), $paymentInstruction);
 @endphp
 {{ $subjectText !== '' ? $subjectText : 'Wiadomość' }}
 
@@ -20,6 +28,13 @@
 
 @endif
 {{ $bodyText }}
+@if (($metadata['entity_type'] ?? null) === 'return' && $returnAddress !== [] && in_array((string) ($metadata['trigger'] ?? ''), ['return_waiting_for_package', 'return_approved', 'return_label_ready', 'manual_return_message'], true))
+
+ADRES DO ODESŁANIA PACZKI
+@foreach (['name', 'line1', 'line2', 'country', 'phone'] as $part)@if (filled($returnAddress[$part] ?? null)){{ $returnAddress[$part] }}
+@endif
+@endforeach
+@endif
 @if ($actionUrl !== '')
 
 {{ $metadata['action_label'] ?? 'Sprawdź szczegóły' }}:
@@ -71,6 +86,8 @@ DANE DO DOKUMENTU
 
 PŁATNOŚĆ I DOKUMENTY
 @if (filled($metadata['payment_method'] ?? null))Metoda płatności: {{ $metadata['payment_method'] }}
+@endif
+@if ($showPaymentInstruction){{ $paymentInstruction }}
 @endif
 @if (filled($metadata['invoice_number'] ?? null))Dokument: {{ $metadata['invoice_number'] }}
 @endif
