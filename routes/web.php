@@ -225,6 +225,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::put('/integrations/{integration}', [IntegrationController::class, 'update'])->name('integrations.update');
         Route::post('/integrations/gs1/test', [IntegrationController::class, 'testGs1Connection'])->name('integrations.gs1.test');
         Route::post('/integrations/{integration}/test', [IntegrationController::class, 'test'])->name('integrations.test');
+        Route::post('/integrations/{integration}/configure-customer-webhook', [IntegrationController::class, 'configureCustomerWebhook'])->name('integrations.customer-webhook.configure');
         Route::post('/integrations/{integration}/import-products', [IntegrationController::class, 'importProducts'])->name('integrations.import-products');
         Route::post('/integrations/{integration}/import-orders', [IntegrationController::class, 'importOrders'])->name('integrations.import-orders');
         Route::post('/integrations/{integration}/import-customers', [IntegrationController::class, 'importCustomers'])->name('integrations.import-customers');

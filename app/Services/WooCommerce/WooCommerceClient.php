@@ -675,6 +675,70 @@ final class WooCommerceClient
         return is_array($json) ? $json : [];
     }
 
+    /**
+     * Configure the Lemon ERP plugin to deliver signed customer lifecycle
+     * events. The consumer secret never leaves either system: WordPress finds
+     * the matching WooCommerce API key from the public consumer key and uses
+     * its stored secret for HMAC signatures.
+     *
+     * @return array<string, mixed>
+     */
+    public function configureCustomerWebhook(
+        WordpressIntegration $integration,
+        string $deliveryUrl,
+    ): array {
+        $scheme = mb_strtolower((string) parse_url($deliveryUrl, PHP_URL_SCHEME));
+
+        if (filter_var($deliveryUrl, FILTER_VALIDATE_URL) === false
+            || ! in_array($scheme, ['http', 'https'], true)
+        ) {
+            throw new RuntimeException('ERP nie przygotował poprawnego adresu odbiorczego webhooka klientów.');
+        }
+
+        try {
+            $response = $this->request($integration, retry: false)
+                ->post(
+                    $this->wordpressRestEndpoint($integration, '/lemon-erp/v1/customer-webhook/configure'),
+                    [
+                        'delivery_url' => $deliveryUrl,
+                        'consumer_key' => Crypt::decryptString($integration->consumer_key_encrypted),
+                    ],
+                );
+        } catch (RequestException $exception) {
+            $this->throwCustomerWebhookConfigurationException($exception->response);
+        }
+
+        if (! $response->successful()) {
+            $this->throwCustomerWebhookConfigurationException($response);
+        }
+
+        $json = $response->json();
+
+        return is_array($json) ? $json : [];
+    }
+
+    private function throwCustomerWebhookConfigurationException(?Response $response): never
+    {
+        $status = $response?->status() ?? 0;
+        $payload = $response?->json();
+        $code = trim((string) data_get($payload, 'code', ''));
+        $message = trim((string) data_get($payload, 'message', ''));
+
+        if ($status === 404 && ($code === '' || $code === 'rest_no_route')) {
+            throw new RuntimeException('Natychmiastowa synchronizacja klientów wymaga aktualnej wtyczki Lemon ERP for WooCommerce. Pobierz nowy ZIP z ekranu Integracje i zaktualizuj wtyczkę w WordPressie.');
+        }
+
+        if (in_array($status, [401, 403], true)) {
+            throw new RuntimeException('WordPress odrzucił konfigurację webhooka klientów. Sprawdź klucze WooCommerce REST i ich uprawnienia odczyt/zapis.');
+        }
+
+        if ($message !== '') {
+            throw new RuntimeException("WordPress nie skonfigurował webhooka klientów: {$message}");
+        }
+
+        throw new RuntimeException("Konfiguracja webhooka klientów zwróciła HTTP {$status}.");
+    }
+
     private function throwCategoryTranslationLinkHttpException(?Response $response): never
     {
         $status = $response?->status() ?? 0;

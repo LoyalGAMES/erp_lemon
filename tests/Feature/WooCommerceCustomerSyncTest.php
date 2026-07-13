@@ -81,6 +81,159 @@ class WooCommerceCustomerSyncTest extends TestCase
         $this->assertSame(2, CustomerExternalAccount::query()->count());
     }
 
+    public function test_two_registered_woocommerce_ids_with_the_same_email_remain_separate(): void
+    {
+        [, $integration] = $this->integration('DUPLICATE');
+
+        Http::fake(function (Request $request) {
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if ((int) ($query['page'] ?? 1) !== 1) {
+                return Http::response([]);
+            }
+
+            return Http::response([
+                [
+                    'id' => 501,
+                    'email' => 'wspolny@example.test',
+                    'first_name' => 'Anna',
+                    'last_name' => 'Pierwsza',
+                    'role' => 'customer',
+                ],
+                [
+                    'id' => 502,
+                    'email' => 'wspolny@example.test',
+                    'first_name' => 'Anna',
+                    'last_name' => 'Druga',
+                    'role' => 'customer',
+                ],
+            ]);
+        });
+
+        $stats = app(WooCommerceCustomerSyncService::class)->importCustomers($integration);
+
+        $accounts = CustomerExternalAccount::query()
+            ->where('wordpress_integration_id', $integration->id)
+            ->where('email_normalized', 'wspolny@example.test')
+            ->orderBy('external_customer_id')
+            ->get();
+
+        $this->assertSame(2, $stats['created']);
+        $this->assertSame(0, $stats['updated']);
+        $this->assertCount(2, $accounts);
+        $this->assertSame(['501', '502'], $accounts->pluck('external_customer_id')->all());
+        $this->assertNotSame($accounts[0]->customer_id, $accounts[1]->customer_id);
+        $this->assertTrue($accounts[0]->is_registered);
+        $this->assertTrue($accounts[1]->is_registered);
+        $this->assertSame(2, Customer::query()->where('email_normalized', 'wspolny@example.test')->count());
+    }
+
+    public function test_guest_with_duplicate_registered_email_uses_one_dedicated_guest_account_deterministically(): void
+    {
+        [$channel, $integration] = $this->integration('GUEST-DUPLICATE');
+        $service = app(WooCommerceCustomerSyncService::class);
+        $firstRegistered = $service->syncCustomer($integration, [
+            'id' => 601,
+            'email' => 'wspolny@example.test',
+        ]);
+        $secondRegistered = $service->syncCustomer($integration, [
+            'id' => 602,
+            'email' => 'wspolny@example.test',
+        ]);
+        $firstOrder = $this->order($channel, '6001', 'wspolny@example.test');
+
+        $guest = $service->syncFromOrder($integration, $firstOrder, (array) $firstOrder->raw_payload);
+        $sameGuest = $service->syncFromOrder($integration, $firstOrder->fresh(), (array) $firstOrder->raw_payload);
+        $secondOrder = $this->order($channel, '6002', 'wspolny@example.test');
+        $guestForSecondOrder = $service->syncFromOrder($integration, $secondOrder, (array) $secondOrder->raw_payload);
+
+        $this->assertNotNull($firstRegistered);
+        $this->assertNotNull($secondRegistered);
+        $this->assertNotNull($guest);
+        $this->assertFalse($guest->is_registered);
+        $this->assertNotSame($firstRegistered->id, $guest->id);
+        $this->assertNotSame($secondRegistered->id, $guest->id);
+        $this->assertSame($guest->id, $sameGuest?->id);
+        $this->assertSame($guest->id, $guestForSecondOrder?->id);
+        $this->assertSame(3, CustomerExternalAccount::query()
+            ->where('wordpress_integration_id', $integration->id)
+            ->where('email_normalized', 'wspolny@example.test')
+            ->count());
+        $this->assertSame('guest_email', $firstOrder->fresh()->customer_match_method);
+        $this->assertSame('guest_email', $secondOrder->fresh()->customer_match_method);
+    }
+
+    public function test_new_registered_id_does_not_promote_guest_when_registered_accounts_share_email(): void
+    {
+        [$channel, $integration] = $this->integration('REGISTERED-GUEST-DUPLICATE');
+        $service = app(WooCommerceCustomerSyncService::class);
+        $firstRegistered = $service->syncCustomer($integration, [
+            'id' => 701,
+            'email' => 'wspolny@example.test',
+        ]);
+        $secondRegistered = $service->syncCustomer($integration, [
+            'id' => 702,
+            'email' => 'wspolny@example.test',
+        ]);
+        $order = $this->order($channel, '7001', 'wspolny@example.test');
+        $guest = $service->syncFromOrder($integration, $order, (array) $order->raw_payload);
+
+        $thirdRegistered = $service->syncCustomer($integration, [
+            'id' => 703,
+            'email' => 'wspolny@example.test',
+        ]);
+
+        $this->assertNotNull($firstRegistered);
+        $this->assertNotNull($secondRegistered);
+        $this->assertNotNull($guest);
+        $this->assertNotNull($thirdRegistered);
+        $this->assertFalse($guest->fresh()->is_registered);
+        $this->assertNotSame($guest->id, $thirdRegistered->id);
+        $this->assertSame('703', $thirdRegistered->external_customer_id);
+        $this->assertTrue($thirdRegistered->is_registered);
+        $this->assertSame(4, CustomerExternalAccount::query()
+            ->where('wordpress_integration_id', $integration->id)
+            ->where('email_normalized', 'wspolny@example.test')
+            ->count());
+    }
+
+    public function test_ambiguous_guest_email_candidates_are_not_selected_arbitrarily(): void
+    {
+        [$channel, $integration] = $this->integration('AMBIGUOUS-GUEST');
+        $candidateIds = collect([1, 2])->map(function (int $number) use ($integration): int {
+            $customer = Customer::query()->create([
+                'email' => 'gosc@example.test',
+                'email_normalized' => 'gosc@example.test',
+                'display_name' => 'Gość '.$number,
+                'account_status' => 'guest',
+            ]);
+
+            return CustomerExternalAccount::query()->create([
+                'customer_id' => $customer->id,
+                'wordpress_integration_id' => $integration->id,
+                'email' => 'gosc@example.test',
+                'email_normalized' => 'gosc@example.test',
+                'display_name' => 'Gość '.$number,
+                'is_registered' => false,
+            ])->id;
+        });
+        $order = $this->order($channel, '7001', 'gosc@example.test');
+        $service = app(WooCommerceCustomerSyncService::class);
+
+        $resolved = $service->syncFromOrder($integration, $order, (array) $order->raw_payload);
+        $resolvedAgain = $service->syncFromOrder($integration, $order->fresh(), (array) $order->raw_payload);
+
+        $this->assertNotNull($resolved);
+        $this->assertFalse($resolved->is_registered);
+        $this->assertFalse($candidateIds->contains($resolved->id));
+        $this->assertSame($resolved->id, $resolvedAgain?->id);
+        $this->assertSame(3, CustomerExternalAccount::query()
+            ->where('wordpress_integration_id', $integration->id)
+            ->where('email_normalized', 'gosc@example.test')
+            ->count());
+        $this->assertSame($resolved->id, $order->fresh()->customer_external_account_id);
+    }
+
     public function test_full_import_creates_registered_profiles_and_backfills_legacy_orders(): void
     {
         [$channel, $integration] = $this->integration('IMPORT');

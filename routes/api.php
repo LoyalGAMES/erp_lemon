@@ -2,9 +2,15 @@
 
 use App\Http\Controllers\Api\PrintBridgeController;
 use App\Http\Controllers\Api\StoreReturnsController;
+use App\Http\Controllers\Api\WooCommerceCustomerWebhookController;
 use App\Http\Middleware\VerifyPrintBridgeToken;
 use App\Http\Middleware\VerifyStoreReturnsToken;
+use App\Http\Middleware\VerifyWooCommerceCustomerWebhookSignature;
 use Illuminate\Support\Facades\Route;
+
+Route::post('/woocommerce/customer-webhooks/{integration}', WooCommerceCustomerWebhookController::class)
+    ->middleware(['throttle:woocommerce-customer-webhooks', VerifyWooCommerceCustomerWebhookSignature::class])
+    ->name('api.woocommerce.customer-webhooks.store');
 
 Route::middleware(['throttle:print-bridge', VerifyPrintBridgeToken::class])
     ->prefix('print-bridge')

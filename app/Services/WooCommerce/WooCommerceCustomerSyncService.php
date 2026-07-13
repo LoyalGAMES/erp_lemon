@@ -10,6 +10,7 @@ use App\Models\CustomerMessage;
 use App\Models\ExternalOrder;
 use App\Models\WordpressIntegration;
 use Carbon\CarbonImmutable;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -85,13 +86,27 @@ final class WooCommerceCustomerSyncService
         WordpressIntegration $integration,
         array $profile,
     ): ?CustomerExternalAccount {
-        return $this->syncProfile($integration, $profile, true)['account'] ?? null;
+        return $this->syncRegisteredCustomer($integration, $profile)['account'] ?? null;
+    }
+
+    /**
+     * Synchronize one registered WooCommerce customer and expose whether the
+     * account was newly created or promoted from an unambiguous guest record.
+     *
+     * @param  array<string, mixed>  $profile
+     * @return array{account:CustomerExternalAccount,account_created:bool,customer_created:bool,match_method:string}|null
+     */
+    public function syncRegisteredCustomer(
+        WordpressIntegration $integration,
+        array $profile,
+    ): ?array {
+        return $this->syncProfile($integration, $profile, true);
     }
 
     /**
      * Resolve the customer for an order without ever matching across separate
-     * WordPress integrations. Guest and registered checkouts sharing an email
-     * are joined only inside the same WooCommerce store.
+     * WordPress integrations. E-mail matching is only used when it identifies
+     * one unambiguous account inside the same WooCommerce store.
      */
     public function syncFromOrder(
         WordpressIntegration $integration,
@@ -221,6 +236,14 @@ final class WooCommerceCustomerSyncService
             $email,
             $emailNormalized,
         ): array {
+            // The e-mail index is deliberately non-unique because WooCommerce
+            // can contain multiple registered ids with the same address. A row
+            // lock on the integration serializes the no-match/create decision.
+            WordpressIntegration::query()
+                ->whereKey($integration->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
             $account = null;
             $matchMethod = $registered ? 'external_id' : 'guest_email';
 
@@ -233,20 +256,40 @@ final class WooCommerceCustomerSyncService
             }
 
             if ($account === null && $emailNormalized !== null) {
-                $account = CustomerExternalAccount::query()
+                $emailAccounts = CustomerExternalAccount::query()
                     ->where('wordpress_integration_id', $integration->id)
                     ->where('email_normalized', $emailNormalized)
+                    ->orderBy('id')
                     ->lockForUpdate()
-                    ->first();
+                    ->get();
+                $orderAccount = $this->accountAlreadyAttachedToOrder($profile, $emailAccounts);
 
-                if ($account !== null && $registered) {
-                    if ($account->external_customer_id !== null
-                        && (string) $account->external_customer_id !== $externalCustomerId
-                    ) {
-                        throw new RuntimeException('WooCommerce zwrócił dwa różne konta klienta dla tego samego adresu e-mail.');
+                if ($registered) {
+                    if ($this->isPromotableGuest($orderAccount)) {
+                        $account = $orderAccount;
+                    } else {
+                        $guestAccounts = $emailAccounts
+                            ->filter(fn (CustomerExternalAccount $candidate): bool => $this->isPromotableGuest($candidate));
+
+                        if ($emailAccounts->count() === 1 && $guestAccounts->count() === 1) {
+                            $account = $guestAccounts->first();
+                        }
                     }
 
-                    $matchMethod = $account->is_registered ? 'email' : 'email_promoted';
+                    if ($account !== null) {
+                        $matchMethod = 'email_promoted';
+                    }
+                } elseif ($orderAccount !== null) {
+                    $account = $orderAccount;
+                } else {
+                    $guestAccounts = $emailAccounts
+                        ->filter(fn (CustomerExternalAccount $candidate): bool => ! $candidate->is_registered);
+
+                    if ($guestAccounts->count() === 1) {
+                        $account = $guestAccounts->first();
+                    } elseif ($guestAccounts->isEmpty() && $emailAccounts->count() === 1) {
+                        $account = $emailAccounts->first();
+                    }
                 }
             }
 
@@ -344,6 +387,45 @@ final class WooCommerceCustomerSyncService
         }
 
         return $result;
+    }
+
+    /**
+     * Prefer the account already assigned to the exact order. This is the only
+     * safe tie-breaker when more than one local account shares an e-mail.
+     *
+     * @param  array<string, mixed>  $profile
+     * @param  Collection<int, CustomerExternalAccount>  $emailAccounts
+     */
+    private function accountAlreadyAttachedToOrder(
+        array $profile,
+        Collection $emailAccounts,
+    ): ?CustomerExternalAccount {
+        $orderId = $profile['erp_order_id'] ?? null;
+
+        if (! is_numeric($orderId) || (int) $orderId <= 0) {
+            return null;
+        }
+
+        $accountId = ExternalOrder::query()
+            ->whereKey((int) $orderId)
+            ->value('customer_external_account_id');
+
+        if (! is_numeric($accountId) || (int) $accountId <= 0) {
+            return null;
+        }
+
+        $account = $emailAccounts->first(
+            fn (CustomerExternalAccount $candidate): bool => (int) $candidate->id === (int) $accountId,
+        );
+
+        return $account instanceof CustomerExternalAccount ? $account : null;
+    }
+
+    private function isPromotableGuest(?CustomerExternalAccount $account): bool
+    {
+        return $account instanceof CustomerExternalAccount
+            && ! $account->is_registered
+            && $account->external_customer_id === null;
     }
 
     private function refreshExternalAccountMetrics(CustomerExternalAccount $account): void

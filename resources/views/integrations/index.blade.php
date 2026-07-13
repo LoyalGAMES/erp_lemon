@@ -167,8 +167,8 @@
                 <div class="integration-panel-body">
                     <p class="muted">
                         Pobierz paczkę ZIP, wgraj ją w WordPress przez Wtyczki -> Dodaj nową -> Wyślij wtyczkę, a potem aktywuj plugin.
-                        Wtyczka dodaje pola NIP/typ klienta, endpoint faktur oraz pewną identyfikację grup tłumaczeń Polylang.
-                        Wersja 0.3.0 lub nowsza obsługuje produkty i kategorie PL/EN jako wspólne rekordy oraz wymaga skonfigurowanego loginu i hasła aplikacji WordPress REST.
+                        Wtyczka dodaje pola NIP/typ klienta, endpoint faktur, natychmiastowe webhooki klientów oraz pewną identyfikację grup tłumaczeń Polylang.
+                        Wersja 0.4.0 lub nowsza obsługuje webhooki kont klientów; funkcje katalogu i faktur wymagają skonfigurowanego loginu i hasła aplikacji WordPress REST.
                     </p>
                     <div class="inline-actions">
                         <a class="button" href="{{ route('integrations.woocommerce-plugin.download') }}">Pobierz plugin ZIP</a>
@@ -205,6 +205,7 @@
                     $labelSettings = $integration->shippingLabelSettings();
                     $orderStatusSettings = $integration->orderStatusSettings();
                     $invoiceDelivery = $integration->invoiceDeliverySettings();
+                    $customerWebhookConfigured = (bool) data_get($integration->settings, 'customer_webhook.configured', false);
                 @endphp
                 <article class="card integration-store-card">
                     <div class="integration-store-head">
@@ -219,6 +220,7 @@
                             <span @class(['status' => true, 'orange' => ! $integration->order_import_enabled])>Zamówienia {{ $integration->order_import_enabled ? 'ON' : 'OFF' }}</span>
                             <span @class(['status' => true, 'orange' => ! $integration->stock_export_enabled])>Stany {{ $integration->stock_export_enabled ? 'ON' : 'OFF' }}</span>
                             <span @class(['status' => true, 'orange' => ! $integration->invoice_upload_enabled])>Faktury {{ $integration->invoice_upload_enabled ? 'ON' : 'OFF' }}</span>
+                            <span @class(['status' => true, 'orange' => ! $customerWebhookConfigured])>Klienci live {{ $customerWebhookConfigured ? 'OK' : 'brak' }}</span>
                             <span @class(['status' => true, 'orange' => ! $integration->shippingLabelsEnabled()])>Etykiety {{ $integration->shippingLabelsEnabled() ? 'OK' : 'brak' }}</span>
                         </div>
                     </div>
@@ -235,6 +237,10 @@
                             <form method="POST" action="{{ route('integrations.test', $integration) }}">
                                 @csrf
                                 <button class="button secondary" type="submit">Test API</button>
+                            </form>
+                            <form method="POST" action="{{ route('integrations.customer-webhook.configure', $integration) }}">
+                                @csrf
+                                <button class="button secondary" type="submit">Włącz webhook klientów</button>
                             </form>
                             <form method="POST" action="{{ route('integrations.import-products', $integration) }}">
                                 @csrf

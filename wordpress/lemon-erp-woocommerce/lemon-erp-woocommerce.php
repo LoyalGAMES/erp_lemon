@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Lemon ERP for WooCommerce
  * Description: Adds Lemon ERP checkout fields, catalog identity and invoice metadata endpoints for WooCommerce.
- * Version: 0.3.0
+ * Version: 0.4.0
  * Author: Lemon ERP
  * Requires PHP: 8.0
  * Requires Plugins: woocommerce
@@ -19,6 +19,8 @@ if (! defined('ABSPATH')) {
     exit;
 }
 
+require_once __DIR__.'/includes/class-customer-webhook.php';
+
 add_action('before_woocommerce_init', static function (): void {
     if (class_exists(FeaturesUtil::class)) {
         FeaturesUtil::declare_compatibility('custom_order_tables', __FILE__, true);
@@ -27,7 +29,7 @@ add_action('before_woocommerce_init', static function (): void {
 
 final class Lemon_Erp_WooCommerce
 {
-    private const VERSION = '0.3.0';
+    private const VERSION = '0.4.0';
 
     private const CATALOG_CONTRACT = 1;
 
@@ -69,6 +71,7 @@ final class Lemon_Erp_WooCommerce
 
     private function __construct()
     {
+        (new Lemon_Erp_Customer_Webhook)->hooks();
         add_filter('woocommerce_checkout_fields', [$this, 'classicCheckoutFields']);
         add_action('wp_enqueue_scripts', [$this, 'enqueueCheckoutUi']);
         add_action('woocommerce_after_checkout_validation', [$this, 'validateClassicCheckout'], 10, 2);

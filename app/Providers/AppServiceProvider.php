@@ -3,6 +3,7 @@
 namespace App\Providers;
 
 use App\Mail\Transport\GmailApiTransport;
+use App\Models\WordpressIntegration;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Mail;
@@ -58,6 +59,18 @@ class AppServiceProvider extends ServiceProvider
             return [
                 Limit::perMinute(120)->by('store-returns:token:'.hash('sha256', $credential)),
                 Limit::perMinute(240)->by('store-returns:ip:'.$request->ip()),
+            ];
+        });
+
+        RateLimiter::for('woocommerce-customer-webhooks', function (Request $request): array {
+            $integration = $request->route('integration');
+            $integrationId = $integration instanceof WordpressIntegration
+                ? $integration->id
+                : (string) $integration;
+
+            return [
+                Limit::perMinute(300)->by('woocommerce-customer-webhooks:integration:'.$integrationId),
+                Limit::perMinute(600)->by('woocommerce-customer-webhooks:ip:'.$request->ip()),
             ];
         });
     }

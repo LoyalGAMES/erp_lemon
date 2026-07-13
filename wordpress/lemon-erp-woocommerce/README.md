@@ -6,6 +6,7 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 - panel `Lemon ERP` na zamówieniu WooCommerce,
 - jednoznaczny kontrakt tożsamości produktów, wariantów i kategorii dla sklepów z Polylang,
 - idempotentne wiązanie polskich i angielskich kategorii utworzonych przez ERP,
+- natychmiastowe, asynchroniczne powiadomienia ERP o utworzeniu lub zmianie konta klienta,
 - REST endpoint do zapisu danych faktury na zamówieniu,
 - opcjonalny zapis PDF poza WordPress Media Library.
 
@@ -18,7 +19,19 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 5. Upewnij się, że użytkownik WordPress używany w Lemon ERP ma uprawnienia do edycji zamówień WooCommerce.
 6. W Lemon ERP w integracji WooCommerce ustaw tryb faktur na `Wtyczka Lemon ERP bez Media Library`.
 
-Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, a eksport powiązanych kategorii wersji co najmniej `0.3.0`.
+Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, a natychmiastowa synchronizacja klientów wersji co najmniej `0.4.0`.
+
+## Natychmiastowa synchronizacja klientów
+
+ERP konfiguruje webhook automatycznie przez uwierzytelniony endpoint:
+
+```text
+POST /wp-json/lemon-erp/v1/customer-webhook/configure
+```
+
+Przekazuje wyłącznie docelowy `delivery_url` i istniejący `consumer_key`. Wtyczka sprawdza, czy klucz należy do zalogowanego użytkownika i ma uprawnienia Odczyt/Zapis, po czym zapisuje tylko ID klucza oraz URL. Istniejący `consumer_secret` pozostaje w bazie WooCommerce i służy po obu stronach wyłącznie do wyliczenia podpisu HMAC-SHA256 — sekret nie jest wysyłany w konfiguracji ani w webhooku.
+
+Zdarzenia `customer.created` i `customer.updated` są kolejkowane w Action Scheduler, więc rejestracja klienta nie czeka na odpowiedź ERP. Nieudane dostarczenie jest ponawiane z rosnącym opóźnieniem. Payload zawiera tylko identyfikator klienta i dane zdarzenia; pełny profil ERP pobiera przez oficjalny endpoint WooCommerce `/wc/v3/customers/{id}`.
 
 ## Kontrakt katalogu
 

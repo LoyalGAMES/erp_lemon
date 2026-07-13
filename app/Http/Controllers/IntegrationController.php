@@ -14,6 +14,7 @@ use App\Services\Integrations\WooCommerceImportQueueService;
 use App\Services\Ksef\KsefClient;
 use App\Services\Ksef\KsefSettingsService;
 use App\Services\WooCommerce\WooCommerceClient;
+use App\Services\WooCommerce\WooCommerceCustomerWebhookService;
 use App\Services\Wordpress\LemonErpWooCommercePluginPackageService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -247,6 +248,63 @@ class IntegrationController extends Controller
             $this->log($integration, 'in', 'test_connection', 'failed', error: $exception->getMessage());
 
             return back()->with('error', 'Test połączenia nie powiódł się: '.$exception->getMessage());
+        }
+    }
+
+    public function configureCustomerWebhook(
+        WordpressIntegration $integration,
+        WooCommerceClient $client,
+        WooCommerceCustomerWebhookService $webhooks,
+    ): RedirectResponse {
+        $deliveryUrl = route('api.woocommerce.customer-webhooks.store', $integration);
+
+        try {
+            // Establish the no-spam boundary before WordPress can emit its
+            // first event. Accounts older than this point are synchronized but
+            // never receive an account-created message from a replay.
+            $baseline = $webhooks->ensureNotificationBaseline($integration);
+            $result = $client->configureCustomerWebhook($integration, $deliveryUrl);
+            DB::transaction(function () use ($integration, $deliveryUrl, $result): void {
+                $locked = WordpressIntegration::query()
+                    ->lockForUpdate()
+                    ->findOrFail($integration->id);
+                $settings = (array) $locked->settings;
+                data_set($settings, 'customer_webhook', [
+                    'configured' => true,
+                    'delivery_url' => $deliveryUrl,
+                    'configured_at' => $result['configured_at'] ?? now()->toIso8601String(),
+                    'plugin_version' => $result['plugin_version'] ?? null,
+                    'contract_version' => $result['contract_version'] ?? null,
+                ]);
+                $locked->update(['settings' => $settings]);
+            }, 3);
+
+            $this->log(
+                $integration,
+                'out',
+                'configure_customer_webhook',
+                'success',
+                requestPayload: ['delivery_url' => $deliveryUrl],
+                responsePayload: [
+                    'configured' => (bool) ($result['configured'] ?? true),
+                    'plugin_version' => $result['plugin_version'] ?? null,
+                    'contract_version' => $result['contract_version'] ?? null,
+                    'notification_baseline_at' => $baseline->toIso8601String(),
+                ],
+            );
+
+            return back()->with('status', 'Webhook klientów został skonfigurowany. Nowe konta będą synchronizowane i obsługiwane mailowo od razu.');
+        } catch (Throwable $exception) {
+            $this->log(
+                $integration,
+                'out',
+                'configure_customer_webhook',
+                'failed',
+                requestPayload: ['delivery_url' => $deliveryUrl],
+                error: $exception->getMessage(),
+            );
+
+            return back()->with('error', $exception->getMessage());
         }
     }
 
