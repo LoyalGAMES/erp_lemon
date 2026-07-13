@@ -1024,6 +1024,97 @@ class ProductCatalogWorkflowTest extends TestCase
         Queue::assertPushed(ExportWooCommerceProductDataJob::class, 1);
     }
 
+    public function test_editing_variant_updates_parent_catalog_visibility_and_queues_both_exports(): void
+    {
+        Queue::fake();
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'SKU-VISIBILITY-PARENT',
+            'name' => 'Produkt główny widoczności',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variable',
+                    'catalog_visibility' => 'visible',
+                ],
+            ],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'SKU-VISIBILITY-PARENT-M',
+            'name' => 'Produkt główny widoczności M',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variation',
+                    'catalog_visibility' => 'visible',
+                    'parameters' => [
+                        ['name' => 'Rozmiar', 'value' => 'M', 'variation' => true],
+                    ],
+                ],
+            ],
+        ]);
+
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+            'metadata' => ['variant_attribute' => 'Rozmiar'],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        $this->get(route('products.edit', $variant))
+            ->assertOk()
+            ->assertSee('Widoczność produktu głównego')
+            ->assertSee('href="'.route('products.edit', $parent).'"', false);
+
+        $this->put(route('products.update', $variant), [
+            'sku' => $variant->sku,
+            'name' => $variant->name,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => '1',
+            'catalog_visibility' => 'hidden',
+            'product_type' => 'variation',
+            'parameters' => [
+                'name' => ['Rozmiar'],
+                'value' => ['M'],
+                'variation' => ['1'],
+            ],
+        ])->assertRedirect(route('products.edit', $variant));
+
+        $this->assertSame('hidden', data_get($parent->refresh()->masterData(), 'catalog_visibility'));
+        Queue::assertPushed(ExportWooCommerceProductDataJob::class, 2);
+    }
+
     public function test_operator_can_duplicate_product_without_stock_or_channel_mappings(): void
     {
         $channel = SalesChannel::query()->create([

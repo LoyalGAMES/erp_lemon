@@ -5,23 +5,32 @@ declare(strict_types=1);
 namespace App\Services\Communication;
 
 use App\Models\AppSetting;
+use App\Models\GoogleMailConnection;
 use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Mail;
 
 final class MailSettingsService
 {
+    public const DELIVERY_SMTP = 'smtp';
+
+    public const DELIVERY_GOOGLE_WORKSPACE = 'google_workspace';
+
     private const KEY = 'mail_settings';
 
     /**
      * @return array{
      *     enabled:bool,
+     *     delivery_method:string,
+     *     delivery_ready:bool,
+     *     delivery_issue:?string,
      *     host:string,
      *     port:int,
      *     encryption:string,
      *     username:string,
      *     from_address:string,
      *     from_name:string,
+     *     reply_to_address:string,
      *     ehlo_domain:string,
      *     timeout:int,
      *     password_configured:bool,
@@ -32,7 +41,14 @@ final class MailSettingsService
      *     signature:string,
      *     footer_text:string,
      *     support_email:string,
-     *     support_phone:string
+     *     support_phone:string,
+     *     google_oauth_configured:bool,
+     *     google_client_secret_configured:bool,
+     *     google_connected:bool,
+     *     google_reauthorization_required:bool,
+     *     google_account_email:string,
+     *     google_client_id:string,
+     *     google_redirect_uri:string
      * }
      */
     public function data(): array
@@ -41,21 +57,61 @@ final class MailSettingsService
             ->where('key', self::KEY)
             ->value('value');
 
-        $data = array_merge($this->defaults(), is_array($stored) ? $stored : []);
+        $stored = is_array($stored) ? $stored : [];
+        $data = array_merge($this->defaults(), $stored);
         $encryption = in_array($data['encryption'] ?? null, ['none', 'tls', 'ssl'], true)
             ? (string) $data['encryption']
             : 'tls';
         $fromAddress = trim((string) ($data['from_address'] ?? config('mail.from.address', '')));
         $fromName = trim((string) ($data['from_name'] ?? config('mail.from.name', config('app.name', 'Sempre ERP'))));
+        $supportEmail = trim((string) ($data['support_email'] ?? $fromAddress));
+        $replyToAddress = array_key_exists('reply_to_address', $stored)
+            ? trim((string) $stored['reply_to_address'])
+            : $supportEmail;
+        $deliveryMethod = in_array($data['delivery_method'] ?? null, [
+            self::DELIVERY_SMTP,
+            self::DELIVERY_GOOGLE_WORKSPACE,
+        ], true)
+            ? (string) $data['delivery_method']
+            : self::DELIVERY_SMTP;
+        $enabled = array_key_exists('delivery_enabled', $stored)
+            ? (bool) $stored['delivery_enabled']
+            : (bool) ($data['enabled'] ?? false);
+        $googleConnection = GoogleMailConnection::query()
+            ->where('purpose', GoogleMailConnection::PURPOSE_TRANSACTIONAL_MAIL)
+            ->first();
+        $storedGoogleClientId = trim((string) ($googleConnection?->client_id ?? ''));
+        $googleClientId = $storedGoogleClientId !== ''
+            ? $storedGoogleClientId
+            : trim((string) config('services.google_workspace.client_id', ''));
+        $googleClientSecretConfigured = $googleConnection?->clientSecret() !== null
+            || filled(config('services.google_workspace.client_secret'));
+        $googleOauthConfigured = $googleClientId !== '' && $googleClientSecretConfigured;
+        $googleConnected = $googleOauthConfigured
+            && $googleConnection instanceof GoogleMailConnection
+            && $googleConnection->isUsable();
+        $host = trim((string) ($data['host'] ?? ''));
+        $deliveryIssue = $this->deliveryIssue(
+            $enabled,
+            $deliveryMethod,
+            $fromAddress,
+            $host,
+            $googleOauthConfigured,
+            $googleConnected,
+        );
 
         return [
-            'enabled' => (bool) ($data['enabled'] ?? false),
-            'host' => trim((string) ($data['host'] ?? '')),
+            'enabled' => $enabled,
+            'delivery_method' => $deliveryMethod,
+            'delivery_ready' => $deliveryIssue === null,
+            'delivery_issue' => $deliveryIssue,
+            'host' => $host,
             'port' => max(1, min(65535, (int) ($data['port'] ?? 587))),
             'encryption' => $encryption,
             'username' => trim((string) ($data['username'] ?? '')),
             'from_address' => $fromAddress,
             'from_name' => $fromName,
+            'reply_to_address' => $replyToAddress,
             'ehlo_domain' => trim((string) ($data['ehlo_domain'] ?? '')),
             'timeout' => max(3, min(120, (int) ($data['timeout'] ?? 15))),
             'password_configured' => filled($data['password_encrypted'] ?? null),
@@ -65,13 +121,20 @@ final class MailSettingsService
             'header_text' => trim((string) ($data['header_text'] ?? 'Informacja o zamówieniu')),
             'signature' => trim((string) ($data['signature'] ?? "Pozdrawiamy,\nZespół Sempre")),
             'footer_text' => trim((string) ($data['footer_text'] ?? 'Ta wiadomość została wysłana automatycznie przez system obsługi zamówień.')),
-            'support_email' => trim((string) ($data['support_email'] ?? $fromAddress)),
+            'support_email' => $supportEmail,
             'support_phone' => trim((string) ($data['support_phone'] ?? '')),
+            'google_oauth_configured' => $googleOauthConfigured,
+            'google_client_secret_configured' => $googleClientSecretConfigured,
+            'google_connected' => $googleConnected,
+            'google_reauthorization_required' => $googleConnection?->reauthorization_required_at !== null,
+            'google_account_email' => (string) ($googleConnection?->email ?? ''),
+            'google_client_id' => $googleClientId,
+            'google_redirect_uri' => route('settings.mail.google.callback'),
         ];
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      * @return array<string, mixed>
      */
     public function update(array $data): array
@@ -111,9 +174,25 @@ final class MailSettingsService
         $supportEmail = array_key_exists('support_email', $data)
             ? trim((string) $data['support_email'])
             : $fromAddress;
+        $replyToAddress = array_key_exists('reply_to_address', $data)
+            ? trim((string) $data['reply_to_address'])
+            : (array_key_exists('reply_to_address', $stored)
+                ? trim((string) $stored['reply_to_address'])
+                : $supportEmail);
+        $deliveryMethod = in_array($data['delivery_method'] ?? ($stored['delivery_method'] ?? null), [
+            self::DELIVERY_SMTP,
+            self::DELIVERY_GOOGLE_WORKSPACE,
+        ], true)
+            ? (string) ($data['delivery_method'] ?? $stored['delivery_method'])
+            : self::DELIVERY_SMTP;
+        $deliveryEnabled = (bool) ($data['enabled'] ?? false);
 
         $payload = [
-            'enabled' => (bool) ($data['enabled'] ?? false),
+            // Older releases only understand "enabled" and always use SMTP.
+            // Keep it off for Gmail API so a code rollback cannot silently send through SMTP.
+            'enabled' => $deliveryMethod === self::DELIVERY_SMTP && $deliveryEnabled,
+            'delivery_enabled' => $deliveryEnabled,
+            'delivery_method' => $deliveryMethod,
             'host' => trim((string) ($data['host'] ?? '')),
             'port' => max(1, min(65535, (int) ($data['port'] ?? 587))),
             'encryption' => $encryption,
@@ -121,6 +200,7 @@ final class MailSettingsService
             'password_encrypted' => $passwordEncrypted,
             'from_address' => $fromAddress,
             'from_name' => $fromName,
+            'reply_to_address' => mb_substr($replyToAddress, 0, 255),
             'ehlo_domain' => trim((string) ($data['ehlo_domain'] ?? '')),
             'timeout' => max(3, min(120, (int) ($data['timeout'] ?? 15))),
             'brand_name' => mb_substr($brandName, 0, 120),
@@ -145,8 +225,21 @@ final class MailSettingsService
     {
         $settings = $this->data();
 
-        if (! $settings['enabled']) {
+        if (! $settings['enabled'] || ! $settings['delivery_ready']) {
             return false;
+        }
+
+        if ($settings['delivery_method'] === self::DELIVERY_GOOGLE_WORKSPACE) {
+            config([
+                'mail.default' => 'google_workspace',
+                'mail.mailers.google_workspace.transport' => 'gmail_api',
+                'mail.from.address' => $settings['from_address'],
+                'mail.from.name' => $settings['from_name'],
+            ]);
+
+            Mail::purge('google_workspace');
+
+            return true;
         }
 
         config([
@@ -183,16 +276,82 @@ final class MailSettingsService
     {
         $settings = $this->data();
         $fromDomain = $this->emailDomain($settings['from_address']);
+        $googleDomain = $this->emailDomain($settings['google_account_email']);
         $usernameDomain = $this->emailDomain($settings['username']);
         $ehloDomain = $settings['ehlo_domain'] !== ''
             ? $settings['ehlo_domain']
             : (string) parse_url((string) config('app.url', 'http://localhost'), PHP_URL_HOST);
         $checks = [];
 
+        if ($settings['delivery_method'] === self::DELIVERY_GOOGLE_WORKSPACE) {
+            if (! $settings['enabled']) {
+                $checks[] = [
+                    'status' => 'warn',
+                    'title' => 'Wysyłka poczty jest wyłączona',
+                    'description' => 'Maile transakcyjne pozostaną w kolejce do czasu włączenia wysyłki.',
+                ];
+            }
+
+            if (! $settings['google_oauth_configured']) {
+                $checks[] = [
+                    'status' => 'warn',
+                    'title' => 'Brak klienta Google OAuth',
+                    'description' => 'Uzupełnij identyfikator klienta i sekret klienta Google OAuth w panelu.',
+                ];
+            } elseif (! $settings['google_connected']) {
+                $checks[] = [
+                    'status' => 'warn',
+                    'title' => 'Konto Google Workspace nie jest połączone',
+                    'description' => $settings['google_reauthorization_required']
+                        ? 'Dostęp wygasł lub został cofnięty. Połącz konto ponownie.'
+                        : 'Zapisz ustawienia i użyj przycisku „Połącz konto Google”.',
+                ];
+            } else {
+                $checks[] = [
+                    'status' => 'ok',
+                    'title' => 'Gmail API',
+                    'description' => 'Połączone konto: '.$settings['google_account_email'].'.',
+                ];
+            }
+
+            if ($fromDomain !== null && $googleDomain !== null && $fromDomain !== $googleDomain) {
+                $checks[] = [
+                    'status' => 'warn',
+                    'title' => 'Nadawca jest w innej domenie',
+                    'description' => 'Adres nadawcy musi być kontem Google lub skonfigurowanym aliasem „Wyślij jako”.',
+                ];
+            } elseif ($settings['google_connected']
+                && mb_strtolower($settings['from_address']) !== mb_strtolower($settings['google_account_email'])) {
+                $checks[] = [
+                    'status' => 'info',
+                    'title' => 'Wysyłka z aliasu',
+                    'description' => 'Sprawdź w Gmailu, czy '.$settings['from_address'].' jest aktywnym aliasem „Wyślij jako”.',
+                ];
+            }
+
+            $checks[] = [
+                'status' => 'info',
+                'title' => 'Minimalny dostęp',
+                'description' => 'Integracja prosi wyłącznie o zakres gmail.send oraz identyfikację połączonego konta.',
+            ];
+            $checks[] = [
+                'status' => 'info',
+                'title' => 'DKIM i SPF',
+                'description' => 'Google Workspace podpisuje wiadomości zgodnie z konfiguracją domeny w konsoli administratora.',
+            ];
+
+            return [
+                'from_domain' => $fromDomain,
+                'username_domain' => $googleDomain,
+                'ehlo_domain' => '',
+                'checks' => $checks,
+            ];
+        }
+
         if (! $settings['enabled']) {
             $checks[] = [
                 'status' => 'warn',
-                'title' => 'SMTP jest wyłączone',
+                'title' => 'Wysyłka SMTP jest wyłączona',
                 'description' => 'Maile transakcyjne nie będą wysyłane przez zapisane konto SMTP.',
             ];
         }
@@ -296,6 +455,39 @@ final class MailSettingsService
         return $domain !== '' ? $domain : null;
     }
 
+    private function deliveryIssue(
+        bool $enabled,
+        string $deliveryMethod,
+        string $fromAddress,
+        string $host,
+        bool $googleOauthConfigured,
+        bool $googleConnected,
+    ): ?string {
+        if (! $enabled) {
+            return $deliveryMethod === self::DELIVERY_GOOGLE_WORKSPACE
+                ? 'Wysyłka przez Gmail API jest wyłączona.'
+                : 'SMTP jest wyłączone.';
+        }
+
+        if ($fromAddress === '') {
+            return 'Uzupełnij adres nadawcy.';
+        }
+
+        if ($deliveryMethod === self::DELIVERY_GOOGLE_WORKSPACE) {
+            if (! $googleOauthConfigured) {
+                return 'Uzupełnij identyfikator klienta i sekret klienta Google OAuth.';
+            }
+
+            if (! $googleConnected) {
+                return 'Konto Google Workspace nie jest połączone lub wymaga ponownej autoryzacji.';
+            }
+
+            return null;
+        }
+
+        return $host !== '' ? null : 'Uzupełnij host SMTP.';
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -303,6 +495,8 @@ final class MailSettingsService
     {
         return [
             'enabled' => false,
+            'delivery_enabled' => false,
+            'delivery_method' => self::DELIVERY_SMTP,
             'host' => (string) config('mail.mailers.smtp.host', ''),
             'port' => (int) config('mail.mailers.smtp.port', 587),
             'encryption' => (int) config('mail.mailers.smtp.port', 587) === 465 ? 'ssl' : 'tls',
@@ -310,6 +504,7 @@ final class MailSettingsService
             'password_encrypted' => null,
             'from_address' => (string) config('mail.from.address', ''),
             'from_name' => (string) config('mail.from.name', config('app.name', 'Sempre ERP')),
+            'reply_to_address' => '',
             'ehlo_domain' => (string) config('mail.mailers.smtp.local_domain', ''),
             'timeout' => 15,
             'brand_name' => (string) config('mail.from.name', config('app.name', 'Sempre ERP')),

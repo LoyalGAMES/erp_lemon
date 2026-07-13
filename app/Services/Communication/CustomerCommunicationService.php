@@ -316,13 +316,15 @@ final class CustomerCommunicationService
         ]));
 
         if (! $this->mailSettings->apply()) {
+            $deliveryIssue = (string) ($this->mailSettings->data()['delivery_issue']
+                ?? 'Wybrana metoda wysyłki nie jest gotowa.');
             $message->update([
                 'status' => 'held',
-                'error_message' => 'SMTP jest wyłączone. Wiadomość oczekuje na ręczne ponowienie po włączeniu wysyłki.',
+                'error_message' => $deliveryIssue.' Wiadomość oczekuje na ręczne ponowienie po poprawieniu ustawień.',
             ]);
 
             if ($throwOnFailure) {
-                throw new RuntimeException('SMTP jest wyłączone. Wiadomość została zapisana jako oczekująca i nie została wysłana.');
+                throw new RuntimeException($deliveryIssue.' Wiadomość została zapisana jako oczekująca i nie została wysłana.');
             }
 
             return $message->refresh();
@@ -359,7 +361,10 @@ final class CustomerCommunicationService
     public function retryUnsent(int $limit = 100): array
     {
         if (! $this->mailSettings->apply()) {
-            throw new RuntimeException('Najpierw włącz SMTP i zapisz poprawną konfigurację.');
+            $deliveryIssue = (string) ($this->mailSettings->data()['delivery_issue']
+                ?? 'Wybrana metoda wysyłki nie jest gotowa.');
+
+            throw new RuntimeException('Nie można ponowić wysyłki. '.$deliveryIssue);
         }
 
         $limit = max(1, min(500, $limit));

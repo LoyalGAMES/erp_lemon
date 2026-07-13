@@ -2,8 +2,10 @@
 
 namespace App\Providers;
 
+use App\Mail\Transport\GmailApiTransport;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 
@@ -22,6 +24,11 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        Mail::extend(
+            'gmail_api',
+            fn (array $config): GmailApiTransport => $this->app->make(GmailApiTransport::class),
+        );
+
         RateLimiter::for('erp-login', function (Request $request): array {
             $identifier = mb_strtolower(trim((string) $request->input('email', '')));
 
@@ -32,6 +39,9 @@ class AppServiceProvider extends ServiceProvider
         });
 
         RateLimiter::for('erp-first-admin', fn (Request $request): Limit => Limit::perMinute(3)->by($request->ip()));
+
+        RateLimiter::for('google-mail-oauth', fn (Request $request): Limit => Limit::perMinute(10)
+            ->by('google-mail-oauth:'.($request->user()?->id ?? 'guest').'|'.$request->ip()));
 
         RateLimiter::for('print-bridge', function (Request $request): array {
             $credential = trim((string) ($request->bearerToken() ?? $request->header('X-API-Key', '')));

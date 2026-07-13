@@ -58,4 +58,9 @@ return [
         'base_url' => env('BLPACZKA_API_URL', 'https://api.blpaczka.com'),
     ],
 
+    'google_workspace' => [
+        'client_id' => env('GOOGLE_WORKSPACE_CLIENT_ID'),
+        'client_secret' => env('GOOGLE_WORKSPACE_CLIENT_SECRET'),
+    ],
+
 ];

@@ -14,6 +14,20 @@
         'failed' => 'błąd',
         default => $status,
     };
+    $selectedDeliveryMethod = old('delivery_method', $mailSettings['delivery_method'] ?? 'smtp');
+    $deliveryReady = (bool) ($mailSettings['delivery_ready'] ?? $mailSettings['enabled']);
+    $mailActive = (bool) $mailSettings['enabled'] && $deliveryReady;
+    $googleConnected = (bool) ($mailSettings['google_connected'] ?? false);
+    $googleReauthorizationRequired = (bool) ($mailSettings['google_reauthorization_required'] ?? false);
+    $googleOauthConfigured = (bool) ($mailSettings['google_oauth_configured'] ?? false);
+    $googleClientSecretConfigured = (bool) ($mailSettings['google_client_secret_configured'] ?? $googleOauthConfigured);
+    $mailStatusDescription = $mailActive
+        ? ($mailSettings['delivery_method'] === 'google_workspace'
+            ? 'ERP wysyła komunikację przez połączone konto Google Workspace i Gmail API.'
+            : 'ERP wysyła komunikację przez zapisane konto SMTP.')
+        : ($mailSettings['enabled']
+            ? ($mailSettings['delivery_issue'] ?? 'Uzupełnij konfigurację wybranej metody wysyłki.')
+            : 'Nowe wiadomości nie znikają — trafiają do listy niewysłanych i czekają na ręczne ponowienie.');
 @endphp
 
 @section('content')
@@ -21,15 +35,11 @@
         <a class="button secondary" href="{{ route('settings.index') }}">Wróć do ustawień</a>
     </div>
 
-    <section @class(['mail-status-banner', 'inactive' => ! $mailSettings['enabled']]) aria-label="Stan komunikacji mailowej">
+    <section @class(['mail-status-banner', 'inactive' => ! $mailActive]) aria-label="Stan komunikacji mailowej">
         <div class="mail-status-indicator" aria-hidden="true"></div>
         <div class="mail-status-copy">
-            <strong>{{ $mailSettings['enabled'] ? 'Wysyłka maili jest aktywna' : 'Wysyłka maili jest wstrzymana' }}</strong>
-            <span>
-                {{ $mailSettings['enabled']
-                    ? 'ERP wysyła komunikację przez zapisane konto SMTP.'
-                    : 'Nowe wiadomości nie znikają — trafiają do listy niewysłanych i czekają na ręczne ponowienie.' }}
-            </span>
+            <strong>{{ $mailActive ? 'Wysyłka maili jest aktywna' : ($mailSettings['enabled'] ? 'Wysyłka wymaga dokończenia konfiguracji' : 'Wysyłka maili jest wstrzymana') }}</strong>
+            <span>{{ $mailStatusDescription }}</span>
         </div>
         <div class="mail-status-facts">
             <span>{{ $activeWorkflowCount }} z {{ count($mailWorkflow) }} scenariuszy aktywnych</span>
@@ -38,59 +48,151 @@
     </section>
 
     <section class="mail-settings-grid">
-        <article class="card settings-panel" id="mail-smtp">
+        <article class="card settings-panel" id="mail-delivery">
             <div class="panel-header">
-                <span>Serwer wysyłkowy (SMTP)</span>
-                <span @class(['mail-panel-state', 'inactive' => ! $mailSettings['enabled']])>{{ $mailSettings['enabled'] ? 'Aktywny' : 'Wyłączony' }}</span>
+                <span>Wysyłka e-mail</span>
+                <span @class(['mail-panel-state', 'inactive' => ! $mailActive])>{{ $mailActive ? 'Aktywna' : ($mailSettings['enabled'] ? 'Wymaga konfiguracji' : 'Wyłączona') }}</span>
             </div>
-            <form method="POST" action="{{ route('settings.mail.update') }}" class="form-grid settings-form">
+            <form method="POST" action="{{ route('settings.mail.update') }}" class="form-grid settings-form" data-mail-settings-form>
                 @csrf
                 @method('PUT')
 
                 <label class="toggle-row">
                     <input type="checkbox" name="enabled" value="1" @checked(old('enabled', $mailSettings['enabled']))>
                     <span>
-                        <strong>Używaj konfiguracji SMTP z panelu</strong>
+                        <strong>Włącz wysyłkę wiadomości z ERP</strong>
                         <small>Gdy opcja jest wyłączona, automatyczne i ręczne maile są bezpiecznie wstrzymywane. Samo ponowne włączenie nie wysyła zaległości.</small>
                     </span>
                 </label>
 
-                <div class="mail-settings-fields">
-                    <label>Host SMTP
-                        <input name="host" value="{{ old('host', $mailSettings['host']) }}" maxlength="255" placeholder="smtp.example.com">
+                <fieldset class="mail-delivery-methods">
+                    <legend>Metoda wysyłki</legend>
+                    <label class="mail-delivery-choice" data-mail-delivery-choice="smtp">
+                        <input type="radio" name="delivery_method" value="smtp" @checked($selectedDeliveryMethod === 'smtp')>
+                        <span><strong>Serwer SMTP</strong><small>Klasyczne połączenie z serwerem pocztowym.</small></span>
                     </label>
-                    <label>Port
-                        <input name="port" type="number" min="1" max="65535" value="{{ old('port', $mailSettings['port']) }}">
+                    <label class="mail-delivery-choice" data-mail-delivery-choice="google_workspace">
+                        <input type="radio" name="delivery_method" value="google_workspace" @checked($selectedDeliveryMethod === 'google_workspace')>
+                        <span><strong>Google Workspace / Gmail API</strong><small>Autoryzacja OAuth 2.0 bez zapisywania hasła do skrzynki.</small></span>
                     </label>
-                    <label>Szyfrowanie
-                        <select name="encryption">
-                            <option value="tls" @selected(old('encryption', $mailSettings['encryption']) === 'tls')>STARTTLS / TLS</option>
-                            <option value="ssl" @selected(old('encryption', $mailSettings['encryption']) === 'ssl')>SSL / SMTPS</option>
-                            <option value="none" @selected(old('encryption', $mailSettings['encryption']) === 'none')>Brak</option>
-                        </select>
-                    </label>
-                    <label>Timeout [s]
-                        <input name="timeout" type="number" min="3" max="120" value="{{ old('timeout', $mailSettings['timeout']) }}">
-                    </label>
-                    <label>Login SMTP
-                        <input name="username" value="{{ old('username', $mailSettings['username']) }}" maxlength="255" autocomplete="username">
-                    </label>
-                    <label>Hasło SMTP
-                        <input name="password" type="password" maxlength="2000" autocomplete="new-password" placeholder="{{ $mailSettings['password_configured'] ? 'Hasło zapisane - wpisz nowe, aby zmienić' : '' }}">
-                    </label>
-                    <label>Adres nadawcy
-                        <input name="from_address" type="email" value="{{ old('from_address', $mailSettings['from_address']) }}" maxlength="255" placeholder="sklep@example.com">
-                    </label>
-                    <label>Nazwa nadawcy
-                        <input name="from_name" value="{{ old('from_name', $mailSettings['from_name']) }}" maxlength="120" placeholder="Sempre">
-                    </label>
-                    <label>Domena EHLO
-                        <input name="ehlo_domain" value="{{ old('ehlo_domain', $mailSettings['ehlo_domain']) }}" maxlength="255" placeholder="opcjonalnie">
-                    </label>
-                    <label class="inline-flag mail-clear-password">
-                        <input type="checkbox" name="clear_password" value="1">
-                        Usuń zapisane hasło SMTP
-                    </label>
+                </fieldset>
+
+                <section class="mail-delivery-panel" data-mail-delivery-panel="smtp" @if ($selectedDeliveryMethod !== 'smtp') hidden @endif>
+                    <div class="mail-delivery-panel-heading">
+                        <strong>Konfiguracja SMTP</strong>
+                        <span class="muted">Ustawienia pozostaną zapisane również po przełączeniu na Gmail API.</span>
+                    </div>
+                    <div class="mail-settings-fields">
+                        <label>Host SMTP
+                            <input name="host" value="{{ old('host', $mailSettings['host']) }}" maxlength="255" placeholder="smtp.example.com">
+                        </label>
+                        <label>Port
+                            <input name="port" type="number" min="1" max="65535" value="{{ old('port', $mailSettings['port']) }}">
+                        </label>
+                        <label>Szyfrowanie
+                            <select name="encryption">
+                                <option value="tls" @selected(old('encryption', $mailSettings['encryption']) === 'tls')>STARTTLS / TLS</option>
+                                <option value="ssl" @selected(old('encryption', $mailSettings['encryption']) === 'ssl')>SSL / SMTPS</option>
+                                <option value="none" @selected(old('encryption', $mailSettings['encryption']) === 'none')>Brak</option>
+                            </select>
+                        </label>
+                        <label>Timeout [s]
+                            <input name="timeout" type="number" min="3" max="120" value="{{ old('timeout', $mailSettings['timeout']) }}">
+                        </label>
+                        <label>Login SMTP
+                            <input name="username" value="{{ old('username', $mailSettings['username']) }}" maxlength="255" autocomplete="username">
+                        </label>
+                        <label>Hasło SMTP
+                            <input name="password" type="password" maxlength="2000" autocomplete="new-password" placeholder="{{ $mailSettings['password_configured'] ? 'Hasło zapisane - wpisz nowe, aby zmienić' : '' }}">
+                        </label>
+                        <label>Domena EHLO
+                            <input name="ehlo_domain" value="{{ old('ehlo_domain', $mailSettings['ehlo_domain']) }}" maxlength="255" placeholder="opcjonalnie">
+                        </label>
+                        <label class="inline-flag mail-clear-password">
+                            <input type="checkbox" name="clear_password" value="1">
+                            Usuń zapisane hasło SMTP
+                        </label>
+                    </div>
+                </section>
+
+                <section class="mail-delivery-panel google-mail-panel" data-mail-delivery-panel="google_workspace" @if ($selectedDeliveryMethod !== 'google_workspace') hidden @endif>
+                    <div class="google-connection-status">
+                        <div>
+                            <strong>Połączenie z Google</strong>
+                            @if ($googleConnected)
+                                <span>Połączono konto <b>{{ $mailSettings['google_account_email'] ?: 'Google Workspace' }}</b>.</span>
+                            @elseif ($googleReauthorizationRequired)
+                                <span>Google wymaga ponownej autoryzacji konta.</span>
+                            @elseif ($googleOauthConfigured)
+                                <span>Dane aplikacji są zapisane. Połącz konto, z którego ERP ma wysyłać wiadomości.</span>
+                            @else
+                                <span>Najpierw wpisz dane aplikacji OAuth i zapisz ustawienia.</span>
+                            @endif
+                        </div>
+                        <span @class(['google-status-badge', 'connected' => $googleConnected, 'warning' => $googleReauthorizationRequired])>
+                            {{ $googleConnected ? 'Połączono' : ($googleReauthorizationRequired ? 'Połącz ponownie' : 'Niepołączono') }}
+                        </span>
+                    </div>
+
+                    <div class="mail-settings-fields">
+                        <label>Identyfikator klienta
+                            <input name="google_client_id" value="{{ old('google_client_id', $mailSettings['google_client_id'] ?? '') }}" maxlength="500" autocomplete="off" placeholder="000000000000-xxxxxxxx.apps.googleusercontent.com">
+                        </label>
+                        <label>Klucz prywatny klienta
+                            <input name="google_client_secret" type="password" maxlength="2000" autocomplete="new-password" placeholder="{{ $googleClientSecretConfigured ? 'Klucz zapisany - wpisz nowy, aby zmienić' : 'Wklej client secret z Google Cloud' }}">
+                        </label>
+                        <label class="google-redirect-field">Autoryzowany identyfikator URI przekierowania
+                            <span class="google-redirect-control">
+                                <input value="{{ $mailSettings['google_redirect_uri'] ?? route('settings.mail.google.callback') }}" readonly aria-readonly="true" data-google-redirect-uri>
+                                <button class="button secondary compact" type="button" data-copy-google-redirect>Kopiuj</button>
+                            </span>
+                            <small class="form-hint">Skopiuj ten adres dokładnie do pola „Authorized redirect URIs” w aplikacji internetowej Google.</small>
+                        </label>
+                        <label class="inline-flag mail-clear-password">
+                            <input type="checkbox" name="clear_google_client_secret" value="1">
+                            Usuń zapisany klucz prywatny klienta
+                        </label>
+                    </div>
+
+                    <div class="google-mail-actions">
+                        @if ($googleConnected)
+                            <button class="button secondary" type="submit" form="google-mail-disconnect-form">Rozłącz konto Google</button>
+                        @else
+                            <button class="button secondary" type="submit" form="google-mail-connect-form" @disabled(! $googleOauthConfigured)>Połącz z Google</button>
+                        @endif
+                        <span class="form-hint">Po zmianie identyfikatora lub klucza najpierw zapisz ustawienia, a następnie połącz konto.</span>
+                    </div>
+
+                    <details class="google-setup-guide">
+                        <summary>Jak przygotować integrację w Google Cloud</summary>
+                        <ol>
+                            <li>Utwórz lub wybierz projekt i włącz <strong>Gmail API</strong>.</li>
+                            <li>Skonfiguruj ekran zgody OAuth; dla jednej organizacji Google Workspace wybierz typ <strong>Internal</strong>.</li>
+                            <li>Utwórz dane logowania OAuth typu <strong>Web application</strong>.</li>
+                            <li>Dodaj powyższy adres jako autoryzowany URI przekierowania i wklej tutaj Client ID oraz Client Secret.</li>
+                            <li>Zapisz ustawienia, kliknij „Połącz z Google” i zaakceptuj minimalny zakres <code>gmail.send</code>.</li>
+                            <li>Jeżeli organizacja blokuje aplikację, administrator Workspace musi dopuścić ten Client ID w <strong>Security → API controls → Manage App Access</strong>.</li>
+                        </ol>
+                    </details>
+                </section>
+
+                <div class="settings-subsection">
+                    <div>
+                        <strong>Nadawca i odpowiedzi</strong>
+                        <span class="muted">Te dane obowiązują zarówno dla SMTP, jak i Gmail API.</span>
+                    </div>
+                    <div class="mail-settings-fields">
+                        <label>Adres nadawcy
+                            <input name="from_address" type="email" value="{{ old('from_address', $mailSettings['from_address']) }}" maxlength="255" placeholder="sklep@example.com">
+                        </label>
+                        <label>Nazwa nadawcy
+                            <input name="from_name" value="{{ old('from_name', $mailSettings['from_name']) }}" maxlength="120" placeholder="Sempre">
+                        </label>
+                        <label>Odpowiedz do (Reply-To)
+                            <input name="reply_to_address" type="email" value="{{ old('reply_to_address', $mailSettings['reply_to_address']) }}" maxlength="255" placeholder="obsluga@example.com">
+                            <small class="form-hint">Na ten adres trafi odpowiedź klienta. Puste pole oznacza adres nadawcy.</small>
+                        </label>
+                    </div>
                 </div>
 
                 <div class="settings-subsection">
@@ -129,33 +231,45 @@
 
                 <details class="technical-details">
                     <summary>Informacje techniczne i bezpieczeństwo</summary>
-                    <p>Aktywny mechanizm wysyłki przed zastosowaniem ustawień: <strong>{{ $runtimeMailer }}</strong>. Hasło SMTP jest przechowywane w bazie w formie szyfrowanej.</p>
+                    <p>Aktywny mechanizm wysyłki przed zastosowaniem ustawień: <strong>{{ $runtimeMailer }}</strong>. Hasła SMTP, klucze OAuth i tokeny Google są przechowywane w bazie w formie szyfrowanej.</p>
                 </details>
                 <button class="button" type="submit">Zapisz ustawienia wysyłki</button>
+            </form>
+            <form id="google-mail-connect-form" method="POST" action="{{ route('settings.mail.google.connect') }}" hidden>
+                @csrf
+            </form>
+            <form id="google-mail-disconnect-form" method="POST" action="{{ route('settings.mail.google.disconnect') }}" hidden>
+                @csrf
+                @method('DELETE')
             </form>
         </article>
 
         <article class="card settings-panel">
             <div class="panel-header">
                 <span>Test wysyłki</span>
-                <span>{{ $mailSettings['password_configured'] ? 'Hasło SMTP zapisane' : 'Brak hasła SMTP' }}</span>
+                <span>{{ $mailSettings['delivery_method'] === 'google_workspace' ? ($googleConnected ? 'Gmail API połączone' : 'Gmail API niepołączone') : ($mailSettings['password_configured'] ? 'Hasło SMTP zapisane' : 'Brak hasła SMTP') }}</span>
             </div>
             <form method="POST" action="{{ route('settings.mail.test') }}" class="form-grid settings-form">
                 @csrf
                 <label>Adres testowy
                     <input name="recipient" type="email" value="{{ old('recipient', $mailSettings['from_address']) }}" required maxlength="255">
                 </label>
-                <button class="button secondary" type="submit" @disabled(! $mailSettings['enabled'])>Wyślij wiadomość testową</button>
-                @if (! $mailSettings['enabled'])
-                    <p class="form-hint warning">Najpierw włącz i zapisz SMTP, aby wysłać wiadomość testową.</p>
+                <button class="button secondary" type="submit" @disabled(! $deliveryReady)>Wyślij wiadomość testową</button>
+                @if (! $deliveryReady)
+                    <p class="form-hint warning">{{ $mailSettings['delivery_issue'] ?? 'Najpierw włącz i zapisz poprawną konfigurację wysyłki.' }}</p>
                 @endif
             </form>
             <div class="deliverability-box">
                 <strong>Dostarczalność</strong>
                 <div class="deliverability-meta">
                     <span>Nadawca: {{ $mailDeliverability['from_domain'] ?? '-' }}</span>
-                    <span>Login SMTP: {{ $mailDeliverability['username_domain'] ?? '-' }}</span>
-                    <span>EHLO: {{ $mailDeliverability['ehlo_domain'] ?: '-' }}</span>
+                    @if ($mailSettings['delivery_method'] === 'google_workspace')
+                        <span>Konto Google: {{ $mailSettings['google_account_email'] ?: '-' }}</span>
+                        <span>Transport: Gmail API (OAuth 2.0)</span>
+                    @else
+                        <span>Login SMTP: {{ $mailDeliverability['username_domain'] ?? '-' }}</span>
+                        <span>EHLO: {{ $mailDeliverability['ehlo_domain'] ?: '-' }}</span>
+                    @endif
                 </div>
                 <div class="deliverability-list">
                     @foreach ($mailDeliverability['checks'] as $check)
@@ -182,7 +296,7 @@
                         <button class="button secondary" type="submit" @disabled(($mailQueue['held'] + $mailQueue['pending'] + $mailQueue['failed']) === 0)>Ponów niewysłane</button>
                     </form>
                 </div>
-                <p class="muted">Włączenie SMTP nie wysyła automatycznie historii. Dopiero ta akcja ponawia maksymalnie 100 oczekujących lub błędnych wiadomości; pominięte etapy workflow pozostają pominięte.</p>
+                <p class="muted">Włączenie wysyłki nie uruchamia automatycznie historii. Dopiero ta akcja ponawia maksymalnie 100 oczekujących lub błędnych wiadomości; pominięte etapy workflow pozostają pominięte.</p>
                 @if ($mailQueue['recent']->isNotEmpty())
                     <div class="mail-queue-list">
                         @foreach ($mailQueue['recent'] as $queuedMessage)
@@ -445,6 +559,34 @@
         .settings-form .button,
         .template-form .button { width: fit-content; }
         .mail-settings-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+        .mail-delivery-methods { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 0; padding: 0; border: 0; }
+        .mail-delivery-methods legend { grid-column: 1 / -1; margin-bottom: 1px; color: var(--text); font-size: 13px; font-weight: 760; }
+        .mail-delivery-choice { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 10px; align-items: start; min-height: 75px; border: 1px solid var(--border); border-radius: 9px; padding: 12px; background: var(--surface); cursor: pointer; transition: border-color .15s ease, background .15s ease, box-shadow .15s ease; }
+        .mail-delivery-choice:hover { background: rgba(47, 111, 79, .035); }
+        .mail-delivery-choice.active { border-color: var(--green-dark); background: rgba(47, 111, 79, .065); box-shadow: inset 0 0 0 1px rgba(47, 111, 79, .12); }
+        .mail-delivery-choice > input { width: 18px; height: 18px; margin-top: 2px; }
+        .mail-delivery-choice > span { display: grid; gap: 3px; }
+        .mail-delivery-choice small { color: var(--muted); font-size: 12px; font-weight: 520; line-height: 1.4; }
+        .mail-delivery-panel { display: grid; gap: 13px; border: 1px solid var(--border); border-radius: 9px; padding: 14px; background: rgba(134, 115, 100, .025); }
+        .mail-delivery-panel[hidden] { display: none; }
+        .mail-delivery-panel-heading { display: grid; gap: 3px; }
+        .mail-delivery-panel-heading > span { font-size: 12px; line-height: 1.45; }
+        .google-mail-panel { background: rgba(66, 133, 244, .035); }
+        .google-connection-status { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; border-bottom: 1px solid var(--border); padding-bottom: 12px; }
+        .google-connection-status > div { display: grid; gap: 3px; }
+        .google-connection-status > div > span { color: var(--muted); font-size: 12px; line-height: 1.45; }
+        .google-status-badge { flex: 0 0 auto; display: inline-flex; min-height: 27px; align-items: center; border: 1px solid var(--border); border-radius: 999px; padding: 3px 9px; background: var(--surface); color: var(--muted); font-size: 11px; font-weight: 760; }
+        .google-status-badge.connected { border-color: rgba(47, 111, 79, .3); background: rgba(47, 111, 79, .09); color: var(--green-dark); }
+        .google-status-badge.warning { border-color: rgba(176, 112, 38, .32); background: rgba(226, 167, 84, .12); color: #8a5818; }
+        .google-redirect-field { grid-column: 1 / -1; }
+        .google-redirect-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
+        .google-redirect-control input[readonly] { color: var(--text); background: #f7f6f4; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; }
+        .google-redirect-control .button { min-height: 42px; }
+        .google-mail-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        .google-mail-actions .form-hint { flex: 1 1 280px; }
+        .google-setup-guide { border-top: 1px solid var(--border); padding-top: 11px; color: var(--muted); font-size: 12px; }
+        .google-setup-guide summary { color: var(--text); font-weight: 740; cursor: pointer; }
+        .google-setup-guide ol { display: grid; gap: 6px; margin: 10px 0 0; padding-left: 22px; line-height: 1.45; }
         .settings-subsection { display: grid; gap: 12px; border-top: 1px solid var(--border); padding-top: 16px; margin-top: 4px; }
         .settings-subsection > div:first-child { display: grid; gap: 4px; }
         .settings-subsection strong { font-size: 15px; }
@@ -562,6 +704,7 @@
             .mail-status-facts { grid-column: 2; justify-content: flex-start; }
             .mail-settings-grid,
             .mail-settings-fields,
+            .mail-delivery-methods,
             .template-list { grid-template-columns: 1fr; }
             .workflow-intro { display: grid; }
             .workflow-tools { grid-template-columns: 1fr; }
@@ -579,6 +722,9 @@
             .workflow-save-footer { display: grid; }
             .workflow-mail-summary { align-items: flex-start; }
             .workflow-mail-state { flex: 0 0 auto; }
+            .google-connection-status { display: grid; }
+            .google-redirect-control { grid-template-columns: 1fr; }
+            .google-redirect-control .button { width: 100%; }
             .mail-preview-toolbar { display: grid; }
             .mail-preview-tabs { overflow-x: auto; }
         }
@@ -587,6 +733,39 @@
 
 @push('scripts')
     <script>
+        (() => {
+            const form = document.querySelector('[data-mail-settings-form]');
+            if (!form) return;
+
+            const methodInputs = [...form.querySelectorAll('input[name="delivery_method"]')];
+            const panels = [...form.querySelectorAll('[data-mail-delivery-panel]')];
+            const choices = [...form.querySelectorAll('[data-mail-delivery-choice]')];
+
+            const refreshDeliveryMethod = () => {
+                const selected = methodInputs.find((input) => input.checked)?.value ?? 'smtp';
+                panels.forEach((panel) => { panel.hidden = panel.dataset.mailDeliveryPanel !== selected; });
+                choices.forEach((choice) => choice.classList.toggle('active', choice.dataset.mailDeliveryChoice === selected));
+            };
+
+            methodInputs.forEach((input) => input.addEventListener('change', refreshDeliveryMethod));
+            refreshDeliveryMethod();
+
+            const copyButton = form.querySelector('[data-copy-google-redirect]');
+            const redirectInput = form.querySelector('[data-google-redirect-uri]');
+            copyButton?.addEventListener('click', async () => {
+                if (!redirectInput) return;
+                try {
+                    await navigator.clipboard.writeText(redirectInput.value);
+                } catch (_) {
+                    redirectInput.select();
+                    document.execCommand('copy');
+                }
+                const originalLabel = copyButton.textContent;
+                copyButton.textContent = 'Skopiowano';
+                window.setTimeout(() => { copyButton.textContent = originalLabel; }, 1600);
+            });
+        })();
+
         (() => {
             const overlay = document.querySelector('[data-mail-preview-overlay]');
             if (!overlay) return;

@@ -112,8 +112,13 @@ class ProductController extends Controller
             'stockBalances.warehouse',
             'channelMappings.salesChannel',
             'childRelations.childProduct',
+            'variantParents.channelMappings.salesChannel',
             'variantChildren.stockBalances.warehouse',
         ]);
+        $catalogVisibilityUsesParent = $this->catalogVisibilityUsesParent($product);
+        $catalogVisibilityParent = $catalogVisibilityUsesParent
+            ? $this->catalogVisibilityParent($product)
+            : null;
         $mappedSalesChannelIds = $product->channelMappings
             ->pluck('sales_channel_id')
             ->filter()
@@ -126,6 +131,8 @@ class ProductController extends Controller
             'parameterOptions' => $this->parameterOptions(),
             'productLookupOptions' => $this->productLookupOptions($product),
             'visibleProductEditFields' => $productEditFields->visibleFields(),
+            'catalogVisibilityUsesParent' => $catalogVisibilityUsesParent,
+            'catalogVisibilityParent' => $catalogVisibilityParent,
             'gs1Settings' => $gs1Settings->publicConfiguration(),
             'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'availableWooCommerceCreateIntegrations' => WordpressIntegration::query()
@@ -221,7 +228,26 @@ class ProductController extends Controller
         ProductEditFieldSettingsService $productEditFields,
         ProductDescriptionSanitizer $descriptionSanitizer,
     ): RedirectResponse {
+        $catalogVisibilityWasSubmitted = $request->has('catalog_visibility');
+        $catalogVisibilityUsesParent = $this->catalogVisibilityUsesParent($product);
+        $catalogVisibilityParent = $catalogVisibilityUsesParent
+            ? $this->catalogVisibilityParent($product)
+            : null;
+
         $this->preserveHiddenProductFields($request, $product, $productEditFields->visibleFields());
+
+        if ($catalogVisibilityUsesParent) {
+            $request->merge([
+                'catalog_visibility' => $catalogVisibilityParent instanceof Product && $catalogVisibilityWasSubmitted
+                    ? $request->input('catalog_visibility')
+                    : data_get(
+                        ($catalogVisibilityParent ?? $product)->masterData(),
+                        'catalog_visibility',
+                        'visible',
+                    ),
+            ]);
+        }
+
         $validated = $request->validate($this->productValidationRules($product));
         $validated = $this->sanitizeProductDescriptions($validated, $descriptionSanitizer);
         $this->validateProductTypeSelection($request, $validated);
@@ -234,7 +260,7 @@ class ProductController extends Controller
         $uploadedMedia = [];
 
         try {
-            [$eanResult, $generatedVariants] = DB::transaction(function () use ($product, $request, $validated, $identifiers, $audit, $before, &$uploadedMedia): array {
+            [$eanResult, $generatedVariants] = DB::transaction(function () use ($product, $request, $validated, $identifiers, $audit, $before, $catalogVisibilityParent, &$uploadedMedia): array {
                 $attributes = (array) $product->attributes;
                 $currentMaster = data_get($attributes, 'master', []);
                 $uploadedMedia = $this->storeUploadedMedia($product, $request);
@@ -284,6 +310,32 @@ class ProductController extends Controller
                     'product' => $product->only(['sku', 'name', 'ean', 'unit', 'vat_rate', 'weight_kg', 'is_active']),
                     'attributes' => $product->attributes,
                 ]);
+
+                if ($catalogVisibilityParent instanceof Product) {
+                    $visibility = (string) ($validated['catalog_visibility'] ?? 'visible');
+                    $previousVisibility = (string) data_get(
+                        $catalogVisibilityParent->masterData(),
+                        'catalog_visibility',
+                        'visible',
+                    );
+
+                    if ($visibility !== $previousVisibility) {
+                        $parentAttributes = (array) $catalogVisibilityParent->attributes;
+                        data_set($parentAttributes, 'master.source', 'erp');
+                        data_set($parentAttributes, 'master.catalog_visibility', $visibility);
+                        $catalogVisibilityParent->forceFill(['attributes' => $parentAttributes])->save();
+
+                        $audit->record('product.catalog_visibility_updated_from_variant', $catalogVisibilityParent, [
+                            'catalog_visibility' => $previousVisibility,
+                        ], [
+                            'catalog_visibility' => $visibility,
+                            'variant_product_id' => $product->id,
+                            'variant_sku' => $product->sku,
+                        ]);
+                        $this->queueWooCommerceDataExport($catalogVisibilityParent);
+                    }
+                }
+
                 $this->queueWooCommerceDataExport($product);
 
                 return [$eanResult, $generatedVariants];
@@ -713,6 +765,43 @@ class ProductController extends Controller
         }
 
         ExportWooCommerceProductDataJob::dispatch($product->id)->afterCommit();
+    }
+
+    private function catalogVisibilityUsesParent(Product $product): bool
+    {
+        $product->loadMissing(['channelMappings', 'variantParents']);
+
+        return data_get($product->masterData(), 'product_type') === 'variation'
+            || $product->variantParents->isNotEmpty()
+            || $product->channelMappings->contains(
+                fn (ProductChannelMapping $mapping): bool => filled($mapping->external_variation_id),
+            );
+    }
+
+    private function catalogVisibilityParent(Product $product): ?Product
+    {
+        $product->loadMissing(['channelMappings', 'variantParents']);
+        $parents = $product->variantParents->keyBy('id');
+
+        foreach ($product->channelMappings as $mapping) {
+            if (! filled($mapping->external_variation_id)) {
+                continue;
+            }
+
+            $parentMapping = ProductChannelMapping::query()
+                ->with('product')
+                ->where('sales_channel_id', $mapping->sales_channel_id)
+                ->where('external_product_id', $mapping->external_product_id)
+                ->whereNull('external_variation_id')
+                ->where('product_id', '!=', $product->id)
+                ->first();
+
+            if ($parentMapping?->product instanceof Product) {
+                $parents->put($parentMapping->product->id, $parentMapping->product);
+            }
+        }
+
+        return $parents->count() === 1 ? $parents->first() : null;
     }
 
     private function safeStockAdjustmentRedirectUrl(Request $request): ?string

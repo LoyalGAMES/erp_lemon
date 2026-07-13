@@ -12,6 +12,7 @@ use App\Models\ReturnCase;
 use App\Models\StockSyncQueueItem;
 use App\Models\WordpressIntegration;
 use App\Services\Ksef\KsefClient;
+use App\Services\Returns\ReturnSettingsService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Support\Facades\DB;
@@ -22,6 +23,7 @@ final class OperationalStatus
 {
     public function __construct(
         private readonly KsefClient $ksefClient,
+        private readonly ReturnSettingsService $returnSettings,
     ) {}
 
     /**
@@ -58,6 +60,7 @@ final class OperationalStatus
      * @return array{
      *     packing_orders: int,
      *     return_cases: int,
+     *     store_returns: array{tone:string,label:string},
      *     woocommerce: array{tone:string,label:string,destination:string},
      *     ksef: array{tone:string,label:string}
      * }
@@ -67,6 +70,7 @@ final class OperationalStatus
         return [
             'packing_orders' => $this->packingOrdersToHandle(),
             'return_cases' => $this->returnCasesToHandle(),
+            'store_returns' => $this->storeReturnsStatus(),
             'woocommerce' => $this->woocommerceStatus(),
             'ksef' => $this->ksefStatus(),
         ];
@@ -113,8 +117,26 @@ final class OperationalStatus
         }
 
         return ReturnCase::query()
-            ->whereIn('status', ['opened', 'document_created'])
+            ->whereIn('status', ['pending', 'opened', 'document_created'])
             ->count();
+    }
+
+    /**
+     * @return array{tone:string,label:string}
+     */
+    private function storeReturnsStatus(): array
+    {
+        try {
+            $settings = $this->returnSettings->data();
+
+            if (blank($settings['store_api_token'] ?? null)) {
+                return ['tone' => 'red', 'label' => 'API nieaktywne'];
+            }
+
+            return ['tone' => 'green', 'label' => 'API OK'];
+        } catch (Throwable) {
+            return ['tone' => 'red', 'label' => 'Błąd statusu API'];
+        }
     }
 
     /**

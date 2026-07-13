@@ -4,13 +4,18 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Jobs\SendReturnWaitingForPackageMailJob;
+use App\Models\AppSetting;
 use App\Models\ExternalOrder;
 use App\Models\Product;
 use App\Models\ReturnCase;
 use App\Models\SalesChannel;
 use App\Services\Returns\ReturnSettingsService;
+use App\Support\OperationalStatus;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class StoreReturnsApiTest extends TestCase
@@ -18,6 +23,7 @@ class StoreReturnsApiTest extends TestCase
     use RefreshDatabase;
 
     private const TOKEN = 'test-store-token';
+
     private const WEBHOOK_SECRET = 'test-webhook-secret';
 
     protected function setUp(): void
@@ -46,6 +52,21 @@ class StoreReturnsApiTest extends TestCase
             ->assertStatus(401);
     }
 
+    public function test_returns_navigation_and_page_warn_when_intake_api_is_not_configured(): void
+    {
+        AppSetting::query()->where('key', 'return_settings')->delete();
+
+        $status = app(OperationalStatus::class)->navigation()['store_returns'];
+
+        $this->assertSame('red', $status['tone']);
+        $this->assertSame('API nieaktywne', $status['label']);
+
+        $this->get(route('returns.index'))
+            ->assertOk()
+            ->assertSee('API formularza zwrotów jest nieaktywne')
+            ->assertSee('nie uruchamiają maila do klienta');
+    }
+
     public function test_order_lookup_requires_matching_contact_and_returns_woo_ids(): void
     {
         $order = $this->createOrder();
@@ -70,6 +91,7 @@ class StoreReturnsApiTest extends TestCase
 
     public function test_store_return_creates_pending_case_and_is_idempotent(): void
     {
+        Queue::fake();
         $order = $this->createOrder();
 
         $payload = [
@@ -104,11 +126,17 @@ class StoreReturnsApiTest extends TestCase
         $this->assertSame($order->lines->first()->id, $returnCase->lines->first()->external_order_line_id);
         $this->assertSame($response->json('external_id'), $returnCase->number);
 
+        Queue::assertPushed(
+            SendReturnWaitingForPackageMailJob::class,
+            fn (SendReturnWaitingForPackageMailJob $job): bool => $job->uniqueId() === (string) $returnCase->id,
+        );
+
         $this->postJson('/api/store-returns', $payload, $this->authHeaders())
             ->assertOk()
             ->assertJsonPath('external_id', $returnCase->number);
 
         $this->assertSame(1, ReturnCase::query()->count());
+        Queue::assertPushed(SendReturnWaitingForPackageMailJob::class, 1);
     }
 
     public function test_store_return_caps_quantity_at_remaining_returnable(): void
@@ -221,7 +249,7 @@ class StoreReturnsApiTest extends TestCase
 
     public function test_approve_survives_unreachable_store(): void
     {
-        Http::fake(fn () => throw new \Illuminate\Http\Client\ConnectionException('Connection refused'));
+        Http::fake(fn () => throw new ConnectionException('Connection refused'));
 
         $this->createOrder();
         $returnCase = $this->createPendingReturn();

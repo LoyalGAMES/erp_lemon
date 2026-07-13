@@ -43,8 +43,8 @@
             <span>Konta InPost (ShipX) do generowania etykiet z wyborem konta nadawczego.</span>
         </a>
         <a class="settings-card" href="{{ route('settings.mail') }}">
-            <strong>Maile SMTP</strong>
-            <span>Host SMTP, nadawca i test wysyłki dla komunikacji z klientami.</span>
+            <strong>Maile i Gmail API</strong>
+            <span>SMTP lub Google Workspace, nadawca, Reply-To i test wysyłki dla komunikacji z klientami.</span>
         </a>
         <a class="settings-card" href="{{ route('settings.payments') }}">
             <strong>Płatności i zwroty</strong>

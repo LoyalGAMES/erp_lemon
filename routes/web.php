@@ -6,6 +6,7 @@ use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ExternalOrderController;
 use App\Http\Controllers\ExternalOrderFulfillmentController;
 use App\Http\Controllers\ExternalOrderInvoiceController;
+use App\Http\Controllers\GoogleWorkspaceMailController;
 use App\Http\Controllers\IntegrationController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\KsefController;
@@ -44,6 +45,15 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::put('/settings/returns', [SettingsController::class, 'updateReturns'])->name('settings.returns.update');
         Route::get('/settings/mail', [SettingsController::class, 'mail'])->name('settings.mail');
         Route::put('/settings/mail', [SettingsController::class, 'updateMail'])->name('settings.mail.update');
+        Route::post('/settings/mail/google/connect', [GoogleWorkspaceMailController::class, 'connect'])
+            ->middleware('throttle:google-mail-oauth')
+            ->name('settings.mail.google.connect');
+        Route::get('/settings/mail/google/callback', [GoogleWorkspaceMailController::class, 'callback'])
+            ->middleware('throttle:google-mail-oauth')
+            ->name('settings.mail.google.callback');
+        Route::delete('/settings/mail/google', [GoogleWorkspaceMailController::class, 'disconnect'])
+            ->middleware('throttle:google-mail-oauth')
+            ->name('settings.mail.google.disconnect');
         Route::put('/settings/mail/workflow', [SettingsController::class, 'updateMailWorkflow'])->name('settings.mail.workflow.update');
         Route::post('/settings/mail/preview', [SettingsController::class, 'previewMail'])->name('settings.mail.preview');
         Route::post('/settings/mail/retry-unsent', [SettingsController::class, 'retryUnsentMail'])->name('settings.mail.retry-unsent');

@@ -4,11 +4,11 @@ declare(strict_types=1);
 
 namespace App\Services\Returns;
 
+use App\Jobs\SendReturnWaitingForPackageMailJob;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
-use App\Services\Communication\CustomerCommunicationService;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -24,7 +24,6 @@ final class StoreReturnIntakeService
     public function __construct(
         private readonly ReturnNumberService $numbers,
         private readonly ReturnSettingsService $settings,
-        private readonly CustomerCommunicationService $communication,
     ) {}
 
     /**
@@ -207,7 +206,7 @@ final class StoreReturnIntakeService
         }
 
         if ($created) {
-            $this->communication->sendReturnStatus($returnCase, 'return_waiting_for_package');
+            SendReturnWaitingForPackageMailJob::dispatch((int) $returnCase->id)->afterCommit();
         }
 
         return $returnCase;

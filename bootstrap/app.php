@@ -20,9 +20,14 @@ return Application::configure(basePath: dirname(__DIR__))
         $exceptions->dontFlash([
             'access_token',
             'api_token',
+            'authorization_code',
             'client_secret',
+            'code',
+            'code_verifier',
             'consumer_key',
             'consumer_secret',
+            'id_token',
+            'google_client_secret',
             'lease_token',
             'password',
             'password_confirmation',
@@ -30,6 +35,7 @@ return Application::configure(basePath: dirname(__DIR__))
             'pickup_token',
             'store_api_token',
             'store_webhook_secret',
+            'refresh_token',
             'wp_api_application_password',
         ]);
 

@@ -33,7 +33,7 @@ class CustomerMessageMail extends Mailable
         $mailLayout = $viewData['mailLayout'];
         $fromAddress = $mailLayout['from_address'] ?: (string) config('mail.from.address', 'noreply@example.com');
         $fromName = $mailLayout['from_name'] ?: (string) config('mail.from.name', config('app.name', 'Sempre ERP'));
-        $replyToAddress = $mailLayout['support_email'] ?: $fromAddress;
+        $replyToAddress = $mailLayout['reply_to_address'] ?: $fromAddress;
         $replyToName = $mailLayout['brand_name'] ?: $fromName;
         $messageSubject = $viewData['messageSubject'];
 

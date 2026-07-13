@@ -11,8 +11,10 @@ use App\Models\EmailTemplate;
 use App\Services\Communication\CustomerMailPresentationService;
 use App\Services\Communication\MailSettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Mail\Message;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Mail;
+use Symfony\Component\Mime\Email;
 use Tests\TestCase;
 
 class MailSettingsWorkflowTest extends TestCase
@@ -35,17 +37,20 @@ class MailSettingsWorkflowTest extends TestCase
             'password' => 'secret-password',
             'from_address' => 'sklep@example.test',
             'from_name' => 'Sempre Sklep',
+            'reply_to_address' => 'odpowiedzi@example.test',
             'ehlo_domain' => 'erp.example.test',
             'timeout' => 20,
         ])->assertRedirect()->assertSessionHas('status');
 
         $setting = AppSetting::query()->where('key', 'mail_settings')->firstOrFail();
         $this->assertSame('smtp.example.test', $setting->value['host']);
+        $this->assertSame('odpowiedzi@example.test', $setting->value['reply_to_address']);
         $this->assertNotSame('secret-password', $setting->value['password_encrypted']);
         $this->assertSame('secret-password', Crypt::decryptString($setting->value['password_encrypted']));
 
         $mailSettings = app(MailSettingsService::class);
         $this->assertTrue($mailSettings->data()['password_configured']);
+        $this->assertSame('odpowiedzi@example.test', $mailSettings->data()['reply_to_address']);
         $this->assertTrue($mailSettings->apply());
 
         $this->assertSame('smtp', config('mail.default'));
@@ -58,8 +63,6 @@ class MailSettingsWorkflowTest extends TestCase
 
     public function test_mail_settings_test_message_uses_saved_configuration(): void
     {
-        Mail::fake();
-
         app(MailSettingsService::class)->update([
             'enabled' => true,
             'host' => 'smtp.example.test',
@@ -69,14 +72,73 @@ class MailSettingsWorkflowTest extends TestCase
             'password' => 'secret-password',
             'from_address' => 'sklep@example.test',
             'from_name' => 'Sempre Sklep',
+            'reply_to_address' => 'odpowiedzi@example.test',
             'timeout' => 15,
         ]);
+
+        Mail::shouldReceive('purge')
+            ->once()
+            ->with('smtp');
+        Mail::shouldReceive('raw')
+            ->once()
+            ->withArgs(function (string $body, callable $callback): bool {
+                $message = new Message(new Email);
+                $callback($message);
+                $replyTo = $message->getSymfonyMessage()->getReplyTo();
+
+                $this->assertStringContainsString('SMTP działa poprawnie', $body);
+                $this->assertCount(1, $replyTo);
+                $this->assertSame('odpowiedzi@example.test', $replyTo[0]->getAddress());
+                $this->assertSame('Sempre Sklep', $replyTo[0]->getName());
+
+                return true;
+            });
 
         $this->post(route('settings.mail.test'), [
             'recipient' => 'admin@example.test',
         ])->assertRedirect()->assertSessionHas('status');
 
         $this->assertSame('smtps', config('mail.mailers.smtp.scheme'));
+    }
+
+    public function test_legacy_reply_to_fallback_and_intentionally_empty_value_are_distinct(): void
+    {
+        AppSetting::query()->create([
+            'key' => 'mail_settings',
+            'value' => [
+                'from_address' => 'sklep@example.test',
+                'from_name' => 'Sempre Sklep',
+                'support_email' => 'stary-bok@example.test',
+            ],
+        ]);
+
+        $mailSettings = app(MailSettingsService::class);
+        $this->assertSame('stary-bok@example.test', $mailSettings->data()['reply_to_address']);
+
+        $mailSettings->update([
+            'from_address' => 'sklep@example.test',
+            'from_name' => 'Sempre Sklep',
+            'support_email' => 'bok@example.test',
+            'reply_to_address' => '',
+        ]);
+
+        $this->assertSame('', $mailSettings->data()['reply_to_address']);
+
+        $message = CustomerMessage::query()->create([
+            'direction' => 'outgoing',
+            'type' => 'manual',
+            'status' => 'pending',
+            'recipient_email' => 'client@example.test',
+            'subject' => 'Test odpowiedzi',
+            'body' => 'Treść testowa.',
+        ]);
+        $mailable = new CustomerMessageMail($message);
+        $mailable->build();
+
+        $this->assertEquals(
+            [['address' => 'sklep@example.test', 'name' => 'Sempre Sklep']],
+            $mailable->replyTo,
+        );
     }
 
     public function test_email_templates_can_be_managed_from_mail_settings(): void
@@ -136,6 +198,7 @@ class MailSettingsWorkflowTest extends TestCase
             'signature' => "Pozdrawiamy,\nZespół BOK",
             'footer_text' => 'Sempre WL - wiadomość systemowa.',
             'support_email' => 'bok@example.test',
+            'reply_to_address' => 'odpowiedzi@example.test',
             'support_phone' => '+48 123 456 789',
         ])->assertRedirect()->assertSessionHas('status');
 
@@ -143,6 +206,7 @@ class MailSettingsWorkflowTest extends TestCase
         $this->assertSame('Sempre Premium', $settings['brand_name']);
         $this->assertSame('#1f7a53', $settings['accent_color']);
         $this->assertSame('bok@example.test', $settings['support_email']);
+        $this->assertSame('odpowiedzi@example.test', $settings['reply_to_address']);
 
         $message = CustomerMessage::query()->create([
             'direction' => 'outgoing',
@@ -203,7 +267,7 @@ class MailSettingsWorkflowTest extends TestCase
         $this->assertSame('Dopłata do wymiany RET/1', $mailable->subject);
         $this->assertSame('emails.customer-message-text', $mailable->textView);
         $this->assertEquals([['address' => 'sklep@example.test', 'name' => 'Sempre Sklep']], $mailable->from);
-        $this->assertEquals([['address' => 'bok@example.test', 'name' => 'Sempre Premium']], $mailable->replyTo);
+        $this->assertEquals([['address' => 'odpowiedzi@example.test', 'name' => 'Sempre Premium']], $mailable->replyTo);
     }
 
     public function test_mail_settings_page_shows_deliverability_hints_and_template_variables(): void
@@ -223,6 +287,7 @@ class MailSettingsWorkflowTest extends TestCase
         $this->get(route('settings.mail'))
             ->assertOk()
             ->assertSee('Dostarczalność')
+            ->assertSee('Odpowiedz do (Reply-To)')
             ->assertSee('Automatyczna komunikacja z klientem')
             ->assertSee('Wysyłka maili jest aktywna')
             ->assertSee('Szukaj po nazwie lub momencie wysyłki')

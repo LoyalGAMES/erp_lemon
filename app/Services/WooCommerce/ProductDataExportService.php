@@ -1534,10 +1534,6 @@ final class ProductDataExportService
                 continue;
             }
 
-            if (! $this->hasTranslationData($product, $language)) {
-                continue;
-            }
-
             $payload = $this->payload($product, $isVariation, (int) $mapping->sales_channel_id, $language);
             $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $product, $mapping);
 
@@ -1574,18 +1570,6 @@ final class ProductDataExportService
         $metadata['creation_state'] = 'completed';
         $metadata['creation_completed_at'] = now()->toDateTimeString();
         $mapping->forceFill(['metadata' => $metadata])->save();
-    }
-
-    private function hasTranslationData(Product $product, string $language): bool
-    {
-        $master = $product->masterData();
-
-        return is_array(data_get($master, "content.{$language}"))
-            || filled($product->ean)
-            || filled(data_get($master, 'prices.retail_price_pln'))
-            || filled(data_get($master, 'prices.sale_price_pln'))
-            || is_array(data_get($master, 'inventory'))
-            || filled(data_get($master, "custom_label.{$language}"));
     }
 
     /**

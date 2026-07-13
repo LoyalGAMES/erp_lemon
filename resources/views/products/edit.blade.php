@@ -51,6 +51,7 @@
 @section('content')
     @php
         $master = $product->masterData();
+        $catalogVisibilityMaster = $catalogVisibilityParent?->masterData() ?? $master;
         $field = fn (string $name, mixed $default = null): mixed => old($name, $default) ?? '';
         $masterField = fn (string $name, string $path, mixed $default = null): mixed => old($name, data_get($master, $path, $default)) ?? '';
         $tags = old('tags', implode(', ', (array) data_get($master, 'tags', [])));
@@ -226,12 +227,25 @@
                     <label @class(['product-edit-field-hidden' => ! $showField('publication_date')])>Data publikacji w sklepie
                         <input name="publication_date" type="datetime-local" value="{{ $masterField('publication_date', 'publication_date') }}">
                     </label>
-                    <label @class(['product-edit-field-hidden' => ! $showField('catalog_visibility')])>Widoczność w WooCommerce
-                        <select name="catalog_visibility">
+                    <label @class(['product-edit-field-hidden' => ! $showField('catalog_visibility')])>
+                        {{ $catalogVisibilityUsesParent ? 'Widoczność produktu głównego w WooCommerce' : 'Widoczność w WooCommerce' }}
+                        @if ($catalogVisibilityUsesParent && ! $catalogVisibilityParent)
+                            <input type="hidden" name="catalog_visibility" value="{{ data_get($master, 'catalog_visibility', 'visible') }}">
+                        @endif
+                        <select @if (! $catalogVisibilityUsesParent || $catalogVisibilityParent) name="catalog_visibility" @else disabled @endif>
                             @foreach (['visible' => 'Widoczny w katalogu i wyszukiwarce', 'catalog' => 'Widoczny tylko w katalogu', 'search' => 'Widoczny tylko w wyszukiwarce', 'hidden' => 'Ukryty w sklepie'] as $visibility => $label)
-                                <option value="{{ $visibility }}" @selected(old('catalog_visibility', data_get($master, 'catalog_visibility', 'visible')) === $visibility)>{{ $label }}</option>
+                                <option value="{{ $visibility }}" @selected(old('catalog_visibility', data_get($catalogVisibilityMaster, 'catalog_visibility', 'visible')) === $visibility)>{{ $label }}</option>
                             @endforeach
                         </select>
+                        @if ($catalogVisibilityParent)
+                            <small class="product-category-help">
+                                WooCommerce przechowuje tę wartość na produkcie głównym
+                                <a href="{{ route('products.edit', $catalogVisibilityParent) }}">{{ $catalogVisibilityParent->sku }}</a>.
+                                Zmiana tutaj zaktualizuje produkt główny.
+                            </small>
+                        @elseif ($catalogVisibilityUsesParent)
+                            <small class="product-category-help">Nie znaleziono jednoznacznego produktu głównego, dlatego tego ustawienia nie można zmienić z poziomu wariantu.</small>
+                        @endif
                     </label>
                     <label @class(['product-edit-field-hidden' => ! $showField('product_type')])>Typ produktu
                         <select name="product_type">

@@ -235,6 +235,7 @@
                 $topStatus = [
                     'packing_orders' => 0,
                     'return_cases' => 0,
+                    'store_returns' => ['tone' => 'red', 'label' => 'Status niedostępny'],
                     'woocommerce' => ['tone' => 'red', 'label' => 'Status niedostępny', 'destination' => 'integrations'],
                     'ksef' => ['tone' => 'red', 'label' => 'Status niedostępny'],
                 ];
@@ -243,6 +244,7 @@
 
         $packingTopCount = (int) data_get($topStatus, 'packing_orders', 0);
         $returnsTopCount = (int) data_get($topStatus, 'return_cases', 0);
+        $storeReturnsTopStatus = data_get($topStatus, 'store_returns', ['tone' => 'red', 'label' => 'Brak statusu']);
         $woocommerceTopStatus = data_get($topStatus, 'woocommerce', ['tone' => 'red', 'label' => 'Brak statusu', 'destination' => 'integrations']);
         $ksefTopStatus = data_get($topStatus, 'ksef', ['tone' => 'red', 'label' => 'Brak statusu']);
         $topActions = [];
@@ -262,8 +264,8 @@
                 'key' => 'returns',
                 'url' => route('returns.index'),
                 'label' => 'Moduł zwrotów'.($returnsTopCount > 0 ? " ({$returnsTopCount})" : ''),
-                'tone' => 'hidden',
-                'status' => '',
+                'tone' => $storeReturnsTopStatus['tone'] ?? 'red',
+                'status' => $storeReturnsTopStatus['label'] ?? 'Brak statusu',
             ];
         }
 

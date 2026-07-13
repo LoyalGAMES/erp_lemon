@@ -99,6 +99,7 @@ class ReturnController extends Controller
             'products' => Product::query()->where('is_active', true)->orderBy('sku')->get(),
             'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'returnSettings' => $returnSettings,
+            'storeReturnsApiConfigured' => filled($returnSettings['store_api_token'] ?? null),
             'mbankPayoutCount' => $mbankBasket->eligibleReturns()->count(),
             'module' => 'returns',
         ]);

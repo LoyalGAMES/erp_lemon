@@ -24,6 +24,14 @@
             ->all();
     @endphp
 
+    @unless ($storeReturnsApiConfigured)
+        <div class="alert warning" role="alert">
+            <strong>API formularza zwrotów jest nieaktywne.</strong>
+            Zgłoszenia ze sklepu są obecnie odrzucane i nie uruchamiają maila do klienta.
+            <a href="{{ route('settings.returns') }}">Skonfiguruj token i sprawdź endpointy</a>.
+        </div>
+    @endunless
+
     <input id="return-drawer" class="drawer-toggle" type="checkbox" @checked($errors->any())>
 
     <div class="page-toolbar">

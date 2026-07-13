@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Jobs\ExportWooCommerceProductDataJob;
 use App\Models\AuditLog;
 use App\Models\IntegrationSyncLog;
 use App\Models\Product;
@@ -18,11 +19,78 @@ use App\Services\WooCommerce\WooCommerceClient;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 class WooCommerceProductDataExportTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_saving_catalog_visibility_runs_queued_export_with_the_new_value(): void
+    {
+        Queue::fake();
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
+                'id' => 123,
+                'sku' => 'SKU-AUTO-VISIBILITY',
+                'catalog_visibility' => 'hidden',
+            ]),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-AUTO-VISIBILITY',
+            'name' => 'Produkt automatyczny',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'catalog_visibility' => 'visible',
+                ],
+            ],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'SKU-AUTO-VISIBILITY',
+            'stock_sync_enabled' => true,
+        ]);
+
+        $this->put(route('products.update', $product), [
+            'sku' => 'SKU-AUTO-VISIBILITY',
+            'name' => 'Produkt automatyczny',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => '1',
+            'publication_status' => 'publish',
+            'catalog_visibility' => 'hidden',
+            'product_type' => 'simple',
+        ])->assertRedirect(route('products.edit', $product));
+
+        $this->assertSame('hidden', data_get($product->refresh()->masterData(), 'catalog_visibility'));
+        $job = Queue::pushed(ExportWooCommerceProductDataJob::class)->sole();
+        $job->handle(app(ProductDataExportService::class));
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
+            && $request['catalog_visibility'] === 'hidden');
+    }
 
     public function test_erp_product_master_data_can_be_exported_to_mapped_woocommerce_product(): void
     {
@@ -301,6 +369,11 @@ class WooCommerceProductDataExportTest extends TestCase
                 'sku' => 'POLYLANG-SKU',
                 'name' => 'Polish product',
             ]),
+            'https://shop.test/wp-json/wc/v3/products/124' => Http::response([
+                'id' => 124,
+                'sku' => 'POLYLANG-SKU',
+                'name' => 'English product',
+            ]),
         ]);
 
         $channel = SalesChannel::query()->create([
@@ -346,6 +419,71 @@ class WooCommerceProductDataExportTest extends TestCase
 
         [$request] = Http::recorded()->first();
         $this->assertSame('POLYLANG-SKU', $request['sku']);
+    }
+
+    public function test_export_updates_catalog_visibility_for_existing_translation_without_translated_content(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
+                'id' => 123,
+                'sku' => 'SKU-HIDDEN',
+            ]),
+            'https://shop.test/wp-json/wc/v3/products/124' => Http::response([
+                'id' => 124,
+                'sku' => 'SKU-HIDDEN',
+            ]),
+        ]);
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-HIDDEN',
+            'name' => 'Ukryty produkt',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'catalog_visibility' => 'hidden',
+                ],
+                'woocommerce_translations' => [
+                    'en' => [
+                        'product_id' => '124',
+                        'variation_id' => null,
+                        'sku' => 'SKU-HIDDEN',
+                    ],
+                ],
+            ],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => 'SKU-HIDDEN',
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($product);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
+            && $request['catalog_visibility'] === 'hidden');
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
+            && $request['catalog_visibility'] === 'hidden');
     }
 
     public function test_export_sends_sku_shared_with_variation_of_same_woocommerce_parent(): void

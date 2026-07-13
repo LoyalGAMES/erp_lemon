@@ -13,6 +13,7 @@ use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Communication\CustomerEmailWorkflowSettingsService;
 use App\Services\Communication\CustomerMailPreviewService;
 use App\Services\Communication\EmailTemplateRenderer;
+use App\Services\Communication\GoogleWorkspaceOAuthService;
 use App\Services\Communication\MailSettingsService;
 use App\Services\Inventory\WarehouseDocumentSettingsService;
 use App\Services\Packing\PackingSettingsService;
@@ -657,19 +658,33 @@ class SettingsController extends Controller
         return back()->with('status', 'Ustawienia płatności i zwrotów zostały zapisane.');
     }
 
-    public function updateMail(Request $request, MailSettingsService $mailSettings): RedirectResponse
-    {
+    public function updateMail(
+        Request $request,
+        MailSettingsService $mailSettings,
+        GoogleWorkspaceOAuthService $googleOAuth,
+    ): RedirectResponse {
         $enabled = $request->boolean('enabled');
+        $deliveryMethod = (string) $request->input('delivery_method', MailSettingsService::DELIVERY_SMTP);
+        $smtpEnabled = $enabled && $deliveryMethod === MailSettingsService::DELIVERY_SMTP;
+        $request->merge(['delivery_method' => $deliveryMethod]);
         $validated = $request->validate([
             'enabled' => ['nullable', 'boolean'],
-            'host' => [$enabled ? 'required' : 'nullable', 'string', 'max:255'],
-            'port' => [$enabled ? 'required' : 'nullable', 'integer', 'min:1', 'max:65535'],
+            'delivery_method' => ['required', 'string', Rule::in([
+                MailSettingsService::DELIVERY_SMTP,
+                MailSettingsService::DELIVERY_GOOGLE_WORKSPACE,
+            ])],
+            'host' => [$smtpEnabled ? 'required' : 'nullable', 'string', 'max:255'],
+            'port' => [$smtpEnabled ? 'required' : 'nullable', 'integer', 'min:1', 'max:65535'],
             'encryption' => ['required', 'string', 'in:none,tls,ssl'],
             'username' => ['nullable', 'string', 'max:255'],
             'password' => ['nullable', 'string', 'max:2000'],
             'clear_password' => ['nullable', 'boolean'],
+            'google_client_id' => ['nullable', 'string', 'max:1000'],
+            'google_client_secret' => ['nullable', 'string', 'max:2000'],
+            'clear_google_client_secret' => ['nullable', 'boolean'],
             'from_address' => [$enabled ? 'required' : 'nullable', 'email', 'max:255'],
             'from_name' => [$enabled ? 'required' : 'nullable', 'string', 'max:120'],
+            'reply_to_address' => ['nullable', 'email', 'max:255'],
             'ehlo_domain' => ['nullable', 'string', 'max:255'],
             'timeout' => ['required', 'integer', 'min:3', 'max:120'],
             'brand_name' => ['nullable', 'string', 'max:120'],
@@ -684,7 +699,21 @@ class SettingsController extends Controller
 
         $validated['enabled'] = $enabled;
         $validated['clear_password'] = $request->boolean('clear_password');
-        $mailSettings->update($validated);
+        $validated['delivery_method'] = $deliveryMethod;
+
+        DB::transaction(function () use ($googleOAuth, $mailSettings, $request, $validated): void {
+            if ($request->exists('google_client_id')
+                || $request->filled('google_client_secret')
+                || $request->boolean('clear_google_client_secret')) {
+                $googleOAuth->updateClientCredentials(
+                    (string) ($validated['google_client_id'] ?? ''),
+                    (string) ($validated['google_client_secret'] ?? ''),
+                    $request->boolean('clear_google_client_secret'),
+                );
+            }
+
+            $mailSettings->update($validated);
+        });
 
         return back()->with('status', 'Ustawienia poczty zostały zapisane.');
     }
@@ -775,12 +804,26 @@ class SettingsController extends Controller
         }
 
         try {
-            $mailSettings->apply();
+            if (! $mailSettings->apply()) {
+                return back()->with(
+                    'error',
+                    $settings['delivery_issue'] ?: 'Wybrana metoda wysyłki nie jest gotowa.',
+                );
+            }
+
+            $deliveryName = $settings['delivery_method'] === MailSettingsService::DELIVERY_GOOGLE_WORKSPACE
+                ? 'Gmail API'
+                : 'SMTP';
             Mail::raw(
-                "To jest test konfiguracji maili z Sempre ERP.\n\nJeśli widzisz tę wiadomość, SMTP działa poprawnie.",
-                function (Message $message) use ($validated): void {
+                "To jest test konfiguracji maili z Sempre ERP.\n\nJeśli widzisz tę wiadomość, {$deliveryName} działa poprawnie.",
+                function (Message $message) use ($settings, $validated): void {
+                    $replyToAddress = $settings['reply_to_address']
+                        ?: $settings['from_address'];
+                    $replyToName = $settings['brand_name'] ?: $settings['from_name'];
+
                     $message
                         ->to($validated['recipient'])
+                        ->replyTo($replyToAddress, $replyToName)
                         ->subject('Test konfiguracji maili Sempre ERP');
                 },
             );
