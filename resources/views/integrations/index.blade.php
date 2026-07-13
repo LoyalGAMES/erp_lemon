@@ -168,7 +168,7 @@
                     <p class="muted">
                         Pobierz paczkę ZIP, wgraj ją w WordPress przez Wtyczki -> Dodaj nową -> Wyślij wtyczkę, a potem aktywuj plugin.
                         Wtyczka dodaje pola NIP/typ klienta, endpoint faktur, natychmiastowe webhooki klientów oraz pewną identyfikację grup tłumaczeń Polylang.
-                        Wersja 0.4.0 lub nowsza obsługuje webhooki kont klientów; funkcje katalogu i faktur wymagają skonfigurowanego loginu i hasła aplikacji WordPress REST.
+                        Wersja 0.4.1 lub nowsza obsługuje konfigurację webhooków bez dodatkowych danych; wersja 0.4.0 działa przy skonfigurowanym loginie i haśle aplikacji WordPress REST.
                     </p>
                     <div class="inline-actions">
                         <a class="button" href="{{ route('integrations.woocommerce-plugin.download') }}">Pobierz plugin ZIP</a>

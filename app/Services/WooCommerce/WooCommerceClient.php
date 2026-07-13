@@ -695,17 +695,39 @@ final class WooCommerceClient
             throw new RuntimeException('ERP nie przygotował poprawnego adresu odbiorczego webhooka klientów.');
         }
 
+        $payload = [
+            'delivery_url' => $deliveryUrl,
+            'consumer_key' => Crypt::decryptString($integration->consumer_key_encrypted),
+        ];
+
         try {
             $response = $this->request($integration, retry: false)
+                ->withoutRedirecting()
                 ->post(
-                    $this->wordpressRestEndpoint($integration, '/lemon-erp/v1/customer-webhook/configure'),
-                    [
-                        'delivery_url' => $deliveryUrl,
-                        'consumer_key' => Crypt::decryptString($integration->consumer_key_encrypted),
-                    ],
+                    $this->wordpressRestEndpoint($integration, '/wc-lemon-erp/v1/customer-webhook/configure'),
+                    $payload,
                 );
         } catch (RequestException $exception) {
             $this->throwCustomerWebhookConfigurationException($exception->response);
+        }
+
+        // Compatibility for plugin 0.4.0, whose custom namespace is not
+        // recognized by WooCommerce ck_/cs_ authentication. When WordPress
+        // Application Password credentials are already configured, use them
+        // only after a definitive missing-route response from the new API.
+        if ($this->customerWebhookRouteIsMissing($response)
+            && $integration->hasWordpressMediaCredentials()
+        ) {
+            try {
+                $response = $this->wordpressRequest($integration, retry: false)
+                    ->withoutRedirecting()
+                    ->post(
+                        $this->wordpressRestEndpoint($integration, '/lemon-erp/v1/customer-webhook/configure'),
+                        $payload,
+                    );
+            } catch (RequestException $exception) {
+                $this->throwCustomerWebhookConfigurationException($exception->response);
+            }
         }
 
         if (! $response->successful()) {
@@ -715,6 +737,14 @@ final class WooCommerceClient
         $json = $response->json();
 
         return is_array($json) ? $json : [];
+    }
+
+    private function customerWebhookRouteIsMissing(Response $response): bool
+    {
+        $code = trim((string) data_get($response->json(), 'code', ''));
+
+        return $response->status() === 404
+            && ($code === '' || $code === 'rest_no_route');
     }
 
     private function throwCustomerWebhookConfigurationException(?Response $response): never

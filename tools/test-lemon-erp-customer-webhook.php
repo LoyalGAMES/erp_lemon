@@ -313,6 +313,7 @@ assert_true(in_array('lemon_erp_deliver_customer_webhook', $registeredActions, t
 
 $webhook->registerRestRoutes();
 assert_true(($restRoutes[0]['route'] ?? '') === '/customer-webhook/configure', 'Configuration REST route must be registered.');
+assert_true(($restRoutes[0]['namespace'] ?? '') === 'wc-lemon-erp/v1', 'Configuration route must use a WooCommerce-authenticated REST namespace.');
 
 $invalidConfiguration = $webhook->configure(new WP_REST_Request([
     'delivery_url' => 'http://erp.example.test/api/customer-webhook/1',
@@ -327,6 +328,28 @@ $readOnlyConfiguration = $webhook->configure(new WP_REST_Request([
 ]));
 assert_true($readOnlyConfiguration instanceof WP_Error, 'Configuration must reject a read-only WooCommerce API key.');
 $wpdb->apiKey['permissions'] = 'read_write';
+
+$wpdb->apiKey['user_id'] = 8;
+$foreignOwnerConfiguration = $webhook->configure(new WP_REST_Request([
+    'delivery_url' => 'https://erp.example.test/api/woocommerce/customer-webhook/42',
+    'consumer_key' => $consumerKey,
+]));
+assert_true($foreignOwnerConfiguration instanceof WP_Error, 'Configuration must reject a key owned by another WordPress user.');
+$wpdb->apiKey['user_id'] = 7;
+
+$wpdb->apiKey['consumer_secret'] = '';
+$missingSecretConfiguration = $webhook->configure(new WP_REST_Request([
+    'delivery_url' => 'https://erp.example.test/api/woocommerce/customer-webhook/42',
+    'consumer_key' => $consumerKey,
+]));
+assert_true($missingSecretConfiguration instanceof WP_Error, 'Configuration must reject a WooCommerce key without its secret.');
+$wpdb->apiKey['consumer_secret'] = 'cs_shared_secret_987654321';
+
+$unknownKeyConfiguration = $webhook->configure(new WP_REST_Request([
+    'delivery_url' => 'https://erp.example.test/api/woocommerce/customer-webhook/42',
+    'consumer_key' => 'ck_0000000000000000000000000000000000000000',
+]));
+assert_true($unknownKeyConfiguration instanceof WP_Error, 'Configuration must reject an unknown WooCommerce API key.');
 
 $configured = $webhook->configure(new WP_REST_Request([
     'delivery_url' => 'https://erp.example.test/api/woocommerce/customer-webhook/42',

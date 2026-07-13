@@ -21,7 +21,7 @@ final class Lemon_Erp_Customer_Webhook
 
     private const CONTRACT_VERSION = '1';
 
-    private const PLUGIN_VERSION = '0.4.0';
+    private const PLUGIN_VERSION = '0.4.1';
 
     private const MAX_ATTEMPTS = 7;
 
@@ -42,7 +42,9 @@ final class Lemon_Erp_Customer_Webhook
 
     public function registerRestRoutes(): void
     {
-        register_rest_route('lemon-erp/v1', '/customer-webhook/configure', [
+        // WooCommerce authenticates ck_/cs_ credentials only for REST
+        // namespaces rooted at `wc/` or prefixed with `wc-`.
+        register_rest_route('wc-lemon-erp/v1', '/customer-webhook/configure', [
             [
                 'methods' => WP_REST_Server::READABLE,
                 'callback' => [$this, 'status'],

@@ -19,14 +19,14 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 5. Upewnij się, że użytkownik WordPress używany w Lemon ERP ma uprawnienia do edycji zamówień WooCommerce.
 6. W Lemon ERP w integracji WooCommerce ustaw tryb faktur na `Wtyczka Lemon ERP bez Media Library`.
 
-Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, a natychmiastowa synchronizacja klientów wersji co najmniej `0.4.0`.
+Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, a natychmiastowa synchronizacja klientów wersji co najmniej `0.4.1`.
 
 ## Natychmiastowa synchronizacja klientów
 
 ERP konfiguruje webhook automatycznie przez uwierzytelniony endpoint:
 
 ```text
-POST /wp-json/lemon-erp/v1/customer-webhook/configure
+POST /wp-json/wc-lemon-erp/v1/customer-webhook/configure
 ```
 
 Przekazuje wyłącznie docelowy `delivery_url` i istniejący `consumer_key`. Wtyczka sprawdza, czy klucz należy do zalogowanego użytkownika i ma uprawnienia Odczyt/Zapis, po czym zapisuje tylko ID klucza oraz URL. Istniejący `consumer_secret` pozostaje w bazie WooCommerce i służy po obu stronach wyłącznie do wyliczenia podpisu HMAC-SHA256 — sekret nie jest wysyłany w konfiguracji ani w webhooku.

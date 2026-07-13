@@ -28,6 +28,10 @@ final class WooCommerceCustomerWebhookTest extends TestCase
 
     private const CONSUMER_SECRET = 'cs_customer_webhook_test';
 
+    private const WORDPRESS_USERNAME = 'erp-wordpress';
+
+    private const WORDPRESS_PASSWORD = 'wordpress-application-password';
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -184,9 +188,9 @@ final class WooCommerceCustomerWebhookTest extends TestCase
         $integration = $this->integration(null);
 
         Http::fake([
-            'https://shop.example.test/wp-json/lemon-erp/v1/customer-webhook/configure' => Http::response([
+            'https://shop.example.test/wp-json/wc-lemon-erp/v1/customer-webhook/configure' => Http::response([
                 'configured' => true,
-                'plugin_version' => '0.4.0',
+                'plugin_version' => '0.4.1',
             ]),
         ]);
 
@@ -200,7 +204,7 @@ final class WooCommerceCustomerWebhookTest extends TestCase
         );
         $this->assertTrue((bool) data_get($integration->fresh()->settings, 'customer_webhook.configured'));
         $this->assertSame(
-            '0.4.0',
+            '0.4.1',
             data_get($integration->fresh()->settings, 'customer_webhook.plugin_version'),
         );
         $this->assertDatabaseHas('integration_sync_logs', [
@@ -212,7 +216,7 @@ final class WooCommerceCustomerWebhookTest extends TestCase
             $expectedDeliveryUrl = route('api.woocommerce.customer-webhooks.store', $integration);
 
             return $request->method() === 'POST'
-                && $request->url() === 'https://shop.example.test/wp-json/lemon-erp/v1/customer-webhook/configure'
+                && $request->url() === 'https://shop.example.test/wp-json/wc-lemon-erp/v1/customer-webhook/configure'
                 && $request['delivery_url'] === $expectedDeliveryUrl
                 && $request['consumer_key'] === self::CONSUMER_KEY
                 && ! array_key_exists('consumer_secret', $request->data())
@@ -223,6 +227,67 @@ final class WooCommerceCustomerWebhookTest extends TestCase
         });
 
         $this->travelBack();
+    }
+
+    public function test_plugin_040_configuration_falls_back_to_wordpress_application_password_after_new_route_is_missing(): void
+    {
+        $this->travelTo(CarbonImmutable::parse('2026-07-13 14:00:00', 'Europe/Warsaw'));
+        $integration = $this->integration(null, withWordpressCredentials: true);
+
+        Http::fake([
+            'https://shop.example.test/wp-json/wc-lemon-erp/v1/customer-webhook/configure' => Http::response([
+                'code' => 'rest_no_route',
+                'message' => 'No route was found matching the URL and request method.',
+            ], 404),
+            'https://shop.example.test/wp-json/lemon-erp/v1/customer-webhook/configure' => Http::response([
+                'configured' => true,
+                'plugin_version' => '0.4.0',
+            ]),
+        ]);
+
+        $this->post(route('integrations.customer-webhook.configure', $integration))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $this->assertTrue((bool) data_get($integration->fresh()->settings, 'customer_webhook.configured'));
+        $this->assertSame(
+            '0.4.0',
+            data_get($integration->fresh()->settings, 'customer_webhook.plugin_version'),
+        );
+        Http::assertSent(function (Request $request): bool {
+            return $request->url() === 'https://shop.example.test/wp-json/lemon-erp/v1/customer-webhook/configure'
+                && $request->hasHeader(
+                    'Authorization',
+                    'Basic '.base64_encode(self::WORDPRESS_USERNAME.':'.self::WORDPRESS_PASSWORD),
+                )
+                && $request['consumer_key'] === self::CONSUMER_KEY
+                && ! array_key_exists('consumer_secret', $request->data());
+        });
+        $this->assertSame(2, count(Http::recorded()));
+
+        $this->travelBack();
+    }
+
+    public function test_authentication_failure_on_new_route_does_not_fall_back_to_other_credentials(): void
+    {
+        $integration = $this->integration(null, withWordpressCredentials: true);
+
+        Http::fake([
+            'https://shop.example.test/wp-json/wc-lemon-erp/v1/customer-webhook/configure' => Http::response([
+                'code' => 'woocommerce_rest_authentication_error',
+                'message' => 'Consumer secret is invalid.',
+            ], 401),
+            'https://shop.example.test/wp-json/lemon-erp/v1/customer-webhook/configure' => Http::response([
+                'configured' => true,
+            ]),
+        ]);
+
+        $this->post(route('integrations.customer-webhook.configure', $integration))
+            ->assertRedirect()
+            ->assertSessionHas('error');
+
+        $this->assertFalse((bool) data_get($integration->fresh()->settings, 'customer_webhook.configured', false));
+        $this->assertSame(1, count(Http::recorded()));
     }
 
     /** @return array<string, mixed> */
@@ -262,8 +327,10 @@ final class WooCommerceCustomerWebhookTest extends TestCase
         ));
     }
 
-    private function integration(?string $baseline): WordpressIntegration
-    {
+    private function integration(
+        ?string $baseline,
+        bool $withWordpressCredentials = false,
+    ): WordpressIntegration {
         $channel = SalesChannel::query()->create([
             'code' => 'WEBHOOK',
             'name' => 'Sklep webhook',
@@ -277,6 +344,10 @@ final class WooCommerceCustomerWebhookTest extends TestCase
             'base_url' => 'https://shop.example.test',
             'consumer_key_encrypted' => Crypt::encryptString(self::CONSUMER_KEY),
             'consumer_secret_encrypted' => Crypt::encryptString(self::CONSUMER_SECRET),
+            'wp_api_username' => $withWordpressCredentials ? self::WORDPRESS_USERNAME : null,
+            'wp_api_password_encrypted' => $withWordpressCredentials
+                ? Crypt::encryptString(self::WORDPRESS_PASSWORD)
+                : null,
             'order_import_enabled' => true,
             'stock_export_enabled' => false,
             'settings' => $baseline === null ? [] : [
