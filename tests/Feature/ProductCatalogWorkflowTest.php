@@ -156,6 +156,70 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertRedirect(route('products.edit', $product));
     }
 
+    public function test_inherited_variant_uses_parent_thumbnail_on_catalog_without_copying_media(): void
+    {
+        $parent = Product::query()->create([
+            'sku' => 'CATALOG-PARENT-PHOTO',
+            'name' => 'Komplet ze zdjęciem',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'media' => [[
+                    'src' => 'https://cdn.test/catalog-parent.jpg',
+                    'alt' => 'Komplet ze zdjęciem',
+                ]],
+            ]],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'CATALOG-PARENT-PHOTO-S',
+            'name' => 'Komplet ze zdjęciem - S',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variation',
+                'variant_attribute' => 'Rozmiar',
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'value' => 'S',
+                    'variation' => true,
+                ]],
+                'media' => [],
+                'inheritance' => [
+                    'mode' => 'parent',
+                    'parent_product_id' => $parent->id,
+                ],
+            ]],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+
+        $this->assertNull($variant->imageUrl());
+        $this->assertSame([], $variant->mediaImages());
+
+        $response = $this->get(route('products.index'))->assertOk();
+        $html = (string) $response->getContent();
+
+        $this->assertSame(2, substr_count(
+            $html,
+            'data-image-preview="https://cdn.test/catalog-parent.jpg"',
+        ));
+        $this->assertSame(2, substr_count($html, 'src="/products/image-thumbnail?src='));
+        $this->assertSame([], $variant->fresh()->mediaImages());
+        $this->assertNull($variant->imageUrl());
+    }
+
     public function test_product_catalog_defaults_to_newest_products_first(): void
     {
         Product::query()->create([

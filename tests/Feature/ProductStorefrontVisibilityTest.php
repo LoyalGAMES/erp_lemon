@@ -245,6 +245,15 @@ class ProductStorefrontVisibilityTest extends TestCase
         Bus::assertDispatchedAfterResponse(ExportWooCommerceProductDataJob::class, 1);
 
         Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/attributes?*' => Http::response([[
+                'id' => 70,
+                'name' => 'Rozmiar',
+                'slug' => 'pa_rozmiar',
+            ]]),
+            'https://shop.test/wp-json/wc/v3/products/attributes/70/terms?*' => Http::response([
+                ['id' => 701, 'name' => 'S', 'slug' => 's-pl'],
+                ['id' => 702, 'name' => 'M', 'slug' => 'm-pl'],
+            ]),
             'https://shop.test/wp-json/wc/v3/products/900' => Http::response([
                 'id' => 900,
                 'sku' => $parent->sku,

@@ -7,6 +7,7 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 - jednoznaczny kontrakt tożsamości produktów, wariantów i kategorii dla sklepów z Polylang,
 - idempotentne wiązanie polskich i angielskich kategorii utworzonych przez ERP,
 - idempotentne przypisywanie języków i wiązanie tłumaczeń produktów utworzonych przez ERP,
+- idempotentne wiązanie osobnych terminów PL/EN globalnych atrybutów WooCommerce,
 - ustawianie daty publikacji na produktach i wariantach przed ich zapisem przez WooCommerce REST,
 - natychmiastowe, asynchroniczne powiadomienia ERP o utworzeniu lub zmianie konta klienta,
 - REST endpoint do zapisu danych faktury na zamówieniu,
@@ -21,7 +22,7 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 5. Upewnij się, że użytkownik WordPress używany w Lemon ERP ma uprawnienia do edycji zamówień WooCommerce.
 6. W Lemon ERP w integracji WooCommerce ustaw tryb faktur na `Wtyczka Lemon ERP bez Media Library`.
 
-Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, natychmiastowa synchronizacja klientów wersji co najmniej `0.4.1`, a wiązanie tłumaczeń produktów wersji co najmniej `0.5.0`.
+Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, natychmiastowa synchronizacja klientów wersji co najmniej `0.4.1`, a bezpieczne wiązanie tłumaczeń produktów i automatyczny backfill wariantów wersji co najmniej `0.5.1`.
 
 ## Natychmiastowa synchronizacja klientów
 
@@ -81,6 +82,14 @@ POST /wp-json/wc-lemon-erp/v1/catalog/products/translations
 ```
 
 Payload `translations` jest mapą kodu języka na ID produktu, np. `{"pl": 700143, "en": 750099}`. Klucz WooCommerce musi mieć uprawnienia odczyt/zapis, a jego użytkownik uprawnienie `manage_woocommerce` oraz prawo edycji każdego wskazanego produktu. Wtyczka przed pierwszym zapisem sprawdza całą mapę, aktywne języki, typ i status wszystkich postów, uprawnienia oraz wcześniejsze rodziny tłumaczeń. Ponowienie identycznego żądania nie wykonuje kolejnych zapisów.
+
+Wartości jednego globalnego atrybutu ERP wiąże przez endpoint uwierzytelniany tym samym kluczem WooCommerce:
+
+```text
+POST /wp-json/wc-lemon-erp/v1/catalog/products/attributes/{attribute_id}/terms/translations
+```
+
+Body ma postać `{"translations":{"pl":301,"en":302}}`. `attribute_id` jest numerycznym ID globalnego atrybutu WooCommerce; wtyczka sama rozwiązuje i ogranicza taksonomię do konkretnego `pa_*`. Każdy język musi wskazywać osobny term — także dla neutralnych wartości takich jak `S` — a wszystkie termy muszą należeć dokładnie do tej samej taksonomii. Użytkownik kluczy REST musi mieć jednocześnie uprawnienia `manage_woocommerce`, `manage_product_terms` i prawo edycji każdego termu. Przed zmianą wtyczka sprawdza aktywne języki, wcześniejsze rodziny oraz pełną mapę; identyczne ponowienie jest idempotentne i zwraca tę samą zweryfikowaną relację.
 
 Przed automatycznym backfillem ERP potwierdza wersję wtyczki, aktywny Polylang i wymagane języki bez wykonywania zmian:
 

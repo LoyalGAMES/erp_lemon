@@ -63,15 +63,25 @@ final class ProductDataExportService
                 : null;
             $payloadProduct = $variantContext['variant'] ?? $product;
             $variantParent = $variantContext['parent'] ?? null;
-            if (! $isVariation) {
-                $this->removePendingVariants($product, $integration, $mapping);
-            }
             $variants = $this->variantChildren($product);
             $this->ensureRemoteCategories(
                 $variantParent instanceof Product ? $variantParent : $product,
                 $integration,
                 (int) $mapping->sales_channel_id,
             );
+            $attributeFamilyParent = $variantParent instanceof Product ? $variantParent : $product;
+            $attributeFamilyVariants = $variantParent instanceof Product
+                ? $this->variantChildren($variantParent)
+                : $variants;
+            $this->preflightGlobalAttributeTranslations(
+                $attributeFamilyParent,
+                $attributeFamilyVariants,
+                $integration,
+                (int) $mapping->sales_channel_id,
+            );
+            if (! $isVariation) {
+                $this->removePendingVariants($product, $integration, $mapping);
+            }
             $payload = $variantParent instanceof Product
                 ? $this->variationPayload(
                     $variantParent,
@@ -85,6 +95,8 @@ final class ProductDataExportService
             if (! $isVariation) {
                 $payload = $this->prepareVariablePayload($product, $variants, $payload);
             }
+
+            $payload = $this->globalizeProductAttributes($integration, $payload, 'pl');
 
             $response = $this->client->updateProductData($integration, $mapping, $payload);
 
@@ -239,10 +251,18 @@ final class ProductDataExportService
                 fn (array $result): bool => (string) ($result['external_id'] ?? '') === (string) $existingMapping->external_product_id,
             ) ?? [];
 
+            $resumedPayload = $this->payload($product, false, (int) $integration->sales_channel_id, 'pl');
+            $resumedPayload = $this->prepareVariablePayload(
+                $product,
+                $this->variantChildren($product),
+                $resumedPayload,
+            );
+            $resumedPayload = $this->globalizeProductAttributes($integration, $resumedPayload, 'pl');
+
             return [
                 'mapping' => $existingMapping->refresh(),
                 'response' => (array) ($channelResult['response'] ?? []),
-                'payload' => $this->payload($product, false, (int) $integration->sales_channel_id, 'pl'),
+                'payload' => $resumedPayload,
                 'variant_mappings' => ProductChannelMapping::query()
                     ->where('sales_channel_id', $integration->sales_channel_id)
                     ->whereIn('product_id', $this->variantChildren($product)->pluck('id'))
@@ -265,8 +285,15 @@ final class ProductDataExportService
         }
 
         $this->ensureRemoteCategories($product, $integration, (int) $integration->sales_channel_id);
+        $this->preflightGlobalAttributeTranslations(
+            $product,
+            $variants,
+            $integration,
+            (int) $integration->sales_channel_id,
+        );
         $payload = $this->payload($product, false, (int) $integration->sales_channel_id, 'pl');
         $payload = $this->prepareVariablePayload($product, $variants, $payload);
+        $payload = $this->globalizeProductAttributes($integration, $payload, 'pl');
         $response = $this->client->createProduct($integration, $payload);
         $externalId = $response['id'] ?? null;
 
@@ -319,6 +346,7 @@ final class ProductDataExportService
 
         foreach ($variants as $variant) {
             $variantPayload = $this->variationPayload($product, $variant, (int) $integration->sales_channel_id);
+            $variantPayload = $this->globalizeProductAttributes($integration, $variantPayload, 'pl');
             $variantResponse = $this->client->createProductVariation($integration, (string) $externalId, $variantPayload);
             $variationExternalId = $variantResponse['id'] ?? null;
 
@@ -420,6 +448,7 @@ final class ProductDataExportService
                 );
                 $payload = $this->payload($product, false, $salesChannelId, $language, null, null, true);
                 $payload = $this->prepareVariablePayload($product, $variants, $payload, $language);
+                $payload = $this->globalizeProductAttributes($integration, $payload, $language);
                 $desiredSku = (string) ($payload['sku'] ?? $product->sku);
                 unset($payload['sku']);
 
@@ -461,7 +490,7 @@ final class ProductDataExportService
             if ($desiredSku !== '') {
                 $response = $this->client->updateProductDataByIds($integration, $translatedProductId, null, [
                     'sku' => $desiredSku,
-                ]);
+                ], $language);
             }
             $variantResponses = [];
 
@@ -736,6 +765,7 @@ final class ProductDataExportService
                 ->first();
 
             $payload = $this->variationPayload($product, $variant, $salesChannelId);
+            $payload = $this->globalizeProductAttributes($integration, $payload, 'pl');
             $operation = 'export_product_variation_data';
 
             if ($mapping instanceof ProductChannelMapping && filled($mapping->external_variation_id)) {
@@ -868,6 +898,7 @@ final class ProductDataExportService
 
             $language = trim((string) $language) ?: 'en';
             $payload = $this->variationPayload($parent, $variant, $salesChannelId, $language);
+            $payload = $this->globalizeProductAttributes($integration, $payload, $language);
             $variantReference = $this->translationReferences($variant, $salesChannelId)[$language] ?? null;
             $translatedVariationId = is_array($variantReference)
                 ? trim((string) ($variantReference['variation_id'] ?? ''))
@@ -879,6 +910,7 @@ final class ProductDataExportService
                     $translatedParentId,
                     $translatedVariationId,
                     $payload,
+                    $language,
                 );
                 $operation = 'updated';
             } else {
@@ -888,6 +920,7 @@ final class ProductDataExportService
                     $primaryMapping->external_variation_id,
                     $variant->sku,
                     (array) ($payload['attributes'] ?? []),
+                    $language,
                 );
                 $translatedVariationId = trim((string) ($discoveredVariation['id'] ?? ''));
 
@@ -897,10 +930,16 @@ final class ProductDataExportService
                         $translatedParentId,
                         $translatedVariationId,
                         $payload,
+                        $language,
                     );
                     $operation = 'updated_discovered';
                 } else {
-                    $response = $this->client->createProductVariation($integration, $translatedParentId, $payload);
+                    $response = $this->client->createProductVariation(
+                        $integration,
+                        $translatedParentId,
+                        $payload,
+                        $language,
+                    );
                     $translatedVariationId = trim((string) ($response['id'] ?? ''));
                     $operation = 'created';
                 }
@@ -1365,7 +1404,7 @@ final class ProductDataExportService
 
     /**
      * @param  array<string, mixed>  $master
-     * @return list<array{name:string,visible:bool,variation:bool,options:list<string>}>
+     * @return list<array{source_name:string,source_options:list<string>,name:string,visible:bool,variation:bool,options:list<string>}>
      */
     private function attributes(array $master, string $language = 'pl'): array
     {
@@ -1380,6 +1419,8 @@ final class ProductDataExportService
                 }
 
                 return [
+                    'source_name' => trim((string) ($row['name'] ?? $name)),
+                    'source_options' => [trim((string) ($row['value'] ?? $value))],
                     'name' => $name,
                     'visible' => true,
                     'variation' => (bool) ($row['variation'] ?? false),
@@ -1393,7 +1434,7 @@ final class ProductDataExportService
 
     /**
      * @param  Collection<int, Product>  $variants
-     * @return list<array{name:string,visible:bool,variation:bool,options:list<string>}>
+     * @return list<array{source_name:string,source_options:list<string>,name:string,visible:bool,variation:bool,options:list<string>}>
      */
     private function variableAttributes(Product $product, Collection $variants, string $language = 'pl'): array
     {
@@ -1405,26 +1446,77 @@ final class ProductDataExportService
                 ->first(fn (?array $parameter): bool => $parameter !== null)
             ?? ['name' => $sourceVariantAttribute];
         $variantAttribute = $this->translatedParameterName($translationSource, $language);
-        $variantOptions = $variants
-            ->map(fn (Product $variant): string => $this->variationOption(
-                $variant,
+        $variantOptionPairs = $variants
+            ->map(function (Product $variant) use (
                 $sourceVariantAttribute,
                 $variantAttribute,
                 $language,
+            ): array {
+                return [
+                    'source' => $this->variationOption(
+                        $variant,
+                        $sourceVariantAttribute,
+                        $sourceVariantAttribute,
+                        'pl',
+                    ),
+                    'localized' => $this->variationOption(
+                        $variant,
+                        $sourceVariantAttribute,
+                        $variantAttribute,
+                        $language,
+                    ),
+                ];
+            })
+            ->filter(fn (array $pair): bool => $pair['source'] !== '' && $pair['localized'] !== '')
+            ->groupBy(fn (array $pair): string => $this->variantOptions->identity(
+                $sourceVariantAttribute,
+                $pair['source'],
             ))
-            ->filter(fn (string $option): bool => $option !== '')
-            ->unique(fn (string $option): string => $this->variantOptions->identity($variantAttribute, $option))
-            ->values()
-            ->all();
+            ->map(function (Collection $pairs) use ($variantAttribute): array {
+                $localized = $pairs
+                    ->unique(fn (array $pair): string => $this->variantOptions->identity(
+                        $variantAttribute,
+                        $pair['localized'],
+                    ))
+                    ->values();
+
+                if ($localized->count() !== 1) {
+                    throw new RuntimeException('Jedna źródłowa opcja wariantu ma kilka różnych tłumaczeń.');
+                }
+
+                return $localized->first();
+            })
+            ->values();
+        $localizedCollisions = $variantOptionPairs
+            ->groupBy(fn (array $pair): string => $this->variantOptions->identity(
+                $variantAttribute,
+                $pair['localized'],
+            ))
+            ->first(fn (Collection $pairs): bool => $pairs->count() > 1);
+
+        if ($localizedCollisions instanceof Collection) {
+            throw new RuntimeException('Dwie źródłowe opcje wariantu mają to samo tłumaczenie.');
+        }
+
+        $variantOptions = $variantOptionPairs->pluck('localized')->all();
+        $sourceVariantOptions = $variantOptionPairs->pluck('source')->all();
 
         return collect($this->attributes($master, $language))
             // The ERP variant model intentionally supports one variant axis.
             // Imported/stale flags must not make Woo require an additional
             // attribute that none of the child variations supplies.
             ->map(fn (array $attribute): array => array_merge($attribute, ['variation' => false]))
-            ->reject(fn (array $attribute): bool => mb_strtolower($attribute['name']) === mb_strtolower($variantAttribute)
-                || $this->isLegacyGenericVariantAttribute($attribute['name'], $variantAttribute))
+            ->reject(fn (array $attribute): bool => in_array(
+                mb_strtolower(trim((string) ($attribute['source_name'] ?? $attribute['name']))),
+                [mb_strtolower($sourceVariantAttribute), mb_strtolower($variantAttribute)],
+                true,
+            ) || $this->isLegacyGenericVariantAttribute(
+                (string) ($attribute['source_name'] ?? $attribute['name']),
+                $sourceVariantAttribute,
+            ))
             ->push([
+                'source_name' => $sourceVariantAttribute,
+                'source_options' => $sourceVariantOptions,
                 'name' => $variantAttribute,
                 'visible' => true,
                 'variation' => true,
@@ -1444,7 +1536,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @return list<array{name:string,option:string}>
+     * @return list<array{source_name:string,source_options:list<string>,name:string,option:string}>
      */
     private function variationAttributes(Product $parent, Product $variant, string $language = 'pl'): array
     {
@@ -1461,6 +1553,13 @@ final class ProductDataExportService
         $variantAttribute = $this->translatedParameterName($translationSource, $language);
 
         return [[
+            'source_name' => $sourceVariantAttribute,
+            'source_options' => [$this->variationOption(
+                $variant,
+                $sourceVariantAttribute,
+                $sourceVariantAttribute,
+                'pl',
+            )],
             'name' => $variantAttribute,
             'option' => $this->variationOption(
                 $variant,
@@ -1469,6 +1568,135 @@ final class ProductDataExportService
                 $language,
             ),
         ]];
+    }
+
+    /**
+     * Convert ERP's internal name-based attributes into WooCommerce global
+     * taxonomy references. `source_name` is intentionally kept only while
+     * resolving the canonical ID and is never sent to WooCommerce.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    private function globalizeProductAttributes(
+        WordpressIntegration $integration,
+        array $payload,
+        string $language,
+    ): array {
+        $attributes = collect((array) ($payload['attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->values();
+
+        if ($attributes->isEmpty()) {
+            $payload['attributes'] = [];
+
+            return $payload;
+        }
+
+        $resolved = [];
+        $parentAttributeIndexes = [];
+
+        foreach ($attributes as $attribute) {
+            $sourceName = trim((string) ($attribute['source_name'] ?? $attribute['name'] ?? ''));
+            $isVariationPayload = array_key_exists('option', $attribute);
+            $options = $isVariationPayload
+                ? [trim((string) ($attribute['option'] ?? ''))]
+                : collect((array) ($attribute['options'] ?? []))
+                    ->map(fn (mixed $option): string => trim((string) $option))
+                    ->filter()
+                    ->values()
+                    ->all();
+            $sourceOptions = collect((array) ($attribute['source_options'] ?? $options))
+                ->map(fn (mixed $option): string => trim((string) $option))
+                ->values()
+                ->all();
+            $global = $this->client->ensureGlobalProductAttribute(
+                $integration,
+                $sourceName,
+                $options,
+                $language,
+                $sourceOptions,
+            );
+            $attributeId = (int) $global['id'];
+
+            if ($isVariationPayload) {
+                $resolved[] = [
+                    'id' => $attributeId,
+                    'option' => (string) ($global['options'][0] ?? $attribute['option'] ?? ''),
+                ];
+
+                continue;
+            }
+
+            $normalized = [
+                'id' => $attributeId,
+                'visible' => (bool) ($attribute['visible'] ?? true),
+                'variation' => (bool) ($attribute['variation'] ?? false),
+                'options' => array_values((array) $global['options']),
+            ];
+
+            // A legacy/imported ERP record may contain the same parameter more
+            // than once. Woo requires one row per global taxonomy ID, so merge
+            // its options while preserving their first-seen order.
+            if (array_key_exists($attributeId, $parentAttributeIndexes)) {
+                $index = $parentAttributeIndexes[$attributeId];
+                $resolved[$index]['visible'] = $resolved[$index]['visible'] || $normalized['visible'];
+                $resolved[$index]['variation'] = $resolved[$index]['variation'] || $normalized['variation'];
+                $resolved[$index]['options'] = collect(array_merge(
+                    (array) $resolved[$index]['options'],
+                    $normalized['options'],
+                ))
+                    ->unique(fn (mixed $option): string => mb_strtolower(trim((string) $option)))
+                    ->values()
+                    ->all();
+
+                continue;
+            }
+
+            $parentAttributeIndexes[$attributeId] = count($resolved);
+            $resolved[] = $normalized;
+        }
+
+        $payload['attributes'] = $resolved;
+
+        return $payload;
+    }
+
+    /**
+     * Resolve every localized taxonomy term, and link its Polylang term family,
+     * before the first remote product/variation mutation. This keeps a failed
+     * bilingual export from leaving WooCommerce with a parent that references
+     * only one side of a translated global attribute.
+     *
+     * @param  Collection<int, Product>  $variants
+     */
+    private function preflightGlobalAttributeTranslations(
+        Product $product,
+        Collection $variants,
+        WordpressIntegration $integration,
+        int $salesChannelId,
+    ): void {
+        // Existing legacy aliases and discovery can still export a configured
+        // language even when the local product has no content bucket for it.
+        // Preflight the complete channel language set so those later paths
+        // cannot discover/link attribute terms only after the Polish product
+        // has already been mutated.
+        foreach ($integration->productExportLanguages() as $language) {
+            $language = trim((string) $language) ?: 'pl';
+            $payload = $this->payload($product, false, $salesChannelId, $language);
+            $payload = $this->prepareVariablePayload($product, $variants, $payload, $language);
+            $this->globalizeProductAttributes($integration, $payload, $language);
+
+            foreach ($variants as $variant) {
+                $variantPayload = $this->variationPayload(
+                    $product,
+                    $variant,
+                    $salesChannelId,
+                    $language,
+                );
+                $this->globalizeProductAttributes($integration, $variantPayload, $language);
+            }
+        }
     }
 
     /**
@@ -2276,11 +2504,14 @@ final class ProductDataExportService
                 $payload = $this->prepareVariablePayload($product, $variants, $payload, $language);
             }
 
+            $payload = $this->globalizeProductAttributes($integration, $payload, $language);
+
             $response = $this->client->updateProductDataByIds(
                 $integration,
                 $externalProductId,
                 $externalVariationId,
                 $payload,
+                $language,
             );
             $results[] = [
                 'language' => $language,
@@ -2382,11 +2613,12 @@ final class ProductDataExportService
         }
 
         $payloads = collect($integration->productExportLanguages())
-            ->mapWithKeys(function (mixed $language) use ($product, $mapping, $variants): array {
+            ->mapWithKeys(function (mixed $language) use ($product, $integration, $mapping, $variants): array {
                 $language = trim((string) $language) ?: 'pl';
                 $payload = $this->payload($product, false, (int) $mapping->sales_channel_id, $language);
                 $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $product, $mapping);
                 $payload = $this->prepareVariablePayload($product, $variants, $payload, $language);
+                $payload = $this->globalizeProductAttributes($integration, $payload, $language);
 
                 return [$language => $payload];
             })

@@ -17,6 +17,8 @@ final class LegacyVariantFamilyBackfillService
 {
     public const REASON = 'legacy_variant_family_backfill_2026_07_14';
 
+    public const UNMARKED_FAMILY_PROMOTION_REVISION = 'legacy_unmarked_variant_family_2026_07_14_000006';
+
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 
     /** @var array<string, bool> */
@@ -60,6 +62,72 @@ final class LegacyVariantFamilyBackfillService
                     'reason' => self::REASON,
                     'requested_at' => now()->toISOString(),
                 ]));
+                $mapping->forceFill(['metadata' => $metadata])->save();
+            }
+
+            return $mappings->count();
+        });
+    }
+
+    /**
+     * Request a newer, explicitly versioned repair export. An already running
+     * export keeps its token; its completion notices the revision mismatch and
+     * leaves this request pending for a follow-up pass.
+     */
+    public function markPendingRevision(Product $product, string $revision): int
+    {
+        $revision = trim($revision);
+
+        if ($revision === '') {
+            throw new \InvalidArgumentException('Backfill revision must not be empty.');
+        }
+
+        return DB::transaction(function () use ($product, $revision): int {
+            $mappings = ProductChannelMapping::query()
+                ->where('product_id', $product->id)
+                ->where(function ($query): void {
+                    $query
+                        ->whereNull('external_variation_id')
+                        ->orWhereIn('external_variation_id', ['', '0'])
+                        ->orWhereRaw("TRIM(external_variation_id) = ''");
+                })
+                ->lockForUpdate()
+                ->get();
+
+            foreach ($mappings as $mapping) {
+                $metadata = (array) $mapping->metadata;
+                $backfill = (array) data_get($metadata, self::BACKFILL_PATH, []);
+
+                if (($backfill['reason'] ?? null) === self::REASON
+                    && ($backfill['revision'] ?? null) === $revision
+                    && in_array(($backfill['status'] ?? null), ['pending', 'queued', 'completed'], true)
+                ) {
+                    continue;
+                }
+
+                $hasActiveExport = filled(data_get(
+                    $metadata,
+                    'product_data_export.pending_token',
+                ));
+                $backfill = array_merge($backfill, [
+                    'status' => 'pending',
+                    'reason' => self::REASON,
+                    'revision' => $revision,
+                    'requested_at' => now()->toISOString(),
+                ]);
+
+                unset(
+                    $backfill['completed_at'],
+                    $backfill['failed_at'],
+                    $backfill['next_attempt_at'],
+                    $backfill['error'],
+                );
+
+                if (! $hasActiveExport) {
+                    unset($backfill['queued_at'], $backfill['queued_revision']);
+                }
+
+                data_set($metadata, self::BACKFILL_PATH, $backfill);
                 $mapping->forceFill(['metadata' => $metadata])->save();
             }
 
@@ -209,11 +277,20 @@ final class LegacyVariantFamilyBackfillService
                 if (($backfill['reason'] ?? null) === self::REASON
                     && ($backfill['status'] ?? null) !== 'completed'
                 ) {
-                    data_set($productMetadata, self::BACKFILL_PATH, array_merge($backfill, [
+                    $queuedBackfill = array_merge($backfill, [
                         'status' => 'queued',
                         'queued_at' => now()->toISOString(),
                         'attempts' => max(0, (int) ($backfill['attempts'] ?? 0)) + 1,
-                    ]));
+                    ]);
+                    $revision = trim((string) ($backfill['revision'] ?? ''));
+
+                    if ($revision === '') {
+                        unset($queuedBackfill['queued_revision']);
+                    } else {
+                        $queuedBackfill['queued_revision'] = $revision;
+                    }
+
+                    data_set($productMetadata, self::BACKFILL_PATH, $queuedBackfill);
                     data_forget($productMetadata, self::BACKFILL_PATH.'.next_attempt_at');
                 }
 

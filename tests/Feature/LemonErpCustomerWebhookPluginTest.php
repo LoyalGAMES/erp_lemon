@@ -59,7 +59,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $package = $packages->build();
         $zip = new ZipArchive;
 
-        $this->assertSame('0.5.0', $package['version']);
+        $this->assertSame('0.5.1', $package['version']);
         $this->assertTrue($zip->open($package['path']) === true);
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-customer-webhook.php'),

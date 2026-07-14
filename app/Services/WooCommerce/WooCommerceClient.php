@@ -23,11 +23,20 @@ final class WooCommerceClient
 
     private const CATALOG_PLUGIN_MINIMUM_VERSION = '0.2.0';
 
-    private const PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION = '0.5.0';
+    private const PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION = '0.5.1';
 
     private const PRODUCT_TRANSLATION_CREATION_META_KEY = '_sempre_erp_translation_creation_token';
 
     private const PRODUCT_TRANSLATION_CREATION_SKU_PREFIX = 'LEMON-TR-';
+
+    /** @var array<string, list<array<string, mixed>>> */
+    private array $globalProductAttributesCache = [];
+
+    /** @var array<string, list<array<string, mixed>>> */
+    private array $globalProductAttributeTermsCache = [];
+
+    /** @var array<string, true> */
+    private array $linkedGlobalProductAttributeTermTranslations = [];
 
     public function test(WordpressIntegration $integration): array
     {
@@ -718,10 +727,20 @@ final class WooCommerceClient
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
-    public function createProductVariation(WordpressIntegration $integration, string $externalProductId, array $payload): array
-    {
+    public function createProductVariation(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        array $payload,
+        ?string $language = null,
+    ): array {
+        $url = $this->endpoint($integration, "/products/{$externalProductId}/variations");
+
+        if (filled($language)) {
+            $url .= '?lang='.rawurlencode((string) $language);
+        }
+
         $response = $this->request($integration, retry: false)
-            ->post($this->endpoint($integration, "/products/{$externalProductId}/variations"), $payload);
+            ->post($url, $payload);
 
         if (! $response->successful()) {
             throw new RuntimeException("Utworzenie wariantu WooCommerce zwróciło HTTP {$response->status()}.");
@@ -742,6 +761,7 @@ final class WooCommerceClient
         ?string $primaryExternalVariationId,
         string $sku,
         array $attributes,
+        ?string $language = null,
     ): ?array {
         $sku = trim($sku);
         $normalizedSku = mb_strtolower($sku);
@@ -749,11 +769,17 @@ final class WooCommerceClient
         $candidates = [];
 
         for ($page = 1; $page <= 50; $page++) {
+            $query = [
+                'per_page' => 100,
+                'page' => $page,
+            ];
+
+            if (filled($language)) {
+                $query['lang'] = $language;
+            }
+
             $response = $this->request($integration)
-                ->get($this->endpoint($integration, "/products/{$externalProductId}/variations"), [
-                    'per_page' => 100,
-                    'page' => $page,
-                ]);
+                ->get($this->endpoint($integration, "/products/{$externalProductId}/variations"), $query);
 
             if (! $response->successful()) {
                 throw new RuntimeException("Wyszukanie wariantów produktu WooCommerce #{$externalProductId} zwróciło HTTP {$response->status()}.");
@@ -874,6 +900,483 @@ final class WooCommerceClient
     }
 
     /**
+     * Resolve one canonical WooCommerce product attribute and make sure every
+     * localized option exists as a term of that taxonomy. Polish and English
+     * product payloads deliberately receive the same attribute ID; only term
+     * labels may differ by language.
+     *
+     * @param  list<string>  $options
+     * @param  list<string>  $sourceOptions  Logical Polish values aligned with localized options.
+     * @return array{id:int,name:string,options:list<string>,term_ids:list<int>}
+     */
+    public function ensureGlobalProductAttribute(
+        WordpressIntegration $integration,
+        string $sourceName,
+        array $options,
+        ?string $language = null,
+        array $sourceOptions = [],
+    ): array {
+        $sourceName = trim($sourceName);
+
+        if ($sourceName === '') {
+            throw new RuntimeException('Nie można utworzyć globalnego atrybutu WooCommerce bez nazwy źródłowej.');
+        }
+
+        $optionPairs = collect($options)
+            ->map(function (mixed $option, int $index) use ($sourceOptions): array {
+                $localized = trim((string) $option);
+                $source = trim((string) ($sourceOptions[$index] ?? $localized));
+
+                return [
+                    'localized' => $localized,
+                    'source' => $source !== '' ? $source : $localized,
+                ];
+            })
+            ->filter(fn (array $pair): bool => $pair['localized'] !== '')
+            ->unique(fn (array $pair): string => mb_strtolower($pair['localized']))
+            ->values()
+            ->all();
+        $attribute = $this->findGlobalProductAttribute($integration, $sourceName);
+
+        if ($attribute === null) {
+            $slug = $this->globalProductAttributeSlug($sourceName);
+            $response = null;
+            $creationException = null;
+
+            try {
+                // Attribute creation is not safe to retry automatically. A
+                // timeout may happen after Woo committed the taxonomy.
+                $response = $this->request($integration, retry: false)
+                    ->post($this->endpoint($integration, '/products/attributes'), [
+                        'name' => $sourceName,
+                        // WooCommerce's REST contract expects the registered
+                        // taxonomy slug, including the `pa_` prefix.
+                        'slug' => 'pa_'.$slug,
+                        'type' => 'select',
+                        'order_by' => 'menu_order',
+                        'has_archives' => false,
+                    ]);
+            } catch (Throwable $exception) {
+                $creationException = $exception;
+            }
+
+            $created = $response?->successful() ? $response->json() : null;
+
+            if (is_array($created) && filled($created['id'] ?? null)) {
+                $attribute = $created;
+                $this->appendGlobalProductAttributeCache($integration, $created);
+            } else {
+                // Handle a concurrent create, a term_exists style collision,
+                // and an ambiguous transport failure with one deterministic
+                // refetch by canonical slug/name.
+                $this->forgetGlobalProductAttributes($integration);
+                $attribute = $this->findGlobalProductAttribute($integration, $sourceName);
+            }
+
+            if ($attribute === null) {
+                $status = $response?->status();
+                $details = $status !== null ? " (HTTP {$status})" : '';
+
+                throw new RuntimeException(
+                    "WooCommerce nie utworzył globalnego atrybutu produktu {$sourceName}{$details}.",
+                    0,
+                    $creationException,
+                );
+            }
+        }
+
+        $attributeId = (int) ($attribute['id'] ?? 0);
+
+        if ($attributeId <= 0) {
+            throw new RuntimeException("WooCommerce zwrócił nieprawidłowe ID globalnego atrybutu {$sourceName}.");
+        }
+
+        $resolvedOptions = [];
+        $resolvedTermIds = [];
+        $language = filled($language) ? mb_strtolower(trim((string) $language)) : null;
+
+        foreach ($optionPairs as $pair) {
+            $sourceTerm = null;
+            $excludedTargetTermIds = [];
+
+            if ($language !== null && $language !== 'pl') {
+                $sourceTerm = $this->ensureGlobalProductAttributeTerm(
+                    $integration,
+                    $attributeId,
+                    $pair['source'],
+                    'pl',
+                );
+                $excludedTargetTermIds[] = (int) $sourceTerm['id'];
+            }
+
+            $term = $this->ensureGlobalProductAttributeTerm(
+                $integration,
+                $attributeId,
+                $pair['localized'],
+                $language,
+                $excludedTargetTermIds,
+            );
+            $resolvedOptions[] = trim((string) ($term['name'] ?? $pair['localized'])) ?: $pair['localized'];
+            $resolvedTermIds[] = (int) $term['id'];
+
+            if (is_array($sourceTerm)) {
+                $this->linkGlobalProductAttributeTermTranslations($integration, $attributeId, [
+                    'pl' => (int) $sourceTerm['id'],
+                    $language => (int) $term['id'],
+                ]);
+            }
+        }
+
+        return [
+            'id' => $attributeId,
+            'name' => trim((string) ($attribute['name'] ?? $sourceName)) ?: $sourceName,
+            'options' => $resolvedOptions,
+            'term_ids' => $resolvedTermIds,
+        ];
+    }
+
+    /** @param array<string, int> $translations */
+    private function linkGlobalProductAttributeTermTranslations(
+        WordpressIntegration $integration,
+        int $attributeId,
+        array $translations,
+    ): void {
+        ksort($translations);
+        $signature = $this->globalProductAttributeCacheKey($integration)
+            .'|'.$attributeId
+            .'|'.sha1(json_encode($translations, JSON_UNESCAPED_SLASHES) ?: '');
+
+        if (isset($this->linkedGlobalProductAttributeTermTranslations[$signature])) {
+            return;
+        }
+
+        $this->linkProductAttributeTermTranslations($integration, $attributeId, $translations);
+        $this->linkedGlobalProductAttributeTermTranslations[$signature] = true;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function findGlobalProductAttribute(
+        WordpressIntegration $integration,
+        string $sourceName,
+    ): ?array {
+        $slug = $this->globalProductAttributeSlug($sourceName);
+        $normalizedName = mb_strtolower(trim($sourceName));
+        $matches = collect($this->globalProductAttributes($integration))
+            ->filter(function (array $attribute) use ($slug, $normalizedName): bool {
+                $candidateSlug = $this->normalizeGlobalProductAttributeSlug(
+                    (string) ($attribute['slug'] ?? ''),
+                );
+                $candidateName = mb_strtolower(trim((string) ($attribute['name'] ?? '')));
+
+                return $candidateSlug === $slug || $candidateName === $normalizedName;
+            })
+            ->filter(fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) > 0)
+            ->unique(fn (array $attribute): int => (int) $attribute['id'])
+            ->values();
+
+        if ($matches->count() > 1) {
+            throw new RuntimeException(
+                "WooCommerce zawiera kilka globalnych atrybutów pasujących do {$sourceName}; eksport został przerwany, aby nie przypisać złej taksonomii.",
+            );
+        }
+
+        return $matches->first();
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function globalProductAttributes(WordpressIntegration $integration): array
+    {
+        $cacheKey = $this->globalProductAttributeCacheKey($integration);
+
+        if (array_key_exists($cacheKey, $this->globalProductAttributesCache)) {
+            return $this->globalProductAttributesCache[$cacheKey];
+        }
+
+        $attributes = [];
+
+        for ($page = 1; $page <= 100; $page++) {
+            $response = $this->request($integration)->get(
+                $this->endpoint($integration, '/products/attributes'),
+                ['per_page' => 100, 'page' => $page],
+            );
+
+            if (! $response->successful()) {
+                throw new RuntimeException("Pobranie globalnych atrybutów WooCommerce zwróciło HTTP {$response->status()}.");
+            }
+
+            $items = $response->json();
+
+            if (! is_array($items) || $items === []) {
+                break;
+            }
+
+            $pageItems = collect($items)
+                ->filter(fn (mixed $item): bool => is_array($item) && filled($item['id'] ?? null))
+                ->values()
+                ->all();
+            array_push($attributes, ...$pageItems);
+
+            if (count($items) < 100) {
+                break;
+            }
+        }
+
+        return $this->globalProductAttributesCache[$cacheKey] = $attributes;
+    }
+
+    /**
+     * @param  list<int>  $excludedTermIds
+     * @return array<string, mixed>
+     */
+    private function ensureGlobalProductAttributeTerm(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $option,
+        ?string $language,
+        array $excludedTermIds = [],
+    ): array {
+        $language = filled($language) ? mb_strtolower(trim((string) $language)) : null;
+        $term = $this->findGlobalProductAttributeTerm(
+            $integration,
+            $attributeId,
+            $option,
+            $language,
+            $excludedTermIds,
+        );
+
+        if ($term === null) {
+            $url = $this->endpoint($integration, "/products/attributes/{$attributeId}/terms");
+
+            if ($language !== null) {
+                $url .= '?lang='.rawurlencode($language);
+            }
+
+            $response = null;
+            $creationException = null;
+
+            try {
+                // As above, never replay a mutating POST automatically.
+                $response = $this->request($integration, retry: false)->post($url, [
+                    'name' => $option,
+                    'slug' => $this->globalProductAttributeTermSlug($option, $language),
+                ]);
+            } catch (Throwable $exception) {
+                $creationException = $exception;
+            }
+
+            $created = $response?->successful() ? $response->json() : null;
+
+            if (is_array($created)
+                && filled($created['id'] ?? null)
+                && ! in_array((int) $created['id'], $excludedTermIds, true)
+            ) {
+                $term = $created;
+                $this->appendGlobalProductAttributeTermCache($integration, $attributeId, $language, $created);
+            } else {
+                $this->forgetGlobalProductAttributeTerms($integration, $attributeId, $language);
+                $term = $this->findGlobalProductAttributeTerm(
+                    $integration,
+                    $attributeId,
+                    $option,
+                    $language,
+                    $excludedTermIds,
+                );
+            }
+
+            if ($term === null) {
+                $status = $response?->status();
+                $details = $status !== null ? " (HTTP {$status})" : '';
+
+                throw new RuntimeException(
+                    "WooCommerce nie utworzył wartości {$option} globalnego atrybutu #{$attributeId}{$details}.",
+                    0,
+                    $creationException,
+                );
+            }
+        }
+
+        return $term;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function findGlobalProductAttributeTerm(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $option,
+        ?string $language,
+        array $excludedTermIds = [],
+    ): ?array {
+        $slug = $this->globalProductAttributeTermSlug($option, $language);
+        $normalizedName = mb_strtolower(trim($option));
+        $matches = collect($this->globalProductAttributeTerms($integration, $attributeId, $language))
+            ->filter(function (array $term) use ($slug, $normalizedName): bool {
+                return Str::slug((string) ($term['slug'] ?? '')) === $slug
+                    || mb_strtolower(trim((string) ($term['name'] ?? ''))) === $normalizedName;
+            })
+            ->filter(fn (array $term): bool => (int) ($term['id'] ?? 0) > 0)
+            ->reject(fn (array $term): bool => in_array((int) $term['id'], $excludedTermIds, true))
+            ->unique(fn (array $term): int => (int) $term['id'])
+            ->values();
+
+        if ($matches->count() > 1) {
+            throw new RuntimeException(
+                "WooCommerce zawiera kilka wartości {$option} globalnego atrybutu #{$attributeId}; eksport został przerwany.",
+            );
+        }
+
+        return $matches->first();
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    private function globalProductAttributeTerms(
+        WordpressIntegration $integration,
+        int $attributeId,
+        ?string $language,
+    ): array {
+        $cacheKey = $this->globalProductAttributeTermsCacheKey($integration, $attributeId, $language);
+
+        if (array_key_exists($cacheKey, $this->globalProductAttributeTermsCache)) {
+            return $this->globalProductAttributeTermsCache[$cacheKey];
+        }
+
+        $terms = [];
+
+        for ($page = 1; $page <= 100; $page++) {
+            $query = ['per_page' => 100, 'page' => $page];
+
+            if (filled($language)) {
+                $query['lang'] = $language;
+            }
+
+            $response = $this->request($integration)->get(
+                $this->endpoint($integration, "/products/attributes/{$attributeId}/terms"),
+                $query,
+            );
+
+            if (! $response->successful()) {
+                throw new RuntimeException("Pobranie wartości globalnego atrybutu WooCommerce #{$attributeId} zwróciło HTTP {$response->status()}.");
+            }
+
+            $items = $response->json();
+
+            if (! is_array($items) || $items === []) {
+                break;
+            }
+
+            $pageItems = collect($items)
+                ->filter(fn (mixed $item): bool => is_array($item) && filled($item['id'] ?? null))
+                ->values()
+                ->all();
+            array_push($terms, ...$pageItems);
+
+            if (count($items) < 100) {
+                break;
+            }
+        }
+
+        return $this->globalProductAttributeTermsCache[$cacheKey] = $terms;
+    }
+
+    /** @param array<string, mixed> $attribute */
+    private function appendGlobalProductAttributeCache(WordpressIntegration $integration, array $attribute): void
+    {
+        $cacheKey = $this->globalProductAttributeCacheKey($integration);
+
+        if (array_key_exists($cacheKey, $this->globalProductAttributesCache)) {
+            $this->globalProductAttributesCache[$cacheKey][] = $attribute;
+        }
+    }
+
+    private function forgetGlobalProductAttributes(WordpressIntegration $integration): void
+    {
+        unset($this->globalProductAttributesCache[$this->globalProductAttributeCacheKey($integration)]);
+    }
+
+    /** @param array<string, mixed> $term */
+    private function appendGlobalProductAttributeTermCache(
+        WordpressIntegration $integration,
+        int $attributeId,
+        ?string $language,
+        array $term,
+    ): void {
+        $cacheKey = $this->globalProductAttributeTermsCacheKey($integration, $attributeId, $language);
+
+        if (array_key_exists($cacheKey, $this->globalProductAttributeTermsCache)) {
+            $this->globalProductAttributeTermsCache[$cacheKey][] = $term;
+        }
+    }
+
+    private function forgetGlobalProductAttributeTerms(
+        WordpressIntegration $integration,
+        int $attributeId,
+        ?string $language,
+    ): void {
+        unset($this->globalProductAttributeTermsCache[
+            $this->globalProductAttributeTermsCacheKey($integration, $attributeId, $language)
+        ]);
+    }
+
+    private function globalProductAttributeCacheKey(WordpressIntegration $integration): string
+    {
+        return (string) ($integration->getKey() ?: $integration->base_url);
+    }
+
+    private function globalProductAttributeTermsCacheKey(
+        WordpressIntegration $integration,
+        int $attributeId,
+        ?string $language,
+    ): string {
+        return $this->globalProductAttributeCacheKey($integration)
+            .'|'.$attributeId
+            .'|'.(filled($language) ? mb_strtolower(trim((string) $language)) : '*');
+    }
+
+    private function globalProductAttributeSlug(string $name): string
+    {
+        $slug = Str::slug($name);
+
+        if ($slug === '') {
+            $slug = 'erp-'.substr(sha1($name), 0, 12);
+        }
+
+        if (strlen($slug) > 28) {
+            $slug = substr($slug, 0, 19).'-'.substr(sha1($slug), 0, 8);
+        }
+
+        return $slug;
+    }
+
+    private function normalizeGlobalProductAttributeSlug(string $slug): string
+    {
+        $slug = preg_replace('/^pa_/', '', trim($slug)) ?? trim($slug);
+
+        return Str::slug($slug);
+    }
+
+    private function globalProductAttributeTermSlug(string $option, ?string $language = null): string
+    {
+        $slug = Str::slug($option);
+
+        if ($slug === '') {
+            $slug = 'erp-'.substr(sha1($option), 0, 12);
+        }
+
+        if (filled($language)) {
+            $slug .= '-'.Str::slug((string) $language);
+        }
+
+        return $slug;
+    }
+
+    /**
      * @param  array<string, int>  $translations
      * @return array<string, mixed>
      */
@@ -943,6 +1446,54 @@ final class WooCommerceClient
     }
 
     /**
+     * Link language-specific terms that belong to one WooCommerce global
+     * product attribute. The endpoint resolves and validates the `pa_*`
+     * taxonomy from the numeric Woo attribute ID.
+     *
+     * @param  array<string, int|string>  $translations
+     * @return array<string, mixed>
+     */
+    public function linkProductAttributeTermTranslations(
+        WordpressIntegration $integration,
+        int $attributeId,
+        array $translations,
+    ): array {
+        if ($attributeId <= 0) {
+            throw new RuntimeException('ERP przygotował niepoprawne ID globalnego atrybutu WooCommerce.');
+        }
+
+        $translations = $this->validatedProductTranslationMap($translations);
+        $url = $this->wordpressRestEndpoint(
+            $integration,
+            "/wc-lemon-erp/v1/catalog/products/attributes/{$attributeId}/terms/translations",
+        );
+
+        try {
+            $response = $this->request($integration, retry: false)
+                ->withoutRedirecting()
+                ->post($url, ['translations' => $translations]);
+        } catch (RequestException $exception) {
+            $this->throwProductAttributeTermTranslationLinkHttpException($exception->response);
+        }
+
+        if (! $response->successful()) {
+            $this->throwProductAttributeTermTranslationLinkHttpException($response);
+        }
+
+        $json = $response->json();
+
+        if (! is_array($json)
+            || data_get($json, 'linked') !== true
+            || (int) data_get($json, 'attribute_id') !== $attributeId
+            || $this->confirmedProductTranslationMap(data_get($json, 'translations')) !== $translations
+        ) {
+            throw new RuntimeException('WordPress zwrócił niepełne potwierdzenie powiązania tłumaczeń wartości atrybutu produktu.');
+        }
+
+        return $json;
+    }
+
+    /**
      * Check the non-mutating plugin endpoint before a historical backfill can
      * update or create any WooCommerce products. A missing/old plugin, missing
      * Polylang or unavailable export language leaves the family pending.
@@ -993,6 +1544,7 @@ final class WooCommerceClient
             ->unique();
 
         return ($payload['available'] ?? null) === true
+            && ($payload['attribute_term_translation_link_available'] ?? null) === true
             && $requiredLanguages->every(fn (string $language): bool => $availableLanguages->contains($language));
     }
 
@@ -1214,6 +1766,32 @@ final class WooCommerceClient
         throw new RuntimeException("Powiązanie tłumaczeń produktów w WooCommerce zwróciło HTTP {$status}.");
     }
 
+    private function throwProductAttributeTermTranslationLinkHttpException(?Response $response): never
+    {
+        $status = $response?->status() ?? 0;
+        $payload = $response?->json();
+        $code = trim((string) data_get($payload, 'code', ''));
+        $message = trim((string) data_get($payload, 'message', ''));
+
+        if ($status === 404 && ($code === '' || $code === 'rest_no_route')) {
+            throw new RuntimeException(
+                'Powiązanie tłumaczeń wartości globalnych atrybutów wymaga wtyczki Lemon ERP for WooCommerce co najmniej '
+                .self::PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION
+                .'. Pobierz nowy ZIP z ekranu Integracje i zaktualizuj wtyczkę w WordPressie.',
+            );
+        }
+
+        if (in_array($status, [401, 403], true)) {
+            throw new RuntimeException('WordPress odrzucił powiązanie tłumaczeń wartości globalnego atrybutu. Sprawdź uprawnienia manage_woocommerce i manage_product_terms użytkownika kluczy REST.');
+        }
+
+        if ($message !== '') {
+            throw new RuntimeException("WordPress nie powiązał tłumaczeń wartości globalnego atrybutu: {$message}");
+        }
+
+        throw new RuntimeException("Powiązanie tłumaczeń wartości globalnego atrybutu w WooCommerce zwróciło HTTP {$status}.");
+    }
+
     /**
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
@@ -1245,13 +1823,19 @@ final class WooCommerceClient
         string $externalProductId,
         ?string $externalVariationId,
         array $payload,
+        ?string $language = null,
     ): array {
         $endpoint = filled($externalVariationId)
             ? "/products/{$externalProductId}/variations/{$externalVariationId}"
             : "/products/{$externalProductId}";
+        $url = $this->endpoint($integration, $endpoint);
+
+        if (filled($language) && filled($externalVariationId)) {
+            $url .= '?lang='.rawurlencode((string) $language);
+        }
 
         $response = $this->request($integration)
-            ->put($this->endpoint($integration, $endpoint), $payload);
+            ->put($url, $payload);
 
         if (! $response->successful()) {
             throw new RuntimeException("Eksport tłumaczenia produktu do WooCommerce zwrócił HTTP {$response->status()}.");
@@ -2031,7 +2615,10 @@ final class WooCommerceClient
                 continue;
             }
 
-            $name = Str::slug((string) ($attribute['name'] ?? $attribute['slug'] ?? ''));
+            $attributeId = (int) ($attribute['id'] ?? 0);
+            $name = $attributeId > 0
+                ? 'id-'.$attributeId
+                : Str::slug((string) ($attribute['name'] ?? $attribute['slug'] ?? ''));
             $value = Str::slug((string) ($attribute['option'] ?? $attribute['value'] ?? ''));
 
             if ($name !== '' && $value !== '') {

@@ -79,6 +79,112 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
         Bus::assertNotDispatched(ExportWooCommerceProductDataJob::class);
     }
 
+    public function test_new_revision_survives_an_active_older_export_and_is_dispatched_after_it(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-BACKFILL-REVISION',
+            'name' => 'Sklep B2C backfill revision',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo backfill revision',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl']]],
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'LEGACY-BACKFILL-REVISION',
+            'name' => 'Rodzina ze starszym aktywnym eksportem',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'content' => ['pl' => ['name' => 'Rodzina ze starszym aktywnym eksportem']],
+                'media' => [],
+            ]],
+        ]);
+        $mapping = ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '808184',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+            'metadata' => [
+                'product_data_export' => [
+                    'pending_token' => 'older-active-token',
+                    'requested_at' => now()->toISOString(),
+                    'legacy_variant_backfill' => [
+                        'status' => 'queued',
+                        'reason' => LegacyVariantFamilyBackfillService::REASON,
+                        'revision' => 'older-revision',
+                        'queued_revision' => 'older-revision',
+                    ],
+                ],
+            ],
+        ]);
+        $service = app(LegacyVariantFamilyBackfillService::class);
+
+        $service->markPendingRevision(
+            $product,
+            LegacyVariantFamilyBackfillService::UNMARKED_FAMILY_PROMOTION_REVISION,
+        );
+
+        $metadata = $mapping->refresh()->metadata;
+        $this->assertSame('older-active-token', data_get($metadata, 'product_data_export.pending_token'));
+        $this->assertSame('pending', data_get($metadata, 'product_data_export.legacy_variant_backfill.status'));
+        $this->assertSame('older-revision', data_get(
+            $metadata,
+            'product_data_export.legacy_variant_backfill.queued_revision',
+        ));
+        $this->assertSame(
+            LegacyVariantFamilyBackfillService::UNMARKED_FAMILY_PROMOTION_REVISION,
+            data_get($metadata, 'product_data_export.legacy_variant_backfill.revision'),
+        );
+
+        Http::fake(function ($request) use ($product) {
+            if (str_ends_with(
+                $request->url(),
+                '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities',
+            )) {
+                return Http::response([
+                    'available' => true,
+                    'languages' => ['pl', 'en'],
+                    'plugin_version' => '0.5.1',
+                ]);
+            }
+
+            return Http::response([
+                'id' => 808184,
+                'sku' => $product->sku,
+            ]);
+        });
+        (new ExportWooCommerceProductDataJob($product->id, 'older-active-token'))
+            ->handle(app(ProductDataExportService::class));
+
+        $metadata = $mapping->refresh()->metadata;
+        $this->assertNull(data_get($metadata, 'product_data_export.pending_token'));
+        $this->assertSame('pending', data_get($metadata, 'product_data_export.legacy_variant_backfill.status'));
+        $this->assertNull(data_get($metadata, 'product_data_export.legacy_variant_backfill.queued_revision'));
+
+        Bus::fake();
+        $result = $service->dispatchPending(10);
+
+        $this->assertSame(1, $result['dispatched']);
+        Bus::assertDispatched(ExportWooCommerceProductDataJob::class, 1);
+        $metadata = $mapping->refresh()->metadata;
+        $this->assertNotSame('older-active-token', data_get($metadata, 'product_data_export.pending_token'));
+        $this->assertSame('queued', data_get($metadata, 'product_data_export.legacy_variant_backfill.status'));
+        $this->assertSame(
+            LegacyVariantFamilyBackfillService::UNMARKED_FAMILY_PROMOTION_REVISION,
+            data_get($metadata, 'product_data_export.legacy_variant_backfill.queued_revision'),
+        );
+    }
+
     public function test_migration_queues_one_durable_family_export_that_creates_the_missing_english_family(): void
     {
         Bus::fake();
@@ -213,12 +319,50 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
                 return $pluginReady
                     ? Http::response([
                         'available' => true,
+                        'attribute_term_translation_link_available' => true,
                         'resource' => 'product_translation_link',
                         'languages' => ['pl', 'en'],
                         'catalog_contract' => 1,
-                        'plugin_version' => '0.5.0',
+                        'plugin_version' => '0.5.1',
                     ])
                     : Http::response(['code' => 'rest_no_route'], 404);
+            }
+
+            if ($request->method() === 'GET'
+                && str_starts_with($url, 'https://shop.test/wp-json/wc/v3/products/attributes?')
+            ) {
+                return Http::response([[
+                    'id' => 70,
+                    'name' => 'Rozmiar',
+                    'slug' => 'pa_rozmiar',
+                ]]);
+            }
+
+            if ($request->method() === 'GET'
+                && str_starts_with($url, 'https://shop.test/wp-json/wc/v3/products/attributes/70/terms?')
+            ) {
+                parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+                return Http::response(($query['lang'] ?? 'pl') === 'en' ? [[
+                    'id' => 702,
+                    'name' => 'S',
+                    'slug' => 's-en',
+                ]] : [[
+                    'id' => 701,
+                    'name' => 'S',
+                    'slug' => 's-pl',
+                ]]);
+            }
+
+            if ($request->method() === 'POST'
+                && $url === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/attributes/70/terms/translations'
+            ) {
+                return Http::response([
+                    'linked' => true,
+                    'attribute_id' => 70,
+                    'taxonomy' => 'pa_rozmiar',
+                    'translations' => ['en' => 702, 'pl' => 701],
+                ]);
             }
 
             if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/123') {
@@ -241,15 +385,15 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
                 return Http::response([]);
             }
 
-            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products/223/variations') {
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products/223/variations?lang=en') {
                 return Http::response(['id' => 224, 'sku' => $request['sku']], 201);
             }
 
             if ($request->method() === 'PUT' && in_array($url, [
                 'https://shop.test/wp-json/wc/v3/products/123/variations/124',
-                'https://shop.test/wp-json/wc/v3/products/223/variations/224',
+                'https://shop.test/wp-json/wc/v3/products/223/variations/224?lang=en',
             ], true)) {
-                return Http::response(['id' => str_ends_with($url, '/224') ? 224 : 124, 'sku' => $request['sku']]);
+                return Http::response(['id' => str_contains($url, '/224') ? 224 : 124, 'sku' => $request['sku']]);
             }
 
             if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations') {

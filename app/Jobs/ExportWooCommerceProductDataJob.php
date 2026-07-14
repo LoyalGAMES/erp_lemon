@@ -130,8 +130,30 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
                 if (data_get($metadata, 'product_data_export.legacy_variant_backfill.reason')
                     === LegacyVariantFamilyBackfillService::REASON
                 ) {
-                    data_set($metadata, 'product_data_export.legacy_variant_backfill.status', 'completed');
-                    data_set($metadata, 'product_data_export.legacy_variant_backfill.completed_at', now()->toISOString());
+                    $requestedRevision = trim((string) data_get(
+                        $metadata,
+                        'product_data_export.legacy_variant_backfill.revision',
+                        '',
+                    ));
+                    $queuedRevision = trim((string) data_get(
+                        $metadata,
+                        'product_data_export.legacy_variant_backfill.queued_revision',
+                        '',
+                    ));
+
+                    if ($requestedRevision !== '' && $requestedRevision !== $queuedRevision) {
+                        // A migration requested a newer repair while this token
+                        // was already active. Do not erase it as "completed";
+                        // the dispatcher must reserve one follow-up export.
+                        data_set($metadata, 'product_data_export.legacy_variant_backfill.status', 'pending');
+                        data_forget($metadata, 'product_data_export.legacy_variant_backfill.completed_at');
+                        data_forget($metadata, 'product_data_export.legacy_variant_backfill.queued_at');
+                        data_forget($metadata, 'product_data_export.legacy_variant_backfill.queued_revision');
+                    } else {
+                        data_set($metadata, 'product_data_export.legacy_variant_backfill.status', 'completed');
+                        data_set($metadata, 'product_data_export.legacy_variant_backfill.completed_at', now()->toISOString());
+                    }
+
                     data_forget($metadata, 'product_data_export.legacy_variant_backfill.next_attempt_at');
                     data_forget($metadata, 'product_data_export.legacy_variant_backfill.failed_at');
                     data_forget($metadata, 'product_data_export.legacy_variant_backfill.error');

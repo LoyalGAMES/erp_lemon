@@ -21,7 +21,7 @@ final class Lemon_Erp_Customer_Webhook
 
     private const CONTRACT_VERSION = '1';
 
-    private const PLUGIN_VERSION = '0.5.0';
+    private const PLUGIN_VERSION = '0.5.1';
 
     private const MAX_ATTEMPTS = 7;
 

@@ -27,10 +27,11 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
         Http::fake([
             'https://shop.example.test/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities' => Http::response([
                 'available' => true,
+                'attribute_term_translation_link_available' => true,
                 'resource' => 'product_translation_link',
                 'languages' => ['pl', 'en'],
                 'catalog_contract' => 1,
-                'plugin_version' => '0.5.0',
+                'plugin_version' => '0.5.1',
             ]),
         ]);
 
@@ -61,6 +62,43 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
         ));
     }
 
+    public function test_backfill_readiness_requires_attribute_term_linking_capability(): void
+    {
+        Http::fake([
+            'https://shop.example.test/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities' => Http::response([
+                'available' => true,
+                'attribute_term_translation_link_available' => false,
+                'resource' => 'product_translation_link',
+                'languages' => ['pl', 'en'],
+                'catalog_contract' => 1,
+                'plugin_version' => '0.5.1',
+            ]),
+        ]);
+
+        $this->assertFalse(app(WooCommerceClient::class)->productTranslationLinkingAvailable(
+            $this->integration(),
+            ['pl', 'en'],
+        ));
+    }
+
+    public function test_backfill_readiness_rejects_ambiguous_previous_050_package(): void
+    {
+        Http::fake([
+            'https://shop.example.test/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities' => Http::response([
+                'available' => true,
+                'resource' => 'product_translation_link',
+                'languages' => ['pl', 'en'],
+                'catalog_contract' => 1,
+                'plugin_version' => '0.5.0',
+            ]),
+        ]);
+
+        $this->assertFalse(app(WooCommerceClient::class)->productTranslationLinkingAvailable(
+            $this->integration(),
+            ['pl', 'en'],
+        ));
+    }
+
     public function test_it_links_products_with_woocommerce_credentials_and_normalized_payload(): void
     {
         Http::fake([
@@ -70,7 +108,7 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
                 'resource' => 'product',
                 'translations' => ['en' => 750099, 'pl' => 700143],
                 'translation_group' => 'product:700143|750099',
-                'plugin_version' => '0.5.0',
+                'plugin_version' => '0.5.1',
             ]),
         ]);
 
@@ -121,7 +159,7 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
         ]);
 
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('co najmniej 0.5.0');
+        $this->expectExceptionMessage('co najmniej 0.5.1');
 
         app(WooCommerceClient::class)->linkProductTranslations(
             $this->integration(),

@@ -725,6 +725,7 @@
                             $channelNames = $channels($familyProducts);
                             $price = $retailPrice($product, $familyVariants);
                             $externalId = $product->externalDisplayId();
+                            $inheritedVariantThumbnailUrl = null;
                             $isImportIssueProduct = (bool) ($row['is_import_issue'] ?? false);
                             $isStorefrontHidden = $familyProducts->contains(fn ($member): bool => $member->isStorefrontHidden());
                             $stockVerificationRequired = $familyProducts->contains(fn ($member): bool => $member->requiresStockVerification());
@@ -844,7 +845,20 @@
                         @foreach ($variants as $variant)
                             @php
                                 $variantImage = $variant->imageUrl();
-                                $variantThumbnailUrl = $variant->thumbnailUrl(88, 112);
+                                $variantMaster = $variant->masterData();
+                                $inheritsParentImage = $variantImage === null
+                                    && data_get($variantMaster, 'inheritance.mode') === 'parent'
+                                    && (int) data_get($variantMaster, 'inheritance.parent_product_id') === (int) $product->id;
+
+                                if ($inheritsParentImage) {
+                                    // The parent is already loaded as the current family row,
+                                    // so this fallback never queries variantParents per child.
+                                    $variantImage = $imageUrl;
+                                    $inheritedVariantThumbnailUrl ??= $product->thumbnailUrl(88, 112);
+                                    $variantThumbnailUrl = $inheritedVariantThumbnailUrl;
+                                } else {
+                                    $variantThumbnailUrl = $variant->thumbnailUrl(88, 112);
+                                }
                                 $variantStock = $stockTotals(collect([$variant]));
                                 $variantChannels = $channels(collect([$variant]));
                                 $variantPrice = $retailPrice($variant, collect());
