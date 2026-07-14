@@ -127,6 +127,8 @@
         .order-details summary, .order-notes summary { cursor: pointer; color: var(--green-dark); font-weight: 760; }
         .order-details-grid { display: grid; gap: 5px; margin-top: 8px; }
         .order-details-grid strong { color: var(--text); }
+        .order-details-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+        .order-details-actions .button { min-height: 40px; }
         .order-actions { display: grid; grid-template-columns: minmax(160px, .55fr) minmax(260px, 1fr) minmax(190px, .65fr); gap: 10px; align-items: stretch; }
         .order-actions .button { min-height: 58px; width: 100%; font-size: 17px; border-radius: 8px; }
         .order-problem-form { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 8px; }
@@ -253,6 +255,12 @@
         $canManagePackingSettings = ! is_object($erpUser)
             || ! method_exists($erpUser, 'canAccessArea')
             || $erpUser->canAccessArea('settings');
+        $canViewOrders = ! is_object($erpUser)
+            || ! method_exists($erpUser, 'canAccessArea')
+            || $erpUser->canAccessArea('orders');
+        $canEditOrders = ! is_object($erpUser)
+            || ! method_exists($erpUser, 'canAccessArea')
+            || $erpUser->canAccessArea('order_editing');
         $waitingCourierOrders = $waitingCourierGroups->sum('orders_count');
         $segmentQuery = fn (string $segment): array => array_filter([
             'view' => $packingView,
@@ -524,6 +532,7 @@
                         $tasksForOrder = $order->packingTasks;
                         $firstTask = $tasksForOrder->first();
                         $shippingLabel = $order->shipmentLabels?->firstWhere('status', 'generated');
+                        $shippingLabelDownloadAllowed = (bool) ($order->shipment_label_download_allowed ?? false);
                         $shippingTrackingUrl = $shippingLabel
                             ? $shippingProviderResolver->trackingUrl($shippingLabel)
                             : null;
@@ -542,7 +551,15 @@
                     <article class="order-card" data-packing-card>
                         <div class="order-card-header">
                             <div>
-                                <div class="order-title"><a href="{{ route('orders.show', $order) }}">Zamówienie {{ $order->external_number }}</a></div>
+                                <div class="order-title">
+                                    @if ($canViewOrders)
+                                        <a href="{{ route('orders.show', $order) }}">Zamówienie {{ $order->external_number }}</a>
+                                    @elseif ($canEditOrders)
+                                        <a href="{{ route('orders.edit', ['order' => $order, 'return_to' => 'packing']) }}">Zamówienie {{ $order->external_number }}</a>
+                                    @else
+                                        Zamówienie {{ $order->external_number }}
+                                    @endif
+                                </div>
                                 <div class="order-meta">{{ $order->salesChannel?->code ?? '-' }} · {{ $firstTask?->customer_name ?: '-' }}</div>
                             </div>
                             <div class="order-badges">
@@ -598,6 +615,11 @@
                                 <div><strong>Wysyłka:</strong> {{ $person($shipping) }} · {{ $address($shipping) }}</div>
                                 <div><strong>Billing:</strong> {{ $person($billing) }} · {{ $address($billing) }}</div>
                             </div>
+                            @if ($canEditOrders)
+                                <div class="order-details-actions">
+                                    <a class="button" href="{{ route('orders.edit', ['order' => $order, 'return_to' => 'packing']) }}">Edytuj zamówienie</a>
+                                </div>
+                            @endif
                         </details>
 
                         <div class="order-actions">
@@ -607,7 +629,9 @@
                                         Nr etykiety: {{ $shippingLabel->trackingIdentifier() ?: '#'.$shippingLabel->id }}
                                     </div>
                                     <div class="shipment-label-actions">
-                                        <a class="button secondary" href="{{ route('packing.labels.download', $shippingLabel) }}">Pobierz etykietę</a>
+                                        @if ($shippingLabelDownloadAllowed)
+                                            <a class="button secondary" href="{{ route('packing.labels.download', $shippingLabel) }}">Pobierz etykietę</a>
+                                        @endif
                                         @if ($shippingTrackingUrl)
                                             <a class="button secondary" href="{{ $shippingTrackingUrl }}" target="_blank" rel="noopener noreferrer" aria-label="Śledź przesyłkę {{ $shippingLabel->trackingIdentifier() }}">Śledź paczkę</a>
                                         @endif

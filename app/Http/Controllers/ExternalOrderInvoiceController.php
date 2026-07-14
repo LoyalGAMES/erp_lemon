@@ -6,6 +6,7 @@ namespace App\Http\Controllers;
 
 use App\Models\ExternalOrder;
 use App\Services\Invoices\OrderInvoiceService;
+use App\Services\Orders\OrderMutationLock;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -18,6 +19,7 @@ class ExternalOrderInvoiceController extends Controller
         ExternalOrder $order,
         OrderInvoiceService $invoices,
         InvoiceWooCommerceUploadService $uploader,
+        OrderMutationLock $orderMutationLock,
     ): RedirectResponse {
         $validated = $request->validate([
             'document_type' => ['nullable', 'string', 'in:vat,proforma'],
@@ -25,26 +27,31 @@ class ExternalOrderInvoiceController extends Controller
         $documentType = $validated['document_type'] ?? 'vat';
 
         try {
-            $invoice = $documentType === 'proforma'
-                ? $invoices->createProformaForOrder($order)
-                : $invoices->createForOrder($order);
+            return $orderMutationLock->forOrder(
+                $order,
+                function () use ($documentType, $invoices, $order, $uploader): RedirectResponse {
+                    $invoice = $documentType === 'proforma'
+                        ? $invoices->createProformaForOrder($order)
+                        : $invoices->createForOrder($order);
+
+                    if ($documentType === 'proforma') {
+                        return back()->with('status', "Wystawiono proformę {$invoice->number}.");
+                    }
+
+                    try {
+                        $uploader->upload($invoice);
+                    } catch (RuntimeException $exception) {
+                        return back()->with(
+                            'error',
+                            "Wystawiono fakturę {$invoice->number}, ale nie dodano jej do zamówienia WooCommerce: {$exception->getMessage()} Po poprawieniu integracji kliknij Wyślij do WooCommerce przy tej fakturze.",
+                        );
+                    }
+
+                    return back()->with('status', "Wystawiono fakturę {$invoice->number} i dodano ją do zamówienia WooCommerce.");
+                },
+            );
         } catch (RuntimeException $exception) {
             return back()->with('error', $exception->getMessage());
         }
-
-        if ($documentType === 'proforma') {
-            return back()->with('status', "Wystawiono proformę {$invoice->number}.");
-        }
-
-        try {
-            $uploader->upload($invoice);
-        } catch (RuntimeException $exception) {
-            return back()->with(
-                'error',
-                "Wystawiono fakturę {$invoice->number}, ale nie dodano jej do zamówienia WooCommerce: {$exception->getMessage()} Po poprawieniu integracji kliknij Wyślij do WooCommerce przy tej fakturze.",
-            );
-        }
-
-        return back()->with('status', "Wystawiono fakturę {$invoice->number} i dodano ją do zamówienia WooCommerce.");
     }
 }

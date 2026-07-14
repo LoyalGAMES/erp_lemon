@@ -46,7 +46,9 @@ final class StockReservationService
             $releasedPairs = [];
             $newPairs = [];
 
-            if (! $this->shouldReserve($order->status) || $this->fulfillmentStatus->hasPostedWz($order)) {
+            if ($order->hasCancellationOperation()
+                || ! $this->shouldReserve($order->status)
+                || $this->fulfillmentStatus->hasPostedWz($order)) {
                 $releasedPairs = $this->releaseReservations($openReservations);
             } else {
                 $routes = $this->warehouseResolver->allocationRoutes((int) $order->sales_channel_id);

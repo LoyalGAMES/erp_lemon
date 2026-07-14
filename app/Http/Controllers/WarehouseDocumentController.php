@@ -11,6 +11,7 @@ use App\Models\WarehouseDocument;
 use App\Services\Audit\AuditLogService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\Inventory\WarehouseDocumentSettingsService;
+use App\Services\Orders\OrderMutationLock;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -66,6 +67,7 @@ class WarehouseDocumentController extends Controller
         Request $request,
         WarehouseDocument $document,
         AuditLogService $audit,
+        OrderMutationLock $orderMutationLock,
     ): RedirectResponse {
         if ($document->status !== 'draft') {
             return back()->with('error', 'Edytować można tylko dokument w statusie szkic.');
@@ -110,45 +112,48 @@ class WarehouseDocumentController extends Controller
         $documentDate = CarbonImmutable::parse((string) ($validated['document_date'] ?? $document->document_date?->toDateString() ?? now()->toDateString()))->startOfDay();
 
         try {
-            [$document, $before] = DB::transaction(function () use ($document, $validated, $lines, $documentDate): array {
-                $lockedDocument = WarehouseDocument::query()
-                    ->with(['lines.product', 'sourceWarehouse', 'destinationWarehouse'])
-                    ->lockForUpdate()
-                    ->findOrFail($document->id);
+            [$document, $before] = $orderMutationLock->forWarehouseDocument(
+                $document,
+                fn (): array => DB::transaction(function () use ($document, $validated, $lines, $documentDate): array {
+                    $lockedDocument = WarehouseDocument::query()
+                        ->with(['lines.product', 'sourceWarehouse', 'destinationWarehouse'])
+                        ->lockForUpdate()
+                        ->findOrFail($document->id);
 
-                if ($lockedDocument->status !== 'draft') {
-                    throw new RuntimeException('Edytować można tylko dokument w statusie szkic.');
-                }
+                    if ($lockedDocument->status !== 'draft') {
+                        throw new RuntimeException('Edytować można tylko dokument w statusie szkic.');
+                    }
 
-                $before = [
-                    'number' => $lockedDocument->number,
-                    'type' => $lockedDocument->type,
-                    'source_warehouse' => $lockedDocument->sourceWarehouse?->code,
-                    'destination_warehouse' => $lockedDocument->destinationWarehouse?->code,
-                    'notes' => $lockedDocument->notes,
-                    'lines' => $lockedDocument->lines->map(fn ($line): array => [
-                        'sku' => $line->product?->sku,
-                        'quantity' => (string) $line->quantity,
-                        'unit_gross_price' => $line->unit_gross_price !== null ? (string) $line->unit_gross_price : null,
-                        'location' => data_get($line->metadata, 'location'),
-                    ])->values()->all(),
-                ];
+                    $before = [
+                        'number' => $lockedDocument->number,
+                        'type' => $lockedDocument->type,
+                        'source_warehouse' => $lockedDocument->sourceWarehouse?->code,
+                        'destination_warehouse' => $lockedDocument->destinationWarehouse?->code,
+                        'notes' => $lockedDocument->notes,
+                        'lines' => $lockedDocument->lines->map(fn ($line): array => [
+                            'sku' => $line->product?->sku,
+                            'quantity' => (string) $line->quantity,
+                            'unit_gross_price' => $line->unit_gross_price !== null ? (string) $line->unit_gross_price : null,
+                            'location' => data_get($line->metadata, 'location'),
+                        ])->values()->all(),
+                    ];
 
-                $lockedDocument->update([
-                    'source_warehouse_id' => $validated['source_warehouse_id'] ?? null,
-                    'destination_warehouse_id' => $validated['destination_warehouse_id'] ?? null,
-                    'document_date' => $documentDate,
-                    'notes' => $validated['notes'] ?? null,
-                ]);
+                    $lockedDocument->update([
+                        'source_warehouse_id' => $validated['source_warehouse_id'] ?? null,
+                        'destination_warehouse_id' => $validated['destination_warehouse_id'] ?? null,
+                        'document_date' => $documentDate,
+                        'notes' => $validated['notes'] ?? null,
+                    ]);
 
-                $lockedDocument->lines()->delete();
+                    $lockedDocument->lines()->delete();
 
-                foreach ($lines as $line) {
-                    $lockedDocument->lines()->create($line);
-                }
+                    foreach ($lines as $line) {
+                        $lockedDocument->lines()->create($line);
+                    }
 
-                return [$lockedDocument, $before];
-            }, 3);
+                    return [$lockedDocument, $before];
+                }, 3),
+            );
         } catch (RuntimeException $exception) {
             return back()->withInput()->with('error', $exception->getMessage());
         }
@@ -189,9 +194,15 @@ class WarehouseDocumentController extends Controller
         WarehouseDocument $document,
         WarehouseDocumentPostingService $postingService,
         AuditLogService $audit,
+        OrderMutationLock $orderMutationLock,
     ): RedirectResponse {
         try {
-            $postingService->post($document);
+            $orderMutationLock->forWarehouseDocument(
+                $document,
+                function () use ($document, $postingService): void {
+                    $postingService->post($document);
+                },
+            );
         } catch (RuntimeException $exception) {
             $audit->record(
                 'warehouse_document.post_failed',
@@ -211,9 +222,15 @@ class WarehouseDocumentController extends Controller
         WarehouseDocument $document,
         WarehouseDocumentPostingService $postingService,
         AuditLogService $audit,
+        OrderMutationLock $orderMutationLock,
     ): RedirectResponse {
         try {
-            $postingService->cancel($document);
+            $orderMutationLock->forWarehouseDocument(
+                $document,
+                function () use ($document, $postingService): void {
+                    $postingService->cancel($document);
+                },
+            );
         } catch (RuntimeException $exception) {
             $audit->record(
                 'warehouse_document.cancel_failed',

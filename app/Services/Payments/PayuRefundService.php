@@ -8,6 +8,7 @@ use App\Models\CustomerPayment;
 use App\Models\Invoice;
 use App\Models\ReturnCase;
 use App\Services\Communication\CustomerCommunicationService;
+use App\Services\Orders\OrderCancellationGuard;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
@@ -18,6 +19,7 @@ final class PayuRefundService
         private readonly PayuRefundSettingsService $settings,
         private readonly PaymentMethodClassifier $classifier,
         private readonly CustomerCommunicationService $communication,
+        private readonly OrderCancellationGuard $cancellationGuard,
     ) {}
 
     public function attemptAutomaticRefund(ReturnCase $returnCase, Invoice $invoice): ?CustomerPayment
@@ -56,6 +58,8 @@ final class PayuRefundService
         if ($order === null) {
             throw new RuntimeException('Refund PayU wymaga zwrotu powiązanego z zamówieniem.');
         }
+
+        $this->cancellationGuard->assertReturnAllowed($order);
 
         $payuOrderId = $this->classifier->payuOrderId($order);
 

@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Models\CustomerMessage;
+use App\Models\CustomerPayment;
 use App\Models\ExternalOrder;
 use App\Models\Invoice;
+use App\Models\OrderCancellation;
 use App\Models\PackingTask;
 use App\Models\Product;
 use App\Models\SalesChannel;
@@ -17,8 +19,10 @@ use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\Invoices\InvoiceSettingsService;
+use App\Services\Orders\OrderCancellationService;
 use App\Services\Packing\PackingTaskService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
@@ -1318,6 +1322,266 @@ class PackingWorkflowTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && str_contains($request->url(), '/wp-json/wc/v3/orders/702')
             && ($request->data()['status'] ?? null) === 'cancelled');
+    }
+
+    public function test_paid_packing_problem_runs_one_safe_refund_and_only_problem_notification(): void
+    {
+        $refundPostCount = 0;
+        $statusPutCount = 0;
+        $wooOrder = [
+            'id' => 703,
+            'number' => '703',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total' => '349.00',
+            'date_paid' => '2026-07-14T10:00:00',
+            'date_paid_gmt' => '2026-07-14T08:00:00',
+            'payment_method' => 'payu',
+            'payment_method_title' => 'PayU',
+            'transaction_id' => 'TX-PROBLEM-703',
+            'refunds' => [],
+        ];
+
+        Http::fake(function (Request $request) use ($wooOrder, &$refundPostCount, &$statusPutCount) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET' && str_ends_with($path, '/orders/703/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($path, '/orders/703')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($path, '/orders/703/refunds')) {
+                $refundPostCount++;
+
+                return Http::response([
+                    'id' => 9703,
+                    'amount' => '349.00',
+                    'reason' => $request['reason'],
+                    'refunded_payment' => true,
+                ], 201);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($path, '/orders/703')) {
+                $statusPutCount++;
+
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-PROBLEM-PAID',
+            'name' => 'Sklep B2C problem opłacony',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Sempre WooCommerce problem opłacony',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-PAID-PROBLEM',
+            'name' => 'Koszula problem opłacony',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'wordpress_integration_id' => $integration->id,
+            'external_id' => '703',
+            'external_number' => '703',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 349,
+            'billing_data' => [
+                'first_name' => 'Ewa',
+                'last_name' => 'Nowak',
+                'email' => 'ewa@example.test',
+            ],
+            'raw_payload' => $wooOrder,
+            'external_created_at' => now()->subHour(),
+        ]);
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'problem-paid-1',
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'quantity' => 1,
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'collect']))->assertOk();
+        $task = PackingTask::query()->firstOrFail();
+
+        foreach ([1, 2] as $attempt) {
+            $this->postJson(route('packing.groups.problem'), [
+                'task_ids' => [$task->id],
+                'reason' => 'Klientka zgłosiła problem z zamówieniem',
+            ])
+                ->assertOk()
+                ->assertJsonPath('ok', true);
+        }
+
+        $cancellation = OrderCancellation::query()->sole();
+        $payment = CustomerPayment::query()->sole();
+        $task->refresh();
+
+        $this->assertSame(1, $refundPostCount);
+        $this->assertSame(1, $statusPutCount);
+        $this->assertSame('completed', $cancellation->status);
+        $this->assertSame('submitted', $cancellation->refund_status);
+        $this->assertSame('packing_problem', data_get($cancellation->metadata, 'source'));
+        $this->assertTrue((bool) data_get($cancellation->metadata, 'context.preserve_packing_problem'));
+        $this->assertSame('cancelled', $order->fresh()->status);
+        $this->assertSame('problem', $task->status);
+        $this->assertTrue((bool) data_get($task->metadata, 'order_cancellation.preserved_as_problem'));
+        $this->assertSame('Klientka zgłosiła problem z zamówieniem', data_get($task->metadata, 'packing_problem.reason'));
+        $this->assertSame('outgoing', $payment->direction);
+        $this->assertSame('paid', $payment->status);
+        $this->assertSame('349.00', (string) $payment->amount);
+        $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_cancelled_problem')->count());
+        $this->assertSame(0, CustomerMessage::query()->where('trigger', 'order_cancelled')->count());
+    }
+
+    public function test_packing_problem_waiting_for_manual_shipping_does_not_claim_cancellation_or_notify_customer(): void
+    {
+        $wooOrder = [
+            'id' => 704,
+            'number' => '704',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total' => '199.00',
+            'date_paid' => null,
+            'date_paid_gmt' => null,
+            'payment_method' => 'cod',
+            'payment_method_title' => 'Płatność przy odbiorze',
+            'transaction_id' => '',
+            'refunds' => [],
+        ];
+        Http::fake(function (Request $request) use ($wooOrder) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET' && str_ends_with($path, '/orders/704/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($path, '/orders/704')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($path, '/orders/704')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-PROBLEM-SHIPPING-GATE',
+            'name' => 'Sklep B2C problem z etykietą',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Sempre WooCommerce problem shipping gate',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'order_import_enabled' => true,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-PROBLEM-SHIPPING-GATE',
+            'name' => 'Produkt z etykietą do ręcznego cofnięcia',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'wordpress_integration_id' => $integration->id,
+            'external_id' => '704',
+            'external_number' => '704',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 199,
+            'billing_data' => [
+                'first_name' => 'Alicja',
+                'last_name' => 'Nowak',
+                'email' => 'alicja@example.test',
+            ],
+            'raw_payload' => $wooOrder,
+            'external_created_at' => now()->subHour(),
+        ]);
+        $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'problem-shipping-gate-1',
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'quantity' => 1,
+        ]);
+        ShippingLabel::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_order_id' => $order->id,
+            'purpose' => 'shipment',
+            'idempotency_key' => 'shipment:problem-shipping-gate:'.$order->id,
+            'status' => 'generated',
+            'provider' => 'inpost',
+            'label_number' => 'SHIP-CONFIRMED-704',
+            'disk' => 'local',
+            'path' => 'shipping-labels/problem-shipping-gate-704.zpl',
+            'mime_type' => 'application/zpl',
+            'response_payload' => ['shipment' => ['status' => 'confirmed']],
+            'generated_at' => now(),
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'collect']))->assertOk();
+        $task = PackingTask::query()->firstOrFail();
+
+        $response = $this->postJson(route('packing.groups.problem'), [
+            'task_ids' => [$task->id],
+            'reason' => 'Problem wymagający anulowania przesyłki',
+        ]);
+
+        $response
+            ->assertStatus(409)
+            ->assertJsonPath('ok', false);
+        $this->assertStringContainsString(
+            'bezpiecznie wstrzymane',
+            mb_strtolower((string) $response->json('message')),
+        );
+
+        $cancellation = OrderCancellation::query()->sole();
+        $this->assertSame('attention_required', $cancellation->status);
+        $this->assertSame('cancellation-pending', $order->fresh()->status);
+        $this->assertSame('open', $task->fresh()->status);
+        $this->assertSame('attention_required', $cancellation->steps()->where('step', 'shipping')->sole()->status);
+        $this->assertDatabaseCount('customer_messages', 0);
+        $this->assertDatabaseCount('customer_payments', 0);
+        Http::assertNothingSent();
+
+        $completed = app(OrderCancellationService::class)->confirmManualShippingCancellation(
+            $order->fresh(),
+            null,
+            'Potwierdzono ręczne anulowanie przesyłki.',
+        );
+
+        $this->assertFalse($completed['attention_required']);
+        $this->assertSame('cancelled', $order->fresh()->status);
+        $this->assertSame('problem', $task->fresh()->status);
+        $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_cancelled_problem')->count());
+        $this->assertSame(0, CustomerMessage::query()->where('trigger', 'order_cancelled')->count());
+        Http::assertSentCount(3);
     }
 
     public function test_on_hold_order_is_not_available_for_mobile_picking(): void

@@ -13,11 +13,18 @@
         .document-section { margin-top: 16px; }
         .document-notes { padding: 16px; color: var(--muted); white-space: pre-wrap; }
         .document-page-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+        .order-snapshot-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 16px; }
+        .order-snapshot-card { border: 1px solid var(--border); border-radius: 8px; padding: 14px; line-height: 1.55; overflow-wrap: anywhere; }
+        .order-snapshot-card > strong { display: block; margin-bottom: 6px; }
+        .order-snapshot-label { color: var(--muted); font-size: 12px; font-weight: 720; }
+        .order-snapshot-note { grid-column: 1 / -1; white-space: pre-wrap; }
         @media (max-width: 960px) {
             .document-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .order-snapshot-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 560px) {
             .document-summary { grid-template-columns: 1fr; }
+            .order-snapshot-grid { grid-template-columns: 1fr; }
         }
     </style>
 @endpush
@@ -87,6 +94,8 @@
             <strong>{{ $document->cancelled_at?->format('Y-m-d H:i') ?? '-' }}</strong>
         </article>
     </section>
+
+    @include('documents._order-snapshot')
 
     <section class="card document-section">
         <div class="panel-header">

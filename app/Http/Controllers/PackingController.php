@@ -32,6 +32,9 @@ use Throwable;
 
 class PackingController extends Controller
 {
+    /** @var list<string> */
+    private const DOWNLOADABLE_SHIPMENT_LABEL_STATUSES = ['generated', 'picked_up', 'delivered'];
+
     public function index(
         Request $request,
         PackingTaskService $packing,
@@ -547,7 +550,7 @@ class PackingController extends Controller
 
     public function downloadLabel(ShippingLabel $label): StreamedResponse
     {
-        if ($label->purpose !== 'shipment' || $label->external_order_id === null) {
+        if (! $this->shipmentLabelCanBeDownloaded($label)) {
             abort(404);
         }
 
@@ -731,6 +734,9 @@ class PackingController extends Controller
                     ->unique()
                     ->values()
                     ->all();
+                $label = $order->shipmentLabels?->firstWhere('status', 'generated');
+                $order->shipment_label_download_allowed = $label instanceof ShippingLabel
+                    && $this->shipmentLabelCanBeDownloaded($label, $order);
 
                 return $order;
             })
@@ -770,6 +776,8 @@ class PackingController extends Controller
                         }
 
                         $label = $order->shipmentLabels?->firstWhere('status', 'generated');
+                        $labelDownloadAllowed = $label instanceof ShippingLabel
+                            && $this->shipmentLabelCanBeDownloaded($label, $order);
 
                         return [
                             'id' => $order->id,
@@ -777,7 +785,7 @@ class PackingController extends Controller
                             'customer_name' => $first->customer_name ?: '-',
                             'tasks_count' => $orderTasks->count(),
                             'packed_at' => $first->packed_at,
-                            'label_id' => $label?->id,
+                            'label_id' => $labelDownloadAllowed ? $label->id : null,
                             'label_number' => $label?->trackingIdentifier(),
                             'tracking_url' => $label instanceof ShippingLabel ? $providers->trackingUrl($label) : null,
                             'tracking_status' => $label?->tracking_status,
@@ -891,6 +899,9 @@ class PackingController extends Controller
                 $label = $order instanceof ExternalOrder
                     ? $order->shipmentLabels?->first()
                     : null;
+                $labelDownloadAllowed = $label instanceof ShippingLabel
+                    && $order instanceof ExternalOrder
+                    && $this->shipmentLabelCanBeDownloaded($label, $order);
 
                 return [
                     'order_id' => $order instanceof ExternalOrder ? $order->id : null,
@@ -903,7 +914,7 @@ class PackingController extends Controller
                     'packed_at' => $group->sortBy('packed_at')->first()?->packed_at,
                     'last_packed_at' => $first->packed_at,
                     'pickup_at' => $pickupAt ? Carbon::parse($pickupAt) : null,
-                    'label_id' => $label?->id,
+                    'label_id' => $labelDownloadAllowed ? $label->id : null,
                     'label_number' => $label?->trackingIdentifier(),
                     'tracking_url' => $label instanceof ShippingLabel ? $providers->trackingUrl($label) : null,
                     'tracking_status' => $label?->tracking_status,
@@ -917,6 +928,33 @@ class PackingController extends Controller
             ->filter()
             ->sortByDesc('last_packed_at')
             ->values();
+    }
+
+    private function shipmentLabelCanBeDownloaded(
+        ShippingLabel $label,
+        ?ExternalOrder $order = null,
+    ): bool {
+        if ($label->purpose !== 'shipment'
+            || $label->external_order_id === null
+            || ! in_array(mb_strtolower((string) $label->status), self::DOWNLOADABLE_SHIPMENT_LABEL_STATUSES, true)) {
+            return false;
+        }
+
+        $order ??= $label->order()->first();
+
+        if (! $order instanceof ExternalOrder
+            || in_array(mb_strtolower((string) $order->status), [
+                'cancellation-pending',
+                'cancelled',
+                'canceled',
+                'refunded',
+            ], true)) {
+            return false;
+        }
+
+        // cancellationOperation() sprawdza zamówienie główne rodziny splitów
+        // i celowo ignoruje odrzucone próby anulowania.
+        return ! $order->hasCancellationOperation();
     }
 
     /** @return array{name:string,sku:?string,size_label:?string,quantity:mixed,image_url:?string,thumbnail_url:?string} */

@@ -137,4 +137,24 @@ class ExternalOrder extends Model
     {
         return $this->hasMany(CustomerPayment::class)->latest('booked_at')->latest();
     }
+
+    public function cancellation(): HasOne
+    {
+        return $this->hasOne(OrderCancellation::class);
+    }
+
+    public function cancellationOperation(): ?OrderCancellation
+    {
+        $rootId = (int) ($this->split_root_order_id ?: $this->id);
+
+        return OrderCancellation::query()
+            ->where('external_order_id', $rootId)
+            ->where('status', '!=', 'rejected')
+            ->first();
+    }
+
+    public function hasCancellationOperation(): bool
+    {
+        return $this->cancellationOperation() instanceof OrderCancellation;
+    }
 }

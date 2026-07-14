@@ -58,8 +58,8 @@ final class InPostShipmentService
         return [
             'shipment_id' => $shipmentId,
             'tracking_number' => filled($shipment['tracking_number'] ?? null) ? (string) $shipment['tracking_number'] : null,
-            'contents' => $this->fetchLabel($account, $shipmentId),
-            'mime_type' => 'application/pdf',
+            'contents' => $this->fetchLabel($account, $shipmentId, 'zpl'),
+            'mime_type' => 'application/zpl',
             'response_payload' => $shipment,
         ];
     }
@@ -254,6 +254,62 @@ final class InPostShipmentService
     }
 
     /**
+     * Anuluje przesyłkę w ShipX. API InPost pozwala na tę operację tylko dla
+     * przesyłek, które nie zostały jeszcze potwierdzone. `invalid_action` jest
+     * wynikiem biznesowym (przesyłkę trzeba obsłużyć ręcznie), a nie awarią
+     * połączenia, dlatego zwracamy go w ustrukturyzowanej postaci.
+     *
+     * @return array{status:string,shipment_id:string,http_status:int,message:?string,response_payload:array<string,mixed>}
+     */
+    public function cancelShipment(string $shipmentId, CourierAccount $account): array
+    {
+        $shipmentId = trim($shipmentId);
+
+        if ($shipmentId === '') {
+            throw new RuntimeException('Nie można anulować przesyłki InPost bez identyfikatora ShipX.');
+        }
+
+        // Celowo bez retry: ponowienie niejednoznacznej operacji DELETE należy
+        // do sagi anulowania, która zna zapisany stan całej operacji.
+        $response = $this->request($account)->delete('/v1/shipments/'.rawurlencode($shipmentId));
+        $body = $response->json();
+        $payload = is_array($body) ? $body : [];
+
+        if ($response->successful()) {
+            return [
+                'status' => 'cancelled',
+                'shipment_id' => $shipmentId,
+                'http_status' => $response->status(),
+                'message' => null,
+                'response_payload' => $payload,
+            ];
+        }
+
+        $error = mb_strtolower(trim((string) data_get($payload, 'error', '')));
+        $message = $this->errorMessage(
+            $payload,
+            'InPost nie pozwala już anulować tej przesyłki zdalnie.',
+        );
+
+        if ($error === 'invalid_action' || str_contains(mb_strtolower($message), 'invalid_action')) {
+            return [
+                'status' => 'remote_not_cancellable',
+                'shipment_id' => $shipmentId,
+                'http_status' => $response->status(),
+                'message' => $message,
+                'response_payload' => $payload,
+            ];
+        }
+
+        throw new RuntimeException(
+            $this->errorMessage(
+                $payload,
+                'Nie udało się anulować przesyłki InPost (HTTP '.$response->status().').',
+            ),
+        );
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function waitForConfirmation(CourierAccount $account, string $shipmentId): array
@@ -284,14 +340,15 @@ final class InPostShipmentService
         throw new RuntimeException('Przesyłka InPost nie została potwierdzona na czas. Spróbuj pobrać etykietę ponownie za chwilę.');
     }
 
-    private function fetchLabel(CourierAccount $account, string $shipmentId): string
+    private function fetchLabel(CourierAccount $account, string $shipmentId, string $format = 'pdf'): string
     {
+        $query = $format === 'zpl'
+            ? ['format' => 'zpl', 'type' => 'normal']
+            : ['format' => 'pdf', 'type' => 'A6'];
+
         $response = $this->request($account)
-            ->withHeaders(['Accept' => 'application/pdf'])
-            ->get("/v1/shipments/{$shipmentId}/label", [
-                'format' => 'pdf',
-                'type' => 'A6',
-            ]);
+            ->withHeaders(['Accept' => $format === 'zpl' ? 'text/plain' : 'application/pdf'])
+            ->get("/v1/shipments/{$shipmentId}/label", $query);
 
         if ($response->failed()) {
             throw new RuntimeException('Nie udało się pobrać etykiety InPost (HTTP '.$response->status().').');

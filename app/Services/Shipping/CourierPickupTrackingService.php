@@ -32,6 +32,8 @@ final class CourierPickupTrackingService
     public function trackPackedOrders(int $limit = 50, bool $force = false): array
     {
         $orderIds = ExternalOrder::query()
+            ->whereNotIn('status', ['cancellation-pending', 'cancelled', 'refunded'])
+            ->whereDoesntHave('cancellation', fn ($query) => $query->where('status', '!=', 'rejected'))
             ->whereHas('packingTasks', fn ($query) => $query->whereIn('status', ['packed', 'shipped']))
             ->whereDoesntHave('packingTasks', fn ($query) => $query->whereNotIn('status', ['packed', 'shipped', 'cancelled']))
             ->pluck('id');
@@ -112,6 +114,17 @@ final class CourierPickupTrackingService
             $order = $label->order;
 
             if (! $order instanceof ExternalOrder) {
+                continue;
+            }
+
+            if ($order->hasCancellationOperation()
+                || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+                $label->update([
+                    'status' => 'cancelled',
+                    'next_tracking_check_at' => null,
+                    'tracking_last_error' => 'Śledzenie wyłączone z powodu anulowania zamówienia.',
+                ]);
+
                 continue;
             }
 

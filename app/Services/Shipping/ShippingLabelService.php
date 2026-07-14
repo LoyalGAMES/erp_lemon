@@ -56,6 +56,13 @@ final class ShippingLabelService
         ?CourierAccount $courierAccount = null,
         ?string $parcelTemplate = null,
     ): ShippingLabel {
+        $order = ExternalOrder::query()->findOrFail($order->id);
+
+        if ($order->hasCancellationOperation()
+            || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+            throw new RuntimeException('Nie można wygenerować etykiety dla anulowanego zamówienia ani podczas trwającej anulacji.');
+        }
+
         $idempotencyKey = 'shipment:order:'.$order->id;
         $existing = ShippingLabel::query()
             ->where('idempotency_key', $idempotencyKey)
@@ -336,8 +343,9 @@ final class ShippingLabelService
                 ? $reportedParcelTemplate
                 : ($reusedExistingShipment ? null : ($parcelTemplate ?: $account->default_parcel_template ?: 'small'));
             $filename = 'inpost-'.($order->external_number ?: $order->external_id ?: $order->id);
+            $extension = str_contains(mb_strtolower((string) $labelData['mime_type']), 'zpl') ? 'zpl' : 'pdf';
             $filename = preg_replace('/[^A-Za-z0-9._-]+/', '-', $filename)
-                .'-order-'.$order->id.'-'.now()->format('YmdHis').'-'.Str::lower((string) Str::ulid()).'.pdf';
+                .'-order-'.$order->id.'-'.now()->format('YmdHis').'-'.Str::lower((string) Str::ulid()).'.'.$extension;
             $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
 
             Storage::disk('local')->put($path, $contents);

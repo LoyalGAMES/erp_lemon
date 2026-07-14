@@ -15,6 +15,7 @@ use App\Services\Audit\AuditLogService;
 use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Invoices\ReturnCorrectionInvoiceService;
+use App\Services\Orders\OrderCancellationGuard;
 use App\Services\Payments\PayuRefundService;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Support\Facades\DB;
@@ -32,10 +33,12 @@ final class WarehouseDocumentPostingService
         private readonly InvoiceWooCommerceUploadService $invoiceUpload,
         private readonly CustomerCommunicationService $communication,
         private readonly PayuRefundService $payuRefunds,
+        private readonly OrderCancellationGuard $cancellationGuard,
     ) {}
 
     public function post(WarehouseDocument $document): void
     {
+        $this->assertReturnPostingAllowed($document);
         $completedReturnCaseIds = [];
 
         DB::transaction(function () use ($document, &$completedReturnCaseIds): void {
@@ -413,6 +416,25 @@ final class WarehouseDocumentPostingService
         }
 
         return $completed;
+    }
+
+    private function assertReturnPostingAllowed(WarehouseDocument $document): void
+    {
+        if (! $this->documentType($document)->isReturnReceipt()) {
+            return;
+        }
+
+        ReturnCase::query()
+            ->where(function ($query) use ($document): void {
+                $query
+                    ->where('warehouse_document_id', $document->id)
+                    ->orWhereHas('lines', fn ($lineQuery) => $lineQuery
+                        ->where('warehouse_document_id', $document->id));
+            })
+            ->with('externalOrder')
+            ->get()
+            ->each(fn (ReturnCase $returnCase) => $this->cancellationGuard
+                ->assertReturnAllowedForCase($returnCase));
     }
 
     /**

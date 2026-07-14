@@ -20,6 +20,8 @@ use App\Services\Automation\DocumentAutomationSettingsService;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\Invoices\ReturnCorrectionInvoiceService;
+use App\Services\Orders\OrderCancellationGuard;
+use App\Services\Orders\OrderMutationLock;
 use App\Services\Payments\MbankTransferBasketService;
 use App\Services\Payments\PayuRefundService;
 use App\Services\Returns\ReturnNumberService;
@@ -217,6 +219,8 @@ class ReturnController extends Controller
         ReturnReceivingService $receivingService,
         WarehouseDocumentPostingService $postingService,
         CustomerCommunicationService $communication,
+        OrderMutationLock $orderLock,
+        OrderCancellationGuard $cancellationGuard,
     ): RedirectResponse {
         $returnSettings = $settings->data();
         $conditionCodes = collect($returnSettings['conditions'] ?? [])->pluck('code')->filter()->implode(',');
@@ -302,47 +306,61 @@ class ReturnController extends Controller
             return back()->withInput()->with('error', 'Zamówienie nie ma pozycji możliwych do przyjęcia jako zwrot.');
         }
 
-        $returnCase = DB::transaction(function () use ($validated, $returnLines, $numbers, $order): ReturnCase {
-            $returnCase = ReturnCase::query()->create([
-                'number' => $numbers->next(),
-                'external_order_id' => $order?->id,
-                'target_warehouse_id' => $validated['target_warehouse_id'],
-                'status' => 'opened',
-                'reason' => $validated['reason'] ?? null,
-                'customer_email' => $validated['customer_email']
-                    ?? (is_array($order?->billing_data) ? ($order->billing_data['email'] ?? null) : null),
-                'notes' => $validated['notes'] ?? null,
-                'metadata' => [
-                    'source' => 'manual_panel',
-                    'external_order_number' => $order?->external_number,
-                    'refund_recipient_name' => trim((string) ($validated['refund_recipient_name'] ?? '')),
-                    'refund_bank_account' => trim((string) ($validated['refund_bank_account'] ?? '')),
-                ],
-            ]);
+        try {
+            $returnCase = $this->withOrderFamilyLock(
+                $order,
+                $orderLock,
+                function () use ($validated, $returnLines, $numbers, $order, $cancellationGuard): ReturnCase {
+                    if ($order instanceof ExternalOrder) {
+                        $cancellationGuard->assertReturnAllowed($order);
+                    }
 
-            foreach ($returnLines as $line) {
-                $orderLine = $order instanceof ExternalOrder
-                    ? $this->resolveOrderLineForReturn($order, $line)
-                    : null;
+                    return DB::transaction(function () use ($validated, $returnLines, $numbers, $order): ReturnCase {
+                        $returnCase = ReturnCase::query()->create([
+                            'number' => $numbers->next(),
+                            'external_order_id' => $order?->id,
+                            'target_warehouse_id' => $validated['target_warehouse_id'],
+                            'status' => 'opened',
+                            'reason' => $validated['reason'] ?? null,
+                            'customer_email' => $validated['customer_email']
+                                ?? (is_array($order?->billing_data) ? ($order->billing_data['email'] ?? null) : null),
+                            'notes' => $validated['notes'] ?? null,
+                            'metadata' => [
+                                'source' => 'manual_panel',
+                                'external_order_number' => $order?->external_number,
+                                'refund_recipient_name' => trim((string) ($validated['refund_recipient_name'] ?? '')),
+                                'refund_bank_account' => trim((string) ($validated['refund_bank_account'] ?? '')),
+                            ],
+                        ]);
 
-                $returnCase->lines()->create([
-                    'product_id' => $line['product_id'],
-                    'external_order_line_id' => $orderLine?->id,
-                    'quantity_expected' => $line['quantity'],
-                    'quantity_accepted' => $line['quantity'],
-                    'condition' => $line['condition'],
-                    'disposition' => $line['disposition'],
-                    'target_warehouse_id' => (int) $validated['target_warehouse_id'],
-                    'notes' => $line['notes'] ?? null,
-                    'metadata' => [
-                        'created_from' => 'return_form',
-                        'external_order_line_id' => $orderLine?->external_line_id,
-                    ],
-                ]);
-            }
+                        foreach ($returnLines as $line) {
+                            $orderLine = $order instanceof ExternalOrder
+                                ? $this->resolveOrderLineForReturn($order, $line)
+                                : null;
 
-            return $returnCase;
-        });
+                            $returnCase->lines()->create([
+                                'product_id' => $line['product_id'],
+                                'external_order_line_id' => $orderLine?->id,
+                                'quantity_expected' => $line['quantity'],
+                                'quantity_accepted' => $line['quantity'],
+                                'condition' => $line['condition'],
+                                'disposition' => $line['disposition'],
+                                'target_warehouse_id' => (int) $validated['target_warehouse_id'],
+                                'notes' => $line['notes'] ?? null,
+                                'metadata' => [
+                                    'created_from' => 'return_form',
+                                    'external_order_line_id' => $orderLine?->external_line_id,
+                                ],
+                            ]);
+                        }
+
+                        return $returnCase;
+                    });
+                },
+            );
+        } catch (RuntimeException $exception) {
+            return back()->withInput()->with('error', $exception->getMessage());
+        }
 
         $communication->sendReturnStatus($returnCase, 'return_waiting_for_package');
 
@@ -492,10 +510,22 @@ class ReturnController extends Controller
             ->with('status', "Zwrot {$returnCase->number} został zaktualizowany.");
     }
 
-    public function createDocument(ReturnCase $returnCase, ReturnReceivingService $receivingService): RedirectResponse
-    {
+    public function createDocument(
+        ReturnCase $returnCase,
+        ReturnReceivingService $receivingService,
+        OrderMutationLock $orderLock,
+        OrderCancellationGuard $cancellationGuard,
+    ): RedirectResponse {
         try {
-            $documents = $receivingService->createReceivingDocuments($returnCase);
+            $documents = $this->withReturnCaseFamilyLock(
+                $returnCase,
+                $orderLock,
+                function () use ($returnCase, $receivingService, $cancellationGuard): Collection {
+                    $cancellationGuard->assertReturnAllowedForCase($returnCase);
+
+                    return $receivingService->createReceivingDocuments($returnCase);
+                },
+            );
         } catch (RuntimeException $exception) {
             return back()->with('error', $exception->getMessage());
         }
@@ -514,9 +544,19 @@ class ReturnController extends Controller
         InvoiceWooCommerceUploadService $uploader,
         CustomerCommunicationService $communication,
         PayuRefundService $payuRefunds,
+        OrderMutationLock $orderLock,
+        OrderCancellationGuard $cancellationGuard,
     ): RedirectResponse {
         try {
-            $invoice = $corrections->createForReturn($returnCase);
+            $invoice = $this->withReturnCaseFamilyLock(
+                $returnCase,
+                $orderLock,
+                function () use ($returnCase, $corrections, $cancellationGuard) {
+                    $cancellationGuard->assertReturnAllowedForCase($returnCase);
+
+                    return $corrections->createForReturn($returnCase);
+                },
+            );
         } catch (RuntimeException $exception) {
             return back()->with('error', $exception->getMessage());
         }
@@ -535,7 +575,15 @@ class ReturnController extends Controller
         }
 
         try {
-            $payuPayment = $payuRefunds->attemptAutomaticRefund($freshReturn, $invoice);
+            $payuPayment = $this->withReturnCaseFamilyLock(
+                $freshReturn,
+                $orderLock,
+                function () use ($freshReturn, $invoice, $payuRefunds, $cancellationGuard): ?CustomerPayment {
+                    $cancellationGuard->assertReturnAllowedForCase($freshReturn);
+
+                    return $payuRefunds->attemptAutomaticRefund($freshReturn, $invoice);
+                },
+            );
         } catch (RuntimeException $exception) {
             $this->appendAutomationWarning($freshReturn, 'payu_refund', $exception->getMessage());
             $communication->sendReturnSettlement($freshReturn, null, $invoice->number);
@@ -563,19 +611,35 @@ class ReturnController extends Controller
         ReturnCase $returnCase,
         ReturnStatusPushService $pusher,
         CustomerCommunicationService $communication,
+        OrderMutationLock $orderLock,
+        OrderCancellationGuard $cancellationGuard,
     ): RedirectResponse {
-        if ($returnCase->status !== StoreReturnIntakeService::STATUS_PENDING) {
-            return back()->with('error', "Zwrot {$returnCase->number} nie oczekuje na zatwierdzenie.");
+        try {
+            return $this->withReturnCaseFamilyLock(
+                $returnCase,
+                $orderLock,
+                function () use ($returnCase, $pusher, $communication, $cancellationGuard): RedirectResponse {
+                    $cancellationGuard->assertReturnAllowedForCase($returnCase);
+
+                    $freshReturn = $returnCase->fresh() ?? $returnCase;
+
+                    if ($freshReturn->status !== StoreReturnIntakeService::STATUS_PENDING) {
+                        return back()->with('error', "Zwrot {$freshReturn->number} nie oczekuje na zatwierdzenie.");
+                    }
+
+                    $freshReturn->update(['status' => StoreReturnIntakeService::STATUS_COMPLETED]);
+                    $communication->sendReturnStatus($freshReturn->fresh() ?? $freshReturn, 'return_approved');
+
+                    return $this->pushStatusToStore(
+                        $freshReturn,
+                        $pusher,
+                        "Zwrot {$freshReturn->number} został zatwierdzony.",
+                    );
+                },
+            );
+        } catch (RuntimeException $exception) {
+            return back()->with('error', $exception->getMessage());
         }
-
-        $returnCase->update(['status' => StoreReturnIntakeService::STATUS_COMPLETED]);
-        $communication->sendReturnStatus($returnCase->fresh() ?? $returnCase, 'return_approved');
-
-        return $this->pushStatusToStore(
-            $returnCase,
-            $pusher,
-            "Zwrot {$returnCase->number} został zatwierdzony.",
-        );
     }
 
     public function reject(
@@ -765,9 +829,19 @@ class ReturnController extends Controller
         ReturnCase $returnCase,
         PayuRefundService $payuRefunds,
         CustomerCommunicationService $communication,
+        OrderMutationLock $orderLock,
+        OrderCancellationGuard $cancellationGuard,
     ): RedirectResponse {
         try {
-            $payment = $payuRefunds->refundReturn($returnCase);
+            $payment = $this->withReturnCaseFamilyLock(
+                $returnCase,
+                $orderLock,
+                function () use ($returnCase, $payuRefunds, $cancellationGuard): CustomerPayment {
+                    $cancellationGuard->assertReturnAllowedForCase($returnCase);
+
+                    return $payuRefunds->refundReturn($returnCase);
+                },
+            );
         } catch (RuntimeException $exception) {
             return back()->with('error', 'Nie udało się wysłać refundu PayU: '.$exception->getMessage());
         }
@@ -855,6 +929,28 @@ class ReturnController extends Controller
         return redirect()
             ->route('returns.index')
             ->with('status', "Zwrot {$number} został usunięty.");
+    }
+
+    private function withOrderFamilyLock(
+        ?ExternalOrder $order,
+        OrderMutationLock $orderLock,
+        callable $operation,
+    ): mixed {
+        if (! $order instanceof ExternalOrder) {
+            return $operation();
+        }
+
+        return $orderLock->forOrderFamily($order, $operation);
+    }
+
+    private function withReturnCaseFamilyLock(
+        ReturnCase $returnCase,
+        OrderMutationLock $orderLock,
+        callable $operation,
+    ): mixed {
+        $returnCase->loadMissing('externalOrder');
+
+        return $this->withOrderFamilyLock($returnCase->externalOrder, $orderLock, $operation);
     }
 
     /**

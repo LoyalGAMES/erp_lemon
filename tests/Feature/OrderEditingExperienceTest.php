@@ -111,14 +111,14 @@ class OrderEditingExperienceTest extends TestCase
         $this->createIntegration($channel);
         $oldProduct = $this->createMappedProduct($channel, 'SKU-OLD', 'Stary produkt', '701');
         $newProduct = $this->createMappedProduct($channel, 'SKU-NEW', 'Nowy produkt', '702');
-        $order = $this->createOrder($channel, $oldProduct, 'cancelled');
+        $order = $this->createOrder($channel, $oldProduct, 'processing');
         $line = $order->lines()->firstOrFail();
 
         Http::fake([
             'https://shop.test/wp-json/wc/v3/orders/9001*' => Http::response([
                 'id' => 9001,
                 'number' => '9001',
-                'status' => 'cancelled',
+                'status' => 'processing',
                 'total' => '250.00',
                 'line_items' => [[
                     'id' => 7001,

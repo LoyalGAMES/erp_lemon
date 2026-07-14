@@ -76,7 +76,26 @@ final class WooCommerceOrderStatusService
         string $operation,
     ): array {
         $order = ExternalOrder::query()->findOrFail($order->id);
+        $status = $settingsKey !== null
+            ? null
+            : trim($defaultStatus);
+
+        if ($order->hasCancellationOperation()
+            && $status !== 'cancelled') {
+            throw new RuntimeException('Nie można zmienić statusu zamówienia podczas trwającej lub zakończonej anulacji.');
+        }
+
+        if (in_array($order->status, ['cancelled', 'refunded'], true)
+            && ! in_array($status, ['cancelled', 'refunded'], true)) {
+            throw new RuntimeException('Anulowanego albo zwróconego zamówienia nie można ponownie otworzyć zwykłą zmianą statusu.');
+        }
+
         $integration = WordpressIntegration::query()
+            ->when(
+                $order->wordpress_integration_id !== null,
+                fn ($query) => $query->whereKey($order->wordpress_integration_id),
+                fn ($query) => $query->where('sales_channel_id', $order->sales_channel_id),
+            )
             ->where('sales_channel_id', $order->sales_channel_id)
             ->first();
 
@@ -92,6 +111,14 @@ final class WooCommerceOrderStatusService
 
         try {
             $response = $this->client->updateOrderStatus($integration, (string) $order->external_id, $status);
+            $responseStatus = mb_strtolower(trim((string) ($response['status'] ?? '')));
+
+            if ($status === 'cancelled' && $responseStatus !== 'cancelled') {
+                throw new RuntimeException(
+                    'WooCommerce nie potwierdził anulowania zamówienia. '
+                    .'Odpowiedź zawiera status: '.($responseStatus !== '' ? $responseStatus : 'brak statusu').'.',
+                );
+            }
 
             $raw = (array) $order->raw_payload;
             $raw['sempre_erp_status_sync'] = [

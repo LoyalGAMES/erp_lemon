@@ -22,6 +22,11 @@
         .numeric { text-align: right; font-variant-numeric: tabular-nums; }
         .section-title { margin-top: 22px; font-weight: 800; font-size: 14px; }
         .notes { border: 1px solid #ccc; border-radius: 6px; padding: 10px; white-space: pre-wrap; }
+        .order-snapshot-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin-top: 10px; }
+        .order-snapshot-card { border: 1px solid #bbb; border-radius: 6px; padding: 10px; line-height: 1.5; overflow-wrap: anywhere; break-inside: avoid; }
+        .order-snapshot-card > strong { display: block; margin-bottom: 5px; }
+        .order-snapshot-label { color: #555; font-size: 10px; font-weight: 700; }
+        .order-snapshot-note { grid-column: 1 / -1; white-space: pre-wrap; }
         .signatures { display: grid; grid-template-columns: 1fr 1fr; gap: 60px; margin-top: 54px; }
         .signature { border-top: 1px solid #111; text-align: center; padding-top: 8px; color: #555; }
         .no-print { margin-bottom: 14px; }
@@ -71,6 +76,8 @@
                 <strong>{{ $document->posted_at?->format('Y-m-d H:i') ?? '-' }}</strong>
             </div>
         </section>
+
+        @include('documents._order-snapshot', ['printMode' => true])
 
         <div class="section-title">Pozycje</div>
         <table>

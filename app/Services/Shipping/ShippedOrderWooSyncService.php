@@ -20,6 +20,8 @@ final class ShippedOrderWooSyncService
     public function retry(int $limit = 25): array
     {
         $orders = ExternalOrder::query()
+            ->whereNotIn('status', ['cancellation-pending', 'cancelled', 'refunded'])
+            ->whereDoesntHave('cancellation', fn ($query) => $query->where('status', '!=', 'rejected'))
             ->where('fulfillment_status', 'shipped')
             ->whereIn('woo_shipped_sync_status', ['pending', 'failed'])
             ->where(function ($query): void {
@@ -36,6 +38,8 @@ final class ShippedOrderWooSyncService
         foreach ($orders as $order) {
             $claimed = ExternalOrder::query()
                 ->whereKey($order->id)
+                ->whereNotIn('status', ['cancellation-pending', 'cancelled', 'refunded'])
+                ->whereDoesntHave('cancellation', fn ($query) => $query->where('status', '!=', 'rejected'))
                 ->whereIn('woo_shipped_sync_status', ['pending', 'failed'])
                 ->where(function ($query): void {
                     $query->whereNull('woo_shipped_sync_next_at')
@@ -48,6 +52,18 @@ final class ShippedOrderWooSyncService
             }
 
             $summary['checked']++;
+
+            $order->refresh();
+            if ($order->hasCancellationOperation()
+                || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+                $order->update([
+                    'woo_shipped_sync_status' => 'skipped',
+                    'woo_shipped_sync_next_at' => null,
+                    'woo_shipped_sync_error' => 'Synchronizacja wysyłki wyłączona z powodu anulowania zamówienia.',
+                ]);
+
+                continue;
+            }
 
             try {
                 $result = $this->statuses->markShipped($order);

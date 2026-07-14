@@ -9,6 +9,8 @@ use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
+use App\Services\Orders\OrderCancellationGuard;
+use App\Services\Orders\OrderMutationLock;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -25,6 +27,8 @@ final class StoreReturnIntakeService
     public function __construct(
         private readonly ReturnNumberService $numbers,
         private readonly ReturnSettingsService $settings,
+        private readonly OrderMutationLock $orderLock,
+        private readonly OrderCancellationGuard $cancellationGuard,
     ) {}
 
     /**
@@ -143,81 +147,87 @@ final class StoreReturnIntakeService
         $created = false;
 
         try {
-            $returnCase = DB::transaction(function () use ($payload, $order, $settings, $contact, $email, $returnReference, &$created): ReturnCase {
-                $rootOrderId = (int) ($order->split_root_order_id ?: $order->id);
-                $order = ExternalOrder::query()
-                    ->lockForUpdate()
-                    ->findOrFail($rootOrderId);
-                $existing = ReturnCase::query()
-                    ->where('store_return_reference', $returnReference)
-                    ->lockForUpdate()
-                    ->first();
+            $returnCase = $this->orderLock->forOrderFamily(
+                $order,
+                function () use ($payload, $order, $settings, $contact, $email, $returnReference, &$created): ReturnCase {
+                    return DB::transaction(function () use ($payload, $order, $settings, $contact, $email, $returnReference, &$created): ReturnCase {
+                        $rootOrderId = (int) ($order->split_root_order_id ?: $order->id);
+                        $order = ExternalOrder::query()
+                            ->lockForUpdate()
+                            ->findOrFail($rootOrderId);
+                        $existing = ReturnCase::query()
+                            ->where('store_return_reference', $returnReference)
+                            ->lockForUpdate()
+                            ->first();
 
-                if ($existing instanceof ReturnCase) {
-                    return $existing;
-                }
+                        if ($existing instanceof ReturnCase) {
+                            return $existing;
+                        }
 
-                $family = $this->familyOrders($order, true);
-                $state = $this->familyAvailability($order, $family);
-                $items = $this->matchItems($state, (array) ($payload['items'] ?? []));
+                        $this->cancellationGuard->assertReturnAllowed($order);
+                        $family = $this->familyOrders($order, true);
+                        $state = $this->familyAvailability($order, $family);
+                        $items = $this->matchItems($state, (array) ($payload['items'] ?? []));
 
-                if ($items === []) {
-                    throw new RuntimeException('Zgłoszenie nie zawiera pozycji możliwych do zwrotu.');
-                }
+                        if ($items === []) {
+                            throw new RuntimeException('Zgłoszenie nie zawiera pozycji możliwych do zwrotu.');
+                        }
 
-                $returnCase = ReturnCase::query()->create([
-                    'number' => $this->numbers->next(),
-                    'store_return_reference' => $returnReference,
-                    'external_order_id' => $order->id,
-                    'target_warehouse_id' => $settings['default_target_warehouse_id'],
-                    'status' => self::STATUS_PENDING,
-                    'reason' => $this->dominantReason($items),
-                    'customer_email' => $email !== '' ? mb_substr($email, 0, 255) : null,
-                    'notes' => filled($payload['customer_note'] ?? null)
-                        ? mb_substr(trim((string) $payload['customer_note']), 0, 2000)
-                        : null,
-                    'metadata' => [
-                        'source' => 'store_form',
-                        'return_reference' => $returnReference,
-                        'local_return_id' => $payload['local_return_id'] ?? null,
-                        'site_url' => filled($payload['site_url'] ?? null) ? (string) $payload['site_url'] : null,
-                        'return_method' => filled($payload['return_method'] ?? null) ? (string) $payload['return_method'] : null,
-                        'customer_contact' => $contact !== '' ? $contact : null,
-                        'customer_phone' => filled($payload['customer_phone'] ?? null) ? (string) $payload['customer_phone'] : null,
-                        'external_order_number' => (string) ($payload['order_number'] ?? $payload['order_reference'] ?? ''),
-                        'store_order_id' => filled($payload['order_id'] ?? null) ? (string) $payload['order_id'] : null,
-                        'return_order_key' => $this->returnOrderKey($order),
-                        'split_family_order_ids' => $family->pluck('id')->values()->all(),
-                    ],
-                ]);
+                        $returnCase = ReturnCase::query()->create([
+                            'number' => $this->numbers->next(),
+                            'store_return_reference' => $returnReference,
+                            'external_order_id' => $order->id,
+                            'target_warehouse_id' => $settings['default_target_warehouse_id'],
+                            'status' => self::STATUS_PENDING,
+                            'reason' => $this->dominantReason($items),
+                            'customer_email' => $email !== '' ? mb_substr($email, 0, 255) : null,
+                            'notes' => filled($payload['customer_note'] ?? null)
+                                ? mb_substr(trim((string) $payload['customer_note']), 0, 2000)
+                                : null,
+                            'metadata' => [
+                                'source' => 'store_form',
+                                'return_reference' => $returnReference,
+                                'local_return_id' => $payload['local_return_id'] ?? null,
+                                'site_url' => filled($payload['site_url'] ?? null) ? (string) $payload['site_url'] : null,
+                                'return_method' => filled($payload['return_method'] ?? null) ? (string) $payload['return_method'] : null,
+                                'customer_contact' => $contact !== '' ? $contact : null,
+                                'customer_phone' => filled($payload['customer_phone'] ?? null) ? (string) $payload['customer_phone'] : null,
+                                'external_order_number' => (string) ($payload['order_number'] ?? $payload['order_reference'] ?? ''),
+                                'store_order_id' => filled($payload['order_id'] ?? null) ? (string) $payload['order_id'] : null,
+                                'return_order_key' => $this->returnOrderKey($order),
+                                'split_family_order_ids' => $family->pluck('id')->values()->all(),
+                            ],
+                        ]);
 
-                foreach ($items as $item) {
-                    $returnCase->lines()->create([
-                        'product_id' => $item['order_line']?->product_id,
-                        'external_order_line_id' => $item['order_line']?->id,
-                        'canonical_external_line_id' => $item['canonical_id'],
-                        'quantity_expected' => $item['quantity'],
-                        'quantity_accepted' => $item['quantity'],
-                        'condition' => $settings['default_condition'],
-                        'disposition' => $settings['default_disposition'],
-                        'target_warehouse_id' => $settings['default_target_warehouse_id'],
-                        'notes' => $item['reason'] !== '' ? mb_substr('Powód klienta: '.$item['reason'], 0, 2000) : null,
-                        'metadata' => [
-                            'created_from' => 'store_form',
-                            'store_item_id' => $item['id'],
-                            'store_item_name' => $item['name'],
-                            'store_item_sku' => $item['sku'],
-                            'store_item_reason' => $item['reason'],
-                            'canonical_external_line_id' => $item['canonical_id'],
-                            'physical_external_order_id' => $item['order_line']?->external_order_id,
-                        ],
-                    ]);
-                }
+                        foreach ($items as $item) {
+                            $returnCase->lines()->create([
+                                'product_id' => $item['order_line']?->product_id,
+                                'external_order_line_id' => $item['order_line']?->id,
+                                'canonical_external_line_id' => $item['canonical_id'],
+                                'quantity_expected' => $item['quantity'],
+                                'quantity_accepted' => $item['quantity'],
+                                'condition' => $settings['default_condition'],
+                                'disposition' => $settings['default_disposition'],
+                                'target_warehouse_id' => $settings['default_target_warehouse_id'],
+                                'notes' => $item['reason'] !== '' ? mb_substr('Powód klienta: '.$item['reason'], 0, 2000) : null,
+                                'metadata' => [
+                                    'created_from' => 'store_form',
+                                    'store_item_id' => $item['id'],
+                                    'store_item_name' => $item['name'],
+                                    'store_item_sku' => $item['sku'],
+                                    'store_item_reason' => $item['reason'],
+                                    'canonical_external_line_id' => $item['canonical_id'],
+                                    'physical_external_order_id' => $item['order_line']?->external_order_id,
+                                ],
+                            ]);
+                        }
 
-                $created = true;
+                        $created = true;
 
-                return $returnCase;
-            });
+                        return $returnCase;
+                    });
+                },
+            );
         } catch (QueryException $exception) {
             $sqlState = (string) ($exception->errorInfo[0] ?? $exception->getCode());
 

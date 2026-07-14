@@ -49,6 +49,11 @@ final class OrderInvoiceService
                 ->lockForUpdate()
                 ->findOrFail($order->id);
 
+            if ($order->hasCancellationOperation()
+                || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+                throw new RuntimeException('Nie można wystawić dokumentu sprzedaży dla anulowanego zamówienia ani podczas trwającej anulacji.');
+            }
+
             $existing = $order->invoices()
                 ->where('type', $type)
                 ->latest()

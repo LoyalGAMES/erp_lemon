@@ -747,14 +747,23 @@ final class WooCommerceImportService
                     $wasCreated = $isNew;
                     $previousStatus = $order->exists ? (string) $order->status : null;
                     $existingRawPayload = (array) $order->raw_payload;
+                    $cancellation = $order->exists ? $order->cancellationOperation() : null;
                     $splitAllocations = $order->exists ? $this->splitAllocationsForOrder($order) : [];
                     $importLines = $this->importableOrderLines($item, $splitAllocations);
                     $rawPayload = $this->rawPayloadForImportedOrder($item, $existingRawPayload, $splitAllocations);
+                    $importedStatus = (string) ($item['status'] ?? 'unknown');
+
+                    if ($cancellation !== null) {
+                        $importedStatus = ($cancellation->status === 'completed'
+                            || $order->status === 'cancelled')
+                            ? 'cancelled'
+                            : 'cancellation-pending';
+                    }
 
                     $order->fill([
                         'wordpress_integration_id' => $integration->id,
                         'external_number' => (string) ($item['number'] ?? $item['id']),
-                        'status' => (string) ($item['status'] ?? 'unknown'),
+                        'status' => $importedStatus,
                         'currency' => (string) ($item['currency'] ?? 'PLN'),
                         'total_gross' => $splitAllocations === []
                             ? (float) ($item['total'] ?? 0)

@@ -18,6 +18,7 @@ final class OrderSplitService
         private readonly StockReservationService $reservations,
         private readonly PackingTaskService $packingTasks,
         private readonly CustomerCommunicationService $communication,
+        private readonly OrderMutationLock $orderLock,
     ) {}
 
     /**
@@ -28,6 +29,21 @@ final class OrderSplitService
      */
     public function split(ExternalOrder $order, array $quantities, ?string $note = null, string $source = 'manual'): ExternalOrder
     {
+        return $this->orderLock->forOrder(
+            $order,
+            fn (): ExternalOrder => $this->splitWhileLocked($order, $quantities, $note, $source),
+        );
+    }
+
+    /**
+     * @param  array<int, float>  $quantities
+     */
+    private function splitWhileLocked(
+        ExternalOrder $order,
+        array $quantities,
+        ?string $note,
+        string $source,
+    ): ExternalOrder {
         $quantities = collect($quantities)
             ->mapWithKeys(fn ($quantity, $lineId): array => [(int) $lineId => (float) $quantity])
             ->filter(fn (float $quantity): bool => $quantity > 0)
@@ -50,6 +66,11 @@ final class OrderSplitService
 
             if (! $order instanceof ExternalOrder) {
                 throw new RuntimeException('Nie znaleziono zamówienia do podziału.');
+            }
+
+            if ($order->hasCancellationOperation()
+                || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+                throw new RuntimeException('Nie można podzielić anulowanego zamówienia ani zamówienia w trakcie anulacji.');
             }
 
             $order->load('lines');

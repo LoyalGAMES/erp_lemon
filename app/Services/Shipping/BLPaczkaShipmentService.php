@@ -414,6 +414,31 @@ final class BLPaczkaShipmentService
         ];
     }
 
+    /**
+     * @return array{status:string,shipment_id:string,message:?string,response_payload:array<string,mixed>}
+     */
+    public function cancelShipment(string $blpaczkaOrderId, CourierAccount $account): array
+    {
+        $blpaczkaOrderId = trim($blpaczkaOrderId);
+
+        if (preg_match('/^\d{1,12}$/', $blpaczkaOrderId) !== 1) {
+            throw new RuntimeException('Nieprawidłowy identyfikator przesyłki BLPaczka.');
+        }
+
+        $response = $this->post($account, 'cancelOrder.json', [
+            'Order' => [
+                'id' => (int) $blpaczkaOrderId,
+            ],
+        ]);
+
+        return [
+            'status' => 'cancelled',
+            'shipment_id' => $blpaczkaOrderId,
+            'message' => filled($response['message'] ?? null) ? (string) $response['message'] : null,
+            'response_payload' => $response,
+        ];
+    }
+
     private function waybillNumber(string $blpaczkaOrderId, CourierAccount $account): ?string
     {
         try {

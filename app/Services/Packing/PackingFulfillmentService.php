@@ -112,6 +112,7 @@ final class PackingFulfillmentService
         array $printStation,
     ): array {
         $order = ExternalOrder::query()->with('invoices')->findOrFail($order->id);
+        $this->assertOrderNotCancelling($order);
         $tasks = PackingTask::query()
             ->where('external_order_id', $order->id)
             ->where('status', '!=', 'cancelled')
@@ -180,6 +181,8 @@ final class PackingFulfillmentService
      */
     private function completePackedOrderWhileLocked(ExternalOrder $order, ?array $printStation = null): array
     {
+        $order->refresh();
+        $this->assertOrderNotCancelling($order);
         $warnings = [];
         $label = $this->generatedLabelFor($order);
 
@@ -429,6 +432,14 @@ final class PackingFulfillmentService
     {
         $order->refresh();
 
+        if ($order->hasCancellationOperation()
+            || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+            return [
+                'tasks' => 0,
+                'warnings' => ["Zamówienie {$order->external_number} jest anulowane albo trwa jego anulacja."],
+            ];
+        }
+
         $tasks = PackingTask::query()
             ->where('external_order_id', $order->id)
             ->where('status', '!=', 'cancelled')
@@ -657,6 +668,14 @@ final class PackingFulfillmentService
     private function orderLockKey(ExternalOrder $order): string
     {
         return 'packing-fulfillment-order-'.$order->id;
+    }
+
+    private function assertOrderNotCancelling(ExternalOrder $order): void
+    {
+        if ($order->hasCancellationOperation()
+            || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+            throw new RuntimeException('Nie można kontynuować pakowania anulowanego zamówienia ani podczas trwającej anulacji.');
+        }
     }
 
     /**

@@ -5,6 +5,7 @@ use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CustomerAccountClaimController;
 use App\Http\Controllers\CustomerController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\ExternalOrderCancellationController;
 use App\Http\Controllers\ExternalOrderController;
 use App\Http\Controllers\ExternalOrderFulfillmentController;
 use App\Http\Controllers\ExternalOrderInvoiceController;
@@ -14,6 +15,7 @@ use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\KsefController;
 use App\Http\Controllers\LedgerController;
 use App\Http\Controllers\ModuleController;
+use App\Http\Controllers\OrderSettlementController;
 use App\Http\Controllers\PackingController;
 use App\Http\Controllers\ProductConfigurationController;
 use App\Http\Controllers\ProductController;
@@ -243,11 +245,23 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::delete('/integrations/{integration}', [IntegrationController::class, 'destroy'])->name('integrations.destroy');
     });
 
+    Route::middleware(EnsureErpRole::class.':order_editing')->group(function (): void {
+        Route::get('/orders/{order}/edit', [ExternalOrderController::class, 'edit'])->name('orders.edit');
+        Route::put('/orders/{order}', [ExternalOrderController::class, 'update'])->name('orders.update');
+        Route::get('/orders/{order}/products/lookup', [ExternalOrderController::class, 'lookupProducts'])->name('orders.products.lookup');
+    });
+
     Route::middleware(EnsureErpRole::class.':orders')->group(function (): void {
         Route::get('/orders/{order}', [ExternalOrderController::class, 'show'])->name('orders.show');
+        Route::post('/orders/{order}/cancel', [ExternalOrderCancellationController::class, 'store'])
+            ->name('orders.cancel');
+        Route::post('/orders/{order}/cancellation/shipping-confirm', [ExternalOrderCancellationController::class, 'confirmManualShipping'])
+            ->name('orders.cancellation.shipping-confirm');
+        Route::post('/orders/{order}/cancellation/refund-reconcile', [ExternalOrderCancellationController::class, 'reconcileUnknownRefund'])
+            ->middleware('throttle:10,1')
+            ->name('orders.cancellation.refund-reconcile');
         Route::get('/orders/{order}/messages/{message}/preview', [ExternalOrderController::class, 'previewMessage'])
             ->name('orders.messages.preview');
-        Route::get('/orders/{order}/products/lookup', [ExternalOrderController::class, 'lookupProducts'])->name('orders.products.lookup');
         Route::put('/orders/{order}/lines', [ExternalOrderController::class, 'updateLines'])->name('orders.lines.update');
         Route::patch('/orders/{order}/status', [ExternalOrderController::class, 'updateStatus'])->name('orders.status.update');
         Route::post('/orders/{order}/payment-reminder', [ExternalOrderController::class, 'sendPaymentReminder'])->name('orders.payment-reminder.send');
@@ -257,6 +271,15 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/orders/{order}/message', [ExternalOrderController::class, 'sendMessage'])->name('orders.message.send');
         Route::post('/orders/{order}/notes', [ExternalOrderController::class, 'storeNote'])->name('orders.notes.store');
         Route::post('/orders/{order}/payments', [ExternalOrderController::class, 'storePayment'])->name('orders.payments.store');
+        Route::post('/orders/{order}/refunds/woocommerce', [OrderSettlementController::class, 'refundThroughWoo'])
+            ->middleware('throttle:10,1')
+            ->name('orders.refunds.woocommerce');
+        Route::post('/orders/{order}/refunds/manual', [OrderSettlementController::class, 'recordManualRefund'])
+            ->middleware('throttle:10,1')
+            ->name('orders.refunds.manual');
+        Route::post('/orders/{order}/refunds/manual/{payment}/woocommerce-reconcile', [OrderSettlementController::class, 'reconcileManualRefundWooAccounting'])
+            ->middleware('throttle:10,1')
+            ->name('orders.refunds.manual.woocommerce-reconcile');
         Route::post('/orders/{order}/wz', [ExternalOrderFulfillmentController::class, 'createWz'])
             ->name('orders.wz.create');
 

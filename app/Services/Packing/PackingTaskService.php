@@ -7,6 +7,7 @@ namespace App\Services\Packing;
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\PackingTask;
+use App\Services\Orders\OrderMutationLock;
 use App\Services\Orders\OrderStatusPolicyService;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -16,6 +17,7 @@ final class PackingTaskService
 {
     public function __construct(
         private readonly OrderStatusPolicyService $statusPolicy,
+        private readonly OrderMutationLock $orderLock,
     ) {}
 
     /**
@@ -27,28 +29,35 @@ final class PackingTaskService
         $updated = 0;
         $cancelled = 0;
 
-        DB::transaction(function () use (&$created, &$updated, &$cancelled): void {
-            ExternalOrder::query()
-                ->with(['lines.product', 'salesChannel'])
-                ->whereIn('status', $this->statusPolicy->packingReadyStatuses())
-                ->orderBy('external_created_at')
-                ->get()
-                ->each(function (ExternalOrder $order) use (&$created, &$updated, &$cancelled): void {
-                    $result = $this->syncLoadedOrder($order);
-
-                    $created += $result['created'];
-                    $updated += $result['updated'];
-                    $cancelled += $result['cancelled'];
-                });
-        });
-
-        $cancelledQuery = PackingTask::query()
+        $readyOrderIds = ExternalOrder::query()
+            ->whereIn('status', $this->statusPolicy->packingReadyStatuses())
+            ->orderBy('external_created_at')
+            ->pluck('id');
+        $inactiveOrderIds = PackingTask::query()
             ->whereIn('status', ['open', 'picked'])
-            ->whereHas('order', fn ($query) => $query->whereNotIn('status', $this->statusPolicy->packingReadyStatuses()));
-        $cancelledOrderIds = (clone $cancelledQuery)->pluck('external_order_id')->unique();
-        $cancelled += $cancelledQuery->update(['status' => 'cancelled']);
+            ->whereHas('order', fn ($query) => $query->whereNotIn('status', $this->statusPolicy->packingReadyStatuses()))
+            ->pluck('external_order_id');
+        $orderIds = $readyOrderIds
+            ->merge($inactiveOrderIds)
+            ->map(fn (mixed $orderId): int => (int) $orderId)
+            ->filter()
+            ->unique()
+            ->values();
 
-        $cancelledOrderIds->each(fn ($orderId) => $this->syncOrderFulfillmentStatus((int) $orderId));
+        ExternalOrder::query()
+            ->whereIn('id', $orderIds)
+            ->orderBy('external_created_at')
+            ->get()
+            ->each(function (ExternalOrder $order) use (&$created, &$updated, &$cancelled): void {
+                $result = $this->orderLock->forOrder(
+                    $order,
+                    fn (): array => $this->syncForOrder($order),
+                );
+
+                $created += $result['created'];
+                $updated += $result['updated'];
+                $cancelled += $result['cancelled'];
+            });
 
         return [
             'created' => $created,
@@ -68,7 +77,8 @@ final class PackingTaskService
                 ->lockForUpdate()
                 ->findOrFail($order->id);
 
-            if (! in_array($order->status, $this->statusPolicy->packingReadyStatuses(), true)) {
+            if ($order->hasCancellationOperation()
+                || ! in_array($order->status, $this->statusPolicy->packingReadyStatuses(), true)) {
                 $cancelled = $this->cancelActiveTasksForOrder($order, collect());
                 $this->syncOrderFulfillmentStatus($order->id);
 
@@ -81,6 +91,99 @@ final class PackingTaskService
 
             return $this->syncLoadedOrder($order);
         });
+    }
+
+    /**
+     * Cofnij kompletację przed zmianą pozycji zamówienia. Pozostawienie liczby
+     * zebranych sztuk spowodowałoby, że nowy produkt odziedziczyłby stan starej
+     * pozycji o tym samym identyfikatorze WooCommerce.
+     */
+    public function resetForOrderEdit(ExternalOrder $order): int
+    {
+        return DB::transaction(function () use ($order): int {
+            $tasks = PackingTask::query()
+                ->where('external_order_id', $order->id)
+                ->whereIn('status', ['open', 'picked'])
+                ->lockForUpdate()
+                ->get();
+
+            foreach ($tasks as $task) {
+                $metadata = (array) $task->metadata;
+                $metadata['order_edit_reset'] = [
+                    'previous_status' => $task->status,
+                    'previous_quantity_picked' => (float) $task->quantity_picked,
+                    'reset_at' => now()->toIso8601String(),
+                ];
+
+                $task->forceFill([
+                    'status' => 'open',
+                    'quantity_picked' => 0,
+                    'picked_at' => null,
+                    'packed_at' => null,
+                    'metadata' => $metadata,
+                ])->save();
+            }
+
+            $this->syncOrderFulfillmentStatus($order->id);
+
+            return $tasks->count();
+        }, 3);
+    }
+
+    /**
+     * Called while the shared order mutation lock is held by the cancellation
+     * workflow. Shipped tasks are intentionally rejected by its preflight.
+     */
+    public function cancelForOrderCancellation(
+        ExternalOrder $order,
+        string $operationUuid,
+        string $reason,
+        bool $preserveAsProblem = false,
+    ): int {
+        return DB::transaction(function () use ($order, $operationUuid, $reason, $preserveAsProblem): int {
+            $tasks = PackingTask::query()
+                ->where('external_order_id', $order->id)
+                ->where('status', '!=', 'cancelled')
+                ->lockForUpdate()
+                ->get();
+
+            if ($tasks->contains(fn (PackingTask $task): bool => $task->status === 'shipped')) {
+                throw new RuntimeException('Zamówienie zostało już odebrane przez kuriera. Użyj procesu zwrotu zamiast anulacji.');
+            }
+
+            foreach ($tasks as $task) {
+                $metadata = (array) $task->metadata;
+                $previousStatus = (string) $task->status;
+                $metadata['order_cancellation'] = [
+                    'operation_uuid' => $operationUuid,
+                    'reason' => $reason,
+                    'previous_status' => $previousStatus,
+                    'cancelled_at' => now()->toISOString(),
+                    'preserved_as_problem' => $preserveAsProblem,
+                ];
+
+                if ($preserveAsProblem) {
+                    $metadata['packing_problem'] = array_merge(
+                        (array) ($metadata['packing_problem'] ?? []),
+                        [
+                            'reason' => $reason,
+                            'reported_at' => data_get($metadata, 'packing_problem.reported_at') ?: now()->toISOString(),
+                            'cancelled_at' => now()->toISOString(),
+                            'order_cancellation_uuid' => $operationUuid,
+                        ],
+                    );
+                }
+
+                $task->update([
+                    'status' => $preserveAsProblem ? 'problem' : 'cancelled',
+                    'metadata' => $metadata,
+                ]);
+            }
+
+            $this->syncOrderFulfillmentStatus($order->id);
+
+            return $tasks->count();
+        }, 3);
     }
 
     /**
@@ -204,66 +307,107 @@ final class PackingTaskService
             throw new RuntimeException('Zeskanuj SKU albo EAN produktu.');
         }
 
-        return DB::transaction(function () use ($code): PackingTask {
-            $task = PackingTask::query()
-                ->with('product')
-                ->where('status', 'open')
-                ->whereColumn('quantity_picked', '<', 'quantity_required')
+        $candidate = PackingTask::query()
+            ->with('order')
+            ->where('status', 'open')
+            ->whereColumn('quantity_picked', '<', 'quantity_required')
+            ->where(function ($query) use ($code): void {
+                $query
+                    ->where('sku', $code)
+                    ->orWhereHas('product', fn ($productQuery) => $productQuery->where('ean', $code));
+            })
+            ->orderBy('order_date')
+            ->first();
+
+        if (! $candidate instanceof PackingTask || ! $candidate->order instanceof ExternalOrder) {
+            $hasCompletedTask = PackingTask::query()
+                ->where('status', 'picked')
                 ->where(function ($query) use ($code): void {
                     $query
                         ->where('sku', $code)
                         ->orWhereHas('product', fn ($productQuery) => $productQuery->where('ean', $code));
                 })
-                ->orderBy('order_date')
-                ->lockForUpdate()
-                ->first();
+                ->exists();
 
-            if (! $task instanceof PackingTask) {
-                $hasCompletedTask = PackingTask::query()
-                    ->where('status', 'picked')
+            if ($hasCompletedTask) {
+                throw new RuntimeException("Wszystkie pozycje dla kodu {$code} są już zebrane.");
+            }
+
+            throw new RuntimeException("Nie znaleziono otwartej pozycji do zebrania dla kodu {$code}.");
+        }
+
+        return $this->orderLock->forOrder($candidate->order, function () use ($candidate, $code): PackingTask {
+            return DB::transaction(function () use ($candidate, $code): PackingTask {
+                $order = ExternalOrder::query()
+                    ->lockForUpdate()
+                    ->findOrFail($candidate->external_order_id);
+                $this->assertPackingMutationAllowed($order);
+
+                $task = PackingTask::query()
+                    ->with('product')
+                    ->whereKey($candidate->id)
+                    ->where('external_order_id', $candidate->external_order_id)
+                    ->where('status', 'open')
+                    ->whereColumn('quantity_picked', '<', 'quantity_required')
                     ->where(function ($query) use ($code): void {
                         $query
                             ->where('sku', $code)
                             ->orWhereHas('product', fn ($productQuery) => $productQuery->where('ean', $code));
                     })
-                    ->exists();
+                    ->lockForUpdate()
+                    ->first();
 
-                if ($hasCompletedTask) {
-                    throw new RuntimeException("Wszystkie pozycje dla kodu {$code} są już zebrane.");
+                if (! $task instanceof PackingTask) {
+                    throw new RuntimeException('Pozycja zmieniła się podczas aktualizacji zamówienia. Zeskanuj kod ponownie.');
                 }
 
-                throw new RuntimeException("Nie znaleziono otwartej pozycji do zebrania dla kodu {$code}.");
-            }
+                $picked = min((float) $task->quantity_required, (float) $task->quantity_picked + 1);
+                $isComplete = $picked >= (float) $task->quantity_required;
 
-            $picked = min((float) $task->quantity_required, (float) $task->quantity_picked + 1);
-            $isComplete = $picked >= (float) $task->quantity_required;
+                $task->update([
+                    'quantity_picked' => $picked,
+                    'status' => $isComplete ? 'picked' : 'open',
+                    'picked_at' => $isComplete ? now() : $task->picked_at,
+                ]);
 
-            $task->update([
-                'quantity_picked' => $picked,
-                'status' => $isComplete ? 'picked' : 'open',
-                'picked_at' => $isComplete ? now() : $task->picked_at,
-            ]);
+                $this->syncOrderFulfillmentStatus($task->external_order_id);
 
-            $this->syncOrderFulfillmentStatus($task->external_order_id);
-
-            return $task->refresh();
+                return $task->refresh();
+            });
         });
     }
 
     public function markPacked(PackingTask $task): PackingTask
     {
-        if ($task->status !== 'picked') {
-            throw new RuntimeException('Pozycja musi być najpierw w całości zebrana.');
+        $task->loadMissing('order');
+
+        if (! $task->order instanceof ExternalOrder) {
+            throw new RuntimeException('Nie znaleziono zamówienia dla tej pozycji pakowania.');
         }
 
-        $task->update([
-            'status' => 'packed',
-            'packed_at' => now(),
-        ]);
+        return $this->orderLock->forOrder($task->order, function () use ($task): PackingTask {
+            return DB::transaction(function () use ($task): PackingTask {
+                $order = ExternalOrder::query()
+                    ->lockForUpdate()
+                    ->findOrFail($task->external_order_id);
+                $this->assertPackingMutationAllowed($order);
 
-        $this->syncOrderFulfillmentStatus($task->external_order_id);
+                $lockedTask = PackingTask::query()->lockForUpdate()->findOrFail($task->id);
 
-        return $task->refresh();
+                if ($lockedTask->status !== 'picked') {
+                    throw new RuntimeException('Pozycja musi być najpierw w całości zebrana.');
+                }
+
+                $lockedTask->update([
+                    'status' => 'packed',
+                    'packed_at' => now(),
+                ]);
+
+                $this->syncOrderFulfillmentStatus($lockedTask->external_order_id);
+
+                return $lockedTask->refresh();
+            });
+        });
     }
 
     /**
@@ -281,36 +425,72 @@ final class PackingTaskService
             throw new RuntimeException('Wybierz pozycje do oznaczenia jako zebrane.');
         }
 
-        return DB::transaction(function () use ($ids): int {
-            $tasks = PackingTask::query()
-                ->whereIn('id', $ids)
-                ->where('status', 'open')
-                ->lockForUpdate()
-                ->get();
+        $orderIds = PackingTask::query()
+            ->whereIn('id', $ids)
+            ->pluck('external_order_id')
+            ->map(fn (mixed $orderId): int => (int) $orderId)
+            ->filter()
+            ->unique()
+            ->sort()
+            ->values();
 
-            if ($tasks->isEmpty()) {
-                throw new RuntimeException('Pozycje z tej grupy są już zebrane albo nie są dostępne do zbierania.');
-            }
+        $orders = ExternalOrder::query()
+            ->whereIn('id', $orderIds)
+            ->orderBy('id')
+            ->get()
+            ->all();
 
-            foreach ($tasks as $task) {
-                $task->update([
-                    'quantity_picked' => $task->quantity_required,
-                    'status' => 'picked',
-                    'picked_at' => now(),
-                ]);
-            }
+        if ($orders === []) {
+            throw new RuntimeException('Nie znaleziono zamówień dla wybranych pozycji pakowania.');
+        }
 
-            $tasks->pluck('external_order_id')->unique()->each(
-                fn ($orderId) => $this->syncOrderFulfillmentStatus((int) $orderId),
-            );
+        return $this->orderLock->forOrders($orders, function () use ($ids): int {
+            return DB::transaction(function () use ($ids): int {
+                $orders = ExternalOrder::query()
+                    ->whereIn('id', PackingTask::query()->whereIn('id', $ids)->select('external_order_id'))
+                    ->orderBy('id')
+                    ->lockForUpdate()
+                    ->get();
 
-            return $tasks->count();
+                foreach ($orders as $order) {
+                    $this->assertPackingMutationAllowed($order);
+                }
+
+                $tasks = PackingTask::query()
+                    ->whereIn('id', $ids)
+                    ->where('status', 'open')
+                    ->lockForUpdate()
+                    ->get();
+
+                if ($tasks->isEmpty()) {
+                    throw new RuntimeException('Pozycje z tej grupy są już zebrane albo nie są dostępne do zbierania.');
+                }
+
+                foreach ($tasks as $task) {
+                    $task->update([
+                        'quantity_picked' => $task->quantity_required,
+                        'status' => 'picked',
+                        'picked_at' => now(),
+                    ]);
+                }
+
+                $tasks->pluck('external_order_id')->unique()->each(
+                    fn ($orderId) => $this->syncOrderFulfillmentStatus((int) $orderId),
+                );
+
+                return $tasks->count();
+            });
         });
     }
 
     public function markOrderPacked(ExternalOrder $order): int
     {
         return DB::transaction(function () use ($order): int {
+            $order = ExternalOrder::query()
+                ->lockForUpdate()
+                ->findOrFail($order->id);
+            $this->assertPackingMutationAllowed($order);
+
             $tasks = PackingTask::query()
                 ->where('external_order_id', $order->id)
                 ->whereIn('status', ['open', 'picked'])
@@ -424,37 +604,65 @@ final class PackingTaskService
 
     public function reopenProblem(PackingTask $task): PackingTask
     {
-        if ($task->status !== 'problem') {
-            throw new RuntimeException('Tylko pozycję w statusie problem można przywrócić do kolejki.');
-        }
-
         $task->loadMissing('order');
-        if ($task->order?->status === 'cancelled'
-            || filled(data_get($task->metadata, 'packing_problem.cancelled_at'))) {
-            throw new RuntimeException('Anulowane zamówienie z listy problemów jest tylko do odczytu.');
+
+        if (! $task->order instanceof ExternalOrder) {
+            throw new RuntimeException('Nie znaleziono zamówienia dla tej pozycji pakowania.');
         }
 
-        $metadata = (array) $task->metadata;
-        $metadata['packing_problem_resolved_at'] = now()->toISOString();
-        unset($metadata['packing_problem']);
+        return $this->orderLock->forOrder($task->order, function () use ($task): PackingTask {
+            return DB::transaction(function () use ($task): PackingTask {
+                $order = ExternalOrder::query()
+                    ->lockForUpdate()
+                    ->findOrFail($task->external_order_id);
+                $this->assertPackingMutationAllowed($order);
+                $lockedTask = PackingTask::query()->lockForUpdate()->findOrFail($task->id);
 
-        $required = (float) $task->quantity_required;
-        $picked = min((float) $task->quantity_picked, $required);
+                if ($lockedTask->status !== 'problem') {
+                    throw new RuntimeException('Tylko pozycję w statusie problem można przywrócić do kolejki.');
+                }
 
-        $task->update([
-            'status' => $picked >= $required ? 'picked' : 'open',
-            'quantity_picked' => $picked,
-            'metadata' => $metadata,
-        ]);
+                if (filled(data_get($lockedTask->metadata, 'packing_problem.cancelled_at'))) {
+                    throw new RuntimeException('Anulowane zamówienie z listy problemów jest tylko do odczytu.');
+                }
 
-        $this->syncOrderFulfillmentStatus($task->external_order_id);
+                $metadata = (array) $lockedTask->metadata;
+                $metadata['packing_problem_resolved_at'] = now()->toISOString();
+                unset($metadata['packing_problem']);
 
-        return $task->refresh();
+                $required = (float) $lockedTask->quantity_required;
+                $picked = min((float) $lockedTask->quantity_picked, $required);
+
+                $lockedTask->update([
+                    'status' => $picked >= $required ? 'picked' : 'open',
+                    'quantity_picked' => $picked,
+                    'metadata' => $metadata,
+                ]);
+
+                $this->syncOrderFulfillmentStatus($lockedTask->external_order_id);
+
+                return $lockedTask->refresh();
+            }, 3);
+        });
     }
 
     public function readyStatuses(): array
     {
         return $this->statusPolicy->packingReadyStatuses();
+    }
+
+    private function assertPackingMutationAllowed(ExternalOrder $order): void
+    {
+        if ($order->hasCancellationOperation()
+            || in_array(mb_strtolower(trim((string) $order->status)), [
+                'cancellation-pending',
+                'cancelled',
+                'refunded',
+            ], true)) {
+            throw new RuntimeException(
+                'Nie można kontynuować kompletacji ani pakowania anulowanego zamówienia lub zamówienia w trakcie anulacji.',
+            );
+        }
     }
 
     private function syncOrderFulfillmentStatus(int $orderId): void

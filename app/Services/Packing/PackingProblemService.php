@@ -9,21 +9,16 @@ use App\Models\ExternalOrder;
 use App\Models\PackingTask;
 use App\Services\Audit\AuditLogService;
 use App\Services\Communication\CustomerCommunicationService;
-use App\Services\Inventory\StockReservationService;
-use App\Services\WooCommerce\WooCommerceOrderStatusService;
-use Illuminate\Contracts\Cache\LockTimeoutException;
-use Illuminate\Support\Facades\Cache;
+use App\Services\Orders\OrderCancellationService;
+use Illuminate\Support\Facades\Auth;
 use RuntimeException;
 use Throwable;
 
 final class PackingProblemService
 {
-    private const ORDER_LOCK_SECONDS = 180;
-
     public function __construct(
         private readonly PackingTaskService $packingTasks,
-        private readonly WooCommerceOrderStatusService $orderStatuses,
-        private readonly StockReservationService $reservations,
+        private readonly OrderCancellationService $cancellations,
         private readonly CustomerCommunicationService $communication,
         private readonly AuditLogService $audit,
     ) {}
@@ -71,22 +66,6 @@ final class PackingProblemService
      */
     public function reportOrder(ExternalOrder $order, string $reason): array
     {
-        try {
-            return Cache::lock('packing-fulfillment-order-'.$order->id, self::ORDER_LOCK_SECONDS)
-                ->block(10, fn (): array => $this->reportOrderWhileLocked($order, $reason));
-        } catch (LockTimeoutException $exception) {
-            throw new RuntimeException(
-                'To zamówienie jest właśnie aktualizowane. Spróbuj ponownie za chwilę.',
-                previous: $exception,
-            );
-        }
-    }
-
-    /**
-     * @return array{tasks:int,orders:int,warnings:list<string>}
-     */
-    private function reportOrderWhileLocked(ExternalOrder $order, string $reason): array
-    {
         $order = ExternalOrder::query()->findOrFail($order->id);
         $taskStatuses = PackingTask::query()
             ->where('external_order_id', $order->id)
@@ -97,31 +76,36 @@ final class PackingProblemService
             throw new RuntimeException('To zamówienie nie ma aktywnych pozycji kompletacji ani pakowania.');
         }
 
-        if ($order->status !== 'cancelled') {
-            try {
-                $this->orderStatuses->markCancelledForPackingProblem($order);
-            } catch (Throwable $exception) {
-                throw new RuntimeException(
-                    'Nie udało się anulować zamówienia w WooCommerce: '.$exception->getMessage(),
-                    previous: $exception,
-                );
-            }
-            $order->refresh();
-        }
-
-        if ($taskStatuses->contains(fn (string $status): bool => in_array($status, ['open', 'picked'], true))) {
-            $this->packingTasks->markOrderProblem($order, $reason);
-        }
-
-        $warnings = [];
         try {
-            $this->reservations->syncForOrder($order);
+            $cancellationResult = $this->cancellations->cancelForPackingProblem(
+                $order,
+                $reason,
+                Auth::id(),
+            );
         } catch (Throwable $exception) {
-            $warnings[] = 'Rezerwacje magazynowe: '.$exception->getMessage();
+            throw new RuntimeException(
+                'Nie udało się bezpiecznie anulować zamówienia: '.$exception->getMessage(),
+                previous: $exception,
+            );
+        }
+
+        $order->refresh();
+        $warnings = array_values(array_unique((array) ($cancellationResult['warnings'] ?? [])));
+
+        if ($order->status !== 'cancelled') {
+            $details = $warnings === []
+                ? 'Wymagane jest ręczne cofnięcie wysyłki przed zwrotem środków.'
+                : implode(' | ', $warnings);
+
+            throw new RuntimeException(
+                'Anulowanie zostało bezpiecznie wstrzymane. '.$details,
+            );
         }
 
         $message = $this->communication->sendOrderStatus($order, 'order_cancelled_problem', [
             'problem_note' => $reason,
+            'cancellation_uuid' => $cancellationResult['cancellation']->uuid,
+            'refund_status' => $cancellationResult['cancellation']->refund_status,
         ]);
 
         if (! $message instanceof CustomerMessage) {
@@ -144,6 +128,8 @@ final class PackingProblemService
             'customer_message_id' => $message?->id,
             'customer_message_status' => $message?->status,
             'warnings' => $warnings,
+            'order_cancellation_uuid' => $cancellationResult['cancellation']->uuid,
+            'refund_status' => $cancellationResult['cancellation']->refund_status,
         ]);
 
         $taskCount = PackingTask::query()
@@ -156,6 +142,9 @@ final class PackingProblemService
             'tasks' => $taskCount,
             'customer_message_id' => $message?->id,
             'customer_message_status' => $message?->status,
+            'order_cancellation_id' => $cancellationResult['cancellation']->id,
+            'order_cancellation_uuid' => $cancellationResult['cancellation']->uuid,
+            'refund_status' => $cancellationResult['cancellation']->refund_status,
             'warnings' => $warnings,
         ]);
 

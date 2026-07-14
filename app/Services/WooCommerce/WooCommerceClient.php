@@ -1153,9 +1153,13 @@ final class WooCommerceClient
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
-    public function updateOrder(WordpressIntegration $integration, string $orderId, array $payload): array
-    {
-        $response = $this->request($integration)
+    public function updateOrder(
+        WordpressIntegration $integration,
+        string $orderId,
+        array $payload,
+        bool $retry = true,
+    ): array {
+        $response = $this->request($integration, retry: $retry)
             ->put($this->endpoint($integration, "/orders/{$orderId}"), $payload);
 
         if (! $response->successful()) {
@@ -1165,6 +1169,88 @@ final class WooCommerceClient
         $json = $response->json();
 
         return is_array($json) ? $json : [];
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function orderRefunds(WordpressIntegration $integration, string|int $orderId): array
+    {
+        $encodedOrderId = rawurlencode((string) $orderId);
+
+        try {
+            $response = $this->request($integration)
+                ->get($this->endpoint($integration, "/orders/{$encodedOrderId}/refunds"), [
+                    'context' => 'view',
+                    'per_page' => 100,
+                ]);
+        } catch (RequestException $exception) {
+            if ($exception->response instanceof Response) {
+                throw $this->wooCommerceResponseException(
+                    $exception->response,
+                    'Pobranie zwrotów zamówienia z WooCommerce',
+                );
+            }
+
+            throw $exception;
+        }
+
+        if (! $response->successful()) {
+            throw $this->wooCommerceResponseException(
+                $response,
+                'Pobranie zwrotów zamówienia z WooCommerce',
+            );
+        }
+
+        $refunds = $response->json();
+
+        return is_array($refunds)
+            ? array_values(array_filter($refunds, fn (mixed $refund): bool => is_array($refund)))
+            : [];
+    }
+
+    /**
+     * This payment-changing POST must never be retried automatically. A timeout
+     * can occur after the gateway accepted the refund, and repeating the call
+     * could return the customer's money twice.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    public function createOrderRefund(
+        WordpressIntegration $integration,
+        string|int $orderId,
+        array $payload,
+    ): array {
+        $encodedOrderId = rawurlencode((string) $orderId);
+        $response = $this->request($integration, retry: false)
+            ->post($this->endpoint($integration, "/orders/{$encodedOrderId}/refunds"), $payload);
+
+        if (! $response->successful()) {
+            throw $this->wooCommerceResponseException(
+                $response,
+                'Utworzenie zwrotu płatności w WooCommerce',
+            );
+        }
+
+        $refund = $response->json();
+
+        return is_array($refund) ? $refund : [];
+    }
+
+    private function wooCommerceResponseException(Response $response, string $operation): RuntimeException
+    {
+        $payload = $response->json();
+        $code = is_array($payload) ? trim((string) ($payload['code'] ?? '')) : '';
+        $message = is_array($payload) ? trim((string) ($payload['message'] ?? '')) : '';
+        $codeDetails = $code !== '' ? ", {$code}" : '';
+        $messageDetails = $message !== ''
+            ? ': '.Str::limit(preg_replace('/\s+/', ' ', $message) ?? $message, 500, '…')
+            : '.';
+
+        return new RuntimeException(
+            "{$operation} nie powiodło się (HTTP {$response->status()}{$codeDetails}){$messageDetails}"
+        );
     }
 
     /**

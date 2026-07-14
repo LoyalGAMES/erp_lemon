@@ -108,6 +108,10 @@ final class MbankTransferBasketService
             return false;
         }
 
+        if ($returnCase->externalOrder->cancellationOperation() !== null) {
+            return false;
+        }
+
         if ($returnCase->status !== 'corrected' || ! $returnCase->correctionInvoice instanceof Invoice) {
             return false;
         }

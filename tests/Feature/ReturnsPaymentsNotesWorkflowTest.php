@@ -23,6 +23,7 @@ use App\Services\Payments\PayuRefundSettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class ReturnsPaymentsNotesWorkflowTest extends TestCase
@@ -54,9 +55,11 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
 
         $this->post(route('orders.payments.store', $order), [
             'amount' => '19.99',
+            'currency' => 'PLN',
             'method' => 'blik',
             'reference' => 'BLIK-123',
             'description' => 'Dopłata za przesyłkę wymienną.',
+            'operation_id' => (string) Str::uuid(),
         ])->assertRedirect()->assertSessionHas('status');
 
         $this->assertSame(1, InternalNote::query()->where('external_order_id', $order->id)->count());

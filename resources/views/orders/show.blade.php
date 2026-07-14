@@ -109,7 +109,28 @@
         .customer-message-preview { margin-top: 7px; white-space: pre-wrap; }
         .compact-form { display: grid; gap: 10px; }
         .compact-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-        .payment-balance { font-size: 22px; font-weight: 780; }
+        .settlement-layout { grid-template-columns: minmax(0, 1.45fr) minmax(300px, .75fr); }
+        .settlement-overview { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin-bottom: 14px; }
+        .settlement-metric { border: 1px solid var(--border); border-radius: 8px; padding: 11px; background: #fffdfb; }
+        .settlement-metric span { display: block; color: var(--muted); font-size: 11px; font-weight: 760; margin-bottom: 4px; }
+        .settlement-metric strong { display: block; font-size: 18px; overflow-wrap: anywhere; }
+        .settlement-block { border: 1px solid var(--border); border-radius: 8px; padding: 13px; margin-top: 12px; background: var(--surface); }
+        .settlement-block h3 { margin: 0 0 9px; font-size: 15px; }
+        .settlement-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 16px; }
+        .settlement-detail { display: grid; gap: 2px; min-width: 0; }
+        .settlement-detail span { color: var(--muted); font-size: 11px; font-weight: 720; }
+        .settlement-detail strong { overflow-wrap: anywhere; }
+        .settlement-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+        .settlement-action { border: 1px solid var(--border); border-radius: 8px; padding: 13px; display: grid; gap: 9px; align-content: start; background: #fffdfb; }
+        .settlement-action h3, .settlement-action p { margin: 0; }
+        .settlement-action-danger { border-color: #e4b5b5; background: #fff8f8; }
+        .settlement-check { display: flex; grid-template-columns: none; align-items: flex-start; gap: 8px; color: var(--text); font-size: 12px; }
+        .settlement-check input { margin-top: 2px; flex: 0 0 auto; }
+        .settlement-cancellation { border-color: #e5c48c; background: #fff8e8; }
+        .settlement-cancellation.is-critical { border-color: #efb9b9; background: #fff0f0; }
+        .settlement-help { color: var(--muted); font-size: 12px; line-height: 1.45; }
+        .settlement-disclosure { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+        .settlement-disclosure summary { cursor: pointer; color: var(--green-dark); font-weight: 780; }
         .payment-history { display: grid; gap: 9px; margin-top: 14px; }
         .payment-row { border-top: 1px solid var(--border); padding-top: 9px; display: flex; justify-content: space-between; gap: 12px; }
         .payment-row strong { display: block; }
@@ -122,19 +143,24 @@
             .order-grid { grid-template-columns: 1fr; }
             .order-command-grid { grid-template-columns: 1fr; }
             .address-grid { grid-template-columns: 1fr; }
+            .settlement-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         }
         @media (max-width: 560px) {
             .order-summary { grid-template-columns: 1fr; }
             .split-line-grid { grid-template-columns: 1fr; }
             .compact-form-grid { grid-template-columns: 1fr; }
             .order-command-form, .order-new-line { grid-template-columns: 1fr; }
+            .settlement-overview, .settlement-detail-grid, .settlement-actions { grid-template-columns: 1fr; }
         }
     </style>
 @endpush
 
 @section('content')
     <section class="order-toolbar">
-        <a class="button secondary" href="{{ route('modules.show', 'orders') }}">Wróć do zamówień</a>
+        <div class="inline-actions">
+            <a class="button secondary" href="{{ route('modules.show', 'orders') }}">Wróć do zamówień</a>
+            <a class="button" href="{{ route('orders.edit', $order) }}">Edytuj zamówienie</a>
+        </div>
         @include('partials.order-actions', [
             'order' => $order,
             'wzDocument' => $latestWz,
@@ -185,31 +211,39 @@
         <article class="card order-command-card">
             <h2>Zmień status zamówienia</h2>
             <p class="muted">Zmiana zostanie zapisana w WooCommerce i od razu odświeży rezerwacje oraz kolejkę pakowania w ERP.</p>
-            <form class="order-command-form" method="POST" action="{{ route('orders.status.update', $order) }}">
-                @csrf
-                @method('PATCH')
-                <label>Status WooCommerce
-                    <select name="status" required>
-                        @foreach ($orderStatusOptions as $statusValue => $statusLabel)
-                            <option value="{{ $statusValue }}" @selected(old('status', $order->status) === $statusValue)>{{ $statusLabel }} ({{ $statusValue }})</option>
-                        @endforeach
-                    </select>
-                </label>
-                <button class="button" type="submit">Zapisz status</button>
-            </form>
+            @if ($orderOperationsLocked)
+                <div class="alert warning" style="margin: 0;">Zwykła zmiana statusu jest wyłączona, ponieważ zamówienie jest anulowane albo trwa jego anulowanie.</div>
+            @else
+                <form class="order-command-form" method="POST" action="{{ route('orders.status.update', $order) }}">
+                    @csrf
+                    @method('PATCH')
+                    <label>Status WooCommerce
+                        <select name="status" required>
+                            @foreach ($orderStatusOptions as $statusValue => $statusLabel)
+                                <option value="{{ $statusValue }}" @selected(old('status', $order->status) === $statusValue)>{{ $statusLabel }} ({{ $statusValue }})</option>
+                            @endforeach
+                        </select>
+                    </label>
+                    <button class="button" type="submit">Zapisz status</button>
+                </form>
+            @endif
             <span class="muted">Status realizacji ERP: <strong>{{ $fulfillmentStatusLabel }}</strong> — jest wyliczany z kompletacji i wysyłki.</span>
         </article>
 
         <article class="card order-command-card">
             <h2>Ponów prośbę o wpłatę</h2>
             <p class="muted">Klient otrzyma gotowy mail z przyciskiem „Przejdź do płatności”. Link możesz uzupełnić, jeśli WooCommerce nie przekazał go automatycznie.</p>
-            <form class="order-command-form" method="POST" action="{{ route('orders.payment-reminder.send', $order) }}">
-                @csrf
-                <label>Link do płatności
-                    <input name="payment_url" type="url" maxlength="1000" value="{{ old('payment_url', $paymentUrl) }}" placeholder="https://sklep.pl/checkout/order-pay/..." required>
-                </label>
-                <button class="button" type="submit">Wyślij przypomnienie</button>
-            </form>
+            @if ($orderOperationsLocked)
+                <div class="alert warning" style="margin: 0;">Przypomnienie o płatności jest wyłączone dla anulowanego zamówienia.</div>
+            @else
+                <form class="order-command-form" method="POST" action="{{ route('orders.payment-reminder.send', $order) }}">
+                    @csrf
+                    <label>Link do płatności
+                        <input name="payment_url" type="url" maxlength="1000" value="{{ old('payment_url', $paymentUrl) }}" placeholder="https://sklep.pl/checkout/order-pay/..." required>
+                    </label>
+                    <button class="button" type="submit">Wyślij przypomnienie</button>
+                </form>
+            @endif
             <span class="muted">Odbiorca: {{ data_get($order->billing_data, 'email') ?: data_get($order->shipping_data, 'email') ?: 'brak adresu e-mail' }}</span>
         </article>
     </section>
@@ -558,7 +592,11 @@
                                 @endif
                             </div>
                             <div class="shipping-label-card-actions">
-                                <a class="button secondary" href="{{ $label->purpose === 'shipment' ? route('packing.labels.download', $label) : route('returns.labels.download', $label) }}">Pobierz etykietę</a>
+                                @if ($label->purpose !== 'shipment' || (! $orderOperationsLocked
+                                    && ! in_array(mb_strtolower((string) $order->status), ['cancellation-pending', 'cancelled', 'canceled', 'refunded'], true)
+                                    && in_array(mb_strtolower((string) $label->status), ['generated', 'picked_up', 'delivered'], true)))
+                                    <a class="button secondary" href="{{ $label->purpose === 'shipment' ? route('packing.labels.download', $label) : route('returns.labels.download', $label) }}">Pobierz etykietę</a>
+                                @endif
                                 @if ($trackingUrl)
                                     <a class="button" href="{{ $trackingUrl }}" target="_blank" rel="noopener noreferrer" aria-label="Śledź przesyłkę {{ $label->trackingIdentifier() }}">Śledź paczkę</a>
                                 @endif
@@ -569,7 +607,7 @@
                     @endforelse
                 </div>
 
-                @if ($shipmentLabels->isEmpty())
+                @if ($shipmentLabels->isEmpty() && ! $orderOperationsLocked)
                     <form class="order-label-form" method="POST" action="{{ route('orders.label.generate', $order) }}">
                         @csrf
                         <select name="courier_account_id" aria-label="Konto nadawcze">
@@ -580,6 +618,8 @@
                         </select>
                         <button class="button" type="submit">Generuj przesyłkę</button>
                     </form>
+                @elseif ($shipmentLabels->isEmpty())
+                    <div class="alert warning" style="margin: 12px 0 0;">Generowanie nowej przesyłki jest wyłączone dla anulowanego zamówienia.</div>
                 @endif
             </div>
         </article>
@@ -689,64 +729,446 @@
         </article>
     </section>
 
-    <section class="order-grid">
+    <section class="order-grid settlement-layout">
         <article id="rozliczenia-zamowienia" class="card order-section">
+            @php
+                $settlement = (array) $settlementSummary;
+                $wooSettlement = (array) data_get($settlement, 'woo', []);
+                $erpSettlement = (array) data_get($settlement, 'erp', []);
+                $wooPaymentRecords = (array) data_get($settlement, 'woocommerce_payment_records', []);
+                $settlementCurrency = (string) data_get($settlement, 'currency', $order->currency);
+                $paymentState = (string) data_get($settlement, 'payment_state', 'unpaid');
+                $paymentStatePresentation = [
+                    'unpaid' => ['label' => 'Nieopłacone', 'class' => 'red'],
+                    'partially_paid' => ['label' => 'Częściowo opłacone', 'class' => 'orange'],
+                    'paid' => ['label' => 'Opłacone', 'class' => ''],
+                    'partially_refunded' => ['label' => 'Częściowo zwrócone', 'class' => 'orange'],
+                    'refunded' => ['label' => 'Zwrócone', 'class' => ''],
+                ][$paymentState] ?? ['label' => $paymentState, 'class' => 'blue'];
+                $pendingIncoming = (float) data_get($erpSettlement, 'pending.incoming', 0);
+                $pendingOutgoing = (float) data_get($erpSettlement, 'pending.outgoing', 0)
+                    + (float) data_get($wooPaymentRecords, 'pending.outgoing', 0);
+                $processingOutgoing = (float) data_get($erpSettlement, 'processing.outgoing', 0)
+                    + (float) data_get($wooPaymentRecords, 'processing.outgoing', 0);
+                $unknownOutgoing = (float) data_get($erpSettlement, 'unknown.outgoing', 0)
+                    + (float) data_get($wooPaymentRecords, 'unknown.outgoing', 0);
+                $ambiguousOutgoing = $pendingOutgoing + $processingOutgoing + $unknownOutgoing;
+                $unconfirmedWooRefund = (float) data_get($settlement, 'unconfirmed_woo_refund_amount', 0);
+                $automaticRefundMaximum = min(
+                    (float) data_get($wooSettlement, 'refundable', 0),
+                    max(0, (float) data_get($settlement, 'balance', 0)),
+                );
+                $cancellationCritical = $orderCancellation !== null && in_array(
+                    (string) $orderCancellation->refund_status,
+                    ['manual_required', 'unknown', 'failed'],
+                    true,
+                );
+                $shippingCancellationStep = $orderCancellation?->steps
+                    ?->first(fn ($step) => $step->step === 'shipping');
+                $refundCancellationStep = $orderCancellation?->steps
+                    ?->first(fn ($step) => $step->step === 'refund');
+                $manualShippingConfirmationRequired = $shippingCancellationStep?->status === 'attention_required'
+                    && $refundCancellationStep === null;
+                $manualRefundBlockedByCancellation = ($shippingCancellationStep !== null
+                        && $shippingCancellationStep->status !== 'completed')
+                    || ($orderCancellation !== null
+                        && $orderCancellation->status !== 'completed'
+                        && $orderCancellation->refund_status !== 'manual_required');
+                $cancellationStatusLabels = [
+                    'requested' => 'Zgłoszona',
+                    'processing' => 'W toku',
+                    'attention_required' => 'Wymaga interwencji',
+                    'completed' => 'Zakończona',
+                    'rejected' => 'Odrzucona',
+                ];
+                $refundStatusLabels = [
+                    'pending' => 'Oczekuje',
+                    'processing' => 'W toku',
+                    'submitted' => 'Zwrócono przez bramkę',
+                    'not_required' => 'Zwrot niewymagany',
+                    'manual_required' => 'Wymagany zwrot ręczny',
+                    'manual_completed' => 'Zwrot ręczny potwierdzony',
+                    'unknown' => 'Wynik nieznany — nie ponawiać',
+                    'failed' => 'Błąd zwrotu',
+                ];
+            @endphp
             <div class="panel-header">
                 <span>Rozliczenia klienta</span>
-                @php
-                    $incomingPayments = (float) $order->customerPayments->where('direction', 'incoming')->sum(fn ($payment) => (float) $payment->amount);
-                    $outgoingPayments = (float) $order->customerPayments->where('direction', 'outgoing')->sum(fn ($payment) => (float) $payment->amount);
-                    $paymentBalance = $incomingPayments - $outgoingPayments;
-                @endphp
-                <span>{{ $money($paymentBalance, $order->currency) }}</span>
+                <span class="status {{ $paymentStatePresentation['class'] }}">{{ $paymentStatePresentation['label'] }}</span>
             </div>
             <div class="order-section-body">
-                <div class="payment-balance">{{ $money($paymentBalance, $order->currency) }}</div>
-                <div class="muted">Suma ręcznie zaksięgowanych dopłat pomniejszona o wypłaty/refundy zarejestrowane w ERP.</div>
-
-                <form class="compact-form" method="POST" action="{{ route('orders.payments.store', $order) }}" style="margin-top: 14px;">
-                    @csrf
-                    <div class="compact-form-grid">
-                        <label>Kwota
-                            <input name="amount" type="number" min="0.01" step="0.01" required>
-                        </label>
-                        <label>Metoda
-                            <select name="method" required>
-                                <option value="blik">BLIK</option>
-                                <option value="bank_transfer">Przelew</option>
-                                <option value="cash">Gotówka</option>
-                                <option value="card">Karta</option>
-                                <option value="payu">PayU</option>
-                                <option value="other">Inna</option>
-                            </select>
-                        </label>
-                        <label>Data księgowania
-                            <input name="booked_at" type="datetime-local">
-                        </label>
-                        <label>Referencja
-                            <input name="reference" maxlength="160" placeholder="np. BLIK, ID transakcji">
-                        </label>
+                @if (! $settlementIsRoot)
+                    <div class="alert warning">
+                        To zamówienie jest częścią podzielonej rodziny. Rozliczenia należą wyłącznie do zamówienia głównego
+                        <a href="{{ route('orders.show', $settlementOrder) }}#rozliczenia-zamowienia"><strong>{{ $settlementOrder->external_number ?: $settlementOrder->external_id }}</strong></a>.
+                        Na tej karcie akcje finansowe są wyłączone.
                     </div>
-                    <label>Opis
-                        <textarea name="description" rows="2" maxlength="1000" placeholder="np. dopłata BLIK za przesyłkę wymienną"></textarea>
-                    </label>
-                    <button class="button secondary" type="submit">Zaksięguj wpłatę</button>
-                </form>
+                @endif
+                <div class="settlement-overview">
+                    <div class="settlement-metric">
+                        <span>Wartość zamówienia</span>
+                        <strong>{{ $money(data_get($settlement, 'order_total', 0), $settlementCurrency) }}</strong>
+                    </div>
+                    <div class="settlement-metric">
+                        <span>Potwierdzone opłacenie</span>
+                        <strong>{{ $money(data_get($settlement, 'confirmed_paid_amount', 0), $settlementCurrency) }}</strong>
+                    </div>
+                    <div class="settlement-metric">
+                        <span>Faktycznie zwrócono</span>
+                        <strong>{{ $money(data_get($settlement, 'confirmed_refunded_amount', 0), $settlementCurrency) }}</strong>
+                    </div>
+                    <div class="settlement-metric">
+                        <span>Saldo po zwrotach</span>
+                        <strong>{{ $money(data_get($settlement, 'balance', 0), $settlementCurrency) }}</strong>
+                    </div>
+                </div>
+
+                @if ($orderCancellation !== null)
+                    <div @class(['settlement-block', 'settlement-cancellation', 'is-critical' => $cancellationCritical])>
+                        <h3>Anulacja zamówienia</h3>
+                        <div class="settlement-detail-grid">
+                            <div class="settlement-detail">
+                                <span>Status procesu</span>
+                                <strong>{{ $cancellationStatusLabels[$orderCancellation->status] ?? $orderCancellation->status }}</strong>
+                            </div>
+                            <div class="settlement-detail">
+                                <span>Status zwrotu pieniędzy</span>
+                                <strong>{{ $refundStatusLabels[$orderCancellation->refund_status] ?? $orderCancellation->refund_status }}</strong>
+                            </div>
+                            <div class="settlement-detail">
+                                <span>Kwota anulacji / zwrotu</span>
+                                <strong>{{ $money($orderCancellation->refund_amount, $orderCancellation->currency) }}</strong>
+                            </div>
+                            <div class="settlement-detail">
+                                <span>Metoda / ID refundu Woo</span>
+                                <strong>{{ $orderCancellation->payment_method ?: '-' }}{{ $orderCancellation->woo_refund_id ? ' · #'.$orderCancellation->woo_refund_id : '' }}</strong>
+                            </div>
+                        </div>
+                        <p class="settlement-help"><strong>Powód:</strong> {{ $orderCancellation->reason }}</p>
+                        @if ($orderCancellation->last_error)
+                            <div class="alert error" style="margin: 8px 0 0;">{{ $orderCancellation->last_error }}</div>
+                        @endif
+                        @if ($settlementIsRoot && $orderCancellation->refund_status === 'unknown' && Route::has('orders.cancellation.refund-reconcile'))
+                            <form class="compact-form" method="POST" action="{{ route('orders.cancellation.refund-reconcile', $settlementOrder) }}" style="margin-top: 10px;">
+                                @csrf
+                                <p class="settlement-help">
+                                    Ta akcja tylko odczyta refundy z WooCommerce i wyszuka istniejącą operację po jej trwałym identyfikatorze. Nie wyśle kolejnego żądania zwrotu.
+                                </p>
+                                <label class="settlement-check">
+                                    <input type="checkbox" name="confirm_reconciliation" value="1" required>
+                                    Potwierdzam uzgodnienie istniejącego refundu bez ponawiania cashbacku.
+                                </label>
+                                <button class="button secondary" type="submit">Uzgodnij wynik zwrotu z WooCommerce</button>
+                            </form>
+                        @endif
+                        @if ($manualShippingConfirmationRequired)
+                            <div class="alert warning" style="margin: 8px 0 0;">
+                                Przewoźnik nie pozwolił potwierdzić anulowania etykiety automatycznie. Refund pieniędzy jeszcze nie ruszył.
+                            </div>
+                            @if ($settlementIsRoot && Route::has('orders.cancellation.shipping-confirm'))
+                                <form class="compact-form" method="POST" action="{{ route('orders.cancellation.shipping-confirm', $settlementOrder) }}" style="margin-top: 10px;">
+                                    @csrf
+                                    <label>Notatka / numer zgłoszenia do przewoźnika
+                                        <input name="note" maxlength="500" placeholder="Opcjonalnie: numer sprawy, data kontaktu">
+                                    </label>
+                                    <label class="settlement-check">
+                                        <input type="checkbox" name="confirm_manual_shipping_cancellation" value="1" required>
+                                        Potwierdzam, że przesyłka została anulowana u przewoźnika, a wszystkie wydruki etykiety zniszczone.
+                                    </label>
+                                    <button class="button" style="background: var(--red);" type="submit">Potwierdź ręczne anulowanie przesyłki i wznów anulację</button>
+                                </form>
+                            @endif
+                        @endif
+                        @if ($orderCancellation->steps->isNotEmpty())
+                            <div class="inline-actions" style="margin-top: 8px;">
+                                @foreach ($orderCancellation->steps->sortBy('id') as $cancellationStep)
+                                    <span @class([
+                                        'status',
+                                        'red' => in_array($cancellationStep->status, ['failed', 'unknown'], true),
+                                        'orange' => $cancellationStep->status === 'attention_required',
+                                        'blue' => in_array($cancellationStep->status, ['pending', 'processing'], true),
+                                    ])>{{ $cancellationStep->step }}: {{ $cancellationStep->status }}</span>
+                                @endforeach
+                            </div>
+                        @endif
+                    </div>
+                @endif
+
+                @if ($unknownOutgoing > 0 || ($orderCancellation?->refund_status === 'unknown'))
+                    <div class="alert error" style="margin: 12px 0 0;">
+                        Wynik zwrotu {{ $money($unknownOutgoing, $settlementCurrency) }} jest nieznany. Nie ponawiaj zwrotu — najpierw uzgodnij go w WooCommerce i u operatora płatności.
+                    </div>
+                @elseif ($ambiguousOutgoing > 0)
+                    <div class="alert warning" style="margin: 12px 0 0;">
+                        Operacje wychodzące oczekują na rozstrzygnięcie: pending {{ $money($pendingOutgoing, $settlementCurrency) }}, processing {{ $money($processingOutgoing, $settlementCurrency) }}. Nowy zwrot jest zablokowany.
+                    </div>
+                @endif
+
+                @if ($unconfirmedWooRefund > 0)
+                    <div class="alert warning" style="margin: 12px 0 0;">
+                        WooCommerce ma zapis refundu na {{ $money(data_get($settlement, 'accounting_refunded_amount', 0), $settlementCurrency) }}, ale potwierdzony przepływ pieniędzy jest niższy o {{ $money($unconfirmedWooRefund, $settlementCurrency) }}. Sam zapis refundu w Woo nie potwierdza cashbacku.
+                    </div>
+                @endif
+
+                <div class="settlement-block">
+                    <h3>Płatność i refundy WooCommerce</h3>
+                    <div class="settlement-detail-grid">
+                        <div class="settlement-detail">
+                            <span>Opłacenie w Woo</span>
+                            <strong>{{ data_get($wooSettlement, 'paid') ? 'Potwierdzone' : 'Brak potwierdzenia' }}{{ data_get($wooSettlement, 'date_paid') ? ' · '.data_get($wooSettlement, 'date_paid') : '' }}</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>Metoda płatności</span>
+                            <strong>{{ data_get($wooSettlement, 'payment_method_title') ?: data_get($wooSettlement, 'payment_method') ?: '-' }}{{ data_get($wooSettlement, 'payment_method') ? ' ('.data_get($wooSettlement, 'payment_method').')' : '' }}</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>ID transakcji</span>
+                            <strong>{{ data_get($wooSettlement, 'transaction_id') ?: '-' }}</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>Suma zamówienia / możliwy kolejny refund Woo</span>
+                            <strong>{{ $money(data_get($wooSettlement, 'total', 0), $settlementCurrency) }} / {{ $money(data_get($wooSettlement, 'refundable', 0), $settlementCurrency) }}</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>Refundy zapisane księgowo w Woo</span>
+                            <strong>{{ $money(data_get($wooSettlement, 'refunded', 0), $settlementCurrency) }} · {{ (int) data_get($wooSettlement, 'refund_count', 0) }} operacji</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>Potwierdzone przez bramkę</span>
+                            <strong>{{ $money(data_get($settlement, 'confirmed_gateway_refunded_amount', 0), $settlementCurrency) }}</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>Zapisane jako ręczne w Woo</span>
+                            <strong>{{ $money(data_get($wooSettlement, 'manual_recorded_refunds', 0), $settlementCurrency) }}</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>Sposób zwrotu nieznany w danych Woo</span>
+                            <strong>{{ $money(data_get($wooSettlement, 'unknown_refund_method', 0), $settlementCurrency) }}</strong>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="settlement-block">
+                    <h3>Księgowania ERP</h3>
+                    <div class="settlement-detail-grid">
+                        <div class="settlement-detail">
+                            <span>Potwierdzone wpłaty ręczne</span>
+                            <strong>{{ $money(data_get($erpSettlement, 'confirmed.incoming', 0), $settlementCurrency) }}</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>Potwierdzone wypłaty ręczne</span>
+                            <strong>{{ $money(data_get($erpSettlement, 'confirmed.outgoing', 0), $settlementCurrency) }}</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>Oczekujące wpłaty</span>
+                            <strong>{{ $money($pendingIncoming, $settlementCurrency) }}</strong>
+                        </div>
+                        <div class="settlement-detail">
+                            <span>Pending / processing / unknown wypłat</span>
+                            <strong>{{ $money($pendingOutgoing, $settlementCurrency) }} / {{ $money($processingOutgoing, $settlementCurrency) }} / {{ $money($unknownOutgoing, $settlementCurrency) }}</strong>
+                        </div>
+                    </div>
+                    @if ((int) data_get($erpSettlement, 'excluded_other_currency_count', 0) > 0)
+                        <p class="settlement-help">Pominięto {{ (int) data_get($erpSettlement, 'excluded_other_currency_count') }} księgowań w innej walucie.</p>
+                    @endif
+                    <p class="settlement-help">Rekordy źródłowe Woo są pokazane jako ślad audytowy i nie są drugi raz dodawane do kwoty ERP.</p>
+                </div>
+
+                <div class="settlement-actions">
+                    <section class="settlement-action settlement-action-danger">
+                        <h3>Zwrot tą samą metodą przez WooCommerce</h3>
+                        <p class="settlement-help">WooCommerce poprosi pierwotną bramkę o zwrot. Zapis nie jest automatycznie ponawiany przy niejednoznacznym wyniku.</p>
+                        @if ($settlementIsRoot && $automaticRefundAllowed && $ambiguousOutgoing <= 0)
+                            <form class="compact-form" method="POST" action="{{ route('orders.refunds.woocommerce', $settlementOrder) }}">
+                                @csrf
+                                <input type="hidden" name="operation_id" value="{{ $automaticRefundOperationId }}">
+                                <input type="hidden" name="currency" value="{{ $settlementCurrency }}">
+                                <label>Kwota zwrotu
+                                    <input name="amount" type="number" min="0.01" max="{{ number_format($automaticRefundMaximum, 2, '.', '') }}" step="0.01" value="{{ number_format($automaticRefundMaximum, 2, '.', '') }}" required>
+                                </label>
+                                <label>Powód
+                                    <textarea name="reason" rows="2" maxlength="1000" required>Zwrot środków do zamówienia {{ $order->external_number ?: $order->external_id }}</textarea>
+                                </label>
+                                <label class="settlement-check">
+                                    <input type="checkbox" name="confirm_refund" value="1" required>
+                                    Potwierdzam uruchomienie zwrotu środków przez pierwotną bramkę płatności.
+                                </label>
+                                <button class="button" style="background: var(--red);" type="submit">Zwróć przez WooCommerce</button>
+                            </form>
+                        @else
+                            <div class="alert warning" style="margin: 0;">
+                                @if (! $settlementIsRoot)
+                                    Przejdź do zamówienia głównego, aby wykonać operację finansową.
+                                @elseif ($orderCancellation !== null)
+                                    Zwrot jest sterowany przez proces anulacji. Dokończ wskazane wyżej kroki zamiast uruchamiać osobny refund.
+                                @elseif ($ambiguousOutgoing > 0)
+                                    Akcja zablokowana do uzgodnienia poprzedniej operacji.
+                                @elseif (! data_get($wooSettlement, 'paid'))
+                                    WooCommerce nie potwierdza opłacenia zamówienia.
+                                @elseif ((float) data_get($wooSettlement, 'refundable', 0) <= 0)
+                                    WooCommerce nie wykazuje kwoty możliwej do kolejnego refundu.
+                                @else
+                                    Ta metoda nie jest rozpoznana jako płatność online. Zwrot wykonaj ręcznie i dopiero potem zarejestruj go obok.
+                                @endif
+                            </div>
+                        @endif
+                    </section>
+
+                    <section class="settlement-action">
+                        <h3>Potwierdź wykonany zwrot ręczny</h3>
+                        <p class="settlement-help"><strong>Ta akcja nie wysyła pieniędzy.</strong> Użyj jej dopiero po rzeczywistym przelewie, wypłacie gotówki lub innym zwrocie poza ERP.</p>
+                        @if ($settlementIsRoot && ! $manualRefundBlockedByCancellation && $manualRefundAvailability['allowed'] && $ambiguousOutgoing <= 0)
+                            <form class="compact-form" method="POST" action="{{ route('orders.refunds.manual', $settlementOrder) }}">
+                                @csrf
+                                <input type="hidden" name="operation_id" value="{{ $manualRefundOperationId }}">
+                                <input type="hidden" name="currency" value="{{ $manualRefundAvailability['currency'] }}">
+                                <div class="compact-form-grid">
+                                    <label>Kwota już zwrócona
+                                        <input name="amount" type="number" min="0.01" max="{{ number_format((float) $manualRefundAvailability['maximum'], 2, '.', '') }}" step="0.01" value="{{ number_format((float) $manualRefundAvailability['maximum'], 2, '.', '') }}" required>
+                                    </label>
+                                    <label>Sposób wykonania
+                                        <select name="method" required>
+                                            <option value="bank_transfer">Przelew bankowy</option>
+                                            <option value="cash">Gotówka</option>
+                                            <option value="card">Karta / terminal</option>
+                                            <option value="other">Inny</option>
+                                        </select>
+                                    </label>
+                                </div>
+                                <label>Referencja / dowód operacji
+                                    <input name="reference" maxlength="160" placeholder="np. numer przelewu" required>
+                                </label>
+                                <label>Powód
+                                    <textarea name="reason" rows="2" maxlength="1000" required>Ręczny zwrot środków do zamówienia {{ $order->external_number ?: $order->external_id }}</textarea>
+                                </label>
+                                <label class="settlement-check">
+                                    <input type="checkbox" name="confirm_completed" value="1" required>
+                                    Potwierdzam, że pieniądze zostały już faktycznie zwrócone klientowi poza ERP.
+                                </label>
+                                <button class="button secondary" type="submit">Zapisz wykonany zwrot ręczny</button>
+                            </form>
+                        @else
+                            <div class="alert warning" style="margin: 0;">{{ ! $settlementIsRoot ? 'Przejdź do zamówienia głównego, aby wykonać operację finansową.' : ($manualRefundBlockedByCancellation ? 'Najpierw dokończ proces anulacji. W jego trakcie ręczne potwierdzenie jest dostępne wyłącznie dla refundu oznaczonego jako manual_required.' : ($ambiguousOutgoing > 0 ? 'Akcja zablokowana do uzgodnienia poprzedniej operacji.' : $manualRefundAvailability['reason'])) }}</div>
+                        @endif
+                    </section>
+                </div>
+
+                @if ($settlementIsRoot && ! $orderOperationsLocked)
+                <details class="settlement-disclosure">
+                    <summary>Dodaj otrzymaną wpłatę ręczną</summary>
+                    <form class="compact-form" method="POST" action="{{ route('orders.payments.store', $settlementOrder) }}" style="margin-top: 12px;">
+                        @csrf
+                        <input type="hidden" name="operation_id" value="{{ $incomingPaymentOperationId }}">
+                        <input type="hidden" name="currency" value="{{ $settlementCurrency }}">
+                        <div class="compact-form-grid">
+                            <label>Kwota
+                                <input name="amount" type="number" min="0.01" step="0.01" required>
+                            </label>
+                            <label>Metoda
+                                <select name="method" required>
+                                    <option value="blik">BLIK</option>
+                                    <option value="bank_transfer">Przelew</option>
+                                    <option value="cash">Gotówka</option>
+                                    <option value="card">Karta</option>
+                                    <option value="payu">PayU</option>
+                                    <option value="other">Inna</option>
+                                </select>
+                            </label>
+                            <label>Data księgowania
+                                <input name="booked_at" type="datetime-local">
+                            </label>
+                            <label>Referencja
+                                <input name="reference" maxlength="160" placeholder="np. BLIK, ID transakcji">
+                            </label>
+                        </div>
+                        <label>Opis
+                            <textarea name="description" rows="2" maxlength="1000" placeholder="np. dopłata za zmianę zamówienia"></textarea>
+                        </label>
+                        <button class="button secondary" type="submit">Zaksięguj otrzymaną wpłatę</button>
+                    </form>
+                </details>
+                @endif
 
                 <div class="payment-history">
-                    @forelse ($order->customerPayments->take(8) as $payment)
+                    <strong>Historia rozliczeń</strong>
+                    @forelse ($settlementPayments->take(12) as $payment)
+                        @php
+                            $paymentStatusPresentation = [
+                                'paid' => ['label' => 'Potwierdzone', 'class' => ''],
+                                'booked' => ['label' => 'Zaksięgowane', 'class' => ''],
+                                'settled' => ['label' => 'Rozliczone', 'class' => ''],
+                                'pending' => ['label' => 'Oczekuje', 'class' => 'blue'],
+                                'processing' => ['label' => 'W toku', 'class' => 'blue'],
+                                'unknown' => ['label' => 'Wynik nieznany', 'class' => 'red'],
+                                'manual_required' => ['label' => 'Ręczny zwrot wymagany', 'class' => 'orange'],
+                                'failed' => ['label' => 'Błąd', 'class' => 'red'],
+                            ][$payment->status] ?? ['label' => $payment->status, 'class' => 'blue'];
+                            $paymentSourceLabel = match ($payment->source) {
+                                'woocommerce' => 'WooCommerce',
+                                'manual' => 'Ręcznie w ERP',
+                                default => $payment->source ?: 'ERP',
+                            };
+                            $manualWooSync = (array) data_get($payment->metadata, 'woocommerce_manual_refund_sync', []);
+                            $manualWooSyncStatus = (string) ($manualWooSync['status'] ?? '');
+                        @endphp
                         <div class="payment-row">
                             <div>
                                 <strong>{{ $payment->direction === 'outgoing' ? '-' : '+' }}{{ $money($payment->amount, $payment->currency) }}</strong>
-                                <span class="muted">{{ $payment->method }} · {{ $payment->reference ?: 'bez referencji' }}</span>
+                                <span class="muted">{{ $paymentSourceLabel }} · {{ $payment->method }} · {{ $payment->reference ?: 'bez referencji' }}</span>
+                                @if ($payment->purpose)
+                                    <div class="muted">Cel: {{ $payment->purpose }}</div>
+                                @endif
                                 @if ($payment->description)
                                     <div class="muted">{{ $payment->description }}</div>
                                 @endif
+                                @if ($payment->error_message)
+                                    <div style="color: var(--red);">{{ $payment->error_message }}</div>
+                                @endif
+                                @if (data_get($payment->metadata, 'manual_resolution.customer_payment_id'))
+                                    <div class="muted">Zwrot potwierdzony ręcznie wpisem #{{ data_get($payment->metadata, 'manual_resolution.customer_payment_id') }}.</div>
+                                @endif
+                                @if ($payment->purpose === 'manual_order_refund' && $manualWooSyncStatus !== '')
+                                    <div @style([
+                                        'color: var(--red)' => $manualWooSyncStatus === 'unknown',
+                                        'color: var(--orange)' => $manualWooSyncStatus === 'skipped' && (float) ($manualWooSync['unaccounted_remainder'] ?? 0) > 0.005,
+                                    ])>
+                                        Księgowanie Woo: {{ match ($manualWooSyncStatus) {
+                                            'success' => 'uzgodnione',
+                                            'skipped' => 'bez nowego rekordu',
+                                            'unknown' => 'wynik nieznany — nie ponawiać POST',
+                                            'processing' => 'wysłane, oczekuje na uzgodnienie',
+                                            default => $manualWooSyncStatus,
+                                        } }}{{ ! empty($manualWooSync['woo_refund_id']) ? ' · refund #'.$manualWooSync['woo_refund_id'] : '' }}.
+                                        @if (! empty($manualWooSync['message']))
+                                            {{ $manualWooSync['message'] }}
+                                        @endif
+                                    </div>
+                                    @if ($settlementIsRoot
+                                        && in_array($manualWooSyncStatus, ['unknown', 'processing'], true)
+                                        && Route::has('orders.refunds.manual.woocommerce-reconcile'))
+                                        <form
+                                            class="compact-form"
+                                            method="POST"
+                                            action="{{ route('orders.refunds.manual.woocommerce-reconcile', [$settlementOrder, $payment]) }}"
+                                            style="margin-top: 8px;"
+                                        >
+                                            @csrf
+                                            <p class="settlement-help">
+                                                Uzgodnienie nie wysyła pieniędzy. Sprawdzi wpis po trwałym tokenie, a księgowy POST bez cashbacku wykona tylko wtedy, gdy wcześniej nie został rozpoczęty.
+                                            </p>
+                                            <label class="settlement-check">
+                                                <input type="checkbox" name="confirm_reconciliation" value="1" required>
+                                                Potwierdzam bezpieczne uzgodnienie księgowania WooCommerce.
+                                            </label>
+                                            <button class="button secondary" type="submit">Uzgodnij księgowanie Woo</button>
+                                        </form>
+                                    @endif
+                                @endif
                             </div>
-                            <span @class(['status', 'blue' => $payment->status === 'pending', 'red' => $payment->status === 'failed'])>{{ $payment->status }}</span>
+                            <span class="status {{ $paymentStatusPresentation['class'] }}">{{ $paymentStatusPresentation['label'] }}</span>
                         </div>
                     @empty
-                        <span class="muted">Brak ręcznych księgowań dla tego zamówienia.</span>
+                        <span class="muted">Brak dodatkowych księgowań dla tego zamówienia.</span>
                     @endforelse
                 </div>
             </div>

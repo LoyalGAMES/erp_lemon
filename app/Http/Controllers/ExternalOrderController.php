@@ -13,16 +13,20 @@ use App\Models\ExternalOrderLine;
 use App\Models\InternalNote;
 use App\Models\ProductChannelMapping;
 use App\Models\StockReservation;
+use App\Models\User;
 use App\Services\Audit\AuditLogService;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Communication\CustomerMailPresentationService;
 use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderEditingService;
 use App\Services\Orders\OrderFulfillmentStatusService;
+use App\Services\Orders\OrderMutationLock;
 use App\Services\Orders\OrderPaymentLinkService;
 use App\Services\Orders\OrderSplitService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
+use App\Services\Payments\OrderSettlementService;
+use App\Services\Payments\PaymentMethodClassifier;
 use App\Services\Shipping\ShippingLabelService;
 use App\Services\WooCommerce\WooCommerceOrderStatusService;
 use Illuminate\Database\Eloquent\Builder;
@@ -31,6 +35,8 @@ use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\View\View;
 use RuntimeException;
 use Throwable;
@@ -43,6 +49,7 @@ class ExternalOrderController extends Controller
         ProductSegmentService $segments,
         OrderEditingService $editing,
         OrderPaymentLinkService $paymentLinks,
+        OrderSettlementService $settlements,
     ): View {
         $order->load([
             'salesChannel',
@@ -76,6 +83,33 @@ class ExternalOrderController extends Controller
             ->where('type', 'proforma')
             ->sortByDesc('id')
             ->first();
+        $settlementOrder = $settlements->rootOrder($order);
+        $settlementOrder->loadMissing('customerPayments');
+        $settlementSummary = $settlements->summary($settlementOrder);
+        $settlementPayments = $settlements->familyPayments($settlementOrder);
+        $manualRefundAvailability = $settlements->manualRefundAvailability($settlementOrder, $settlementSummary);
+        $cancellation = $settlementOrder->cancellationOperation()?->load(['steps', 'requestedBy']);
+        $woocommerceOperations = (array) $settlementSummary['woocommerce_payment_records'];
+        $erpOperations = (array) $settlementSummary['erp'];
+        $ambiguousRefundAmount = (float) data_get($woocommerceOperations, 'pending.outgoing', 0)
+            + (float) data_get($woocommerceOperations, 'processing.outgoing', 0)
+            + (float) data_get($woocommerceOperations, 'unknown.outgoing', 0)
+            + (float) data_get($erpOperations, 'pending.outgoing', 0)
+            + (float) data_get($erpOperations, 'processing.outgoing', 0)
+            + (float) data_get($erpOperations, 'unknown.outgoing', 0);
+        $automaticRefundAllowed = data_get($settlementSummary, 'woo.paid') === true
+            && (float) data_get($settlementSummary, 'woo.refundable', 0) > 0
+            && (float) data_get($settlementSummary, 'balance', 0) > 0
+            && $manualRefundAvailability['category'] === PaymentMethodClassifier::ONLINE
+            && $ambiguousRefundAmount <= 0
+            && $cancellation === null
+            && (int) $settlementOrder->id === (int) $order->id;
+        $orderOperationsLocked = $cancellation !== null
+            || in_array(mb_strtolower((string) $order->status), [
+                'cancellation-pending',
+                'cancelled',
+                'refunded',
+            ], true);
 
         return view('orders.show', [
             'title' => 'Zamówienie '.($order->external_number ?: $order->external_id),
@@ -111,11 +145,183 @@ class ExternalOrderController extends Controller
             'productLookupUrl' => route('orders.products.lookup', $order),
             'paymentUrl' => $paymentLinks->resolve($order),
             'orderStatusOptions' => $this->orderStatusOptions((string) $order->status),
+            'settlementSummary' => $settlementSummary,
+            'manualRefundAvailability' => $manualRefundAvailability,
+            'automaticRefundAllowed' => $automaticRefundAllowed,
+            'automaticRefundOperationId' => (string) Str::uuid(),
+            'manualRefundOperationId' => (string) Str::uuid(),
+            'incomingPaymentOperationId' => (string) Str::uuid(),
+            'orderCancellation' => $cancellation,
+            'orderOperationsLocked' => $orderOperationsLocked,
+            'settlementOrder' => $settlementOrder,
+            'settlementIsRoot' => (int) $settlementOrder->id === (int) $order->id,
+            'settlementPayments' => $settlementPayments,
         ]);
+    }
+
+    public function edit(
+        Request $request,
+        ExternalOrder $order,
+        OrderEditingService $editing,
+    ): View {
+        $this->assertCanEditOrder($request, $order);
+        $order->load([
+            'salesChannel',
+            'lines.product',
+            'packingTasks',
+            'shipmentLabels',
+            'invoices',
+        ]);
+        $returnTo = $request->query('return_to') === 'packing' ? 'packing' : 'order';
+        $canViewOrders = Auth::user()?->canAccessArea('orders') ?? false;
+        $cancellation = $order->cancellationOperation()?->load('steps');
+        $cancellationRetryable = $cancellation !== null
+            && (
+                in_array($cancellation->status, ['requested', 'processing'], true)
+                || $cancellation->steps->contains(
+                    fn ($step): bool => in_array($step->status, ['failed'], true),
+                )
+            );
+        $backUrl = $returnTo === 'packing' || ! $canViewOrders
+            ? route('packing.index', ['view' => 'pack'])
+            : route('orders.show', $order);
+
+        return view('orders.edit', [
+            'title' => 'Edycja zamówienia '.($order->external_number ?: $order->external_id),
+            'subtitle' => 'Zmiana zostanie zapisana jednocześnie w WooCommerce, ERP, aktywnym pakowaniu i szkicu WZ.',
+            'module' => $canViewOrders ? 'orders' : 'packing',
+            'order' => $order,
+            'editingAvailability' => $editing->availability($order),
+            'productLookupUrl' => route('orders.products.lookup', $order),
+            'billingTaxId' => $editing->billingTaxId($order),
+            'targetPoint' => $editing->targetPoint($order),
+            'shippingLine' => $editing->shippingLine($order),
+            'paymentMethodLocked' => $editing->paymentMethodLocked($order),
+            'cancellation' => $cancellation,
+            'canCancelOrder' => $canViewOrders && ($cancellation === null || $cancellationRetryable),
+            'canViewOrderDetails' => $canViewOrders,
+            'expectedVersion' => $editing->version($order),
+            'expectedRemoteModifiedAt' => $editing->expectedRemoteModifiedAt($order),
+            'returnTo' => $returnTo,
+            'backUrl' => $backUrl,
+        ]);
+    }
+
+    public function update(
+        Request $request,
+        ExternalOrder $order,
+        OrderEditingService $editing,
+        CustomerCommunicationService $communication,
+    ): RedirectResponse {
+        $this->assertCanEditOrder($request, $order);
+        $validated = $request->validate([
+            'expected_version' => ['required', 'string', 'size:64'],
+            'expected_remote_modified_at' => ['nullable', 'string', 'max:80'],
+            'return_to' => ['nullable', 'string', 'in:order,packing'],
+            'billing' => ['required', 'array'],
+            'billing.first_name' => ['nullable', 'string', 'max:100'],
+            'billing.last_name' => ['nullable', 'string', 'max:100'],
+            'billing.company' => ['nullable', 'string', 'max:200'],
+            'billing.address_1' => ['nullable', 'string', 'max:200'],
+            'billing.address_2' => ['nullable', 'string', 'max:200'],
+            'billing.city' => ['nullable', 'string', 'max:120'],
+            'billing.state' => ['nullable', 'string', 'max:120'],
+            'billing.postcode' => ['nullable', 'string', 'max:32'],
+            'billing.country' => ['nullable', 'string', 'size:2', 'alpha'],
+            'billing.email' => ['nullable', 'email:rfc', 'max:254'],
+            'billing.phone' => ['nullable', 'string', 'max:50'],
+            'shipping' => ['required', 'array'],
+            'shipping.first_name' => ['nullable', 'string', 'max:100'],
+            'shipping.last_name' => ['nullable', 'string', 'max:100'],
+            'shipping.company' => ['nullable', 'string', 'max:200'],
+            'shipping.address_1' => ['nullable', 'string', 'max:200'],
+            'shipping.address_2' => ['nullable', 'string', 'max:200'],
+            'shipping.city' => ['nullable', 'string', 'max:120'],
+            'shipping.state' => ['nullable', 'string', 'max:120'],
+            'shipping.postcode' => ['nullable', 'string', 'max:32'],
+            'shipping.country' => ['nullable', 'string', 'size:2', 'alpha'],
+            'shipping.phone' => ['nullable', 'string', 'max:50'],
+            'billing_tax_id' => ['nullable', 'string', 'max:32', 'regex:/^[0-9A-Za-z\- ]*$/'],
+            'target_point' => ['nullable', 'string', 'max:40', 'regex:/^[0-9A-Za-z_-]*$/'],
+            'customer_note' => ['nullable', 'string', 'max:5000'],
+            'payment_method' => ['nullable', 'string', 'max:100', 'regex:/^[0-9A-Za-z_-]*$/'],
+            'payment_method_title' => ['nullable', 'string', 'max:160'],
+            'shipping_line' => ['nullable', 'array'],
+            'shipping_line.id' => ['required_with:shipping_line', 'integer', 'min:1'],
+            'shipping_line.method_id' => ['nullable', 'string', 'max:100'],
+            'shipping_line.method_title' => ['nullable', 'string', 'max:160'],
+            'shipping_line.total' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
+            'lines' => ['required', 'array', 'min:1', 'max:200'],
+            'lines.*.product_id' => ['nullable', 'integer', 'exists:products,id'],
+            'lines.*.quantity' => ['required', 'numeric', 'min:0.0001', 'max:999999.9999'],
+            'lines.*.subtotal' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
+            'lines.*.total' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
+            'lines.*.remove' => ['nullable', 'boolean'],
+            'new_line' => ['nullable', 'array'],
+            'new_line.product_id' => ['nullable', 'integer', 'exists:products,id'],
+            'new_line.quantity' => ['nullable', 'numeric', 'min:0.0001', 'max:999999.9999'],
+            'new_line.subtotal' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
+            'new_line.total' => ['nullable', 'numeric', 'min:0', 'max:99999999.99'],
+        ]);
+
+        $details = [
+            'billing' => (array) $validated['billing'],
+            'shipping' => (array) $validated['shipping'],
+            'billing_tax_id' => (string) ($validated['billing_tax_id'] ?? ''),
+            'target_point' => (string) ($validated['target_point'] ?? ''),
+            'customer_note' => (string) ($validated['customer_note'] ?? ''),
+            'payment_method' => (string) ($validated['payment_method'] ?? ''),
+            'payment_method_title' => (string) ($validated['payment_method_title'] ?? ''),
+        ];
+
+        if (array_key_exists('shipping_line', $validated)) {
+            $details['shipping_line'] = (array) $validated['shipping_line'];
+        }
+
+        try {
+            $result = $editing->updateOrder(
+                $order,
+                $details,
+                (array) $validated['lines'],
+                (array) ($validated['new_line'] ?? []),
+                (string) $validated['expected_version'],
+                (string) ($validated['expected_remote_modified_at'] ?? ''),
+            );
+        } catch (Throwable $exception) {
+            return back()->withInput()->with('error', 'Nie udało się zapisać zamówienia: '.$exception->getMessage());
+        }
+
+        $freshOrder = $order->fresh() ?? $order;
+
+        if ($result['lines_changed']) {
+            $communication->sendOrderStatus($freshOrder, 'order_updated');
+        }
+
+        $message = "Zamówienie {$freshOrder->external_number} zapisano w WooCommerce i ERP.";
+
+        if ($result['lines_changed']) {
+            $message .= " Produkty: {$result['updated']} zmienionych, {$result['added']} dodanych, {$result['removed']} usuniętych.";
+        }
+
+        if ($result['warnings'] === []) {
+            $message .= ' Rezerwacje, szkic WZ oraz pakowanie zostały odświeżone.';
+        } else {
+            $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
+        }
+
+        $returnTo = ($validated['return_to'] ?? null) === 'packing' ? 'packing' : 'order';
+        $canViewOrders = Auth::user()?->canAccessArea('orders') ?? false;
+
+        return redirect()
+            ->to($returnTo === 'packing' || ! $canViewOrders
+                ? route('packing.index', ['view' => 'pack'])
+                : route('orders.show', $freshOrder))
+            ->with('status', $message);
     }
 
     public function lookupProducts(Request $request, ExternalOrder $order): JsonResponse
     {
+        $this->assertCanEditOrder($request, $order);
         $query = trim((string) $request->query('q', ''));
 
         if (mb_strlen($query) < 2) {
@@ -128,6 +334,7 @@ class ExternalOrderController extends Controller
             ProductChannelMapping::query()
                 ->with('product')
                 ->where('sales_channel_id', $order->sales_channel_id)
+                ->where('external_product_id', '!=', '')
                 ->whereHas('product', function (Builder $product) use ($like): void {
                     $product
                         ->where('is_translation', false)
@@ -230,34 +437,68 @@ class ExternalOrderController extends Controller
         PackingTaskService $packingTasks,
         AuditLogService $audit,
         CustomerCommunicationService $communication,
+        OrderMutationLock $orderMutationLock,
     ): RedirectResponse {
         $validated = $request->validate([
             'status' => ['required', 'string', 'max:80', 'regex:/^[a-z0-9][a-z0-9-]*$/'],
         ]);
-        $before = ['status' => $order->status, 'fulfillment_status' => $order->fulfillment_status];
+
+        if (in_array($validated['status'], ['cancelled', 'refunded'], true)) {
+            return back()->withInput()->with(
+                'error',
+                'Status anulowania lub zwrotu można ustawić wyłącznie dedykowaną operacją, która bezpiecznie cofa dokumenty i rozliczenia.',
+            );
+        }
+
+        if ($order->hasCancellationOperation()
+            || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+            return back()->withInput()->with(
+                'error',
+                'Anulowanego zamówienia ani zamówienia w trakcie anulacji nie można ponownie otworzyć zwykłą zmianą statusu.',
+            );
+        }
 
         try {
-            $result = $statuses->updateManually($order, $validated['status']);
+            $state = $orderMutationLock->forOrder(
+                $order,
+                function () use ($order, $validated, $statuses, $reservations, $packingTasks): array {
+                    $freshOrder = ExternalOrder::query()->findOrFail($order->id);
+                    $before = [
+                        'status' => $freshOrder->status,
+                        'fulfillment_status' => $freshOrder->fulfillment_status,
+                    ];
+                    $result = $statuses->updateManually($freshOrder, $validated['status']);
+                    $warnings = [];
+                    $freshOrder = $freshOrder->fresh();
+
+                    try {
+                        $reservations->syncForOrder($freshOrder);
+                    } catch (Throwable $exception) {
+                        $warnings[] = 'rezerwacje: '.$exception->getMessage();
+                    }
+
+                    try {
+                        $packingTasks->syncForOrder($freshOrder);
+                    } catch (Throwable $exception) {
+                        $warnings[] = 'pakowanie: '.$exception->getMessage();
+                    }
+
+                    return [
+                        'before' => $before,
+                        'result' => $result,
+                        'warnings' => $warnings,
+                        'order' => $freshOrder->fresh(),
+                    ];
+                },
+            );
         } catch (Throwable $exception) {
             return back()->withInput()->with('error', 'Nie udało się zmienić statusu: '.$exception->getMessage());
         }
 
-        $warnings = [];
-        $freshOrder = $order->fresh();
-
-        try {
-            $reservations->syncForOrder($freshOrder);
-        } catch (Throwable $exception) {
-            $warnings[] = 'rezerwacje: '.$exception->getMessage();
-        }
-
-        try {
-            $packingTasks->syncForOrder($freshOrder);
-        } catch (Throwable $exception) {
-            $warnings[] = 'pakowanie: '.$exception->getMessage();
-        }
-
-        $freshOrder = $order->fresh();
+        $before = $state['before'];
+        $result = $state['result'];
+        $warnings = $state['warnings'];
+        $freshOrder = $state['order'];
         $notificationTrigger = match ((string) $freshOrder->status) {
             'processing' => 'order_received',
             'cancelled' => 'order_cancelled',
@@ -350,39 +591,136 @@ class ExternalOrderController extends Controller
         Request $request,
         ExternalOrder $order,
         CustomerCommunicationService $communication,
+        OrderMutationLock $orderLock,
+        OrderSettlementService $settlements,
     ): RedirectResponse {
         $validated = $request->validate([
             'amount' => ['required', 'numeric', 'min:0.01', 'max:99999999.99'],
-            'currency' => ['nullable', 'string', 'size:3'],
+            'currency' => ['required', 'string', 'size:3', 'regex:/^[A-Za-z]{3}$/'],
             'method' => ['required', 'string', 'in:blik,bank_transfer,cash,card,payu,other'],
             'reference' => ['nullable', 'string', 'max:160'],
             'description' => ['nullable', 'string', 'max:1000'],
             'booked_at' => ['nullable', 'date'],
+            'operation_id' => ['required', 'uuid'],
         ]);
+        $root = $settlements->rootOrder($order);
+        $amount = round((float) $validated['amount'], 2);
+        $currency = mb_strtoupper((string) $validated['currency']);
+        $idempotencyKey = 'manual-order-payment:'.$root->id.':'.$validated['operation_id'];
 
-        $payment = CustomerPayment::query()->create([
-            'external_order_id' => $order->id,
-            'direction' => 'incoming',
-            'method' => $validated['method'],
-            'status' => 'booked',
-            'amount' => round((float) $validated['amount'], 2),
-            'currency' => mb_strtoupper($validated['currency'] ?? $order->currency),
-            'reference' => $validated['reference'] ?? null,
-            'description' => $validated['description'] ?? null,
-            'booked_at' => $validated['booked_at'] ?? now(),
-            'metadata' => [
-                'source' => 'order_view',
-                'booked_by' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
-            ],
-        ]);
+        try {
+            $result = $orderLock->forOrders(
+                $settlements->familyOrderIds($root),
+                fn (): array => DB::transaction(function () use (
+                    $root,
+                    $settlements,
+                    $validated,
+                    $amount,
+                    $currency,
+                    $idempotencyKey,
+                    $request,
+                ): array {
+                    $lockedRoot = ExternalOrder::query()->lockForUpdate()->findOrFail($root->id);
+                    $existing = CustomerPayment::query()
+                        ->where('idempotency_key', $idempotencyKey)
+                        ->lockForUpdate()
+                        ->first();
 
-        $communication->sendOrderStatus($order, 'order_payment_received', [
-            'amount' => number_format((float) $payment->amount, 2, ',', ' '),
-            'currency' => $payment->currency,
-            'payment_reference' => $payment->reference,
-        ]);
+                    if ($existing instanceof CustomerPayment) {
+                        if ((int) $existing->external_order_id !== (int) $lockedRoot->id
+                            || $existing->direction !== 'incoming'
+                            || mb_strtolower((string) $existing->purpose) !== 'manual_order_payment'
+                            || abs((float) $existing->amount - $amount) > 0.005
+                            || mb_strtoupper((string) $existing->currency) !== $currency) {
+                            throw new RuntimeException(
+                                'Identyfikator wpłaty był już użyty z innymi danymi. Odśwież kartę zamówienia.',
+                            );
+                        }
 
-        return back()->with('status', 'Wpłata klienta została zaksięgowana w saldzie zamówienia.');
+                        return ['payment' => $existing, 'already_recorded' => true];
+                    }
+
+                    $summary = $settlements->summary($lockedRoot);
+
+                    if (mb_strtoupper((string) $summary['currency']) !== $currency) {
+                        throw new RuntimeException(
+                            'Waluta wpłaty nie zgadza się z walutą zamówienia. Odśwież kartę zamówienia.',
+                        );
+                    }
+
+                    if ($lockedRoot->hasCancellationOperation()
+                        || in_array(mb_strtolower((string) $lockedRoot->status), [
+                            'cancellation-pending',
+                            'cancelled',
+                            'refunded',
+                        ], true)) {
+                        throw new RuntimeException('Nie można dodać wpłaty do anulowanego zamówienia.');
+                    }
+
+                    $bookedAt = filled($validated['booked_at'] ?? null)
+                        ? $validated['booked_at']
+                        : now();
+                    $payment = CustomerPayment::query()->create([
+                        'external_order_id' => $lockedRoot->id,
+                        'idempotency_key' => $idempotencyKey,
+                        'direction' => 'incoming',
+                        'source' => 'manual',
+                        'purpose' => 'manual_order_payment',
+                        'method' => $validated['method'],
+                        'status' => 'booked',
+                        'amount' => $amount,
+                        'currency' => $currency,
+                        'reference' => $validated['reference'] ?? null,
+                        'description' => $validated['description'] ?? null,
+                        'requested_at' => now(),
+                        'booked_at' => $bookedAt,
+                        'paid_at' => $bookedAt,
+                        'metadata' => [
+                            'source' => 'order_view',
+                            'operation_id' => (string) $validated['operation_id'],
+                            'booked_by' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
+                            'booked_by_user_id' => Auth::id(),
+                        ],
+                    ]);
+
+                    return ['payment' => $payment, 'already_recorded' => false];
+                }, 3),
+            );
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return back()->withInput()->with('error', 'Nie zaksięgowano wpłaty: '.$exception->getMessage());
+        }
+
+        /** @var CustomerPayment $payment */
+        $payment = $result['payment'];
+
+        if ($result['already_recorded']) {
+            return redirect()
+                ->route('orders.show', $root)
+                ->with('status', 'Ta wpłata była już zaksięgowana. Nie dodano drugiego wpisu.');
+        }
+
+        try {
+            $communication->sendOrderStatus($root, 'order_payment_received', [
+                'amount' => number_format((float) $payment->amount, 2, ',', ' '),
+                'currency' => $payment->currency,
+                'payment_reference' => $payment->reference,
+            ]);
+        } catch (Throwable $exception) {
+            report($exception);
+
+            return redirect()
+                ->route('orders.show', $root)
+                ->with(
+                    'status',
+                    'Wpłata klienta została zaksięgowana. Nie udało się wysłać powiadomienia, ale księgowanie pozostaje ważne: '.$exception->getMessage(),
+                );
+        }
+
+        return redirect()
+            ->route('orders.show', $root)
+            ->with('status', 'Wpłata klienta została zaksięgowana w saldzie zamówienia.');
     }
 
     public function generateLabel(
@@ -446,6 +784,14 @@ class ExternalOrderController extends Controller
         OrderSplitService $splitter,
         ProductSegmentService $segments,
     ): RedirectResponse {
+        if ($order->hasCancellationOperation()
+            || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+            return back()->with(
+                'error',
+                'Nie można zmienić sposobu wysyłki anulowanego zamówienia ani zamówienia w trakcie anulacji.',
+            );
+        }
+
         $validated = $request->validate([
             'decision' => ['required', 'string', 'in:ship_footwear_now,wait_for_all'],
         ]);
@@ -505,8 +851,6 @@ class ExternalOrderController extends Controller
             'on-hold' => 'Wstrzymane',
             'ready-to-ship' => 'Gotowe do wysyłki',
             'completed' => 'Zrealizowane',
-            'cancelled' => 'Anulowane',
-            'refunded' => 'Zwrócone',
             'failed' => 'Nieudane',
         ];
 
@@ -515,5 +859,18 @@ class ExternalOrderController extends Controller
         }
 
         return $options;
+    }
+
+    private function assertCanEditOrder(Request $request, ExternalOrder $order): void
+    {
+        $user = $request->attributes->get('erp_user') ?: Auth::user();
+
+        if (! $user instanceof User || $user->role !== User::ROLE_PACKER) {
+            return;
+        }
+
+        if (! $order->packingTasks()->whereIn('status', ['open', 'picked'])->exists()) {
+            abort(403, 'Pakujący może edytować tylko zamówienie znajdujące się w aktywnym pakowaniu.');
+        }
     }
 }
