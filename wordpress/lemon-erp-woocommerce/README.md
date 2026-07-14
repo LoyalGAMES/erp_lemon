@@ -6,6 +6,8 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 - panel `Lemon ERP` na zamówieniu WooCommerce,
 - jednoznaczny kontrakt tożsamości produktów, wariantów i kategorii dla sklepów z Polylang,
 - idempotentne wiązanie polskich i angielskich kategorii utworzonych przez ERP,
+- idempotentne przypisywanie języków i wiązanie tłumaczeń produktów utworzonych przez ERP,
+- ustawianie daty publikacji na produktach i wariantach przed ich zapisem przez WooCommerce REST,
 - natychmiastowe, asynchroniczne powiadomienia ERP o utworzeniu lub zmianie konta klienta,
 - REST endpoint do zapisu danych faktury na zamówieniu,
 - opcjonalny zapis PDF poza WordPress Media Library.
@@ -19,7 +21,7 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 5. Upewnij się, że użytkownik WordPress używany w Lemon ERP ma uprawnienia do edycji zamówień WooCommerce.
 6. W Lemon ERP w integracji WooCommerce ustaw tryb faktur na `Wtyczka Lemon ERP bez Media Library`.
 
-Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, a natychmiastowa synchronizacja klientów wersji co najmniej `0.4.1`.
+Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, natychmiastowa synchronizacja klientów wersji co najmniej `0.4.1`, a wiązanie tłumaczeń produktów wersji co najmniej `0.5.0`.
 
 ## Natychmiastowa synchronizacja klientów
 
@@ -71,6 +73,20 @@ GET /wp-json/lemon-erp/v1/catalog/capabilities
 ```
 
 Odpowiedź zawiera `catalog_contract`, `plugin_version`, `polylang_active`, aktywne języki i nazwy pól kontraktu. Dostęp wymaga uprawnienia `manage_woocommerce` albo `edit_products`.
+
+ERP przypisuje języki i wiąże utworzone osobno produkty przez endpoint uwierzytelniany kluczem i sekretem WooCommerce REST:
+
+```text
+POST /wp-json/wc-lemon-erp/v1/catalog/products/translations
+```
+
+Payload `translations` jest mapą kodu języka na ID produktu, np. `{"pl": 700143, "en": 750099}`. Klucz WooCommerce musi mieć uprawnienia odczyt/zapis, a jego użytkownik uprawnienie `manage_woocommerce` oraz prawo edycji każdego wskazanego produktu. Wtyczka przed pierwszym zapisem sprawdza całą mapę, aktywne języki, typ i status wszystkich postów, uprawnienia oraz wcześniejsze rodziny tłumaczeń. Ponowienie identycznego żądania nie wykonuje kolejnych zapisów.
+
+Przed automatycznym backfillem ERP potwierdza wersję wtyczki, aktywny Polylang i wymagane języki bez wykonywania zmian:
+
+```text
+GET /wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities
+```
 
 ERP wiąże utworzone osobno termy językowe przez uwierzytelniony endpoint:
 

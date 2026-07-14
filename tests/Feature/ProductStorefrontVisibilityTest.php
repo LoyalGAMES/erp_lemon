@@ -169,7 +169,10 @@ class ProductStorefrontVisibilityTest extends TestCase
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'stock_export_enabled' => true,
-            'settings' => ['product_import' => ['languages' => ['pl']]],
+            'settings' => [
+                'product_import' => ['languages' => ['pl']],
+                'product_export' => ['languages' => ['pl']],
+            ],
         ]);
         $parent = $this->product('SKU-FAMILY', [
             'master' => [
@@ -262,7 +265,8 @@ class ProductStorefrontVisibilityTest extends TestCase
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/900'
             && $request['status'] === 'publish'
             && $request['catalog_visibility'] === 'hidden'
-            && ! array_key_exists('manage_stock', $request->data())
+            && $request['manage_stock'] === false
+            && $request['default_attributes'] === []
             && ! array_key_exists('stock_quantity', $request->data())
             && ! array_key_exists('stock_status', $request->data()));
         foreach ([901, 902] as $variationId) {
@@ -300,7 +304,10 @@ class ProductStorefrontVisibilityTest extends TestCase
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'stock_export_enabled' => true,
-            'settings' => ['product_import' => ['languages' => ['pl']]],
+            'settings' => [
+                'product_import' => ['languages' => ['pl']],
+                'product_export' => ['languages' => ['pl']],
+            ],
         ]);
         $category = ProductCategory::query()->create([
             'sales_channel_id' => $channel->id,
@@ -433,7 +440,10 @@ class ProductStorefrontVisibilityTest extends TestCase
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'stock_export_enabled' => false,
-            'settings' => ['product_import' => ['languages' => ['pl']]],
+            'settings' => [
+                'product_import' => ['languages' => ['pl']],
+                'product_export' => ['languages' => ['pl']],
+            ],
         ]);
         $product = $this->product('SKU-VERIFY-FALLBACK', [
             'master' => [
@@ -537,7 +547,10 @@ class ProductStorefrontVisibilityTest extends TestCase
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'stock_export_enabled' => false,
-            'settings' => ['product_import' => ['languages' => ['pl']]],
+            'settings' => [
+                'product_import' => ['languages' => ['pl']],
+                'product_export' => ['languages' => ['pl']],
+            ],
         ]);
         $warehouse = Warehouse::query()->create([
             'code' => 'M-GUARD',
@@ -634,7 +647,10 @@ class ProductStorefrontVisibilityTest extends TestCase
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'stock_export_enabled' => true,
-            'settings' => ['product_import' => ['languages' => ['pl']]],
+            'settings' => [
+                'product_import' => ['languages' => ['pl']],
+                'product_export' => ['languages' => ['pl']],
+            ],
         ]);
         $warehouse = Warehouse::query()->create([
             'code' => 'M1',

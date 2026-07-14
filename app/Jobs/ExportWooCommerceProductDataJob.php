@@ -8,6 +8,7 @@ use App\Models\IntegrationSyncLog;
 use App\Models\Product;
 use App\Models\ProductChannelMapping;
 use App\Models\WordpressIntegration;
+use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
 use App\Services\WooCommerce\ProductDataExportService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -125,6 +126,17 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
                 data_forget($metadata, 'product_data_export.requested_at');
                 data_forget($metadata, 'product_data_export.stock_release_pending');
                 data_set($metadata, 'product_data_export.completed_at', now()->toISOString());
+
+                if (data_get($metadata, 'product_data_export.legacy_variant_backfill.reason')
+                    === LegacyVariantFamilyBackfillService::REASON
+                ) {
+                    data_set($metadata, 'product_data_export.legacy_variant_backfill.status', 'completed');
+                    data_set($metadata, 'product_data_export.legacy_variant_backfill.completed_at', now()->toISOString());
+                    data_forget($metadata, 'product_data_export.legacy_variant_backfill.next_attempt_at');
+                    data_forget($metadata, 'product_data_export.legacy_variant_backfill.failed_at');
+                    data_forget($metadata, 'product_data_export.legacy_variant_backfill.error');
+                }
+
                 $mapping->forceFill(['metadata' => $metadata])->save();
             });
 
@@ -198,6 +210,20 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
                     data_forget($metadata, 'product_data_export.requested_at');
                     data_set($metadata, 'product_data_export.failed_at', now()->toISOString());
                     data_set($metadata, 'product_data_export.error', $exception->getMessage());
+
+                    if (data_get($metadata, 'product_data_export.legacy_variant_backfill.reason')
+                        === LegacyVariantFamilyBackfillService::REASON
+                    ) {
+                        data_set($metadata, 'product_data_export.legacy_variant_backfill.status', 'pending');
+                        data_set($metadata, 'product_data_export.legacy_variant_backfill.failed_at', now()->toISOString());
+                        data_set(
+                            $metadata,
+                            'product_data_export.legacy_variant_backfill.next_attempt_at',
+                            now()->addMinutes(15)->toISOString(),
+                        );
+                        data_set($metadata, 'product_data_export.legacy_variant_backfill.error', $exception->getMessage());
+                    }
+
                     $mapping->forceFill(['metadata' => $metadata])->save();
                 });
         });

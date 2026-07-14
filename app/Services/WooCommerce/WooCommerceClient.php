@@ -23,6 +23,12 @@ final class WooCommerceClient
 
     private const CATALOG_PLUGIN_MINIMUM_VERSION = '0.2.0';
 
+    private const PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION = '0.5.0';
+
+    private const PRODUCT_TRANSLATION_CREATION_META_KEY = '_sempre_erp_translation_creation_token';
+
+    private const PRODUCT_TRANSLATION_CREATION_SKU_PREFIX = 'LEMON-TR-';
+
     public function test(WordpressIntegration $integration): array
     {
         $response = $this->request($integration)
@@ -570,18 +576,142 @@ final class WooCommerceClient
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
-    public function createProductForLanguage(WordpressIntegration $integration, array $payload, string $language): array
-    {
+    public function createProductForLanguage(
+        WordpressIntegration $integration,
+        array $payload,
+        string $language,
+        string $creationToken,
+        bool $resume = false,
+    ): array {
+        $creationToken = trim($creationToken);
+
+        if ($creationToken === '') {
+            throw new RuntimeException('ERP nie przygotował tokenu idempotencji tłumaczenia produktu.');
+        }
+
+        if ($resume) {
+            $existingProduct = $this->findProductForLanguageByCreationToken(
+                $integration,
+                $language,
+                $creationToken,
+            );
+
+            if ($existingProduct !== null) {
+                return array_merge($existingProduct, ['idempotent_recovery' => true]);
+            }
+        }
+
+        $payload['meta_data'] = collect((array) ($payload['meta_data'] ?? []))
+            ->filter(fn (mixed $meta): bool => is_array($meta))
+            ->reject(fn (array $meta): bool => (string) ($meta['key'] ?? '') === self::PRODUCT_TRANSLATION_CREATION_META_KEY)
+            ->push([
+                'key' => self::PRODUCT_TRANSLATION_CREATION_META_KEY,
+                'value' => $creationToken,
+            ])
+            ->values()
+            ->all();
+        $payload['sku'] = $this->productTranslationCreationSku($creationToken);
         $url = $this->endpoint($integration, '/products').'?lang='.rawurlencode($language);
-        $response = $this->request($integration, retry: false)->post($url, $payload);
+
+        try {
+            $response = $this->request($integration, retry: false)->post($url, $payload);
+        } catch (Throwable $exception) {
+            $existingProduct = $this->findProductForLanguageByCreationToken(
+                $integration,
+                $language,
+                $creationToken,
+            );
+
+            if ($existingProduct !== null) {
+                return array_merge($existingProduct, ['idempotent_recovery' => true]);
+            }
+
+            throw $exception;
+        }
 
         if (! $response->successful()) {
+            $existingProduct = $this->findProductForLanguageByCreationToken(
+                $integration,
+                $language,
+                $creationToken,
+            );
+
+            if ($existingProduct !== null) {
+                return array_merge($existingProduct, ['idempotent_recovery' => true]);
+            }
+
             throw new RuntimeException("Utworzenie produktu {$language} w WooCommerce zwróciło HTTP {$response->status()}.");
         }
 
         $json = $response->json();
 
+        if (! is_array($json) || ! filled($json['id'] ?? null)) {
+            $existingProduct = $this->findProductForLanguageByCreationToken(
+                $integration,
+                $language,
+                $creationToken,
+            );
+
+            if ($existingProduct !== null) {
+                return array_merge($existingProduct, ['idempotent_recovery' => true]);
+            }
+        }
+
         return is_array($json) ? $json : [];
+    }
+
+    /**
+     * Resolve a previously-created translated product after an ambiguous POST
+     * failure. WooCommerce exposes product meta in its authenticated catalog
+     * response. A deterministic temporary SKU makes the lookup efficient and
+     * prevents two concurrent retries from creating separate products; the
+     * private meta marker still verifies that the result belongs to this run.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function findProductForLanguageByCreationToken(
+        WordpressIntegration $integration,
+        string $language,
+        string $creationToken,
+    ): ?array {
+        $creationToken = trim($creationToken);
+
+        if ($creationToken === '') {
+            return null;
+        }
+
+        $response = $this->request($integration)->get(
+            $this->endpoint($integration, '/products'),
+            [
+                'lang' => $language,
+                'sku' => $this->productTranslationCreationSku($creationToken),
+                'per_page' => 100,
+            ],
+        );
+
+        if (! $response->successful()) {
+            throw new RuntimeException("Wyszukanie rozpoczętego tłumaczenia produktu {$language} zwróciło HTTP {$response->status()}.");
+        }
+
+        $matches = collect($response->json())
+            ->filter(fn (mixed $product): bool => is_array($product) && filled($product['id'] ?? null))
+            ->filter(fn (array $product): bool => collect((array) ($product['meta_data'] ?? []))
+                ->contains(fn (mixed $meta): bool => is_array($meta)
+                    && (string) ($meta['key'] ?? '') === self::PRODUCT_TRANSLATION_CREATION_META_KEY
+                    && is_scalar($meta['value'] ?? null)
+                    && hash_equals($creationToken, (string) ($meta['value'] ?? ''))))
+            ->keyBy(fn (array $product): string => (string) $product['id']);
+
+        if (count($matches) > 1) {
+            throw new RuntimeException("WooCommerce zawiera więcej niż jedno tłumaczenie produktu {$language} z tym samym tokenem ERP.");
+        }
+
+        return $matches->isEmpty() ? null : $matches->first();
+    }
+
+    private function productTranslationCreationSku(string $creationToken): string
+    {
+        return self::PRODUCT_TRANSLATION_CREATION_SKU_PREFIX.substr(hash('sha256', $creationToken), 0, 40);
     }
 
     /**
@@ -772,6 +902,101 @@ final class WooCommerceClient
     }
 
     /**
+     * Link separately-created WooCommerce product posts as Polylang translations.
+     *
+     * This endpoint deliberately uses the WooCommerce consumer key and secret,
+     * so product translation linking does not depend on WordPress Application
+     * Password credentials used for media uploads.
+     *
+     * @param  array<string, int|string>  $translations
+     * @return array<string, mixed>
+     */
+    public function linkProductTranslations(WordpressIntegration $integration, array $translations): array
+    {
+        $translations = $this->validatedProductTranslationMap($translations);
+
+        try {
+            $response = $this->request($integration, retry: false)
+                ->withoutRedirecting()
+                ->post(
+                    $this->wordpressRestEndpoint($integration, '/wc-lemon-erp/v1/catalog/products/translations'),
+                    ['translations' => $translations],
+                );
+        } catch (RequestException $exception) {
+            $this->throwProductTranslationLinkHttpException($exception->response);
+        }
+
+        if (! $response->successful()) {
+            $this->throwProductTranslationLinkHttpException($response);
+        }
+
+        $json = $response->json();
+
+        if (! is_array($json)
+            || data_get($json, 'linked') !== true
+            || $this->confirmedProductTranslationMap(data_get($json, 'translations')) !== $translations
+        ) {
+            throw new RuntimeException('WordPress zwrócił niepełne potwierdzenie powiązania tłumaczeń produktów.');
+        }
+
+        return $json;
+    }
+
+    /**
+     * Check the non-mutating plugin endpoint before a historical backfill can
+     * update or create any WooCommerce products. A missing/old plugin, missing
+     * Polylang or unavailable export language leaves the family pending.
+     *
+     * @param  list<string>  $requiredLanguages
+     */
+    public function productTranslationLinkingAvailable(
+        WordpressIntegration $integration,
+        array $requiredLanguages = ['pl', 'en'],
+    ): bool {
+        try {
+            $response = $this->request($integration, retry: false)
+                ->withoutRedirecting()
+                ->get($this->wordpressRestEndpoint(
+                    $integration,
+                    '/wc-lemon-erp/v1/catalog/products/translations/capabilities',
+                ));
+        } catch (Throwable) {
+            return false;
+        }
+
+        if (! $response->successful()) {
+            return false;
+        }
+
+        $payload = $response->json();
+
+        if (! is_array($payload)
+            || ! is_string($payload['plugin_version'] ?? null)
+            || version_compare($payload['plugin_version'], self::PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION, '<')
+        ) {
+            return false;
+        }
+
+        $requiredLanguages = collect($requiredLanguages)
+            ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)))
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ($requiredLanguages->reject(fn (string $language): bool => $language === 'pl')->isEmpty()) {
+            return true;
+        }
+
+        $availableLanguages = collect((array) ($payload['languages'] ?? []))
+            ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)))
+            ->filter()
+            ->unique();
+
+        return ($payload['available'] ?? null) === true
+            && $requiredLanguages->every(fn (string $language): bool => $availableLanguages->contains($language));
+    }
+
+    /**
      * Configure the Lemon ERP plugin to deliver signed customer lifecycle
      * events. The consumer secret never leaves either system: WordPress finds
      * the matching WooCommerce API key from the public consumer key and uses
@@ -888,6 +1113,108 @@ final class WooCommerceClient
     }
 
     /**
+     * @param  array<string, int|string>  $translations
+     * @return array<string, int>
+     */
+    private function validatedProductTranslationMap(array $translations): array
+    {
+        $normalized = [];
+
+        foreach ($translations as $language => $productId) {
+            $language = mb_strtolower(trim((string) $language));
+
+            if (preg_match('/^[a-z][a-z0-9_-]*$/', $language) !== 1) {
+                throw new RuntimeException('ERP przygotował niepoprawny kod języka tłumaczenia produktu.');
+            }
+
+            if (array_key_exists($language, $normalized)) {
+                throw new RuntimeException("ERP przygotował język {$language} więcej niż raz w tłumaczeniach produktu.");
+            }
+
+            if (! is_int($productId) && ! is_string($productId)) {
+                throw new RuntimeException("ERP przygotował niepoprawne ID produktu dla języka {$language}.");
+            }
+
+            $rawProductId = trim((string) $productId);
+
+            if (preg_match('/^[1-9]\d*$/', $rawProductId) !== 1
+                || (string) ((int) $rawProductId) !== $rawProductId
+            ) {
+                throw new RuntimeException("ERP przygotował niepoprawne ID produktu dla języka {$language}.");
+            }
+
+            $normalized[$language] = (int) $rawProductId;
+        }
+
+        if (count($normalized) < 2) {
+            throw new RuntimeException('Powiązanie tłumaczeń produktu wymaga co najmniej dwóch języków.');
+        }
+
+        if (count(array_unique(array_values($normalized))) !== count($normalized)) {
+            throw new RuntimeException('Każdy język tłumaczenia musi wskazywać inny produkt WooCommerce.');
+        }
+
+        ksort($normalized);
+
+        return $normalized;
+    }
+
+    /**
+     * @return array<string, int>|null
+     */
+    private function confirmedProductTranslationMap(mixed $translations): ?array
+    {
+        if (! is_array($translations)) {
+            return null;
+        }
+
+        $normalized = [];
+
+        foreach ($translations as $language => $productId) {
+            if (! is_string($language)
+                || preg_match('/^[a-z][a-z0-9_-]*$/', $language) !== 1
+                || (! is_int($productId) && ! is_string($productId))
+                || preg_match('/^[1-9]\d*$/', (string) $productId) !== 1
+                || (string) ((int) $productId) !== (string) $productId
+            ) {
+                return null;
+            }
+
+            $normalized[$language] = (int) $productId;
+        }
+
+        ksort($normalized);
+
+        return $normalized;
+    }
+
+    private function throwProductTranslationLinkHttpException(?Response $response): never
+    {
+        $status = $response?->status() ?? 0;
+        $payload = $response?->json();
+        $code = trim((string) data_get($payload, 'code', ''));
+        $message = trim((string) data_get($payload, 'message', ''));
+
+        if ($status === 404 && ($code === '' || $code === 'rest_no_route')) {
+            throw new RuntimeException(
+                'Powiązanie tłumaczeń produktów wymaga wtyczki Lemon ERP for WooCommerce co najmniej '
+                .self::PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION
+                .'. Pobierz nowy ZIP z ekranu Integracje i zaktualizuj wtyczkę w WordPressie.',
+            );
+        }
+
+        if (in_array($status, [401, 403], true)) {
+            throw new RuntimeException('WordPress odrzucił powiązanie tłumaczeń produktów. Sprawdź klucze WooCommerce REST, ich uprawnienia odczyt/zapis oraz uprawnienie manage_woocommerce użytkownika.');
+        }
+
+        if ($message !== '') {
+            throw new RuntimeException("WordPress nie powiązał tłumaczeń produktów: {$message}");
+        }
+
+        throw new RuntimeException("Powiązanie tłumaczeń produktów w WooCommerce zwróciło HTTP {$status}.");
+    }
+
+    /**
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
      */
@@ -953,7 +1280,7 @@ final class WooCommerceClient
         $updated = [];
         $updatedIds = [];
 
-        foreach ($integration->productImportLanguages() as $language) {
+        foreach (array_keys($payloadsByLanguage) as $language) {
             $language = $this->normalizeCatalogLanguage($language);
 
             if ($language === null || $language === 'pl') {

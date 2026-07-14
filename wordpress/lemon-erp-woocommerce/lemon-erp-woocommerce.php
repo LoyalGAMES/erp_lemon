@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Lemon ERP for WooCommerce
  * Description: Adds Lemon ERP checkout fields, catalog identity and invoice metadata endpoints for WooCommerce.
- * Version: 0.4.1
+ * Version: 0.5.0
  * Author: Lemon ERP
  * Requires PHP: 8.0
  * Requires Plugins: woocommerce
@@ -20,6 +20,8 @@ if (! defined('ABSPATH')) {
 }
 
 require_once __DIR__.'/includes/class-customer-webhook.php';
+require_once __DIR__.'/includes/class-product-publication-date.php';
+require_once __DIR__.'/includes/class-product-translation-linker.php';
 
 add_action('before_woocommerce_init', static function (): void {
     if (class_exists(FeaturesUtil::class)) {
@@ -29,7 +31,7 @@ add_action('before_woocommerce_init', static function (): void {
 
 final class Lemon_Erp_WooCommerce
 {
-    private const VERSION = '0.4.1';
+    private const VERSION = '0.5.0';
 
     private const CATALOG_CONTRACT = 1;
 
@@ -72,6 +74,8 @@ final class Lemon_Erp_WooCommerce
     private function __construct()
     {
         (new Lemon_Erp_Customer_Webhook)->hooks();
+        (new Lemon_Erp_Product_Publication_Date)->hooks();
+        (new Lemon_Erp_Product_Translation_Linker)->hooks();
         add_filter('woocommerce_checkout_fields', [$this, 'classicCheckoutFields']);
         add_action('wp_enqueue_scripts', [$this, 'enqueueCheckoutUi']);
         add_action('woocommerce_after_checkout_validation', [$this, 'validateClassicCheckout'], 10, 2);
@@ -615,6 +619,7 @@ final class Lemon_Erp_WooCommerce
             'languages' => $languages,
             'resources' => ['product', 'variation', 'category'],
             'category_translation_link_endpoint' => '/wp-json/lemon-erp/v1/catalog/categories/translations',
+            'product_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/translations',
             'fields' => [
                 'contract' => 'lemon_erp_catalog_contract',
                 'language' => 'lemon_erp_language',

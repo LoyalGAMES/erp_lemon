@@ -11,6 +11,7 @@ use App\Services\Ksef\KsefSubmissionService;
 use App\Services\Payments\PayuRefundService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippedOrderWooSyncService;
+use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -61,6 +62,25 @@ Artisan::command('erp:release-stale-woocommerce-imports {--minutes=60 : Mark run
 
     return 0;
 })->purpose('Release WooCommerce imports stuck in running status.');
+
+Artisan::command('erp:dispatch-legacy-variant-backfill {--limit=10 : Maximum number of product families to queue} {--stale-minutes=120 : Replace an abandoned export reservation after this many minutes}', function (): int {
+    $result = app(LegacyVariantFamilyBackfillService::class)->dispatchPending(
+        max(1, (int) $this->option('limit')),
+        max(1, (int) $this->option('stale-minutes')),
+    );
+
+    $this->info(sprintf(
+        'Legacy variant backfill: scanned %d, dispatched %d, active %d, backoff %d, plugin unready %d, failed %d.',
+        $result['scanned'],
+        $result['dispatched'],
+        $result['skipped_active'],
+        $result['skipped_backoff'],
+        $result['skipped_unready'],
+        $result['failed'],
+    ));
+
+    return $result['failed'] > 0 ? 1 : 0;
+})->purpose('Queue durable full WooCommerce exports for repaired legacy variant families.');
 
 Artisan::command('erp:refresh-ksef-submissions {--limit=25 : Maximum number of KSeF submissions to refresh} {--minutes=2 : Refresh submissions older than this many minutes}', function (): int {
     $limit = max(1, (int) $this->option('limit'));
@@ -353,6 +373,11 @@ Schedule::command('erp:queue-woocommerce-imports --customers')
 
 Schedule::command('erp:release-stale-woocommerce-imports --minutes=60')
     ->cron('*/10 * * * *')
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:dispatch-legacy-variant-backfill --limit=10 --stale-minutes=120')
+    ->cron('*/5 * * * *')
     ->withoutOverlapping(10)
     ->runInBackground();
 

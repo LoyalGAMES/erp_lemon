@@ -50,7 +50,7 @@
 
 @section('content')
     @php
-        $master = $product->masterData();
+        $master = $effectiveMaster ?? $product->masterData();
         $catalogVisibilityMaster = $catalogVisibilityParent?->masterData() ?? $master;
         $field = fn (string $name, mixed $default = null): mixed => old($name, $default) ?? '';
         $masterField = fn (string $name, string $path, mixed $default = null): mixed => old($name, data_get($master, $path, $default)) ?? '';
@@ -106,6 +106,29 @@
         $relatedUpsells = old('related_upsell_skus', implode("\n", (array) data_get($master, 'related_products.upsell_skus', [])));
         $relatedCrossSells = old('related_cross_sell_skus', implode("\n", (array) data_get($master, 'related_products.cross_sell_skus', [])));
         $showField = fn (string $field): bool => (bool) ($visibleProductEditFields[$field] ?? true);
+        $isVariantChild = (bool) $catalogVisibilityUsesParent;
+        $isInheritedVariant = data_get($master, 'inheritance.mode') === 'parent' && $catalogVisibilityParent;
+        $variantAttributeName = trim((string) data_get($master, 'variant_attribute'));
+        $variantOption = collect((array) data_get($master, 'parameters', []))
+            ->filter(fn ($row): bool => is_array($row))
+            ->first(function (array $row) use ($variantAttributeName): bool {
+                $name = trim((string) ($row['name'] ?? ''));
+
+                return (bool) ($row['variation'] ?? false)
+                    && ($variantAttributeName === '' || mb_strtolower($name) === mb_strtolower($variantAttributeName));
+            });
+
+        if ($isInheritedVariant) {
+            $mediaRows = collect($catalogVisibilityParent->mediaImages())
+                ->map(fn (array $row): array => [
+                    'src' => (string) ($row['src'] ?? ''),
+                    'alt' => (string) ($row['alt'] ?? ''),
+                    'name' => (string) ($row['name'] ?? ''),
+                ])
+                ->filter(fn (array $row): bool => $row['src'] !== '')
+                ->values()
+                ->all();
+        }
     @endphp
 
     @if (data_get($master, 'identifier_conflict.type') === 'duplicated_ean')
@@ -117,6 +140,14 @@
     @if ($errors->any())
         <div class="alert error">
             Nie zapisano produktu. Popraw pola formularza oznaczone przez walidację.
+        </div>
+    @endif
+
+    @if ($isInheritedVariant)
+        <div class="alert warning">
+            Ten wariant dziedziczy nazwy i opisy PL/EN, ceny, ustawienia sprzedaży, datę publikacji oraz galerię prezentowaną w sklepie z produktu głównego
+            <a href="{{ route('products.edit', $catalogVisibilityParent) }}">{{ $catalogVisibilityParent->sku }}</a>.
+            W wariancie pozostają własne SKU, EAN, aktywność, stan magazynowy i opcja wariantowa.
         </div>
     @endif
 
@@ -413,52 +444,86 @@
         <section @class(['card', 'product-edit-card', 'product-edit-step', 'product-edit-field-hidden' => ! $showField('variants')]) data-product-step="warianty" hidden>
             <div class="panel-header">Warianty i relacje</div>
             <div class="product-edit-body">
-                @include('products._new_variant_values_fields', [
-                    'variantProduct' => $product,
-                    'selectedVariantAttribute' => data_get($master, 'variant_attribute'),
-                ])
-                @include('products._variant_relation_editor', [
-                    'product' => $product,
-                    'productLookupOptions' => $productLookupOptions,
-                ])
+                @if ($isVariantChild)
+                    <div class="media-upload-panel">
+                        <strong>{{ $catalogVisibilityParent ? 'To jest końcowy wariant produktu '.$catalogVisibilityParent->sku.'.' : 'To jest końcowy wariant produktu.' }}</strong>
+                        <div class="toolbar-note">
+                            Nie można tworzyć kolejnych wariantów wewnątrz wariantu.
+                            @if ($variantAttributeName !== '' && is_array($variantOption))
+                                Opcja tego SKU: {{ $variantAttributeName }} = {{ $variantOption['value'] ?? '-' }}.
+                            @endif
+                            Kolejność rozmiarów ustawiasz na karcie produktu głównego.
+                        </div>
+                        @if ($catalogVisibilityParent)
+                            <div class="inline-actions">
+                                <a class="button secondary" href="{{ route('products.edit', $catalogVisibilityParent) }}">Otwórz produkt główny i ustaw kolejność</a>
+                            </div>
+                        @endif
+                    </div>
+                @else
+                    @include('products._new_variant_values_fields', [
+                        'variantProduct' => $product,
+                        'selectedVariantAttribute' => data_get($master, 'variant_attribute'),
+                    ])
+                    @include('products._variant_relation_editor', [
+                        'product' => $product,
+                        'productLookupOptions' => $productLookupOptions,
+                    ])
+                @endif
             </div>
         </section>
 
         <section @class(['card', 'product-edit-card', 'product-edit-step', 'product-edit-field-hidden' => ! $showField('media')]) data-product-step="media" hidden>
             <div class="panel-header">Media</div>
             <div class="product-edit-body">
-                <div class="toolbar-note">Pierwsze zachowane lub dodane zdjęcie jest traktowane jako miniatura główna produktu w ERP. Pliki trafiają na serwer aplikacji.</div>
+                @if ($isInheritedVariant)
+                    <div class="toolbar-note">
+                        Galeria jest zarządzana na produkcie głównym
+                        <a href="{{ route('products.edit', $catalogVisibilityParent) }}">{{ $catalogVisibilityParent->sku }}</a>.
+                        Wariant nie dostaje osobnej miniatury w WooCommerce, dzięki czemu sklep używa zdjęć produktu głównego.
+                    </div>
+                @else
+                    <div class="toolbar-note">Pierwsze zachowane lub dodane zdjęcie jest traktowane jako miniatura główna produktu w ERP. Pliki trafiają na serwer aplikacji.</div>
+                @endif
 
                 @if ($mediaRows !== [])
                     <div class="media-edit-grid">
                         @foreach ($mediaRows as $index => $row)
                             <div class="media-edit-item">
                                 <img src="{{ $row['src'] }}" alt="{{ $row['alt'] ?: $product->name }}" loading="lazy" referrerpolicy="no-referrer">
-                                <input type="hidden" name="existing_media[{{ $index }}][src]" value="{{ $row['src'] }}">
-                                <input type="hidden" name="existing_media[{{ $index }}][name]" value="{{ $row['name'] ?? '' }}">
-                                <label>Alt
-                                    <input name="existing_media[{{ $index }}][alt]" value="{{ $row['alt'] }}">
-                                </label>
-                                <label class="toggle-row">
-                                    <input name="existing_media[{{ $index }}][remove]" type="checkbox" value="1">
-                                    Usuń przy zapisie
-                                </label>
+                                @if ($isInheritedVariant)
+                                    <div class="toolbar-note">Alt: {{ $row['alt'] ?: '-' }}</div>
+                                @else
+                                    <input type="hidden" name="existing_media[{{ $index }}][src]" value="{{ $row['src'] }}">
+                                    <input type="hidden" name="existing_media[{{ $index }}][name]" value="{{ $row['name'] ?? '' }}">
+                                    <label>Alt
+                                        <input name="existing_media[{{ $index }}][alt]" value="{{ $row['alt'] }}">
+                                    </label>
+                                    <label class="toggle-row">
+                                        <input name="existing_media[{{ $index }}][remove]" type="checkbox" value="1">
+                                        Usuń przy zapisie
+                                    </label>
+                                @endif
                             </div>
                         @endforeach
                     </div>
                 @else
-                    <div class="toolbar-note">Ten produkt nie ma jeszcze mediów zapisanych w ERP.</div>
+                    <div class="toolbar-note">
+                        {{ $isInheritedVariant ? 'Produkt główny nie ma jeszcze mediów zapisanych w ERP.' : 'Ten produkt nie ma jeszcze mediów zapisanych w ERP.' }}
+                    </div>
                 @endif
 
-                <div class="media-upload-panel">
-                    <label>Dodaj zdjęcia z komputera
-                        <input name="new_media[]" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple>
-                    </label>
-                    <label>Alt dla nowych zdjęć
-                        <input name="new_media_alt" value="{{ old('new_media_alt') }}" placeholder="{{ $product->name }}">
-                    </label>
-                    <div class="toolbar-note">Obsługiwane formaty: JPG, PNG, WebP, GIF. Maksymalnie 8 MB na plik.</div>
-                </div>
+                @unless ($isInheritedVariant)
+                    <div class="media-upload-panel">
+                        <label>Dodaj zdjęcia z komputera
+                            <input name="new_media[]" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple>
+                        </label>
+                        <label>Alt dla nowych zdjęć
+                            <input name="new_media_alt" value="{{ old('new_media_alt') }}" placeholder="{{ $product->name }}">
+                        </label>
+                        <div class="toolbar-note">Obsługiwane formaty: JPG, PNG, WebP, GIF. Maksymalnie 8 MB na plik.</div>
+                    </div>
+                @endunless
             </div>
         </section>
 

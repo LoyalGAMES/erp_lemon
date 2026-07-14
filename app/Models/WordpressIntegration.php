@@ -206,4 +206,26 @@ class WordpressIntegration extends Model
 
         return $languages !== [] ? $languages : [null];
     }
+
+    /**
+     * Export policy is deliberately independent from import filtering. A store
+     * may import only the Polish catalog while ERP must still create and keep
+     * the English storefront translation up to date.
+     *
+     * @return list<string>
+     */
+    public function productExportLanguages(): array
+    {
+        $languages = collect((array) data_get($this->settings, 'product_export.languages', ['pl', 'en']))
+            ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)))
+            ->filter(fn (string $language): bool => preg_match('/^[a-z][a-z0-9_-]*$/', $language) === 1)
+            ->unique()
+            ->values();
+
+        if (! $languages->contains('pl')) {
+            $languages->prepend('pl');
+        }
+
+        return $languages->all();
+    }
 }

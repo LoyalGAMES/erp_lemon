@@ -9,13 +9,16 @@
             'ean' => $variant->ean,
             'regular_price' => data_get($variant->masterData(), 'prices.retail_price_pln'),
             'sale_price' => data_get($variant->masterData(), 'prices.sale_price_pln'),
+            'sort_order' => $variant->pivot?->sort_order ?? 100,
             'existing' => true,
         ])->values()->all()
         : [];
 
+    $oldVariantSortOrders = (array) old('variant_sort_order', []);
+
     if (old('variant_skus')) {
         $variantRows = collect((array) old('variant_skus'))
-            ->map(function ($sku) use ($lookupBySku): array {
+            ->map(function ($sku, $index) use ($lookupBySku, $oldVariantSortOrders): array {
                 $sku = trim((string) $sku);
                 $lookup = $lookupBySku->get($sku);
 
@@ -27,6 +30,7 @@
                     'ean' => $lookup['ean'] ?? null,
                     'regular_price' => null,
                     'sale_price' => null,
+                    'sort_order' => $oldVariantSortOrders[$index] ?? null,
                     'existing' => $sku !== '',
                 ];
             })
@@ -36,9 +40,15 @@
     }
 
     $emptyVariantRows = max(3, 6 - count($variantRows));
+    $nextVariantSortOrder = (int) (collect($variantRows)
+        ->pluck('sort_order')
+        ->filter(fn ($sortOrder): bool => is_numeric($sortOrder))
+        ->map(fn ($sortOrder): int => (int) $sortOrder)
+        ->max() ?? 0);
 
     for ($index = 0; $index < $emptyVariantRows; $index++) {
-        $variantRows[] = ['id' => null, 'sku' => '', 'label' => '', 'name' => '', 'ean' => null, 'regular_price' => null, 'sale_price' => null, 'existing' => false];
+        $nextVariantSortOrder = min(65535, $nextVariantSortOrder + 10);
+        $variantRows[] = ['id' => null, 'sku' => '', 'label' => '', 'name' => '', 'ean' => null, 'regular_price' => null, 'sale_price' => null, 'sort_order' => $nextVariantSortOrder, 'existing' => false];
     }
 @endphp
 
@@ -54,11 +64,14 @@
             .variant-editor-main input { width: 100%; min-width: 0; }
             .variant-editor-meta { display: flex; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 13px; }
             .variant-editor-actions { display: grid; gap: 6px; justify-items: end; }
+            .variant-editor-order { display: grid; gap: 4px; justify-items: end; color: var(--muted); font-size: 13px; }
+            .variant-editor-order input { width: 110px; }
             .variant-editor-actions .toggle-row { justify-content: flex-end; }
             .related-picker-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
             @media (max-width: 820px) {
                 .variant-editor-row { grid-template-columns: 1fr; }
                 .variant-editor-actions { justify-items: start; }
+                .variant-editor-order { justify-items: start; }
                 .variant-editor-actions .toggle-row { justify-content: flex-start; }
             }
             @media (max-width: 720px) {
@@ -72,7 +85,7 @@
     <div class="variant-editor-head">
         <div>
             <strong>Warianty produktu</strong>
-            <div class="toolbar-note">Atrybut oznaczony jako wariant, np. Rozmiar, określa opcje WooCommerce. Każda opcja jest osobnym SKU. Tutaj możesz dodać istniejący wariant; podczas kopiowania produktu jego warianty kopiują się automatycznie.</div>
+            <div class="toolbar-note">Atrybut oznaczony jako wariant, np. Rozmiar, określa opcje WooCommerce. Każda opcja jest osobnym SKU. Niższa liczba kolejności wyświetla wariant wcześniej w sklepie. Tutaj możesz dodać istniejący wariant; podczas kopiowania produktu jego warianty kopiują się automatycznie.</div>
         </div>
     </div>
 
@@ -103,6 +116,9 @@
                     </div>
                 </div>
                 <div class="variant-editor-actions">
+                    <label class="variant-editor-order">Kolejność w sklepie
+                        <input name="variant_sort_order[{{ $index }}]" type="number" min="0" max="65535" step="1" value="{{ $row['sort_order'] }}">
+                    </label>
                     <input type="hidden" name="variant_remove[{{ $index }}]" value="0">
                     @if ($row['sku'] !== '')
                         @if ($row['id'])

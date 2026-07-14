@@ -9,6 +9,7 @@ use App\Models\AuditLog;
 use App\Models\IntegrationSyncLog;
 use App\Models\Product;
 use App\Models\ProductCategory;
+use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
@@ -53,6 +54,7 @@ class WooCommerceProductDataExportTest extends TestCase
             'base_url' => 'https://shop.test',
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl']]],
         ]);
         $product = Product::query()->create([
             'sku' => 'SKU-AUTO-VISIBILITY',
@@ -482,6 +484,262 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame('124', data_get($fresh->attributes, 'woocommerce_translations.en.product_id'));
     }
 
+    public function test_legacy_translation_ids_are_discovered_and_scoped_separately_for_two_stores(): void
+    {
+        $channelA = SalesChannel::query()->create([
+            'code' => 'SHOP-A',
+            'name' => 'Sklep A',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $channelB = SalesChannel::query()->create([
+            'code' => 'SHOP-B',
+            'name' => 'Sklep B',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        foreach ([[$channelA, 'https://a.test'], [$channelB, 'https://b.test']] as [$channel, $url]) {
+            WordpressIntegration::query()->create([
+                'sales_channel_id' => $channel->id,
+                'name' => $channel->name,
+                'base_url' => $url,
+                'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+                'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            ]);
+        }
+
+        $product = Product::query()->create([
+            'sku' => 'MULTI-STORE-SKU',
+            'name' => 'Produkt wielokanałowy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'woocommerce_translations' => [
+                    // Legacy attributes have no channel and point to store A.
+                    'en' => ['product_id' => '101', 'variation_id' => null, 'sku' => 'MULTI-STORE-SKU'],
+                ],
+                'master' => [
+                    'source' => 'erp',
+                    'publication_date' => '2026-07-14T12:00',
+                    'content' => [
+                        'pl' => ['name' => 'Produkt wielokanałowy'],
+                        'en' => ['name' => 'Multi-store product'],
+                    ],
+                ],
+            ],
+        ]);
+
+        foreach ([[$channelA, '100'], [$channelB, '200']] as [$channel, $externalId]) {
+            ProductChannelMapping::query()->create([
+                'product_id' => $product->id,
+                'sales_channel_id' => $channel->id,
+                'external_product_id' => $externalId,
+                'external_sku' => $product->sku,
+                'stock_sync_enabled' => true,
+            ]);
+        }
+
+        Http::fake(function ($request) {
+            $url = $request->url();
+            $isStoreA = str_starts_with($url, 'https://a.test/');
+            $primaryId = $isStoreA ? 100 : 200;
+            $englishId = $isStoreA ? 101 : 201;
+
+            if ($request->method() === 'GET' && str_contains($url, 'lang=en')) {
+                return Http::response([[
+                    'id' => $englishId,
+                    'sku' => 'MULTI-STORE-SKU',
+                    'lang' => 'en',
+                    'translations' => ['pl' => $primaryId, 'en' => $englishId],
+                ]]);
+            }
+
+            if ($request->method() === 'PUT' && in_array($url, [
+                "https://a.test/wp-json/wc/v3/products/{$primaryId}",
+                "https://a.test/wp-json/wc/v3/products/{$englishId}",
+                "https://b.test/wp-json/wc/v3/products/{$primaryId}",
+                "https://b.test/wp-json/wc/v3/products/{$englishId}",
+            ], true)) {
+                return Http::response(['id' => (int) basename($url), 'sku' => 'MULTI-STORE-SKU']);
+            }
+
+            return Http::response([], 404);
+        });
+
+        app(ProductDataExportService::class)->export($product);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://a.test/wp-json/wc/v3/products/101');
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://b.test/wp-json/wc/v3/products/201');
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'PUT'
+            && in_array($request->url(), [
+                'https://a.test/wp-json/wc/v3/products/201',
+                'https://b.test/wp-json/wc/v3/products/101',
+            ], true));
+        $this->assertDatabaseHas('product_channel_aliases', [
+            'product_id' => $product->id,
+            'sales_channel_id' => $channelA->id,
+            'external_product_id' => '101',
+            'language' => 'en',
+        ]);
+        $this->assertDatabaseHas('product_channel_aliases', [
+            'product_id' => $product->id,
+            'sales_channel_id' => $channelB->id,
+            'external_product_id' => '201',
+            'language' => 'en',
+        ]);
+    }
+
+    public function test_discovery_cannot_hijack_an_external_alias_owned_by_another_product(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $owner = Product::query()->create([
+            'sku' => 'ALIAS-OWNER',
+            'name' => 'Właściciel aliasu',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        ProductChannelAlias::query()->create([
+            'product_id' => $owner->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '999',
+            'external_variation_id' => null,
+            'external_key' => ProductChannelAlias::externalKey('999', null),
+            'external_sku' => $owner->sku,
+            'language' => 'en',
+        ]);
+        $target = Product::query()->create([
+            'sku' => 'ALIAS-TARGET',
+            'name' => 'Produkt docelowy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'publication_date' => '2026-07-14T12:00',
+                'content' => [
+                    'pl' => ['name' => 'Produkt docelowy'],
+                    'en' => ['name' => 'Target product'],
+                ],
+            ]],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $target->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $target->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        Http::fake(function ($request) {
+            if ($request->method() === 'GET' && str_contains($request->url(), 'lang=en')) {
+                return Http::response([[
+                    'id' => 999,
+                    'sku' => 'ALIAS-TARGET',
+                    'lang' => 'en',
+                    'translations' => ['pl' => 123, 'en' => 999],
+                ]]);
+            }
+
+            return Http::response(['id' => str_ends_with($request->url(), '/999') ? 999 : 123, 'sku' => 'ALIAS-TARGET']);
+        });
+
+        try {
+            app(ProductDataExportService::class)->export($target);
+            $this->fail('Próba przejęcia aliasu powinna przerwać eksport.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('jest już przypisany do innego produktu ERP', $exception->getMessage());
+        }
+
+        $this->assertSame($owner->id, ProductChannelAlias::query()
+            ->where('sales_channel_id', $channel->id)
+            ->where('external_key', ProductChannelAlias::externalKey('999', null))
+            ->firstOrFail()
+            ->product_id);
+        $this->assertNull(data_get($target->fresh()->attributes, 'woocommerce_translations.en'));
+    }
+
+    public function test_existing_non_english_translation_keeps_its_configured_language_payload(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'DE-STORE',
+            'name' => 'Sklep niemiecki',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'DE Woo',
+            'base_url' => 'https://de.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl', 'de']]],
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-DE',
+            'name' => 'Koszula',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'content' => [
+                    'pl' => ['name' => 'Koszula', 'description' => '<p>Opis PL</p>'],
+                    'en' => ['name' => 'Shirt', 'description' => '<p>English description</p>'],
+                    'de' => ['name' => 'Hemd', 'description' => '<p>Deutsche Beschreibung</p>'],
+                ],
+            ]],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '300',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelAlias::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '301',
+            'external_variation_id' => null,
+            'external_key' => ProductChannelAlias::externalKey('301', null),
+            'external_sku' => $product->sku,
+            'language' => 'de',
+        ]);
+
+        Http::fake([
+            'https://de.test/wp-json/wc/v3/products/300' => Http::response(['id' => 300, 'sku' => 'SKU-DE']),
+            'https://de.test/wp-json/wc/v3/products/301' => Http::response(['id' => 301, 'sku' => 'SKU-DE']),
+        ]);
+
+        app(ProductDataExportService::class)->export($product);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://de.test/wp-json/wc/v3/products/301'
+            && $request['name'] === 'Hemd'
+            && $request['description'] === '<p>Deutsche Beschreibung</p>');
+    }
+
     public function test_export_uses_exact_erp_gallery_and_can_remove_all_woocommerce_images(): void
     {
         Http::fake([
@@ -672,6 +930,7 @@ class WooCommerceProductDataExportTest extends TestCase
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'stock_export_enabled' => true,
+            'settings' => ['product_export' => ['languages' => ['pl']]],
         ]);
 
         ProductCategory::query()->create([
@@ -1205,14 +1464,14 @@ class WooCommerceProductDataExportTest extends TestCase
 
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
-            && $request['date_created'] === '2026-07-15T09:30:00'
+            && $request['date_created'] === '2026-07-15T09:30:00+02:00'
             && str_ends_with($request['images'][0]['src'], '/uploads/products/shared-pl-en.jpg'));
 
         Http::assertSent(fn ($request): bool => $request->method() === 'GET'
             && str_contains($request->url(), 'lang=en'));
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
-            && $request['date_created'] === '2026-07-15T09:30:00'
+            && $request['date_created'] === '2026-07-15T09:30:00+02:00'
             && str_ends_with($request['images'][0]['src'], '/uploads/products/shared-pl-en.jpg'));
     }
 
@@ -1334,6 +1593,14 @@ class WooCommerceProductDataExportTest extends TestCase
                 return Http::response(['id' => 556, 'sku' => $request['sku']]);
             }
 
+            if ($request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations') {
+                return Http::response([
+                    'linked' => true,
+                    'translations' => ['en' => 556, 'pl' => 555],
+                    'translation_group' => 'product:555|556',
+                ]);
+            }
+
             return Http::response([], 404);
         });
         $channel = SalesChannel::query()->create([
@@ -1348,7 +1615,7 @@ class WooCommerceProductDataExportTest extends TestCase
             'base_url' => 'https://shop.test',
             'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
-            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+            'settings' => ['product_import' => ['languages' => ['pl']]],
         ]);
         $product = Product::query()->create([
             'sku' => 'SKU-BILINGUAL',
@@ -1372,13 +1639,22 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en'
             && $request['name'] === 'English product'
-            && ! isset($request['sku'])
-            && $request['translations'] === ['pl' => 555]);
+            && str_starts_with((string) $request['sku'], 'LEMON-TR-')
+            && ! isset($request['translations']));
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/556'
             && $request['sku'] === 'SKU-BILINGUAL');
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations'
+            && $request['translations'] === ['en' => 556, 'pl' => 555]);
         $this->assertSame('556', data_get($product->fresh()->attributes, 'woocommerce_translations.en.product_id'));
         $this->assertSame('SKU-BILINGUAL', data_get($product->fresh()->attributes, 'woocommerce_translations.en.sku'));
+        $this->assertDatabaseHas('product_channel_aliases', [
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '556',
+            'language' => 'en',
+        ]);
         $this->assertCount(1, $result['translation_responses']);
     }
 
@@ -1424,19 +1700,26 @@ class WooCommerceProductDataExportTest extends TestCase
             }
 
             if (! $retry && $request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en') {
-                return Http::response([], 500);
+                return Http::response(['id' => 223, 'name' => 'Product EN']);
             }
 
             if ($retry && $request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123') {
                 return Http::response(['id' => 123, 'sku' => 'SKU-RESUME', 'name' => 'Produkt PL']);
             }
 
-            if ($retry && $request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en') {
-                return Http::response(['id' => 223, 'name' => 'Product EN']);
+            if ($request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223') {
+                return Http::response(['id' => 223, 'sku' => 'SKU-RESUME', 'name' => 'Product EN']);
             }
 
-            if ($retry && $request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223') {
-                return Http::response(['id' => 223, 'sku' => 'SKU-RESUME', 'name' => 'Product EN']);
+            if ($request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations') {
+                return $retry ? Http::response([
+                    'linked' => true,
+                    'translations' => ['en' => 223, 'pl' => 123],
+                    'translation_group' => 'product:123|223',
+                ]) : Http::response([
+                    'code' => 'lemon_erp_product_translation_verification_failed',
+                    'message' => 'Polylang nie potwierdził relacji.',
+                ], 500);
             }
 
             throw new \RuntimeException('Unexpected request: '.$request->method().' '.$request->url());
@@ -1452,6 +1735,21 @@ class WooCommerceProductDataExportTest extends TestCase
         $mapping = ProductChannelMapping::query()->where('product_id', $product->id)->firstOrFail();
         $this->assertSame('123', $mapping->external_product_id);
         $this->assertSame('creating', data_get($mapping->metadata, 'creation_state'));
+        $this->assertSame('223', data_get($product->fresh()->attributes, 'woocommerce_translations.en.product_id'));
+        $this->assertDatabaseHas('product_channel_aliases', [
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '223',
+            'language' => 'en',
+        ]);
+        ProductChannelAlias::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '323',
+            'external_key' => ProductChannelAlias::externalKey('323', null),
+            'external_sku' => $product->sku,
+            'language' => 'de',
+        ]);
 
         $retry = true;
 
@@ -1465,6 +1763,710 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123');
         $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
             && $pair[0]->url() === 'https://shop.test/wp-json/wc/v3/products')->count());
+        $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en')->count());
+        $this->assertSame(2, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]->url() === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations')->count());
+        Http::assertNotSent(fn ($request): bool => str_contains($request->url(), '/products/323'));
+    }
+
+    public function test_ambiguous_english_creation_response_is_resumed_by_erp_token_without_a_second_post(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl', 'en']]],
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-AMBIGUOUS-EN',
+            'name' => 'Produkt PL',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'content' => [
+                    'pl' => ['name' => 'Produkt PL'],
+                    'en' => ['name' => 'English product'],
+                ],
+            ]],
+        ]);
+
+        $retry = false;
+        $creationToken = null;
+        $creationSku = null;
+        Http::fake(function ($request) use (&$retry, &$creationToken, &$creationSku) {
+            $url = $request->url();
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products') {
+                return Http::response(['id' => 555, 'sku' => 'SKU-AMBIGUOUS-EN'], 201);
+            }
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products?lang=en') {
+                $creationToken = (string) data_get(
+                    collect((array) $request['meta_data'])->firstWhere(
+                        'key',
+                        '_sempre_erp_translation_creation_token',
+                    ),
+                    'value',
+                );
+                $creationSku = (string) $request['sku'];
+
+                // The gateway lost WooCommerce's successful response. The
+                // product becomes visible to the next ERP retry.
+                return Http::response(['message' => 'Gateway timeout'], 504);
+            }
+
+            if ($request->method() === 'GET'
+                && str_starts_with($url, 'https://shop.test/wp-json/wc/v3/products?')
+                && str_contains($url, 'lang=en')
+                && (string) $request['sku'] === $creationSku
+            ) {
+                return $retry ? Http::response([[
+                    'id' => 556,
+                    'sku' => $creationSku,
+                    'lang' => 'en',
+                    'meta_data' => [[
+                        'key' => '_sempre_erp_translation_creation_token',
+                        'value' => $creationToken,
+                    ]],
+                ]]) : Http::response([]);
+            }
+
+            if ($retry && $request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/555') {
+                return Http::response(['id' => 555, 'sku' => 'SKU-AMBIGUOUS-EN']);
+            }
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations') {
+                return Http::response([
+                    'linked' => true,
+                    'translations' => ['en' => 556, 'pl' => 555],
+                    'translation_group' => 'product:555|556',
+                ]);
+            }
+
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/556') {
+                return Http::response(['id' => 556, 'sku' => $request['sku']]);
+            }
+
+            throw new \RuntimeException('Unexpected request: '.$request->method().' '.$url);
+        });
+
+        try {
+            app(ProductDataExportService::class)->create($product, $integration);
+            $this->fail('Pierwszy eksport powinien zachować niejednoznaczny stan do wznowienia.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('HTTP 504', $exception->getMessage());
+        }
+
+        $mapping = ProductChannelMapping::query()->where('product_id', $product->id)->firstOrFail();
+        $this->assertNotSame('', $creationToken);
+        $this->assertMatchesRegularExpression('/^LEMON-TR-[a-f0-9]{40}$/', (string) $creationSku);
+        $this->assertSame($creationToken, data_get(
+            $mapping->metadata,
+            'product_translation_creation.en.token',
+        ));
+        $this->assertTrue((bool) data_get(
+            $mapping->metadata,
+            'product_translation_creation.en.pending',
+        ));
+
+        $retry = true;
+        $result = app(ProductDataExportService::class)->create($product->fresh(), $integration->fresh());
+
+        $this->assertTrue($result['resumed']);
+        $this->assertSame('556', data_get($product->fresh()->attributes, 'woocommerce_translations.en.product_id'));
+        $this->assertFalse((bool) data_get(
+            $mapping->refresh()->metadata,
+            'product_translation_creation.en.pending',
+        ));
+        $this->assertSame('556', data_get(
+            $mapping->metadata,
+            'product_translation_creation.en.external_product_id',
+        ));
+        $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en')->count());
+
+        $requests = Http::recorded()->map(fn (array $record) => $record[0])->values();
+        $linkRequestIndex = $requests->search(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations');
+        $skuRequestIndex = $requests->search(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/556');
+        $this->assertIsInt($linkRequestIndex);
+        $this->assertIsInt($skuRequestIndex);
+        $this->assertLessThan($skuRequestIndex, $linkRequestIndex);
+    }
+
+    public function test_existing_polish_mapped_copy_creates_missing_english_family_and_retries_link_safely(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl']]],
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'LEGACY-ARDEN-COPY',
+            'name' => 'Komplet ARDEN kopia',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'publication_status' => 'publish',
+                'publication_date' => '2026-07-14T12:30',
+                'prices' => ['retail_price_pln' => 699],
+                'content' => [
+                    'pl' => ['name' => 'Komplet ARDEN kopia', 'description' => '<p>Opis rodzica</p>'],
+                    'en' => ['name' => 'ARDEN set copy', 'description' => '<p>Parent description</p>'],
+                ],
+                'copy' => ['created_from_product_id' => 1000],
+            ]],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'LEGACY-ARDEN-COPY-S',
+            'name' => 'Czarny - S (kopia)',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variation',
+                'prices' => ['retail_price_pln' => 1],
+                'content' => [
+                    'pl' => ['description' => '<p>Stary opis</p>'],
+                    'en' => ['description' => '<p>Stale description</p>'],
+                ],
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'name_en' => 'Size',
+                    'value' => 'S',
+                    'value_en' => 'S',
+                    'variation' => true,
+                ]],
+                'copy' => ['created_from_product_id' => 1001],
+            ]],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+            'metadata' => [
+                'copied_from_relation_id' => 777,
+                'copied_at' => '2026-07-13T10:00:00+00:00',
+            ],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+            'metadata' => ['creation_state' => 'completed'],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '124',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        $retry = false;
+        Http::fake(function ($request) use (&$retry) {
+            $url = $request->url();
+
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/123') {
+                return Http::response(['id' => 123, 'sku' => 'LEGACY-ARDEN-COPY']);
+            }
+
+            if ($request->method() === 'GET' && str_contains($url, '/wc/v3/products?') && str_contains($url, 'lang=en')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products?lang=en') {
+                return Http::response(['id' => 223, 'sku' => ''], 201);
+            }
+
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/223') {
+                return Http::response(['id' => 223, 'sku' => $request['sku']]);
+            }
+
+            if ($request->method() === 'GET' && str_starts_with($url, 'https://shop.test/wp-json/wc/v3/products/223/variations')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products/223/variations') {
+                return Http::response(['id' => 224, 'sku' => $request['sku']], 201);
+            }
+
+            if ($request->method() === 'PUT' && in_array($url, [
+                'https://shop.test/wp-json/wc/v3/products/123/variations/124',
+                'https://shop.test/wp-json/wc/v3/products/223/variations/224',
+            ], true)) {
+                return Http::response(['id' => str_ends_with($url, '/224') ? 224 : 124, 'sku' => $request['sku']]);
+            }
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations') {
+                return $retry ? Http::response([
+                    'linked' => true,
+                    'translations' => ['en' => 223, 'pl' => 123],
+                    'translation_group' => 'product:123|223',
+                ]) : Http::response([
+                    'code' => 'lemon_erp_product_translation_verification_failed',
+                    'message' => 'Polylang nie potwierdził relacji.',
+                ], 500);
+            }
+
+            throw new \RuntimeException('Unexpected request: '.$request->method().' '.$url);
+        });
+
+        try {
+            app(ProductDataExportService::class)->export($parent);
+            $this->fail('Pierwsze linkowanie Polylang powinno zakończyć się błędem.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('Polylang nie potwierdził relacji', $exception->getMessage());
+        }
+
+        $this->assertSame('223', data_get($parent->fresh()->attributes, 'woocommerce_translations.en.product_id'));
+        $this->assertNull(data_get($variant->fresh()->attributes, 'woocommerce_translations.en.variation_id'));
+        $this->assertTrue((bool) data_get(
+            ProductChannelMapping::query()->where('product_id', $parent->id)->firstOrFail()->metadata,
+            'product_translation_link.pending',
+        ));
+
+        $retry = true;
+        app(ProductDataExportService::class)->export($parent->fresh());
+
+        $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en')->count());
+        $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]->url() === 'https://shop.test/wp-json/wc/v3/products/223/variations')->count());
+        $this->assertSame(2, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]->url() === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations')->count());
+        $this->assertFalse((bool) data_get(
+            ProductChannelMapping::query()->where('product_id', $parent->id)->firstOrFail()->metadata,
+            'product_translation_link.pending',
+        ));
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/124'
+            && $request['description'] === '<p>Opis rodzica</p>'
+            && $request['regular_price'] === '699.00'
+            && $request['menu_order'] === 10);
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223/variations/224'
+            && $request['description'] === '<p>Parent description</p>'
+            && $request['regular_price'] === '699.00'
+            && $request['menu_order'] === 10);
+    }
+
+    public function test_direct_variant_export_uses_parent_inheritance_for_both_languages(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'DIRECT-PARENT',
+            'name' => 'Produkt główny',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'publication_status' => 'publish',
+                'publication_date' => '2026-07-14T13:00',
+                'prices' => ['retail_price_pln' => 699],
+                'content' => [
+                    'pl' => ['name' => 'Produkt główny', 'description' => '<p>Opis PL rodzica</p>'],
+                    'en' => ['name' => 'Main product', 'description' => '<p>Parent EN description</p>'],
+                ],
+            ]],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'DIRECT-PARENT-M',
+            'name' => 'Stary wariant M',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variation',
+                'prices' => ['retail_price_pln' => 1],
+                'content' => [
+                    'pl' => ['description' => '<p>Stary opis</p>'],
+                    'en' => ['description' => '<p>Stale description</p>'],
+                ],
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'name_en' => 'Size',
+                    'value' => 'M',
+                    'value_en' => 'M',
+                    'variation' => true,
+                ]],
+                'inheritance' => ['mode' => 'parent', 'parent_product_id' => $parent->id],
+            ]],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 7,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelAlias::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '124',
+            'external_variation_id' => '457',
+            'external_key' => ProductChannelAlias::externalKey('124', '457'),
+            'external_sku' => $variant->sku,
+            'language' => 'en',
+        ]);
+
+        Http::fake([
+            'https://shop.test/wp-json/wc/v3/products/123/variations/456' => Http::response(['id' => 456, 'sku' => $variant->sku]),
+            'https://shop.test/wp-json/wc/v3/products/124/variations/457' => Http::response(['id' => 457, 'sku' => $variant->sku]),
+        ]);
+
+        app(ProductDataExportService::class)->export($variant);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/456'
+            && $request['description'] === '<p>Opis PL rodzica</p>'
+            && $request['regular_price'] === '699.00'
+            && $request['menu_order'] === 7
+            && ! array_key_exists('date_created', $request->data())
+            && collect($request['meta_data'])->contains(fn (array $meta): bool => $meta['key'] === '_sempre_erp_publication_date'
+                && $meta['value'] === '2026-07-14T13:00:00'));
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations/457'
+            && $request['description'] === '<p>Parent EN description</p>'
+            && $request['regular_price'] === '699.00'
+            && $request['menu_order'] === 7
+            && $request['attributes'][0] === ['name' => 'Size', 'option' => 'M']);
+    }
+
+    public function test_copied_variable_family_creates_linked_english_product_with_inherited_variant_data(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            // Import is intentionally Polish-only. Exporting EN is a separate policy.
+            'settings' => ['product_import' => ['languages' => ['pl']]],
+        ]);
+        $source = Product::query()->create([
+            'sku' => 'ARDEN-SOURCE',
+            'name' => 'Komplet ARDEN',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'publication_status' => 'publish',
+                'publication_date' => '2025-01-01T08:00',
+                'prices' => ['retail_price_pln' => 699],
+                'inventory' => ['manage_stock' => true, 'backorders' => 'no'],
+                'content' => [
+                    'pl' => [
+                        'name' => 'Komplet ARDEN',
+                        'description' => '<p>Opis rodzica PL</p>',
+                    ],
+                    'en' => [
+                        'name' => 'ARDEN set',
+                        'description' => '<p>Parent description EN</p>',
+                    ],
+                ],
+            ]],
+        ]);
+
+        foreach ([
+            ['sku' => 'ARDEN-S', 'option' => 'S', 'order' => 10],
+            ['sku' => 'ARDEN-M', 'option' => 'M', 'order' => 20],
+        ] as $row) {
+            $variant = Product::query()->create([
+                'sku' => $row['sku'],
+                'name' => 'Nieaktualna kopia '.$row['option'],
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => ['master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variation',
+                    'prices' => ['retail_price_pln' => 1],
+                    'content' => [
+                        'pl' => ['description' => '<p>NIEAKTUALNY OPIS</p>'],
+                        'en' => ['description' => '<p>STALE DESCRIPTION</p>'],
+                    ],
+                    'parameters' => [[
+                        'name' => 'Rozmiar',
+                        'name_en' => 'Size',
+                        'value' => mb_strtolower($row['option']),
+                        'value_en' => mb_strtolower($row['option']),
+                        'variation' => true,
+                    ]],
+                ]],
+            ]);
+            ProductRelation::query()->create([
+                'parent_product_id' => $source->id,
+                'child_product_id' => $variant->id,
+                'relation_type' => 'variant',
+                'sort_order' => $row['order'],
+            ]);
+        }
+
+        $this->post(route('products.duplicate', $source))->assertRedirect();
+        $copy = Product::query()->get()->first(
+            fn (Product $candidate): bool => (int) data_get($candidate->masterData(), 'copy.created_from_product_id') === $source->id,
+        );
+        $this->assertInstanceOf(Product::class, $copy);
+        $copy->forceFill(['is_active' => true])->save();
+        $copy->load('variantChildren');
+        $publicationDate = data_get($copy->masterData(), 'publication_date').':00';
+        $publicationDateWithOffset = $publicationDate.'+02:00';
+
+        Http::fake(function ($request) {
+            $url = $request->url();
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products') {
+                return Http::response(['id' => 700, 'sku' => $request['sku']], 201);
+            }
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products?lang=en') {
+                return Http::response(['id' => 800, 'sku' => ''], 201);
+            }
+
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/800') {
+                return Http::response(['id' => 800, 'sku' => $request['sku']]);
+            }
+
+            if ($request->method() === 'GET' && str_starts_with($url, 'https://shop.test/wp-json/wc/v3/products/800/variations')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'POST' && in_array($url, [
+                'https://shop.test/wp-json/wc/v3/products/700/variations',
+                'https://shop.test/wp-json/wc/v3/products/800/variations',
+            ], true)) {
+                $base = str_contains($url, '/800/') ? 800 : 700;
+                $id = $base + ($request['attributes'][0]['option'] === 'S' ? 1 : 2);
+
+                return Http::response(['id' => $id, 'sku' => $request['sku']], 201);
+            }
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations') {
+                return Http::response([
+                    'linked' => true,
+                    'translations' => ['en' => 800, 'pl' => 700],
+                    'translation_group' => 'product:700|800',
+                ]);
+            }
+
+            throw new \RuntimeException('Unexpected request: '.$request->method().' '.$url);
+        });
+
+        app(ProductDataExportService::class)->create($copy, $integration);
+
+        $requests = Http::recorded()->map(fn (array $record) => $record[0])->values();
+        $plParent = $requests->first(fn ($request) => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products');
+        $enParent = $requests->first(fn ($request) => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en');
+        $plVariants = $requests->filter(fn ($request) => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/700/variations')->values();
+        $enVariants = $requests->filter(fn ($request) => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/800/variations')->values();
+
+        $this->assertSame('<p>Opis rodzica PL</p>', $plParent['description']);
+        $this->assertSame('<p>Parent description EN</p>', $enParent['description']);
+        $this->assertSame($publicationDateWithOffset, $plParent['date_created']);
+        $this->assertSame($publicationDateWithOffset, $enParent['date_created']);
+        $this->assertSame([10, 20], $plVariants->pluck('menu_order')->all());
+        $this->assertSame([10, 20], $enVariants->pluck('menu_order')->all());
+        $this->assertSame(['<p>Opis rodzica PL</p>', '<p>Opis rodzica PL</p>'], $plVariants->pluck('description')->all());
+        $this->assertSame(['<p>Parent description EN</p>', '<p>Parent description EN</p>'], $enVariants->pluck('description')->all());
+        $this->assertSame(['699.00', '699.00'], $plVariants->pluck('regular_price')->all());
+        $this->assertSame(['699.00', '699.00'], $enVariants->pluck('regular_price')->all());
+        $this->assertSame(['S', 'M'], $plVariants->map(fn ($request) => $request['attributes'][0]['option'])->all());
+        $this->assertSame(['S', 'M'], $enVariants->map(fn ($request) => $request['attributes'][0]['option'])->all());
+        foreach ($plVariants->concat($enVariants) as $variationRequest) {
+            $publicationMeta = collect($variationRequest['meta_data'])->firstWhere(
+                'key',
+                '_sempre_erp_publication_date',
+            );
+            $this->assertSame($publicationDate, $publicationMeta['value'] ?? null);
+        }
+        $this->assertSame(3, ProductChannelAlias::query()
+            ->where('sales_channel_id', $channel->id)
+            ->where('language', 'en')
+            ->count());
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations'
+            && $request['translations'] === ['en' => 800, 'pl' => 700]);
+    }
+
+    public function test_variable_creation_resumes_missing_polish_variants_before_translations(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl']]],
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'RETRY-FAMILY',
+            'name' => 'Rodzina do wznowienia',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'content' => ['pl' => ['name' => 'Rodzina do wznowienia']],
+                'prices' => ['retail_price_pln' => 199],
+            ]],
+        ]);
+        $variantS = $this->createVariantProduct('RETRY-FAMILY-S', 'S', 199);
+        $variantM = $this->createVariantProduct('RETRY-FAMILY-M', 'M', 199);
+
+        foreach ([[$variantS, 10], [$variantM, 20]] as [$variant, $order]) {
+            ProductRelation::query()->create([
+                'parent_product_id' => $parent->id,
+                'child_product_id' => $variant->id,
+                'relation_type' => 'variant',
+                'sort_order' => $order,
+            ]);
+        }
+
+        $retry = false;
+        Http::fake(function ($request) use (&$retry) {
+            $url = $request->url();
+
+            if (! $retry && $request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products') {
+                return Http::response(['id' => 500, 'sku' => 'RETRY-FAMILY'], 201);
+            }
+
+            if ($retry && $request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/500') {
+                return Http::response(['id' => 500, 'sku' => 'RETRY-FAMILY']);
+            }
+
+            if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products/500/variations') {
+                if ($request['sku'] === 'RETRY-FAMILY-M' && ! $retry) {
+                    return Http::response(['message' => 'temporary variation failure'], 503);
+                }
+
+                return Http::response([
+                    'id' => $request['sku'] === 'RETRY-FAMILY-S' ? 501 : 502,
+                    'sku' => $request['sku'],
+                ], 201);
+            }
+
+            if ($retry && $request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/500/variations/501') {
+                return Http::response(['id' => 501, 'sku' => 'RETRY-FAMILY-S']);
+            }
+
+            throw new \RuntimeException('Unexpected request: '.$request->method().' '.$url);
+        });
+
+        $this->post(route('products.woocommerce.create', [$parent, $integration]))
+            ->assertRedirect()
+            ->assertSessionHas('error');
+        $this->assertSame(2, ProductChannelMapping::query()->count());
+        $this->assertSame('creating', data_get(
+            ProductChannelMapping::query()->where('product_id', $parent->id)->firstOrFail()->metadata,
+            'creation_state',
+        ));
+
+        $retry = true;
+        $this->post(route('products.woocommerce.create', [$parent, $integration]))
+            ->assertRedirect()
+            ->assertSessionHas('status', 'Wznowiono i dokończono synchronizację produktu w WooCommerce dla kanału B2C.');
+
+        $this->assertSame(3, ProductChannelMapping::query()->count());
+        $this->assertSame('completed', data_get(
+            ProductChannelMapping::query()->where('product_id', $parent->id)->firstOrFail()->metadata,
+            'creation_state',
+        ));
+        $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]->url() === 'https://shop.test/wp-json/wc/v3/products')->count());
+        $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]['sku'] === 'RETRY-FAMILY-S')->count());
+        $this->assertSame(2, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
+            && $pair[0]['sku'] === 'RETRY-FAMILY-M')->count());
     }
 
     public function test_erp_variable_product_creates_parent_and_variants_in_woocommerce(): void
@@ -1517,7 +2519,6 @@ class WooCommerceProductDataExportTest extends TestCase
                 'master' => [
                     'source' => 'erp',
                     'product_type' => 'variable',
-                    'variant_attribute' => 'Rozmiar',
                     'prices' => ['retail_price_pln' => 819.00],
                     'content' => [
                         'pl' => [
@@ -1526,25 +2527,30 @@ class WooCommerceProductDataExportTest extends TestCase
                         ],
                     ],
                     'parameters' => [
+                        ['name' => 'wariant', 'value' => 'S, M', 'variation' => true],
+                        ['name' => 'System', 'value' => 's, m', 'variation' => true],
+                        ['name' => 'Rozmiar', 'value' => 's, m', 'variation' => true],
                         ['name' => 'Kolor', 'value' => 'Kremowy'],
                     ],
                 ],
             ],
         ]);
-        $variantS = $this->createVariantProduct('SET-AMORA-S', 'S', 819.00);
-        $variantM = $this->createVariantProduct('SET-AMORA-M', 'M', 829.00);
+        $variantS = $this->createVariantProduct('SET-AMORA-S', 's', 819.00);
+        $variantM = $this->createVariantProduct('SET-AMORA-M', 'm', 829.00);
 
         ProductRelation::query()->create([
             'parent_product_id' => $parent->id,
             'child_product_id' => $variantS->id,
             'relation_type' => 'variant',
             'sort_order' => 10,
+            'metadata' => ['variant_attribute' => 'Rozmiar'],
         ]);
         ProductRelation::query()->create([
             'parent_product_id' => $parent->id,
             'child_product_id' => $variantM->id,
             'relation_type' => 'variant',
             'sort_order' => 20,
+            'metadata' => ['variant_attribute' => 'Size'],
         ]);
 
         $this->post(route('products.woocommerce.create', [$parent, $integration]))
@@ -1556,15 +2562,32 @@ class WooCommerceProductDataExportTest extends TestCase
         $variationRequests = $requests->filter(fn ($request) => $request->url() === 'https://shop.test/wp-json/wc/v3/products/700/variations')->values();
 
         $this->assertSame('variable', $parentRequest['type']);
-        $this->assertSame('Rozmiar', $parentRequest['attributes'][1]['name']);
-        $this->assertSame(['S', 'M'], $parentRequest['attributes'][1]['options']);
-        $this->assertTrue($parentRequest['attributes'][1]['variation']);
+        $variantAttributes = collect($parentRequest['attributes'])
+            ->filter(fn (array $attribute): bool => (bool) $attribute['variation'])
+            ->values();
+        $this->assertCount(1, $variantAttributes);
+        $this->assertSame('Rozmiar', $variantAttributes[0]['name']);
+        $this->assertSame(['S', 'M'], $variantAttributes[0]['options']);
+        $this->assertFalse(collect($parentRequest['attributes'])->contains(
+            fn (array $attribute): bool => mb_strtolower($attribute['name']) === 'wariant',
+        ));
+        $this->assertTrue(collect($parentRequest['attributes'])
+            ->reject(fn (array $attribute): bool => $attribute['name'] === 'Rozmiar')
+            ->every(fn (array $attribute): bool => $attribute['variation'] === false));
+        $this->assertFalse($parentRequest['manage_stock']);
+        $this->assertSame([], $parentRequest['default_attributes']);
         $this->assertSame(2, $variationRequests->count());
         $this->assertSame('SET-AMORA-S', $variationRequests[0]['sku']);
+        $this->assertCount(1, $variationRequests[0]['attributes']);
+        $this->assertSame('Rozmiar', $variationRequests[0]['attributes'][0]['name']);
         $this->assertSame('S', $variationRequests[0]['attributes'][0]['option']);
+        $this->assertSame(10, $variationRequests[0]['menu_order']);
         $this->assertSame('819.00', $variationRequests[0]['regular_price']);
         $this->assertSame('SET-AMORA-M', $variationRequests[1]['sku']);
+        $this->assertCount(1, $variationRequests[1]['attributes']);
+        $this->assertSame('Rozmiar', $variationRequests[1]['attributes'][0]['name']);
         $this->assertSame('M', $variationRequests[1]['attributes'][0]['option']);
+        $this->assertSame(20, $variationRequests[1]['menu_order']);
         $this->assertSame('829.00', $variationRequests[1]['regular_price']);
 
         $this->assertSame(3, ProductChannelMapping::query()->count());
@@ -2349,7 +3372,11 @@ class WooCommerceProductDataExportTest extends TestCase
         app(ProductDataExportService::class)->export($parent);
 
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/456'
+            && $request['menu_order'] === 10);
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations/457'
+            && $request['menu_order'] === 10
             && str_ends_with($request['image']['src'], '/uploads/products/legacy-variant-new.jpg'));
         Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
             && str_contains($request->url(), '/variations'));
@@ -2466,11 +3493,13 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations'
             && $request['sku'] === 'SEM-NEW-S'
+            && $request['menu_order'] === 10
             && $request['global_unique_id'] === '5901234567890'
             && str_ends_with($request['image']['src'], '/uploads/products/shared-variant-pl-en.jpg'));
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations'
             && $request['sku'] === 'SEM-NEW-S'
+            && $request['menu_order'] === 10
             && $request['attributes'][0]['name'] === 'Sizing'
             && $request['attributes'][0]['option'] === 'Petite'
             && str_ends_with($request['image']['src'], '/uploads/products/shared-variant-pl-en.jpg'));

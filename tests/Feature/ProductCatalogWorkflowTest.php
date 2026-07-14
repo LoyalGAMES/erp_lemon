@@ -21,7 +21,9 @@ use App\Models\StockSyncQueueItem;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
+use App\Services\Products\ProductVariantInheritanceService;
 use App\Services\WooCommerce\StockSyncExportService;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Bus;
@@ -1203,7 +1205,6 @@ class ProductCatalogWorkflowTest extends TestCase
                 'master' => [
                     'source' => 'erp',
                     'product_type' => 'variable',
-                    'variant_attribute' => 'Rozmiar',
                     'content' => [
                         'pl' => [
                             'name' => 'Koszula do kopiowania',
@@ -1252,7 +1253,8 @@ class ProductCatalogWorkflowTest extends TestCase
                         ],
                     ],
                     'parameters' => [
-                        ['name' => 'Rozmiar', 'value' => 'M', 'variation' => true],
+                        ['name' => 'Kolor', 'value' => 'Czarny', 'variation' => true],
+                        ['name' => 'Rozmiar', 'value' => 'm', 'variation' => true],
                     ],
                     'media' => [
                         ['src' => '/uploads/products/2/m.jpg', 'alt' => 'M', 'name' => 'm.jpg'],
@@ -1265,7 +1267,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'child_product_id' => $sourceVariant->id,
             'relation_type' => 'variant',
             'sort_order' => 10,
-            'metadata' => ['variant_attribute' => 'Rozmiar'],
+            'metadata' => ['source' => 'woocommerce_import'],
         ]);
 
         $this->post(route('products.duplicate', $product))
@@ -1283,6 +1285,8 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertFalse($copy->is_active);
         $this->assertSame('Koszula do kopiowania (kopia)', data_get($copy->attributes, 'master.content.pl.name'));
         $this->assertSame('<p>Opis</p>', data_get($copy->attributes, 'master.content.pl.description'));
+        $this->assertSame('Rozmiar', data_get($copy->attributes, 'master.variant_attribute'));
+        $this->assertSame(now()->format('Y-m-d\TH:i'), data_get($copy->attributes, 'master.publication_date'));
         $this->assertSame($product->id, data_get($copy->attributes, 'master.copy.created_from_product_id'));
         $this->assertSame([], data_get($copy->attributes, 'master.media'));
         $this->assertNull(data_get($copy->attributes, 'woocommerce_product_id'));
@@ -1298,12 +1302,43 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertStringNotContainsString('COPY', $variantCopy->sku);
         $this->assertNull($variantCopy->ean);
         $this->assertTrue($variantCopy->is_active);
+        $this->assertSame('Koszula do kopiowania (kopia) - M', $variantCopy->name);
         $this->assertSame('M', data_get($variantCopy->attributes, 'master.parameters.0.value'));
-        $this->assertSame('<p>Opis wariantu</p>', data_get($variantCopy->attributes, 'master.content.pl.description'));
+        $this->assertSame('<p>Opis</p>', data_get($variantCopy->attributes, 'master.content.pl.description'));
+        $this->assertSame('parent', data_get($variantCopy->attributes, 'master.inheritance.mode'));
+        $this->assertSame($copy->id, data_get($variantCopy->attributes, 'master.inheritance.parent_product_id'));
+        $this->assertSame(
+            data_get($copy->attributes, 'master.publication_date'),
+            data_get($variantCopy->attributes, 'master.publication_date'),
+        );
         $this->assertSame([], data_get($variantCopy->attributes, 'master.media'));
         $this->assertNull(data_get($variantCopy->attributes, 'woocommerce_variation_id'));
         $this->assertSame(0, ProductChannelMapping::query()->where('product_id', $variantCopy->id)->count());
         $this->assertSame(0, StockBalance::query()->where('product_id', $variantCopy->id)->count());
+
+        $copiedRelation = ProductRelation::query()
+            ->where('parent_product_id', $copy->id)
+            ->where('child_product_id', $variantCopy->id)
+            ->firstOrFail();
+        $copiedFromRelationId = data_get($copiedRelation->metadata, 'copied_from_relation_id');
+        $copiedAt = data_get($copiedRelation->metadata, 'copied_at');
+
+        $this->put(route('products.update', $copy), [
+            'name' => $copy->name,
+            'sku' => $copy->sku,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'product_type' => 'variable',
+            'variant_attribute' => 'Rozmiar',
+            'variant_skus' => [4 => $variantCopy->sku],
+            'variant_remove' => [4 => '0'],
+            'variant_sort_order' => [4 => 30],
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $copiedRelation->refresh();
+        $this->assertSame($copiedFromRelationId, data_get($copiedRelation->metadata, 'copied_from_relation_id'));
+        $this->assertSame($copiedAt, data_get($copiedRelation->metadata, 'copied_at'));
+        $this->assertSame(30, $copiedRelation->sort_order);
 
         $this->get(route('products.show', $copy))
             ->assertRedirect(route('products.edit', $copy));
@@ -1317,6 +1352,11 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('Edytuj')
             ->assertDontSee('variant-stock-management-item', false)
             ->assertDontSee('Edytuj cenę, EAN, SKU i stan');
+
+        $this->get(route('products.edit', $variantCopy))
+            ->assertOk()
+            ->assertSee('Ten wariant dziedziczy nazwy i opisy PL/EN')
+            ->assertSee($copy->sku);
 
         $this->assertSame(1, substr_count($response->getContent(), '<tr data-variant-stock-row>'));
     }
@@ -1349,7 +1389,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'is_active' => 1,
             'product_type' => 'variable',
             'variant_attribute' => 'Rozmiar',
-            'new_variant_values' => ['S', 'M'],
+            'new_variant_values' => ['s', 'm'],
             'category_ids' => [$category->id],
             'retail_price_pln' => 399.99,
             'description_pl' => '<p>Opis kompletu</p>',
@@ -1358,6 +1398,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $parent = Product::query()->where('name', 'Komplet tworzony od zera')->firstOrFail();
         $parent->load('variantChildren');
         $this->assertSame('variable', data_get($parent->masterData(), 'product_type'));
+        $this->assertSame(now()->format('Y-m-d\TH:i'), data_get($parent->masterData(), 'publication_date'));
         $this->assertSame('SEM-'.str_pad((string) $parent->id, 8, '0', STR_PAD_LEFT), $parent->sku);
         $this->assertNotNull($parent->ean);
         $this->assertCount(2, $parent->variantChildren);
@@ -1387,8 +1428,8 @@ class ProductCatalogWorkflowTest extends TestCase
         ]);
 
         $this->put(route('products.update', $parent), [
-            'name' => $parent->name,
-            'name_en' => 'New set',
+            'name' => 'Komplet odświeżony',
+            'name_en' => 'Updated set',
             'sku' => $parent->sku,
             'ean' => $parent->ean,
             'unit' => 'szt',
@@ -1396,10 +1437,10 @@ class ProductCatalogWorkflowTest extends TestCase
             'is_active' => 1,
             'product_type' => 'variable',
             'variant_attribute' => 'Rozmiar',
-            'new_variant_values' => ['S', 'M', 'L'],
+            'new_variant_values' => ['s', 'm', 'l'],
             'category_ids' => [$category->id],
-            'retail_price_pln' => 399.99,
-            'description_pl' => '<p>Opis kompletu</p>',
+            'retail_price_pln' => 429.99,
+            'description_pl' => '<p>Nowy opis kompletu</p>',
         ])->assertRedirect()->assertSessionHasNoErrors();
 
         $parent->refresh()->load('variantChildren');
@@ -1414,6 +1455,244 @@ class ProductCatalogWorkflowTest extends TestCase
         );
         $this->assertSame(3, $parent->variantChildren->pluck('sku')->unique()->count());
         $this->assertSame(3, $parent->variantChildren->pluck('ean')->filter()->unique()->count());
+
+        foreach ($parent->variantChildren as $variant) {
+            $option = (string) data_get($variant->masterData(), 'parameters.0.value');
+            $this->assertSame('parent', data_get($variant->masterData(), 'inheritance.mode'));
+            $this->assertSame('Komplet odświeżony - '.$option, $variant->name);
+            $this->assertSame('Updated set - '.$option, data_get($variant->masterData(), 'content.en.name'));
+            $this->assertSame('<p>Nowy opis kompletu</p>', data_get($variant->masterData(), 'content.pl.description'));
+            $this->assertEquals(429.99, data_get($variant->masterData(), 'prices.retail_price_pln'));
+            $this->assertSame(
+                data_get($parent->masterData(), 'publication_date'),
+                data_get($variant->masterData(), 'publication_date'),
+            );
+        }
+
+        $editedVariant = $parent->variantChildren->first();
+        $editedOption = (string) data_get($editedVariant->masterData(), 'parameters.0.value');
+        $originalVariantSku = $editedVariant->sku;
+
+        $this->put(route('products.update', $editedVariant), [
+            'name' => 'Próba nadpisania wariantu',
+            'name_en' => 'Attempted child override',
+            'sku' => $editedVariant->sku,
+            'ean' => $editedVariant->ean,
+            'unit' => 'kg',
+            'vat_rate' => 8,
+            'is_active' => 1,
+            'product_type' => 'variation',
+            'variant_attribute' => 'Rozmiar',
+            'retail_price_pln' => 1,
+            'description_pl' => '<p>Opis tylko wariantu</p>',
+            'description_en' => '<p>Child-only description</p>',
+            'parameters' => [
+                'name' => ['Rozmiar'],
+                'value' => [$editedOption],
+                'variation' => ['1'],
+            ],
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $editedVariant->refresh();
+        $this->assertSame($originalVariantSku, $editedVariant->sku);
+        $this->assertSame('Komplet odświeżony - '.$editedOption, $editedVariant->name);
+        $this->assertSame('szt', $editedVariant->unit);
+        $this->assertSame('23.00', $editedVariant->vat_rate);
+        $this->assertEquals(429.99, data_get($editedVariant->masterData(), 'prices.retail_price_pln'));
+        $this->assertSame('<p>Nowy opis kompletu</p>', data_get($editedVariant->masterData(), 'content.pl.description'));
+        $this->assertSame('parent', data_get($editedVariant->masterData(), 'inheritance.mode'));
+    }
+
+    public function test_legacy_copied_variant_is_promoted_to_parent_inheritance(): void
+    {
+        $parent = Product::query()->create([
+            'sku' => 'LEGACY-COPY-PARENT',
+            'name' => 'Stara kopia rodzica',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'publication_date' => '2026-07-14T12:00',
+                'prices' => ['retail_price_pln' => 699],
+                'content' => ['pl' => [
+                    'name' => 'Stara kopia rodzica',
+                    'description' => '<p>Aktualny opis rodzica</p>',
+                ]],
+                'copy' => ['created_from_product_id' => 100],
+            ]],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'LEGACY-COPY-S',
+            'name' => 'Nieaktualna nazwa S (kopia)',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variation',
+                'prices' => ['retail_price_pln' => 1],
+                'content' => ['pl' => ['description' => '<p>Nieaktualny opis wariantu</p>']],
+                'parameters' => [['name' => 'Rozmiar', 'value' => 'S', 'variation' => true]],
+                'copy' => ['created_from_product_id' => 101],
+            ]],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+            'metadata' => [
+                'created_from' => 'product_editor',
+                'variant_attribute' => 'Rozmiar',
+            ],
+        ]);
+
+        app(ProductVariantInheritanceService::class)->synchronizeFamily($parent);
+
+        $variant->refresh();
+        $this->assertSame('Stara kopia rodzica - S', $variant->name);
+        $this->assertSame('parent', data_get($variant->masterData(), 'inheritance.mode'));
+        $this->assertSame($parent->id, data_get($variant->masterData(), 'inheritance.parent_product_id'));
+        $this->assertSame('<p>Aktualny opis rodzica</p>', data_get($variant->masterData(), 'content.pl.description'));
+        $this->assertEquals(699, data_get($variant->masterData(), 'prices.retail_price_pln'));
+        $this->assertSame('2026-07-14T12:00', data_get($variant->masterData(), 'publication_date'));
+    }
+
+    public function test_deactivating_an_undated_product_does_not_generate_a_publication_date(): void
+    {
+        $product = Product::query()->create([
+            'sku' => 'UNDATED-DRAFT',
+            'name' => 'Produkt bez daty',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'publication_status' => 'publish',
+                'publication_date' => null,
+                'product_type' => 'simple',
+                'content' => ['pl' => ['name' => 'Produkt bez daty']],
+            ]],
+        ]);
+
+        $this->put(route('products.update', $product), [
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'publication_status' => 'publish',
+            'product_type' => 'simple',
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $product->refresh();
+        $this->assertFalse($product->is_active);
+        $this->assertNull(data_get($product->masterData(), 'publication_date'));
+    }
+
+    public function test_explicitly_blank_publication_date_clears_date_for_draft_or_inactive_products(): void
+    {
+        $draft = Product::query()->create([
+            'sku' => 'DATED-DRAFT',
+            'name' => 'Produkt roboczy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'publication_status' => 'publish',
+                'publication_date' => '2026-07-01T10:00',
+                'product_type' => 'simple',
+                'content' => ['pl' => ['name' => 'Produkt roboczy']],
+            ]],
+        ]);
+
+        $this->put(route('products.update', $draft), [
+            'sku' => $draft->sku,
+            'name' => $draft->name,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => '1',
+            'publication_status' => 'draft',
+            'publication_date' => '',
+            'product_type' => 'simple',
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $draft->refresh();
+        $this->assertTrue($draft->is_active);
+        $this->assertNull(data_get($draft->masterData(), 'publication_date'));
+
+        $inactive = Product::query()->create([
+            'sku' => 'DATED-INACTIVE',
+            'name' => 'Produkt nieaktywny',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'publication_status' => 'publish',
+                'publication_date' => '2026-07-02T11:00',
+                'product_type' => 'simple',
+                'content' => ['pl' => ['name' => 'Produkt nieaktywny']],
+            ]],
+        ]);
+
+        $this->put(route('products.update', $inactive), [
+            'sku' => $inactive->sku,
+            'name' => $inactive->name,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'publication_status' => 'publish',
+            'publication_date' => '',
+            'product_type' => 'simple',
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $inactive->refresh();
+        $this->assertFalse($inactive->is_active);
+        $this->assertNull(data_get($inactive->masterData(), 'publication_date'));
+    }
+
+    public function test_explicitly_blank_publication_date_is_regenerated_for_active_published_product(): void
+    {
+        $this->travelTo(Carbon::parse('2026-07-14 15:42:30'));
+
+        $product = Product::query()->create([
+            'sku' => 'DATED-PUBLISHED',
+            'name' => 'Produkt publikowany',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'publication_status' => 'publish',
+                'publication_date' => '2026-07-01T10:00',
+                'product_type' => 'simple',
+                'content' => ['pl' => ['name' => 'Produkt publikowany']],
+            ]],
+        ]);
+
+        $this->put(route('products.update', $product), [
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => '1',
+            'publication_status' => 'publish',
+            'publication_date' => '',
+            'product_type' => 'simple',
+        ])->assertRedirect()->assertSessionHasNoErrors();
+
+        $product->refresh();
+        $this->assertTrue($product->is_active);
+        $this->assertSame('2026-07-14T15:42', data_get($product->masterData(), 'publication_date'));
     }
 
     public function test_product_form_rejects_duplicate_invalid_ean_and_variants_without_attribute(): void
@@ -1598,6 +1877,207 @@ class ProductCatalogWorkflowTest extends TestCase
         $copy->refresh();
         $this->assertNotNull($copy->ean);
         $this->assertSame('10001352', data_get($copy->masterData(), 'gs1.gpc_code'));
+    }
+
+    public function test_operator_can_set_variant_storefront_order_with_sparse_form_indices(): void
+    {
+        $parent = Product::query()->create([
+            'sku' => 'SKU-ORDER-PARENT',
+            'name' => 'Komplet z kolejnością',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variable',
+                    'variant_attribute' => 'Rozmiar',
+                    'content' => ['pl' => ['name' => 'Komplet z kolejnością']],
+                ],
+            ],
+        ]);
+        $createVariant = function (string $sku, string $size): Product {
+            return Product::query()->create([
+                'sku' => $sku,
+                'name' => "Komplet z kolejnością {$size}",
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => [
+                    'master' => [
+                        'source' => 'erp',
+                        'product_type' => 'variation',
+                        'parameters' => [
+                            ['name' => 'Rozmiar', 'value' => $size, 'variation' => true],
+                        ],
+                    ],
+                ],
+            ]);
+        };
+        $variantM = $createVariant('SKU-ORDER-M', 'M');
+        $variantS = $createVariant('SKU-ORDER-S', 'S');
+
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variantM->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variantS->id,
+            'relation_type' => 'variant',
+            'sort_order' => 20,
+        ]);
+
+        $this->get(route('products.edit', $parent))
+            ->assertOk()
+            ->assertSee('name="variant_sort_order[0]" type="number" min="0" max="65535" step="1" value="10"', false)
+            ->assertSee('name="variant_sort_order[1]" type="number" min="0" max="65535" step="1" value="20"', false);
+
+        $payload = [
+            'sku' => $parent->sku,
+            'name' => $parent->name,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => '1',
+            'product_type' => 'variable',
+            'variant_attribute' => 'Rozmiar',
+            'variant_skus' => [2 => $variantM->sku, 5 => $variantS->sku],
+            'variant_remove' => [2 => '0', 5 => '0'],
+        ];
+
+        $this->from(route('products.edit', $parent))->put(route('products.update', $parent), $payload + [
+            'variant_sort_order' => [2 => 65536, 5 => 10],
+        ])->assertRedirect(route('products.edit', $parent))
+            ->assertSessionHasErrors('variant_sort_order.2');
+
+        $this->put(route('products.update', $parent), $payload + [
+            'variant_sort_order' => [2 => 20, 5 => 10],
+        ])->assertRedirect(route('products.edit', $parent))
+            ->assertSessionHasNoErrors();
+
+        $this->assertSame(20, (int) ProductRelation::query()
+            ->where('parent_product_id', $parent->id)
+            ->where('child_product_id', $variantM->id)
+            ->value('sort_order'));
+        $this->assertSame(10, (int) ProductRelation::query()
+            ->where('parent_product_id', $parent->id)
+            ->where('child_product_id', $variantS->id)
+            ->value('sort_order'));
+        $this->assertSame(
+            [$variantS->sku, $variantM->sku],
+            $parent->variantChildren()->pluck('products.sku')->all(),
+        );
+
+        $this->put(route('products.update', $parent), $payload)
+            ->assertRedirect(route('products.edit', $parent))
+            ->assertSessionHasNoErrors();
+        $this->assertSame(
+            [$variantS->sku, $variantM->sku],
+            $parent->variantChildren()->pluck('products.sku')->all(),
+        );
+    }
+
+    public function test_inherited_variant_shows_parent_media_and_cannot_create_nested_variants(): void
+    {
+        $parent = Product::query()->create([
+            'sku' => 'SKU-LEAF-PARENT',
+            'name' => 'Komplet główny',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'content' => [
+                    'pl' => ['name' => 'Komplet główny', 'description' => '<p>Opis rodzica</p>'],
+                    'en' => ['name' => 'Main set', 'description' => '<p>Parent description</p>'],
+                ],
+                'prices' => ['retail_price_pln' => 459],
+                'media' => [[
+                    'src' => 'https://cdn.example.test/products/main-set.jpg',
+                    'alt' => 'Komplet główny',
+                ]],
+            ]],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'SKU-LEAF-S',
+            'name' => 'Komplet główny - S',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variation',
+                'variant_attribute' => 'Rozmiar',
+                'parameters' => [['name' => 'Rozmiar', 'value' => 'S', 'variation' => true]],
+                'inheritance' => ['mode' => 'parent', 'parent_product_id' => $parent->id],
+                'media' => [],
+            ]],
+        ]);
+        $unrelated = Product::query()->create([
+            'sku' => 'SKU-UNRELATED-M',
+            'name' => 'Inny produkt M',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp', 'product_type' => 'simple']],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+            'metadata' => ['variant_attribute' => 'Rozmiar', 'variant_option' => 'S'],
+        ]);
+
+        $this->get(route('products.edit', $variant))
+            ->assertOk()
+            ->assertSee('To jest końcowy wariant produktu')
+            ->assertSee('Kolejność rozmiarów ustawiasz na karcie produktu głównego.')
+            ->assertSee('https://cdn.example.test/products/main-set.jpg', false)
+            ->assertSee('Galeria jest zarządzana na produkcie głównym')
+            ->assertDontSee('data-new-variant-values', false)
+            ->assertDontSee('name="new_media[]"', false)
+            ->assertDontSee('Ten produkt nie ma jeszcze mediów zapisanych w ERP.');
+
+        $this->put(route('products.update', $variant), [
+            'sku' => $variant->sku,
+            'name' => $variant->name,
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => 1,
+            'product_type' => 'variation',
+            'variant_attribute' => 'Rozmiar',
+            'parameters' => [
+                'name' => ['Rozmiar'],
+                'value' => ['S'],
+                'variation' => ['1'],
+            ],
+            'new_variant_values_custom' => "M\nL",
+            'variant_skus' => [$unrelated->sku],
+            'variant_remove' => ['0'],
+            'variant_sort_order' => [20],
+        ])->assertRedirect(route('products.edit', $variant));
+
+        $this->assertSame(3, Product::query()->count());
+        $this->assertSame(0, ProductRelation::query()->where('parent_product_id', $variant->id)->count());
+
+        $this->from(route('products.edit', $variant))->post(route('products.relations.store', $variant), [
+            'relation_type' => 'variant',
+            'child_sku' => $unrelated->sku,
+            'variant_attribute' => 'Rozmiar',
+        ])->assertRedirect(route('products.edit', $variant))
+            ->assertSessionHas('error', 'Nie można dodać wariantu do wariantu. Relacje i kolejność ustaw na produkcie głównym.');
+
+        $this->assertSame(0, ProductRelation::query()->where('parent_product_id', $variant->id)->count());
     }
 
     public function test_operator_can_attach_and_remove_variant_relation(): void

@@ -13,6 +13,10 @@ final class ProductParameterTranslationService
     /** @var Collection<int, ProductParameterDefinition>|null */
     private ?Collection $definitions = null;
 
+    public function __construct(
+        private readonly ProductVariantOptionNormalizer $variantOptions,
+    ) {}
+
     /**
      * Synchronize the shared parameter dictionary from one canonical Woo item
      * and its explicitly verified Polylang translations.
@@ -65,7 +69,10 @@ final class ProductParameterTranslationService
                         : null,
                     'name' => $name,
                     'values' => collect($values)
-                        ->map(fn (mixed $value): string => trim((string) ($value ?? '')))
+                        ->map(fn (mixed $value): string => $this->variantOptions->normalize(
+                            $name,
+                            trim((string) ($value ?? '')),
+                        ))
                         ->filter()
                         ->values()
                         ->all(),
@@ -169,15 +176,38 @@ final class ProductParameterTranslationService
 
         $beforeName = trim((string) ($definition->name_en ?? ''));
         $beforeValues = (array) $definition->values_en;
-        $values = collect((array) $definition->values)
-            ->map(fn (mixed $value): string => trim((string) $value))
-            ->filter()
-            ->values()
-            ->all();
-        $valuesEn = array_values((array) $definition->values_en);
+        $englishAttributeName = trim((string) ($english['name'] ?? $definition->name_en ?? ''));
+        $rawValuesEn = array_values((array) $definition->values_en);
+        $values = [];
+        $valuesEn = [];
+        $valueIndexes = [];
 
-        while (count($valuesEn) < count($values)) {
-            $valuesEn[] = '';
+        foreach (array_values((array) $definition->values) as $index => $rawValue) {
+            $value = $this->variantOptions->normalize($primary['name'], trim((string) $rawValue));
+
+            if ($value === '') {
+                continue;
+            }
+
+            $valueEn = $this->variantOptions->normalize(
+                $englishAttributeName !== '' ? $englishAttributeName : $primary['name'],
+                trim((string) ($rawValuesEn[$index] ?? '')),
+            );
+            $identity = $this->variantOptions->identity($primary['name'], $value);
+
+            if (array_key_exists($identity, $valueIndexes)) {
+                $existingIndex = $valueIndexes[$identity];
+
+                if ($valuesEn[$existingIndex] === '' && $valueEn !== '') {
+                    $valuesEn[$existingIndex] = $valueEn;
+                }
+
+                continue;
+            }
+
+            $valueIndexes[$identity] = count($values);
+            $values[] = $value;
+            $valuesEn[] = $valueEn;
         }
 
         $englishValues = $english['values'] ?? [];

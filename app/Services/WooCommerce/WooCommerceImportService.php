@@ -27,6 +27,7 @@ use App\Services\Products\ProductCategoryTranslationMergeService;
 use App\Services\Products\ProductDescriptionSanitizer;
 use App\Services\Products\ProductParameterTranslationService;
 use App\Services\Products\ProductTranslationMergeService;
+use App\Services\Products\ProductVariantOptionNormalizer;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Arr;
 use Illuminate\Support\Facades\DB;
@@ -47,6 +48,7 @@ final class WooCommerceImportService
         private readonly ProductCategoryTranslationMergeService $categoryTranslationMerge,
         private readonly ProductParameterTranslationService $parameterTranslations,
         private readonly ProductDescriptionSanitizer $descriptionSanitizer,
+        private readonly ProductVariantOptionNormalizer $variantOptions,
         private readonly WooCommerceCustomerSyncService $customerSync,
         private readonly CustomerAccountClaimService $customerAccountClaims,
     ) {}
@@ -201,7 +203,7 @@ final class WooCommerceImportService
                     $attributes['master'] = $mergedMaster;
 
                     $product->fill([
-                        'name' => (string) ($item['name'] ?? $sku),
+                        'name' => $this->productNameForImport($item, $sku),
                         'ean' => $eanConflict === null ? $incomingEan : null,
                         'unit' => 'szt',
                         'vat_rate' => 23,
@@ -1748,7 +1750,7 @@ final class WooCommerceImportService
 
         $content = $this->translatedContent($item);
 
-        return [
+        $master = [
             'source' => 'woocommerce_import',
             'catalog' => 'Domyślny',
             'category' => $categories[0] ?? null,
@@ -1790,6 +1792,15 @@ final class WooCommerceImportService
             'content' => $content,
             'media' => $images,
         ];
+
+        $variantAttribute = $this->variantAttributeForImport($item);
+
+        // A null value deliberately clears a stale axis from an earlier,
+        // ambiguous import. Leaving it in place would make export trust the
+        // wrong attribute over the current Woo payload.
+        $master['variant_attribute'] = $variantAttribute;
+
+        return $master;
     }
 
     /**
@@ -1889,18 +1900,95 @@ final class WooCommerceImportService
                 $value = $attribute['option'] ?? null;
 
                 if ($value === null && isset($attribute['options']) && is_array($attribute['options'])) {
-                    $value = implode(', ', array_filter(array_map('strval', $attribute['options'])));
+                    $value = collect($attribute['options'])
+                        ->map(fn (mixed $option): string => $this->variantOptions->normalize(
+                            $name,
+                            trim((string) $option),
+                        ))
+                        ->filter()
+                        ->unique(fn (string $option): string => $this->variantOptions->identity($name, $option))
+                        ->implode(', ');
                 }
 
                 return [
                     'name' => $name,
-                    'value' => trim((string) ($value ?? '')),
+                    'value' => $this->variantOptions->normalize(
+                        $name,
+                        trim((string) ($value ?? '')),
+                    ),
                     'variation' => (bool) ($attribute['variation'] ?? isset($attribute['option'])),
                 ];
             })
             ->filter()
             ->values()
             ->all();
+    }
+
+    /**
+     * WooCommerce variations must use the same single attribute as their
+     * parent. Preserve our explicit metadata when available; otherwise infer
+     * the axis only when the payload is unambiguous.
+     *
+     * @param  array<string, mixed>  $item
+     */
+    private function variantAttributeForImport(array $item): ?string
+    {
+        $explicit = $this->nullableString($this->metaValue($item, [
+            '_sempre_erp_variant_attribute',
+        ]));
+
+        if ($explicit !== null) {
+            return $explicit;
+        }
+
+        $candidates = collect((array) ($item['attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->filter(function (array $attribute) use ($item): bool {
+                if (isset($item['variation_id'])) {
+                    return array_key_exists('option', $attribute);
+                }
+
+                return (bool) ($attribute['variation'] ?? false);
+            })
+            ->map(fn (array $attribute): ?string => $this->nullableString($attribute['name'] ?? null))
+            ->filter()
+            ->unique(fn (string $name): string => mb_strtolower(trim($name)))
+            ->values();
+
+        if ($candidates->count() === 1) {
+            return $candidates->first();
+        }
+
+        $sizeCandidates = $candidates
+            ->filter(fn (string $name): bool => $this->variantOptions->isSizeAttribute($name))
+            ->values();
+
+        return $sizeCandidates->count() === 1 ? $sizeCandidates->first() : null;
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     */
+    private function productNameForImport(array $item, string $fallback): string
+    {
+        if (! isset($item['variation_id'])) {
+            return (string) ($item['name'] ?? $fallback);
+        }
+
+        $variantAttribute = $this->variantAttributeForImport($item);
+        $parentName = $this->nullableString($item['parent_name'] ?? null);
+
+        if ($variantAttribute === null || $parentName === null) {
+            return (string) ($item['name'] ?? $fallback);
+        }
+
+        $option = collect($this->parameterList($item))
+            ->first(fn (array $parameter): bool => mb_strtolower($parameter['name']) === mb_strtolower($variantAttribute));
+        $option = is_array($option) ? $this->nullableString($option['value'] ?? null) : null;
+
+        return $option === null
+            ? (string) ($item['name'] ?? $fallback)
+            : mb_substr($parentName.' - '.$option, 0, 255);
     }
 
     private function syncImportedRelatedProductSkus(WordpressIntegration $integration): void

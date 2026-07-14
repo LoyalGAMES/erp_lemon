@@ -61,12 +61,14 @@ class WooCommerceProductImportTest extends TestCase
                     [
                         'id' => 888,
                         'sku' => 'BLS29K1TRMI',
-                        'name' => '36',
+                        'name' => 'm',
                         'manage_stock' => true,
                         'stock_quantity' => 4,
                         'stock_status' => 'instock',
+                        'menu_order' => 37,
                         'attributes' => [
-                            ['name' => 'Rozmiar', 'option' => '36'],
+                            ['name' => 'Kolor', 'option' => 'Czarny'],
+                            ['name' => 'Rozmiar', 'option' => 'm'],
                         ],
                     ],
                 ]);
@@ -85,6 +87,18 @@ class WooCommerceProductImportTest extends TestCase
                             'status' => 'publish',
                             'date_created' => '2026-07-08T14:20:00',
                             'permalink' => 'https://shop.test/produkt/koszula-vivien-biala',
+                            'attributes' => [
+                                [
+                                    'name' => 'Kolor',
+                                    'variation' => true,
+                                    'options' => ['Czarny'],
+                                ],
+                                [
+                                    'name' => 'Rozmiar',
+                                    'variation' => true,
+                                    'options' => ['s', 'm'],
+                                ],
+                            ],
                             'images' => [
                                 [
                                     'id' => 1001,
@@ -119,6 +133,30 @@ class WooCommerceProductImportTest extends TestCase
             'stock_export_enabled' => true,
             'settings' => ['product_import' => ['languages' => ['pl']]],
         ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S', 's'],
+            'values_en' => ['S', ''],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 100,
+            'metadata' => [],
+        ]);
+        Product::query()->create([
+            'sku' => 'WC-B2C-PARENT-777',
+            'name' => 'Stary rodzic',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'woocommerce_import',
+                'variant_attribute' => 'System',
+            ]],
+        ]);
 
         $stats = app(WooCommerceImportService::class)->importProducts($integration);
 
@@ -127,13 +165,24 @@ class WooCommerceProductImportTest extends TestCase
 
         $this->assertSame('Koszula VIVIEN Biala', $parent->name);
         $this->assertSame('variable', data_get($parent->attributes, 'woocommerce_type'));
+        $this->assertSame('Rozmiar', data_get($parent->attributes, 'master.variant_attribute'));
+        $this->assertSame('S, M', collect(data_get($parent->attributes, 'master.parameters'))
+            ->firstWhere('name', 'Rozmiar')['value']);
         $this->assertSame('2026-07-08T14:20', data_get($parent->attributes, 'master.publication_date'));
         $this->assertSame(2, Product::query()->count());
-        $this->assertSame('Koszula VIVIEN Biala - 36', $product->name);
+        $this->assertSame('Koszula VIVIEN Biala - M', $product->name);
+        $this->assertSame('Rozmiar', data_get($product->attributes, 'master.variant_attribute'));
+        $this->assertSame('M', collect(data_get($product->attributes, 'master.parameters'))
+            ->firstWhere('name', 'Rozmiar')['value']);
+        $this->assertSame(['S', 'M'], ProductParameterDefinition::query()
+            ->where('name', 'Rozmiar')
+            ->firstOrFail()
+            ->values);
         $this->assertSame([], data_get($product->attributes, 'master.media'));
         $this->assertSame('https://shop.test/wp-content/uploads/koszula-vivien.jpg', $product->imageUrl());
         $this->assertSame('https://shop.test/produkt/koszula-vivien-biala', $product->externalProductUrl());
         $this->assertSame('https://shop.test/wp-content/uploads/koszula-vivien.jpg', $product->attributes['woocommerce_parent_image']['src']);
+        $this->assertSame(37, (int) $parent->variantChildren()->firstOrFail()->pivot->sort_order);
         $this->assertSame(1, $stats['stock_updated']);
         $this->assertSame(1, ProductChannelMapping::query()->where('external_variation_id', '888')->count());
         $this->assertDatabaseHas('product_categories', [

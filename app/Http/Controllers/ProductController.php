@@ -26,6 +26,8 @@ use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Products\ProductIdentifierService;
 use App\Services\Products\ProductImportIssueService;
 use App\Services\Products\ProductStorefrontVisibilityService;
+use App\Services\Products\ProductVariantInheritanceService;
+use App\Services\Products\ProductVariantOptionNormalizer;
 use App\Services\WooCommerce\ProductDataExportService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
@@ -109,6 +111,7 @@ class ProductController extends Controller
         Product $product,
         Gs1SettingsService $gs1Settings,
         ProductEditFieldSettingsService $productEditFields,
+        ProductVariantInheritanceService $variantInheritance,
     ): View {
         $product->load([
             'stockBalances.warehouse',
@@ -121,6 +124,10 @@ class ProductController extends Controller
         $catalogVisibilityParent = $catalogVisibilityUsesParent
             ? $this->catalogVisibilityParent($product)
             : null;
+        $effectiveMaster = $catalogVisibilityParent instanceof Product
+            && $variantInheritance->inheritsFromParent($product, $catalogVisibilityParent)
+                ? $variantInheritance->masterData($catalogVisibilityParent, $product)
+                : $product->masterData();
         $mappedSalesChannelIds = $product->channelMappings
             ->pluck('sales_channel_id')
             ->filter()
@@ -135,6 +142,7 @@ class ProductController extends Controller
             'visibleProductEditFields' => $productEditFields->visibleFields(),
             'catalogVisibilityUsesParent' => $catalogVisibilityUsesParent,
             'catalogVisibilityParent' => $catalogVisibilityParent,
+            'effectiveMaster' => $effectiveMaster,
             'gs1Settings' => $gs1Settings->publicConfiguration(),
             'warehouses' => Warehouse::query()->where('is_active', true)->orderBy('code')->get(),
             'availableWooCommerceCreateIntegrations' => WordpressIntegration::query()
@@ -189,11 +197,19 @@ class ProductController extends Controller
                     $validated,
                     $request,
                     $uploadedMedia,
+                    [],
+                    $request->boolean('is_active', true),
                 );
                 $product->forceFill(['attributes' => $attributes])->save();
                 $identifiers->ensureSku($product, $requestedSku === null);
                 $eanResult = $identifiers->ensureEan($product);
-                $this->syncVariantRelations($product, (array) $request->input('variant_skus', []), [], $validated['variant_attribute'] ?? null);
+                $this->syncVariantRelations(
+                    $product,
+                    (array) $request->input('variant_skus', []),
+                    [],
+                    (array) $request->input('variant_sort_order', []),
+                    $validated['variant_attribute'] ?? null,
+                );
                 $generatedVariants = $this->createGeneratedVariants(
                     $product,
                     $request,
@@ -229,12 +245,23 @@ class ProductController extends Controller
         ProductIdentifierService $identifiers,
         ProductEditFieldSettingsService $productEditFields,
         ProductDescriptionSanitizer $descriptionSanitizer,
+        ProductVariantInheritanceService $variantInheritance,
     ): RedirectResponse {
         $catalogVisibilityWasSubmitted = $request->has('catalog_visibility');
         $catalogVisibilityUsesParent = $this->catalogVisibilityUsesParent($product);
         $catalogVisibilityParent = $catalogVisibilityUsesParent
             ? $this->catalogVisibilityParent($product)
             : null;
+        $inheritanceParent = $catalogVisibilityParent instanceof Product
+            && $variantInheritance->inheritsFromParent($product, $catalogVisibilityParent)
+                ? $catalogVisibilityParent
+                : null;
+
+        if ($inheritanceParent instanceof Product) {
+            $effectiveAttributes = (array) $product->attributes;
+            $effectiveAttributes['master'] = $variantInheritance->masterData($inheritanceParent, $product);
+            $product->setAttribute('attributes', $effectiveAttributes);
+        }
 
         $this->preserveHiddenProductFields($request, $product, $productEditFields->visibleFields());
 
@@ -261,11 +288,14 @@ class ProductController extends Controller
 
         $uploadedMedia = [];
         try {
-            [$eanResult, $generatedVariants] = DB::transaction(function () use ($product, $request, $validated, $identifiers, $audit, $before, $catalogVisibilityParent, &$uploadedMedia): array {
+            [$eanResult, $generatedVariants] = DB::transaction(function () use ($product, $request, $validated, $identifiers, $audit, $before, $catalogVisibilityParent, $inheritanceParent, $variantInheritance, &$uploadedMedia): array {
                 $attributes = (array) $product->attributes;
                 $currentMaster = (array) data_get($attributes, 'master', []);
-                $uploadedMedia = $this->storeUploadedMedia($product, $request);
-                $media = $request->has('existing_media') || $request->hasFile('new_media')
+                $uploadedMedia = $inheritanceParent instanceof Product
+                    ? []
+                    : $this->storeUploadedMedia($product, $request);
+                $media = ! ($inheritanceParent instanceof Product)
+                    && ($request->has('existing_media') || $request->hasFile('new_media'))
                 ? array_merge(
                     $this->normalizeExistingMedia((array) $request->input('existing_media', [])),
                     $uploadedMedia,
@@ -274,7 +304,20 @@ class ProductController extends Controller
                     ? $currentMaster['media']
                     : $product->mediaImages());
 
-                $attributes['master'] = $this->masterDataFromRequest($validated, $request, $media, $currentMaster);
+                $attributes['master'] = $this->masterDataFromRequest(
+                    $validated,
+                    $request,
+                    $media,
+                    $currentMaster,
+                    $request->boolean('is_active'),
+                );
+
+                if ($inheritanceParent instanceof Product) {
+                    $attributes['master'] = $variantInheritance->inheritedMasterData(
+                        $inheritanceParent,
+                        $attributes['master'],
+                    );
+                }
 
                 $product->fill([
                     'sku' => $this->nullableString($validated['sku'] ?? null) ?? $product->sku,
@@ -294,6 +337,7 @@ class ProductController extends Controller
                     $product,
                     (array) $request->input('variant_skus', []),
                     (array) $request->input('variant_remove', []),
+                    (array) $request->input('variant_sort_order', []),
                     $validated['variant_attribute'] ?? null,
                 );
                 $generatedVariants = $this->createGeneratedVariants(
@@ -302,6 +346,11 @@ class ProductController extends Controller
                     $validated['variant_attribute'] ?? null,
                     $identifiers,
                 );
+                if ($inheritanceParent instanceof Product) {
+                    $variantInheritance->synchronizeVariant($inheritanceParent, $product);
+                } else {
+                    $variantInheritance->synchronizeFamily($product);
+                }
                 $product->load('variantChildren');
 
                 foreach ($product->variantChildren as $variant) {
@@ -327,6 +376,10 @@ class ProductController extends Controller
                         data_set($parentAttributes, 'master.source', 'erp');
                         data_set($parentAttributes, 'master.catalog_visibility', $visibility);
                         $catalogVisibilityParent->forceFill(['attributes' => $parentAttributes])->save();
+
+                        if ($inheritanceParent instanceof Product) {
+                            $variantInheritance->synchronizeVariant($inheritanceParent, $product);
+                        }
 
                         $audit->record('product.catalog_visibility_updated_from_variant', $catalogVisibilityParent, [
                             'catalog_visibility' => $previousVisibility,
@@ -370,13 +423,15 @@ class ProductController extends Controller
         Product $product,
         AuditLogService $audit,
         ProductIdentifierService $identifiers,
+        ProductVariantInheritanceService $variantInheritance,
+        ProductVariantOptionNormalizer $variantOptions,
     ): RedirectResponse {
         $product->load([
             'childRelations' => fn ($query) => $query
                 ->where('relation_type', 'variant')
                 ->with('childProduct'),
         ]);
-        [$copy, $copiedVariants] = DB::transaction(function () use ($product, $identifiers, $audit): array {
+        [$copy, $copiedVariants] = DB::transaction(function () use ($product, $identifiers, $audit, $variantInheritance, $variantOptions): array {
             $copy = $product->replicate([
                 'sku',
                 'storefront_hidden_at',
@@ -394,6 +449,14 @@ class ProductController extends Controller
             $identifiers->ensureSku($copy, true);
 
             $copiedVariants = [];
+            $variantAttribute = $this->variantAttributeForCopy($product, $copy, $variantOptions);
+
+            if ($product->childRelations->isNotEmpty()) {
+                $copyAttributes = (array) $copy->attributes;
+                data_set($copyAttributes, 'master.product_type', 'variable');
+                data_set($copyAttributes, 'master.variant_attribute', $variantAttribute);
+                $copy->forceFill(['attributes' => $copyAttributes])->save();
+            }
 
             foreach ($product->childRelations as $sourceRelation) {
                 $sourceVariant = $sourceRelation->childProduct;
@@ -402,24 +465,40 @@ class ProductController extends Controller
                     continue;
                 }
 
-                $variantCopy = $sourceVariant->replicate([
-                    'sku',
-                    'storefront_hidden_at',
-                    'storefront_restore_visibility',
-                    'stock_verification_required_at',
-                    'created_at',
-                    'updated_at',
+                $optionParameter = $this->variantOptionParameter($sourceVariant, $variantAttribute);
+                $option = $this->nullableString($optionParameter['value'] ?? null)
+                    ?? $this->nullableString(data_get($sourceRelation->metadata, 'variant_option'))
+                    ?? $sourceVariant->name;
+                $option = $variantOptions->normalize($variantAttribute, $option);
+                $optionParameter ??= [
+                    'name' => $variantAttribute,
+                    'value' => $option,
+                    'variation' => true,
+                ];
+                $optionParameter['name'] = $variantAttribute;
+                $optionParameter['value'] = $option;
+                $optionParameter['variation'] = true;
+                $variantCopy = Product::query()->create([
+                    'sku' => $identifiers->temporarySku(),
+                    'name' => mb_substr($copy->name.' - '.$option, 0, 255),
+                    'ean' => null,
+                    'unit' => $copy->unit,
+                    'vat_rate' => $copy->vat_rate,
+                    'weight_kg' => $copy->weight_kg,
+                    'quantity_precision' => $copy->quantity_precision,
+                    'is_active' => $sourceVariant->is_active,
+                    'attributes' => [
+                        'master' => $variantInheritance->newVariantMasterData(
+                            $copy,
+                            $variantAttribute,
+                            $optionParameter,
+                            [
+                                'created_from_product_id' => $sourceVariant->id,
+                                'created_at' => now()->toISOString(),
+                            ],
+                        ),
+                    ],
                 ]);
-                $variantCopy->name = $this->copyName($sourceVariant->name);
-                $variantCopy->sku = $identifiers->temporarySku();
-                $variantCopy->ean = null;
-                $variantCopy->attributes = $this->copyAttributes(
-                    (array) $sourceVariant->attributes,
-                    $variantCopy->name,
-                    $sourceVariant->id,
-                );
-                $variantCopy->is_active = $sourceVariant->is_active;
-                $variantCopy->save();
 
                 ProductRelation::query()->create([
                     'parent_product_id' => $copy->id,
@@ -429,6 +508,8 @@ class ProductController extends Controller
                     'metadata' => array_merge((array) $sourceRelation->metadata, [
                         'copied_from_relation_id' => $sourceRelation->id,
                         'copied_at' => now()->toISOString(),
+                        'variant_attribute' => $variantAttribute,
+                        'variant_option' => $option,
                     ]),
                 ]);
 
@@ -460,6 +541,13 @@ class ProductController extends Controller
 
     public function storeRelation(Product $product, Request $request, AuditLogService $audit): RedirectResponse
     {
+        if ($this->catalogVisibilityUsesParent($product)) {
+            return back()->withInput()->with(
+                'error',
+                'Nie można dodać wariantu do wariantu. Relacje i kolejność ustaw na produkcie głównym.',
+            );
+        }
+
         $validated = $request->validate([
             'relation_type' => ['required', 'string', 'in:variant'],
             'child_sku' => ['required', 'string', 'exists:products,sku'],
@@ -1163,6 +1251,8 @@ class ProductController extends Controller
             'variant_skus.*' => ['nullable', 'string', 'exists:products,sku'],
             'variant_remove' => ['nullable', 'array'],
             'variant_remove.*' => ['nullable', 'boolean'],
+            'variant_sort_order' => ['nullable', 'array'],
+            'variant_sort_order.*' => ['nullable', 'integer', 'min:0', 'max:65535'],
             'existing_media' => ['nullable', 'array'],
             'existing_media.*.src' => ['nullable', 'string', 'max:2000'],
             'existing_media.*.alt' => ['nullable', 'string', 'max:255'],
@@ -1185,8 +1275,13 @@ class ProductController extends Controller
      * @param  list<array{src:string,alt:?string,name:?string}>  $media
      * @return array<string, mixed>
      */
-    private function masterDataFromRequest(array $validated, Request $request, array $media, array $existingMaster = []): array
-    {
+    private function masterDataFromRequest(
+        array $validated,
+        Request $request,
+        array $media,
+        array $existingMaster = [],
+        ?bool $isActive = null,
+    ): array {
         $categoryIds = collect((array) ($validated['category_ids'] ?? []))
             ->map(fn (mixed $id): int => (int) $id)
             ->filter()
@@ -1201,6 +1296,15 @@ class ProductController extends Controller
             ->all();
         $legacyCategory = $this->nullableString($validated['category'] ?? null)
             ?? ($categoryNames[0] ?? null);
+        $publicationStatus = $this->nullableString($validated['publication_status'] ?? null)
+            ?? (string) data_get($existingMaster, 'publication_status', 'publish');
+        $publicationDate = $request->exists('publication_date')
+            ? $this->nullableDateTimeString($validated['publication_date'] ?? null)
+            : $this->nullableDateTimeString(data_get($existingMaster, 'publication_date'));
+
+        if ($publicationDate === null && $publicationStatus === 'publish' && ($isActive ?? false)) {
+            $publicationDate = now()->format('Y-m-d\TH:i');
+        }
 
         return [
             'source' => 'erp',
@@ -1211,8 +1315,8 @@ class ProductController extends Controller
             'producer' => $this->nullableString($validated['producer'] ?? null) ?? 'SEMPRE',
             'tags' => $this->tagList($validated['tags'] ?? ''),
             'asin' => $this->nullableString($validated['asin'] ?? null),
-            'publication_status' => $this->nullableString($validated['publication_status'] ?? null) ?? 'publish',
-            'publication_date' => $this->nullableDateTimeString($validated['publication_date'] ?? null),
+            'publication_status' => $publicationStatus,
+            'publication_date' => $publicationDate,
             'catalog_visibility' => $this->nullableString($validated['catalog_visibility'] ?? null) ?? 'visible',
             'product_type' => $this->nullableString($validated['product_type'] ?? null) ?? 'simple',
             'variant_attribute' => $this->nullableString($validated['variant_attribute'] ?? null),
@@ -1262,7 +1366,10 @@ class ProductController extends Controller
                 'upsell_skus' => $this->skuList($validated['related_upsell_skus'] ?? ''),
                 'cross_sell_skus' => $this->skuList($validated['related_cross_sell_skus'] ?? ''),
             ],
-            'parameters' => $this->normalizeParameters((array) $request->input('parameters', [])),
+            'parameters' => $this->normalizeParameters(
+                (array) $request->input('parameters', []),
+                (array) data_get($existingMaster, 'parameters', []),
+            ),
             'media' => $media,
             'media_updated_at' => $request->has('existing_media') || $request->hasFile('new_media')
                 ? now()->toISOString()
@@ -1271,6 +1378,8 @@ class ProductController extends Controller
                 ? $this->normalizeSuppliers((array) $request->input('suppliers', []))
                 : array_values((array) data_get($existingMaster, 'suppliers', [])),
             'gs1' => (array) data_get($existingMaster, 'gs1', []),
+            'copy' => (array) data_get($existingMaster, 'copy', []),
+            'inheritance' => (array) data_get($existingMaster, 'inheritance', []),
         ];
     }
 
@@ -1372,16 +1481,13 @@ class ProductController extends Controller
         mixed $variantAttribute,
         ProductIdentifierService $identifiers,
     ): array {
-        $options = collect((array) $request->input('new_variant_values', []))
-            ->merge(preg_split('/[\r\n,;]+/', (string) $request->input('new_variant_values_custom', '')) ?: [])
-            ->map(fn (mixed $option): string => mb_substr(trim((string) $option), 0, 120))
-            ->filter()
-            ->unique(fn (string $option): string => mb_strtolower($option))
-            ->take(100)
-            ->values();
-
-        if ($options->isEmpty()) {
-            return ['created' => 0, 'error' => null];
+        if ($this->catalogVisibilityUsesParent($parent)) {
+            return [
+                'created' => 0,
+                'error' => $request->filled('new_variant_values') || $request->filled('new_variant_values_custom')
+                    ? 'Nie utworzono wariantów: wariant nie może zawierać kolejnych wariantów.'
+                    : null,
+            ];
         }
 
         $variantAttribute = $this->nullableString($variantAttribute)
@@ -1391,11 +1497,25 @@ class ProductController extends Controller
             return ['created' => 0, 'error' => 'Nie utworzono wariantów: wybierz atrybut wariantowy.'];
         }
 
+        $variantOptions = app(ProductVariantOptionNormalizer::class);
+        $options = collect((array) $request->input('new_variant_values', []))
+            ->merge(preg_split('/[\r\n,;]+/', (string) $request->input('new_variant_values_custom', '')) ?: [])
+            ->map(fn (mixed $option): string => mb_substr(trim((string) $option), 0, 120))
+            ->map(fn (string $option): string => $variantOptions->normalize($variantAttribute, $option))
+            ->filter()
+            ->unique(fn (string $option): string => $variantOptions->identity($variantAttribute, $option))
+            ->take(100)
+            ->values();
+
+        if ($options->isEmpty()) {
+            return ['created' => 0, 'error' => null];
+        }
+
         $parent->loadMissing('variantChildren');
         $existingOptions = $parent->variantChildren
             ->map(fn (Product $variant): ?string => $this->variantOptionValue($variant, $variantAttribute))
             ->filter()
-            ->map(fn (string $option): string => mb_strtolower($option))
+            ->map(fn (string $option): string => $variantOptions->identity($variantAttribute, $option))
             ->flip();
         $nextSortOrder = (int) (ProductRelation::query()
             ->where('parent_product_id', $parent->id)
@@ -1405,7 +1525,9 @@ class ProductController extends Controller
         $eanErrors = [];
 
         foreach ($options as $option) {
-            if ($existingOptions->has(mb_strtolower($option))) {
+            $optionIdentity = $variantOptions->identity($variantAttribute, $option);
+
+            if ($existingOptions->has($optionIdentity)) {
                 continue;
             }
 
@@ -1444,7 +1566,7 @@ class ProductController extends Controller
                 $eanErrors[] = $eanResult['error'];
             }
 
-            $existingOptions->put(mb_strtolower($option), true);
+            $existingOptions->put($optionIdentity, true);
             $created++;
         }
 
@@ -1464,34 +1586,160 @@ class ProductController extends Controller
      */
     private function generatedVariantMasterData(Product $parent, string $variantAttribute, string $option): array
     {
-        $master = $parent->masterData();
-        $master['source'] = 'erp';
-        $master['product_type'] = 'variation';
-        $master['variant_attribute'] = $variantAttribute;
-        $master['media'] = [];
-        unset($master['copy']);
-
-        foreach (['pl', 'en'] as $language) {
-            $parentName = $this->nullableString(data_get($master, "content.{$language}.name"));
-
-            if ($parentName !== null) {
-                data_set($master, "content.{$language}.name", mb_substr($parentName.' - '.$option, 0, 255));
-            }
-        }
-
-        $parameters = collect((array) data_get($master, 'parameters', []))
-            ->filter(fn (mixed $parameter): bool => is_array($parameter))
-            ->reject(fn (array $parameter): bool => mb_strtolower(trim((string) ($parameter['name'] ?? ''))) === mb_strtolower($variantAttribute))
-            ->values()
-            ->push([
+        return app(ProductVariantInheritanceService::class)->newVariantMasterData(
+            $parent,
+            $variantAttribute,
+            [
                 'name' => $variantAttribute,
                 'value' => $option,
                 'variation' => true,
-            ])
-            ->all();
-        $master['parameters'] = $parameters;
+            ],
+        );
+    }
 
-        return $master;
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function variantOptionParameter(Product $variant, string $variantAttribute): ?array
+    {
+        $parameters = collect((array) data_get($variant->masterData(), 'parameters', []))
+            ->filter(fn (mixed $parameter): bool => is_array($parameter));
+
+        $matching = $parameters->filter(
+            fn (array $parameter): bool => mb_strtolower(trim((string) ($parameter['name'] ?? ''))) === mb_strtolower($variantAttribute),
+        )->values();
+        $matchingVariant = $matching->first(fn (array $parameter): bool => (bool) ($parameter['variation'] ?? false)
+            && ! $this->isAggregateVariantOption($parameter['value'] ?? null));
+
+        if (is_array($matchingVariant)) {
+            return $matchingVariant;
+        }
+
+        $variantParameters = $parameters
+            ->filter(fn (array $parameter): bool => (bool) ($parameter['variation'] ?? false))
+            ->values();
+
+        $matchingSingleOption = $matching->first(fn (array $parameter): bool => ! $this->isAggregateVariantOption(
+            $parameter['value'] ?? null,
+        ));
+
+        if (is_array($matchingSingleOption)) {
+            return $matchingSingleOption;
+        }
+
+        if (app(ProductVariantOptionNormalizer::class)->isSizeAttribute($variantAttribute)) {
+            $sizeParameters = $variantParameters
+                ->filter(fn (array $parameter): bool => app(ProductVariantOptionNormalizer::class)->isSizeAttribute(
+                    (string) ($parameter['name'] ?? ''),
+                ))
+                ->values();
+
+            if ($sizeParameters->count() === 1) {
+                return $sizeParameters->first();
+            }
+        }
+
+        if ($variantParameters->count() === 1) {
+            return $variantParameters->first();
+        }
+
+        return null;
+    }
+
+    private function isAggregateVariantOption(mixed $value): bool
+    {
+        return preg_match('/[,;|]/u', trim((string) ($value ?? ''))) === 1;
+    }
+
+    private function variantAttributeForCopy(
+        Product $source,
+        Product $copy,
+        ProductVariantOptionNormalizer $variantOptions,
+    ): string {
+        $explicit = $this->nullableString(data_get($copy->masterData(), 'variant_attribute'));
+
+        if ($explicit !== null) {
+            return $explicit;
+        }
+
+        $relationCandidate = $this->singleVariantAttributeCandidate(
+            $source->childRelations
+                ->map(fn (ProductRelation $relation): string => trim((string) data_get(
+                    $relation->metadata,
+                    'variant_attribute',
+                    '',
+                ))),
+            $variantOptions,
+        );
+
+        if ($relationCandidate !== null) {
+            return $relationCandidate;
+        }
+
+        $variants = $source->childRelations
+            ->map(fn (ProductRelation $relation): ?Product => $relation->childProduct)
+            ->filter(fn (?Product $variant): bool => $variant instanceof Product)
+            ->values();
+        $commonCandidates = $variants
+            ->flatMap(function (Product $variant): array {
+                return collect((array) data_get($variant->masterData(), 'parameters', []))
+                    ->filter(fn (mixed $parameter): bool => is_array($parameter)
+                        && (bool) ($parameter['variation'] ?? false))
+                    ->map(fn (array $parameter): string => trim((string) ($parameter['name'] ?? '')))
+                    ->filter()
+                    ->unique(fn (string $candidate): string => mb_strtolower($candidate))
+                    ->map(fn (string $candidate): array => [
+                        'name' => $candidate,
+                        'product_id' => (int) $variant->id,
+                    ])
+                    ->values()
+                    ->all();
+            })
+            ->groupBy(fn (array $candidate): string => mb_strtolower($candidate['name']))
+            ->filter(fn (Collection $candidates): bool => $candidates
+                ->pluck('product_id')
+                ->unique()
+                ->count() === $variants->count())
+            ->map(fn (Collection $candidates): string => (string) $candidates->first()['name'])
+            ->values();
+        $commonCandidate = $this->singleVariantAttributeCandidate($commonCandidates, $variantOptions);
+
+        if ($commonCandidate !== null) {
+            return $commonCandidate;
+        }
+
+        $parentCandidate = $this->singleVariantAttributeCandidate(
+            collect((array) data_get($source->masterData(), 'parameters', []))
+                ->filter(fn (mixed $parameter): bool => is_array($parameter)
+                    && (bool) ($parameter['variation'] ?? false))
+                ->map(fn (array $parameter): string => trim((string) ($parameter['name'] ?? ''))),
+            $variantOptions,
+        );
+
+        return $parentCandidate ?? 'Rozmiar';
+    }
+
+    /**
+     * @param  Collection<int, string>  $candidates
+     */
+    private function singleVariantAttributeCandidate(
+        Collection $candidates,
+        ProductVariantOptionNormalizer $variantOptions,
+    ): ?string {
+        $candidates = $candidates
+            ->filter()
+            ->unique(fn (string $candidate): string => mb_strtolower(trim($candidate)))
+            ->values();
+
+        if ($candidates->count() === 1) {
+            return $candidates->first();
+        }
+
+        $sizeCandidates = $candidates
+            ->filter(fn (string $candidate): bool => $variantOptions->isSizeAttribute($candidate))
+            ->values();
+
+        return $sizeCandidates->count() === 1 ? $sizeCandidates->first() : null;
     }
 
     private function variantOptionValue(Product $variant, string $variantAttribute): ?string
@@ -1544,9 +1792,19 @@ class ProductController extends Controller
     /**
      * @param  array<int|string, mixed>  $submittedSkus
      * @param  array<int|string, mixed>  $removeFlags
+     * @param  array<int|string, mixed>  $submittedSortOrders
      */
-    private function syncVariantRelations(Product $product, array $submittedSkus, array $removeFlags, mixed $variantAttribute): void
-    {
+    private function syncVariantRelations(
+        Product $product,
+        array $submittedSkus,
+        array $removeFlags,
+        array $submittedSortOrders,
+        mixed $variantAttribute,
+    ): void {
+        if ($this->catalogVisibilityUsesParent($product)) {
+            return;
+        }
+
         if ($submittedSkus === [] && $removeFlags === []) {
             return;
         }
@@ -1582,7 +1840,7 @@ class ProductController extends Controller
                 continue;
             }
 
-            $skusToAttach[] = $sku;
+            $skusToAttach[$index] = $sku;
         }
 
         $children = Product::query()
@@ -1594,7 +1852,7 @@ class ProductController extends Controller
             ->where('relation_type', 'variant')
             ->max('sort_order') ?? 0);
 
-        foreach (collect($skusToAttach)->unique() as $sku) {
+        foreach (collect($skusToAttach)->unique() as $index => $sku) {
             $child = $children->get($sku);
 
             if (! $child instanceof Product || (int) $child->id === (int) $product->id) {
@@ -1602,7 +1860,14 @@ class ProductController extends Controller
             }
 
             $existing = $currentRelationBySku->get(mb_strtolower($sku));
-            $nextSortOrder += $existing instanceof ProductRelation ? 0 : 10;
+            $nextSortOrder = $existing instanceof ProductRelation
+                ? $nextSortOrder
+                : min(65535, $nextSortOrder + 10);
+            $submittedSortOrder = $submittedSortOrders[$index] ?? null;
+            $sortOrder = $submittedSortOrder === null || $submittedSortOrder === ''
+                ? ($existing?->sort_order ?? $nextSortOrder)
+                : max(0, min(65535, (int) $submittedSortOrder));
+            $nextSortOrder = max($nextSortOrder, (int) $sortOrder);
 
             ProductRelation::query()->updateOrCreate(
                 [
@@ -1611,11 +1876,11 @@ class ProductController extends Controller
                     'relation_type' => 'variant',
                 ],
                 [
-                    'sort_order' => $existing?->sort_order ?? $nextSortOrder,
-                    'metadata' => [
+                    'sort_order' => $sortOrder,
+                    'metadata' => array_merge((array) $existing?->metadata, [
                         'created_from' => 'product_editor',
                         'variant_attribute' => $variantAttribute,
-                    ],
+                    ]),
                 ],
             );
 
@@ -2118,9 +2383,10 @@ class ProductController extends Controller
 
     /**
      * @param  array<string, mixed>  $input
-     * @return list<array{name:string,value:string}>
+     * @param  list<array<string, mixed>>  $existing
+     * @return list<array<string, mixed>>
      */
-    private function normalizeParameters(array $input): array
+    private function normalizeParameters(array $input, array $existing = []): array
     {
         $names = (array) ($input['name'] ?? []);
         $values = (array) ($input['value'] ?? []);
@@ -2135,11 +2401,12 @@ class ProductController extends Controller
                 continue;
             }
 
-            $rows[] = [
+            $preserved = is_array($existing[$index] ?? null) ? $existing[$index] : [];
+            $rows[] = array_merge($preserved, [
                 'name' => $name ?? '',
                 'value' => $value ?? '',
                 'variation' => filter_var($variations[$index] ?? false, FILTER_VALIDATE_BOOLEAN),
-            ];
+            ]);
         }
 
         return $rows;
@@ -2351,11 +2618,17 @@ class ProductController extends Controller
             }
         }
 
+        if (! is_array(data_get($attributes, 'master.content.en'))) {
+            data_set($attributes, 'master.content.en', []);
+        }
+
         data_set($attributes, 'master.content.pl.name', $copyName);
         data_set($attributes, 'master.source', 'erp');
         data_set($attributes, 'master.copy.created_from_product_id', $sourceProductId);
         data_set($attributes, 'master.copy.created_at', now()->toISOString());
+        data_set($attributes, 'master.publication_date', now()->format('Y-m-d\TH:i'));
         data_set($attributes, 'master.media', []);
+        data_forget($attributes, 'master.inheritance');
 
         return $attributes;
     }
