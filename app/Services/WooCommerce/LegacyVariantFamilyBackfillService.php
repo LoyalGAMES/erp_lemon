@@ -19,6 +19,14 @@ final class LegacyVariantFamilyBackfillService
 
     public const UNMARKED_FAMILY_PROMOTION_REVISION = 'legacy_unmarked_variant_family_2026_07_14_000006';
 
+    /**
+     * Reuse the durable historical catalog-export queue for mapped products
+     * that predate automatic creation of their configured translations. The
+     * metadata path keeps its legacy name for backward compatibility with
+     * already queued production work.
+     */
+    public const MISSING_PRODUCT_TRANSLATIONS_REVISION = 'missing_product_translations_2026_07_14_000007';
+
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 
     /** @var array<string, bool> */

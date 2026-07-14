@@ -63,14 +63,14 @@ Artisan::command('erp:release-stale-woocommerce-imports {--minutes=60 : Mark run
     return 0;
 })->purpose('Release WooCommerce imports stuck in running status.');
 
-Artisan::command('erp:dispatch-legacy-variant-backfill {--limit=10 : Maximum number of product families to queue} {--stale-minutes=120 : Replace an abandoned export reservation after this many minutes}', function (): int {
+Artisan::command('erp:dispatch-legacy-variant-backfill {--limit=10 : Maximum number of historical catalog products to queue} {--stale-minutes=120 : Replace an abandoned export reservation after this many minutes}', function (): int {
     $result = app(LegacyVariantFamilyBackfillService::class)->dispatchPending(
         max(1, (int) $this->option('limit')),
         max(1, (int) $this->option('stale-minutes')),
     );
 
     $this->info(sprintf(
-        'Legacy variant backfill: scanned %d, dispatched %d, active %d, backoff %d, plugin unready %d, failed %d.',
+        'Historical catalog backfill: scanned %d, dispatched %d, active %d, backoff %d, plugin unready %d, failed %d.',
         $result['scanned'],
         $result['dispatched'],
         $result['skipped_active'],
@@ -80,7 +80,7 @@ Artisan::command('erp:dispatch-legacy-variant-backfill {--limit=10 : Maximum num
     ));
 
     return $result['failed'] > 0 ? 1 : 0;
-})->purpose('Queue durable full WooCommerce exports for repaired legacy variant families.');
+})->purpose('Queue durable full WooCommerce exports for historical catalog repairs.');
 
 Artisan::command('erp:refresh-ksef-submissions {--limit=25 : Maximum number of KSeF submissions to refresh} {--minutes=2 : Refresh submissions older than this many minutes}', function (): int {
     $limit = max(1, (int) $this->option('limit'));
