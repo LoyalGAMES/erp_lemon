@@ -56,7 +56,8 @@ class BLPaczkaIntegrationTest extends TestCase
 
             return data_get($request->data(), 'auth.login') === 'sklep@sempre.test'
                 && data_get($request->data(), 'auth.api_key') === 'klucz-blp'
-                && data_get($request->data(), 'Order.id') === 445566;
+                && data_get($request->data(), 'Order.id') === 445566
+                && data_get($request->data(), 'Order.printer_type') === 'LBL';
         });
     }
 

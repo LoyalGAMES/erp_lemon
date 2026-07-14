@@ -288,7 +288,10 @@ final class InPostShipmentService
     {
         $response = $this->request($account)
             ->withHeaders(['Accept' => 'application/pdf'])
-            ->get("/v1/shipments/{$shipmentId}/label", ['format' => 'pdf']);
+            ->get("/v1/shipments/{$shipmentId}/label", [
+                'format' => 'pdf',
+                'type' => 'A6',
+            ]);
 
         if ($response->failed()) {
             throw new RuntimeException('Nie udało się pobrać etykiety InPost (HTTP '.$response->status().').');

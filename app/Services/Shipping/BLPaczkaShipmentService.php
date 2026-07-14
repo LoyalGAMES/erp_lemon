@@ -21,6 +21,9 @@ use RuntimeException;
  */
 final class BLPaczkaShipmentService
 {
+    /** Format etykiety 100 x 150 mm przeznaczony dla drukarek termicznych. */
+    private const WAYBILL_PRINTER_TYPE = 'LBL';
+
     /**
      * Frazy w statusach śledzenia oznaczające, że paczka fizycznie
      * opuściła magazyn nadawcy.
@@ -329,7 +332,7 @@ final class BLPaczkaShipmentService
         $response = $this->post($account, 'getWaybill.json', [
             'Order' => [
                 'id' => (int) $blpaczkaOrderId,
-                'printer_type' => (string) data_get($account->metadata, 'printer_type', 'A4'),
+                'printer_type' => self::WAYBILL_PRINTER_TYPE,
             ],
         ]);
 

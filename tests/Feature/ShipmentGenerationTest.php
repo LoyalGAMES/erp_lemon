@@ -256,6 +256,10 @@ class ShipmentGenerationTest extends TestCase
         $this->assertSame('987654', $label->label_number);
         $this->assertSame('520000333333333333333333', $label->tracking_number);
 
+        Http::assertSent(fn ($request): bool => str_contains($request->url(), '/v1/shipments/987654/label')
+            && $request['format'] === 'pdf'
+            && $request['type'] === 'A6');
+
         Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
             && str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/shipments'));
     }
