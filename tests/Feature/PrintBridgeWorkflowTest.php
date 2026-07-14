@@ -340,6 +340,101 @@ class PrintBridgeWorkflowTest extends TestCase
         $this->assertSame(64, strlen((string) $first?->deduplication_key));
     }
 
+    public function test_operator_can_requeue_a_printed_label_without_creating_a_duplicate_job(): void
+    {
+        $label = $this->createLabel();
+        $station = [
+            'code' => 'station-1',
+            'name' => 'Stanowisko pakowania',
+            'printer_name' => 'Zebra ZD421',
+            'segment' => 'all',
+        ];
+        $queue = app(ShippingLabelPrintQueueService::class);
+        $printed = $queue->enqueueForStation($label, $station, 'packing.order.packed');
+        $oldLease = str_repeat('a', 64);
+        $requestToken = '15f8cb67-7970-4e67-8db6-334b1411aa11';
+
+        $printed?->forceFill([
+            'status' => 'printed',
+            'attempts' => 2,
+            'reserved_by' => 'PACK-PC-1',
+            'reserved_station' => 'station-1',
+            'lease_token' => $oldLease,
+            'printed_at' => now(),
+            'last_error' => 'historyczny komunikat',
+        ])->save();
+
+        $requeued = $queue->requeueForStation($label, $station, 'packing.waiting.manual', $requestToken);
+        $secondClick = $queue->requeueForStation($label, $station, 'packing.waiting.manual', $requestToken);
+
+        $this->assertNotSame($printed?->id, $requeued?->id);
+        $this->assertSame($requeued?->id, $secondClick?->id);
+        $this->assertSame('pending', $requeued?->status);
+        $this->assertSame('packing.waiting.manual', $requeued?->source);
+        $this->assertSame(0, $requeued?->attempts);
+        $this->assertNull($requeued?->printed_at);
+        $this->assertNull($requeued?->last_error);
+        $this->assertSame([$requestToken], data_get($requeued?->metadata, 'manual_request_tokens'));
+        $this->assertSame('printed', $printed?->fresh()->status);
+        $this->assertSame($oldLease, $printed?->fresh()->lease_token);
+        $this->assertSame(2, PrintJob::query()->where('shipping_label_id', $label->id)->count());
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'print_job.requeued',
+            'auditable_type' => PrintJob::class,
+            'auditable_id' => $requeued?->id,
+        ]);
+
+        $requeued?->forceFill([
+            'status' => 'printed',
+            'reserved_by' => 'PACK-PC-1',
+            'reserved_station' => 'station-1',
+            'lease_token' => str_repeat('b', 64),
+            'printed_at' => now(),
+        ])->save();
+
+        $terminalRetry = $queue->requeueForStation($label, $station, 'packing.waiting.manual', $requestToken);
+
+        $this->assertSame($requeued?->id, $terminalRetry?->id);
+        $this->assertSame('printed', $terminalRetry?->status);
+        $this->assertSame(2, PrintJob::query()->where('shipping_label_id', $label->id)->count());
+    }
+
+    public function test_manual_print_token_bound_to_an_active_job_cannot_create_a_later_duplicate(): void
+    {
+        $label = $this->createLabel();
+        $station = [
+            'code' => 'station-1',
+            'name' => 'Stanowisko pakowania',
+            'printer_name' => 'Zebra ZD421',
+            'segment' => 'all',
+        ];
+        $requestToken = 'af458851-1fe1-4116-aec8-42353e3ec444';
+        $queue = app(ShippingLabelPrintQueueService::class);
+        $active = $queue->enqueueForStation($label, $station, 'packing.order.packed');
+        $active?->forceFill([
+            'status' => 'printing',
+            'reserved_by' => 'PACK-PC-1',
+            'reserved_station' => 'station-1',
+            'reserved_at' => now(),
+            'lease_token' => str_repeat('c', 64),
+        ])->save();
+        $staleAcknowledgementModel = $active?->fresh();
+
+        $bound = $queue->requeueForStation($label, $station, 'packing.waiting.manual', $requestToken);
+
+        $this->assertSame($active?->id, $bound?->id);
+        $this->assertSame([$requestToken], data_get($bound?->metadata, 'manual_request_tokens'));
+
+        $printed = $queue->markPrinted($staleAcknowledgementModel, 'PACK-PC-1');
+
+        $lostResponseRetry = $queue->requeueForStation($label, $station, 'packing.waiting.manual', $requestToken);
+
+        $this->assertSame($active?->id, $lostResponseRetry?->id);
+        $this->assertSame([$requestToken], data_get($printed->metadata, 'manual_request_tokens'));
+        $this->assertSame('printed', $lostResponseRetry?->status);
+        $this->assertSame(1, PrintJob::query()->where('shipping_label_id', $label->id)->count());
+    }
+
     public function test_legacy_listener_url_is_ignored_and_job_waits_for_outbound_bridge(): void
     {
         Http::fake();

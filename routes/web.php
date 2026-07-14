@@ -45,6 +45,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
     Route::post('/logout', [AuthController::class, 'logout'])->name('logout');
 
     Route::get('/', DashboardController::class)->name('dashboard');
+    Route::get('/products/image-thumbnail', ProductImageThumbnailController::class)->name('products.image-thumbnail');
     Route::middleware(EnsureErpRole::class.':settings')->group(function (): void {
         Route::get('/settings', SettingsController::class)->name('settings.index');
         Route::get('/settings/documents', [SettingsController::class, 'documents'])->name('settings.documents');
@@ -115,7 +116,6 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/products/configuration/parameters', [ProductConfigurationController::class, 'storeParameter'])->name('products.parameters.store');
         Route::put('/products/configuration/parameters/{parameter}', [ProductConfigurationController::class, 'updateParameter'])->name('products.parameters.update');
         Route::delete('/products/configuration/parameters/{parameter}', [ProductConfigurationController::class, 'destroyParameter'])->name('products.parameters.destroy');
-        Route::get('/products/image-thumbnail', ProductImageThumbnailController::class)->name('products.image-thumbnail');
         Route::post('/products', [ProductController::class, 'store'])->name('products.store');
         Route::get('/products/{product}/edit', [ProductController::class, 'edit'])->name('products.edit');
         Route::put('/products/{product}', [ProductController::class, 'update'])->name('products.update');
@@ -181,6 +181,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/packing/orders/{order}/label', [PackingController::class, 'label'])->name('packing.orders.label');
         Route::post('/packing/couriers/check-pickups', [PackingController::class, 'checkCourierPickups'])->name('packing.couriers.check-pickups');
         Route::post('/packing/couriers/pickup', [PackingController::class, 'courierPickup'])->name('packing.couriers.pickup');
+        Route::post('/packing/labels/{label}/print', [PackingController::class, 'printLabel'])->name('packing.labels.print');
         Route::get('/packing/labels/{label}/download', [PackingController::class, 'downloadLabel'])->name('packing.labels.download');
     });
 
@@ -244,6 +245,8 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
 
     Route::middleware(EnsureErpRole::class.':orders')->group(function (): void {
         Route::get('/orders/{order}', [ExternalOrderController::class, 'show'])->name('orders.show');
+        Route::get('/orders/{order}/messages/{message}/preview', [ExternalOrderController::class, 'previewMessage'])
+            ->name('orders.messages.preview');
         Route::get('/orders/{order}/products/lookup', [ExternalOrderController::class, 'lookupProducts'])->name('orders.products.lookup');
         Route::put('/orders/{order}/lines', [ExternalOrderController::class, 'updateLines'])->name('orders.lines.update');
         Route::patch('/orders/{order}/status', [ExternalOrderController::class, 'updateStatus'])->name('orders.status.update');

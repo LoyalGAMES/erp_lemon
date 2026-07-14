@@ -8,6 +8,8 @@ use App\Models\AppSetting;
 
 final class PackingSettingsService
 {
+    public const DEFAULT_STATION_CODE = 'station-1';
+
     private const KEY = 'packing_settings';
 
     /**
@@ -82,7 +84,7 @@ final class PackingSettingsService
             'footwear_keywords' => $this->defaultFootwearKeywords(),
             'stations' => [
                 [
-                    'code' => 'station-1',
+                    'code' => self::DEFAULT_STATION_CODE,
                     'name' => 'Stanowisko 1',
                     'printer_name' => 'Drukarka 1',
                     'segment' => 'clothing',

@@ -14,6 +14,7 @@ use App\Services\Packing\PackingProblemService;
 use App\Services\Packing\PackingSettingsService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
+use App\Services\Printing\ShippingLabelPrintQueueService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippingLabelService;
 use App\Services\Shipping\ShippingProviderResolver;
@@ -60,7 +61,7 @@ class PackingController extends Controller
         $packingHistoryDate = $this->historyDate((string) $request->query('date', now()->toDateString()));
 
         $tasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product', 'orderLine'])
             ->whereIn('status', ['open', 'picked'])
             ->orderByRaw("case when status = 'picked' then 1 else 0 end")
             ->orderBy('courier')
@@ -69,13 +70,13 @@ class PackingController extends Controller
             ->get();
 
         $problemTasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product', 'orderLine'])
             ->where('status', 'problem')
             ->orderBy('updated_at')
             ->get();
 
         $recentPickedTasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product', 'orderLine'])
             ->whereIn('status', ['picked', 'packed', 'shipped'])
             ->whereNotNull('picked_at')
             ->latest('picked_at')
@@ -83,7 +84,7 @@ class PackingController extends Controller
             ->get();
 
         $waitingCourierTasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product', 'orderLine'])
             ->where('status', 'packed')
             ->whereHas('order', fn ($query) => $query
                 ->whereDoesntHave('packingTasks', fn ($tasks) => $tasks->whereNotIn('status', ['packed', 'cancelled'])))
@@ -559,6 +560,40 @@ class PackingController extends Controller
         ]);
     }
 
+    public function printLabel(
+        Request $request,
+        ShippingLabel $label,
+        PackingSettingsService $settings,
+        ShippingLabelPrintQueueService $printQueue,
+    ): RedirectResponse {
+        $data = $request->validate([
+            'request_token' => ['required', 'string', 'uuid'],
+        ]);
+
+        if ($label->purpose !== 'shipment'
+            || $label->external_order_id === null
+            || $label->status !== 'generated') {
+            abort(404);
+        }
+
+        $station = $settings->station((string) session('packing_station', ''));
+        $printJob = $printQueue->requeueForStation(
+            $label,
+            $station,
+            'packing.waiting.manual',
+            $data['request_token'],
+        );
+
+        if (! $printJob instanceof PrintJob) {
+            return back()->with('error', 'Wybierz stanowisko pakowania z przypisaną drukarką Windows.');
+        }
+
+        return back()->with(
+            'status',
+            'Zlecono wydruk etykiety '.$label->filename().'.'.$this->printJobMessage($printJob),
+        );
+    }
+
     private function printJobMessage(PrintJob $printJob): string
     {
         if ($printJob->status === 'printed') {
@@ -750,6 +785,11 @@ class PackingController extends Controller
                             'tracking_error' => $label?->tracking_last_error,
                             'label_error' => collect((array) data_get($first->metadata, 'packing_completion.warnings', []))
                                 ->first(fn ($warning): bool => str_starts_with((string) $warning, 'Etykieta:')),
+                            'items' => $orderTasks
+                                ->sortBy('product_name')
+                                ->map(fn (PackingTask $task): array => $this->packingItem($task))
+                                ->values()
+                                ->all(),
                         ];
                     })
                     ->filter()
@@ -800,7 +840,7 @@ class PackingController extends Controller
     private function packingHistoryOrders(Carbon $date, ShippingProviderResolver $providers): Collection
     {
         $tasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product', 'orderLine'])
             ->whereIn('status', ['packed', 'shipped'])
             ->whereDate('packed_at', $date->toDateString())
             ->orderByDesc('packed_at')
@@ -815,7 +855,7 @@ class PackingController extends Controller
     private function shippedOrders(ShippingProviderResolver $providers): Collection
     {
         $tasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product', 'orderLine'])
             ->where('status', 'shipped')
             ->orderByDesc('packed_at')
             ->get();
@@ -869,13 +909,7 @@ class PackingController extends Controller
                     'tracking_status' => $label?->tracking_status,
                     'items' => $group
                         ->sortBy('product_name')
-                        ->map(fn (PackingTask $task): array => [
-                            'name' => $task->product_name,
-                            'sku' => $task->sku,
-                            'size_label' => $task->size_label,
-                            'quantity' => $task->quantity_required,
-                            'image_url' => $task->product?->imageUrl(),
-                        ])
+                        ->map(fn (PackingTask $task): array => $this->packingItem($task))
                         ->values()
                         ->all(),
                 ];
@@ -883,5 +917,18 @@ class PackingController extends Controller
             ->filter()
             ->sortByDesc('last_packed_at')
             ->values();
+    }
+
+    /** @return array{name:string,sku:?string,size_label:?string,quantity:mixed,image_url:?string,thumbnail_url:?string} */
+    private function packingItem(PackingTask $task): array
+    {
+        return [
+            'name' => $task->product_name,
+            'sku' => $task->sku,
+            'size_label' => $task->size_label,
+            'quantity' => $task->quantity_required,
+            'image_url' => $task->imageUrl(),
+            'thumbnail_url' => $task->thumbnailUrl(),
+        ];
     }
 }

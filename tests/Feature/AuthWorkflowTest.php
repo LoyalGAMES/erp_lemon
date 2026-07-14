@@ -72,10 +72,33 @@ class AuthWorkflowTest extends TestCase
         $this->assertAuthenticatedAs($user);
         $this->assertNotNull($user->refresh()->last_login_at);
 
+        $this->get(route('dashboard'))
+            ->assertOk()
+            ->assertSessionHas('packing_station_initialized', true)
+            ->assertSessionHas('packing_station', 'station-1');
+
         $this->post(route('logout'))
             ->assertRedirect(route('login'));
 
         $this->assertGuest();
+    }
+
+    public function test_authenticated_session_preserves_an_existing_manual_packing_station(): void
+    {
+        $user = User::query()->create([
+            'name' => 'Operator ERP',
+            'email' => 'operator@example.test',
+            'password' => 'secret-password',
+            'role' => User::ROLE_OPERATOR,
+            'is_active' => true,
+        ]);
+
+        $this->actingAs($user)
+            ->withSession(['packing_station' => 'station-2'])
+            ->get(route('dashboard'))
+            ->assertOk()
+            ->assertSessionHas('packing_station', 'station-2')
+            ->assertSessionHas('packing_station_initialized', true);
     }
 
     public function test_inactive_user_cannot_login(): void

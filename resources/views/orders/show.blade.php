@@ -103,6 +103,8 @@
         .customer-message-card { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }
         .customer-message-card header { display: flex; justify-content: space-between; gap: 10px; margin-bottom: 7px; }
         .customer-message-card strong { display: block; }
+        .customer-message-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 7px; }
+        .customer-message-card-actions .button { min-height: 30px; padding: 4px 9px; font-size: 12px; }
         .customer-message-meta { color: var(--muted); font-size: 12px; }
         .customer-message-preview { margin-top: 7px; white-space: pre-wrap; }
         .compact-form { display: grid; gap: 10px; }
@@ -583,9 +585,20 @@
         </article>
 
         <article id="komunikacja-z-klientem" class="card order-section">
+            @php
+                $customerMessageCount = $order->customerMessages->count();
+                $sentCustomerMessageCount = $order->customerMessages->where('status', 'sent')->count();
+                $customerMessageStatuses = [
+                    'sent' => ['label' => 'Wysłano', 'class' => ''],
+                    'pending' => ['label' => 'W kolejce', 'class' => 'blue'],
+                    'held' => ['label' => 'Wstrzymano', 'class' => 'orange'],
+                    'failed' => ['label' => 'Błąd wysyłki', 'class' => 'red'],
+                    'skipped' => ['label' => 'Nie wysłano', 'class' => 'orange'],
+                ];
+            @endphp
             <div class="panel-header">
                 <span>Komunikacja z klientem</span>
-                <span>{{ $order->customerMessages->count() }} wiadomości</span>
+                <span>Wysłane: {{ $sentCustomerMessageCount }} / {{ $customerMessageCount }}</span>
             </div>
             <div class="order-section-body">
                 @php
@@ -623,6 +636,22 @@
 
                 <div class="customer-message-history">
                     @forelse ($order->customerMessages->take(8) as $message)
+                        @php
+                            $messageState = $customerMessageStatuses[$message->status]
+                                ?? ['label' => $message->status ?: 'Nieznany', 'class' => 'blue'];
+                            $messageEventLabel = match ($message->status) {
+                                'sent' => 'Wysłano',
+                                'failed' => 'Błąd',
+                                'held' => 'Wstrzymano',
+                                'skipped' => 'Pominięto',
+                                default => 'Zapisano',
+                            };
+                            $messageEventTime = match ($message->status) {
+                                'sent' => $message->sent_at ?? $message->updated_at,
+                                'failed' => $message->failed_at ?? $message->updated_at,
+                                default => $message->updated_at ?? $message->created_at,
+                            };
+                        @endphp
                         <article class="customer-message-card">
                             <header>
                                 <div>
@@ -631,18 +660,29 @@
                                         {{ $message->recipient_email }} · {{ $message->type === 'automated' ? 'automat' : 'ręcznie' }}{{ $message->trigger ? ' · '.$message->trigger : '' }}
                                     </span>
                                 </div>
-                                <span @class(['status', 'blue' => $message->status === 'pending', 'red' => $message->status === 'failed', 'orange' => $message->status === 'skipped'])>{{ $message->status }}</span>
+                                <div class="customer-message-card-actions">
+                                    @if ($message->status === 'sent')
+                                        <a
+                                            class="button secondary"
+                                            href="{{ route('orders.messages.preview', [$order, $message]) }}"
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            data-customer-message-preview
+                                        >Podgląd</a>
+                                    @endif
+                                    <span class="status {{ $messageState['class'] }}">{{ $messageState['label'] }}</span>
+                                </div>
                             </header>
                             <div class="customer-message-meta">
-                                {{ $message->sent_at?->format('Y-m-d H:i') ?? $message->failed_at?->format('Y-m-d H:i') ?? $message->created_at?->format('Y-m-d H:i') }}
-                                @if ($message->error_message)
+                                {{ $messageEventLabel }}: {{ $messageEventTime?->format('Y-m-d H:i') ?? '-' }}
+                                @if ($message->status !== 'sent' && $message->error_message)
                                     · {{ $message->error_message }}
                                 @endif
                             </div>
                             <div class="customer-message-preview">{{ \Illuminate\Support\Str::limit($message->renderedBody(), 220) }}</div>
                         </article>
                     @empty
-                        <span class="muted">Brak wiadomości wysłanych do klienta tego zamówienia.</span>
+                        <span class="muted">Brak zapisanych wiadomości do klienta tego zamówienia.</span>
                     @endforelse
                 </div>
             </div>

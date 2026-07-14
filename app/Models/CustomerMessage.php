@@ -26,12 +26,16 @@ class CustomerMessage extends Model
         'failed_at',
         'error_message',
         'metadata',
+        'delivery_snapshot',
+        'rendered_html_snapshot',
+        'rendered_text_snapshot',
     ];
 
     protected $casts = [
         'sent_at' => 'datetime',
         'failed_at' => 'datetime',
         'metadata' => 'array',
+        'delivery_snapshot' => 'array',
     ];
 
     public function externalOrder(): BelongsTo

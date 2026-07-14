@@ -27,6 +27,7 @@ final class CustomerCommunicationService
         private readonly EmailTemplateRenderer $templateRenderer,
         private readonly CustomerEmailWorkflowSettingsService $emailWorkflow,
         private readonly CustomerMailContextService $mailContext,
+        private readonly CustomerMailPresentationService $mailPresentation,
         private readonly PaymentMethodClassifier $paymentMethods,
     ) {}
 
@@ -451,8 +452,10 @@ final class CustomerCommunicationService
         }
 
         try {
+            $layoutSnapshot = $this->captureDeliverySnapshot($message);
+
             Mail::to($message->recipient_email, $message->recipient_name ?: null)
-                ->send(new CustomerMessageMail($message));
+                ->send(new CustomerMessageMail($message, $layoutSnapshot));
 
             $message->update([
                 'status' => 'sent',
@@ -543,8 +546,10 @@ final class CustomerCommunicationService
         ]);
 
         try {
+            $layoutSnapshot = $this->captureDeliverySnapshot($message);
+
             Mail::to($message->recipient_email, $message->recipient_name ?: null)
-                ->send(new CustomerMessageMail($message));
+                ->send(new CustomerMessageMail($message, $layoutSnapshot));
 
             $message->update([
                 'status' => 'sent',
@@ -563,6 +568,34 @@ final class CustomerCommunicationService
 
             return false;
         }
+    }
+
+    /**
+     * Persist the exact body and non-secret presentation settings used by this
+     * delivery attempt. A failed message gets a fresh snapshot when retried,
+     * so a later successful preview always mirrors what was actually sent.
+     *
+     * @return array<string, string>
+     */
+    private function captureDeliverySnapshot(CustomerMessage $message): array
+    {
+        $layout = $this->mailPresentation->snapshotLayout();
+        $capturedAt = now();
+
+        $message->forceFill([
+            'delivery_snapshot' => [
+                'version' => 1,
+                'captured_at' => $capturedAt->toIso8601String(),
+                'recipient_email' => (string) $message->recipient_email,
+                'recipient_name' => (string) $message->recipient_name,
+                'subject' => $message->renderedSubject(),
+                'layout' => $layout,
+            ],
+            'rendered_html_snapshot' => $this->mailPresentation->html($message, $layout),
+            'rendered_text_snapshot' => $this->mailPresentation->text($message, $layout),
+        ])->save();
+
+        return $layout;
     }
 
     private function alreadySentForOrder(ExternalOrder $order, string $trigger): bool

@@ -193,6 +193,54 @@ class PackingShipmentAutomationTest extends TestCase
         );
     }
 
+    public function test_waiting_view_hides_manual_pickup_and_can_queue_an_idempotent_label_reprint(): void
+    {
+        Storage::fake('local');
+        $channel = $this->createChannel();
+        [$order] = $this->createOrderWithTask($channel, 'packed', 'InPost');
+        $label = $this->createLabel($order);
+        Storage::disk('local')->put($label->path, '%PDF-1.4 waiting-reprint');
+
+        app(PackingSettingsService::class)->update([
+            'stations' => [[
+                'code' => 'station-reprint',
+                'name' => 'Stanowisko ponownego wydruku',
+                'printer_name' => 'Zebra REPRINT',
+                'segment' => 'all',
+            ]],
+        ]);
+
+        $this->withSession(['packing_station' => 'station-reprint'])
+            ->get(route('packing.index', ['view' => 'waiting']))
+            ->assertOk()
+            ->assertSee('Zamówienie '.$order->external_number)
+            ->assertSee('Drukuj')
+            ->assertSee(route('packing.labels.print', $label), false)
+            ->assertDontSee('>Odebrano<', false);
+
+        $requestToken = '47069f8c-1098-4bbf-8507-b1141413a555';
+        $route = route('packing.labels.print', $label);
+
+        $this->withSession(['packing_station' => 'station-reprint'])
+            ->post($route, ['request_token' => $requestToken])
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'Zlecono wydruk etykiety'));
+
+        $this->assertDatabaseHas('print_jobs', [
+            'shipping_label_id' => $label->id,
+            'status' => 'pending',
+            'source' => 'packing.waiting.manual',
+            'station_code' => 'station-reprint',
+            'printer_name' => 'Zebra REPRINT',
+        ]);
+
+        $this->withSession(['packing_station' => 'station-reprint'])
+            ->post($route, ['request_token' => $requestToken])
+            ->assertRedirect();
+
+        $this->assertSame(1, $label->printJobs()->count());
+    }
+
     public function test_finishing_collection_requires_manual_gabaryt_selection_before_generating_label(): void
     {
         Storage::fake('local');

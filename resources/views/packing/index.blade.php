@@ -38,6 +38,7 @@
         .packing-workflow-tab { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; background: var(--surface); color: var(--muted); text-decoration: none; font-weight: 760; }
         .packing-workflow-tab.active { background: var(--green-soft); border-color: rgba(134, 115, 100, .42); color: var(--green-dark); }
         .packing-workflow-tab-count { display: inline-flex; align-items: center; justify-content: center; min-width: 21px; min-height: 21px; border-radius: 999px; padding: 0 6px; background: rgba(134, 115, 100, .14); font-size: 12px; }
+        .packing-mobile-workflow-nav { display: none; }
         .workflow-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
         .workflow-card { min-height: 148px; display: grid; align-content: center; gap: 7px; border: 1px solid var(--border); border-radius: 8px; padding: 22px; background: var(--surface); color: var(--text); text-decoration: none; box-shadow: var(--shadow); }
         .workflow-card span { color: var(--muted); font-weight: 780; text-transform: uppercase; letter-spacing: .04em; font-size: 12px; }
@@ -59,6 +60,16 @@
         .collect-main { display: grid; grid-template-columns: 78px minmax(0, 1fr) auto; gap: 14px; align-items: center; }
         .product-thumb { width: 58px; height: 72px; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: #f4f1ef; display: grid; place-items: center; color: var(--muted); font-size: 11px; font-weight: 780; }
         .product-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .product-thumb-button { padding: 0; appearance: none; font: inherit; cursor: zoom-in; }
+        .product-thumb-button:focus-visible { outline: 3px solid rgba(134, 115, 100, .45); outline-offset: 2px; }
+        .packing-image-modal[hidden] { display: none; }
+        .packing-image-modal { position: fixed; inset: 0; z-index: 120; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(37, 31, 26, .72); }
+        .packing-image-modal-card { width: min(900px, 94vw); max-height: 92dvh; overflow: hidden; border-radius: 8px; background: var(--surface); box-shadow: 0 24px 70px rgba(0, 0, 0, .32); }
+        .packing-image-modal-header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-weight: 780; }
+        .packing-image-modal-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .packing-image-modal-close { min-width: 42px; min-height: 42px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font: inherit; font-size: 24px; cursor: pointer; }
+        .packing-image-modal-close:hover, .packing-image-modal-close:focus-visible { background: var(--green-soft); color: var(--green-dark); }
+        .packing-image-modal img { display: block; width: 100%; max-height: calc(92dvh - 52px); object-fit: contain; background: #f4f1ef; }
         .collect-card .product-thumb { width: 78px; height: 98px; }
         .pick-name { font-size: 17px; font-weight: 840; line-height: 1.25; }
         .pick-sku { color: var(--muted); font-size: 12px; font-weight: 760; letter-spacing: .02em; margin-top: 2px; }
@@ -151,7 +162,7 @@
         .problem-card-header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
         .problem-reason { color: var(--red); font-weight: 780; }
         .problem-order-items { display: grid; gap: 6px; }
-        .problem-order-item { border-top: 1px solid #f0dada; padding-top: 7px; }
+        .problem-order-item { border-color: #f0dada; background: #fff; }
         .packing-action-toast { position: fixed; z-index: 110; right: 18px; bottom: 18px; width: min(460px, calc(100vw - 36px)); border: 1px solid rgba(42, 111, 73, .35); border-radius: 8px; padding: 13px 15px; background: #eff9f2; color: var(--green-dark); font-weight: 760; box-shadow: 0 16px 40px rgba(33, 28, 24, .2); }
         .packing-action-toast.error { border-color: #efb9b9; background: #fff0f0; color: var(--red); }
         .packing-action-error { grid-column: 1 / -1; border: 1px solid #efb9b9; border-radius: 7px; padding: 9px 11px; background: #fff0f0; color: var(--red); font-weight: 720; }
@@ -163,6 +174,7 @@
             .order-problem-form { grid-template-columns: 1fr; }
         }
         @media (max-width: 760px) {
+            .main { padding-bottom: calc(104px + env(safe-area-inset-bottom, 0px)); }
             .packing-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .workflow-picker { grid-template-columns: 1fr; }
             .workflow-card { min-height: 118px; padding: 18px; }
@@ -178,6 +190,15 @@
             .order-item strong { grid-column: 2; }
             .shipment-label-actions, .courier-order-actions { display: grid; grid-template-columns: 1fr; }
             .shipment-label-actions .button, .courier-order-actions .button { width: 100%; }
+            .packing-mobile-workflow-nav { position: fixed; z-index: 55; inset: auto 0 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; padding: 8px 10px calc(8px + env(safe-area-inset-bottom, 0px)); border-top: 1px solid var(--border); background: rgba(255, 254, 253, .96); box-shadow: 0 -12px 28px rgba(33, 28, 24, .14); backdrop-filter: blur(12px); }
+            .packing-mobile-workflow-link { min-width: 0; min-height: 58px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px; border: 1px solid var(--border); border-radius: 8px; padding: 7px 8px; background: var(--surface); color: var(--muted); text-decoration: none; font-size: 12px; font-weight: 780; line-height: 1.15; }
+            .packing-mobile-workflow-link.active { border-color: rgba(134, 115, 100, .48); background: var(--green-soft); color: var(--green-dark); }
+            .packing-mobile-workflow-label { min-width: 0; overflow-wrap: anywhere; }
+            .packing-mobile-workflow-count { min-width: 23px; min-height: 23px; display: inline-grid; place-items: center; border-radius: 999px; padding: 0 5px; background: rgba(134, 115, 100, .14); font-size: 11px; }
+            .packing-action-toast { bottom: calc(88px + env(safe-area-inset-bottom, 0px)); }
+            .packing-image-modal { padding: 12px; }
+            .packing-image-modal-card { width: 100%; max-height: 96dvh; }
+            .packing-image-modal img { max-height: calc(96dvh - 52px); }
         }
     </style>
 @endpush
@@ -360,6 +381,20 @@
         </nav>
     @endif
 
+    <nav class="packing-mobile-workflow-nav" data-packing-mobile-navigation aria-label="Szybkie etapy realizacji">
+        @foreach (['collect', 'pack', 'waiting'] as $view)
+            <a
+                @class(['packing-mobile-workflow-link', 'active' => $packingView === $view])
+                href="{{ route('packing.index', ['view' => $view]) }}"
+                data-packing-mobile-view="{{ $view }}"
+                @if ($packingView === $view) aria-current="page" @endif
+            >
+                <span class="packing-mobile-workflow-label">{{ $workflowTabs[$view]['label'] }}</span>
+                <span class="packing-mobile-workflow-count">{{ $workflowTabs[$view]['count'] }}</span>
+            </a>
+        @endforeach
+    </nav>
+
     @if (in_array($packingView, ['collect', 'pack'], true))
         <nav class="segment-tabs" aria-label="Podział asortymentu">
             @foreach ($segmentLabels as $segmentValue => $segmentLabel)
@@ -409,13 +444,12 @@
                                         ?: '-';
                                 @endphp
                                 <div class="order-item">
-                                    <div class="product-thumb">
-                                        @if ($task->product?->imageUrl())
-                                            <img src="{{ $task->product->imageUrl() }}" alt="{{ $task->product_name }}" loading="lazy" referrerpolicy="no-referrer">
-                                        @else
-                                            Foto
-                                        @endif
-                                    </div>
+                                    @include('packing._product-thumbnail', [
+                                        'imageUrl' => $task->imageUrl(),
+                                        'thumbnailUrl' => $task->thumbnailUrl(),
+                                        'imageTitle' => ($task->sku ?: 'brak SKU').' - '.$task->product_name,
+                                        'imageAlt' => $task->product_name,
+                                    ])
                                     <div>
                                         <div class="order-item-name">{{ $task->product_name }}</div>
                                         <div class="order-item-meta">{{ $task->sku ?: 'brak SKU' }} · Rozmiar <strong>{{ $task->size_label ?: '-' }}</strong> · Lok. {{ $taskLocation }}</div>
@@ -532,13 +566,12 @@
                                         ?: '-';
                                 @endphp
                                 <div class="order-item">
-                                    <div class="product-thumb">
-                                        @if ($task->product?->imageUrl())
-                                            <img src="{{ $task->product->imageUrl() }}" alt="{{ $task->product_name }}" loading="lazy" referrerpolicy="no-referrer">
-                                        @else
-                                            Foto
-                                        @endif
-                                    </div>
+                                    @include('packing._product-thumbnail', [
+                                        'imageUrl' => $task->imageUrl(),
+                                        'thumbnailUrl' => $task->thumbnailUrl(),
+                                        'imageTitle' => ($task->sku ?: 'brak SKU').' - '.$task->product_name,
+                                        'imageAlt' => $task->product_name,
+                                    ])
                                     <div>
                                         <div class="order-item-name">{{ $task->product_name }}</div>
                                         <div class="order-item-meta">{{ $task->sku ?: 'brak SKU' }} · rozmiar {{ $task->size_label ?: '-' }} · lok. {{ $taskLocation }}</div>
@@ -653,15 +686,6 @@
                                         @endif
                                     </div>
                                 </div>
-                                <form method="POST" action="{{ route('packing.couriers.pickup') }}">
-                                    @csrf
-                                    <input type="hidden" name="courier" value="{{ $group['courier'] }}">
-                                    @foreach ($group['orders'] as $queuedOrder)
-                                        <input type="hidden" name="order_ids[]" value="{{ $queuedOrder['id'] }}">
-                                    @endforeach
-                                    <input type="hidden" name="pickup_token" value="{{ $group['pickup_token'] }}">
-                                    <button class="button" type="submit">Odebrano</button>
-                                </form>
                             </div>
                             <div class="courier-orders">
                                 @foreach ($group['orders'] as $queuedOrder)
@@ -678,6 +702,23 @@
                                                     · spakowane {{ $queuedPackedAt->format('Y-m-d H:i') }}
                                                 @endif
                                             </span>
+                                            </div>
+                                            <div class="order-items" aria-label="Produkty w zamówieniu {{ $queuedOrder['external_number'] }}">
+                                                @foreach ($queuedOrder['items'] ?? [] as $item)
+                                                    <div class="order-item">
+                                                        @include('packing._product-thumbnail', [
+                                                            'imageUrl' => $item['image_url'],
+                                                            'thumbnailUrl' => $item['thumbnail_url'],
+                                                            'imageTitle' => ($item['sku'] ?: 'brak SKU').' - '.$item['name'],
+                                                            'imageAlt' => $item['name'],
+                                                        ])
+                                                        <div>
+                                                            <div class="order-item-name">{{ $item['name'] }}</div>
+                                                            <div class="order-item-meta">{{ $item['sku'] ?: 'brak SKU' }} · rozmiar {{ $item['size_label'] ?: '-' }}</div>
+                                                        </div>
+                                                        <strong>{{ $qty($item['quantity']) }} szt.</strong>
+                                                    </div>
+                                                @endforeach
                                             </div>
                                             <div class="tracking-state">
                                                 @if ($queuedOrder['label_number'])
@@ -701,6 +742,11 @@
                                             <div class="courier-order-actions">
                                                 @if ($queuedOrder['label_id'])
                                                     <a class="button secondary" href="{{ route('packing.labels.download', $queuedOrder['label_id']) }}">Pobierz etykietę</a>
+                                                    <form method="POST" action="{{ route('packing.labels.print', $queuedOrder['label_id']) }}">
+                                                        @csrf
+                                                        <input type="hidden" name="request_token" value="{{ (string) \Illuminate\Support\Str::uuid() }}">
+                                                        <button class="button secondary" type="submit">Drukuj</button>
+                                                    </form>
                                                 @endif
                                                 @if ($queuedOrder['tracking_url'])
                                                     <a class="button secondary" href="{{ $queuedOrder['tracking_url'] }}" target="_blank" rel="noopener noreferrer">Śledź paczkę</a>
@@ -763,9 +809,18 @@
                                                 ?: data_get($task->product?->attributes, 'warehouse_location')
                                                 ?: '-';
                                         @endphp
-                                        <div class="problem-order-item">
-                                            <strong>{{ $task->product_name }}</strong>
-                                            <span class="muted"> · {{ $task->sku ?: 'brak SKU' }} · lok. {{ $problemLocation }} · {{ $qty($task->quantity_required) }} szt.</span>
+                                        <div class="order-item problem-order-item">
+                                            @include('packing._product-thumbnail', [
+                                                'imageUrl' => $task->imageUrl(),
+                                                'thumbnailUrl' => $task->thumbnailUrl(),
+                                                'imageTitle' => ($task->sku ?: 'brak SKU').' - '.$task->product_name,
+                                                'imageAlt' => $task->product_name,
+                                            ])
+                                            <div>
+                                                <div class="order-item-name">{{ $task->product_name }}</div>
+                                                <div class="order-item-meta">{{ $task->sku ?: 'brak SKU' }} · lok. {{ $problemLocation }}</div>
+                                            </div>
+                                            <strong>{{ $qty($task->quantity_required) }} szt.</strong>
                                         </div>
                                     @endforeach
                                 </div>
@@ -827,13 +882,12 @@
                         <div class="order-items">
                             @foreach ($shippedOrder['items'] as $item)
                                 <div class="order-item">
-                                    <div class="product-thumb">
-                                        @if ($item['image_url'])
-                                            <img src="{{ $item['image_url'] }}" alt="{{ $item['name'] }}" loading="lazy" referrerpolicy="no-referrer">
-                                        @else
-                                            Foto
-                                        @endif
-                                    </div>
+                                    @include('packing._product-thumbnail', [
+                                        'imageUrl' => $item['image_url'],
+                                        'thumbnailUrl' => $item['thumbnail_url'],
+                                        'imageTitle' => ($item['sku'] ?: 'brak SKU').' - '.$item['name'],
+                                        'imageAlt' => $item['name'],
+                                    ])
                                     <div>
                                         <div class="order-item-name">{{ $item['name'] }}</div>
                                         <div class="order-item-meta">{{ $item['sku'] ?: 'brak SKU' }} · rozmiar {{ $item['size_label'] ?: '-' }}</div>
@@ -887,13 +941,12 @@
                         <div class="order-items">
                             @foreach ($historyOrder['items'] as $item)
                                 <div class="order-item">
-                                    <div class="product-thumb">
-                                        @if ($item['image_url'])
-                                            <img src="{{ $item['image_url'] }}" alt="{{ $item['name'] }}" loading="lazy" referrerpolicy="no-referrer">
-                                        @else
-                                            Foto
-                                        @endif
-                                    </div>
+                                    @include('packing._product-thumbnail', [
+                                        'imageUrl' => $item['image_url'],
+                                        'thumbnailUrl' => $item['thumbnail_url'],
+                                        'imageTitle' => ($item['sku'] ?: 'brak SKU').' - '.$item['name'],
+                                        'imageAlt' => $item['name'],
+                                    ])
                                     <div>
                                         <div class="order-item-name">{{ $item['name'] }}</div>
                                         <div class="order-item-meta">{{ $item['sku'] ?: 'brak SKU' }} · rozmiar {{ $item['size_label'] ?: '-' }}</div>
@@ -919,10 +972,98 @@
             </section>
         </div>
     @endif
+
+    <div class="packing-image-modal" data-packing-image-modal aria-hidden="true" hidden>
+        <section class="packing-image-modal-card" role="dialog" aria-modal="true" aria-labelledby="packing-image-modal-title">
+            <div class="packing-image-modal-header">
+                <span class="packing-image-modal-title" id="packing-image-modal-title" data-packing-image-modal-title>Podgląd produktu</span>
+                <button class="packing-image-modal-close" type="button" data-packing-image-modal-close aria-label="Zamknij podgląd zdjęcia">&times;</button>
+            </div>
+            <img data-packing-image-modal-image alt="" referrerpolicy="no-referrer">
+        </section>
+    </div>
 @endsection
 
 @push('scripts')
     <script>
+        (() => {
+            const modal = document.querySelector('[data-packing-image-modal]');
+            const image = modal?.querySelector('[data-packing-image-modal-image]');
+            const title = modal?.querySelector('[data-packing-image-modal-title]');
+            const closeButton = modal?.querySelector('[data-packing-image-modal-close]');
+            let activeTrigger = null;
+            let previousBodyOverflow = '';
+
+            if (!modal || !image || !title || !closeButton) {
+                return;
+            }
+
+            const closeModal = () => {
+                if (modal.hidden) {
+                    return;
+                }
+
+                modal.hidden = true;
+                modal.setAttribute('aria-hidden', 'true');
+                image.removeAttribute('src');
+                image.alt = '';
+                document.body.style.overflow = previousBodyOverflow;
+
+                if (activeTrigger?.isConnected) {
+                    activeTrigger.focus();
+                }
+                activeTrigger = null;
+            };
+
+            const openModal = (trigger) => {
+                const src = trigger.dataset.packingImagePreview || '';
+                const imageTitle = trigger.dataset.packingImageTitle || 'Podgląd produktu';
+
+                if (!src) {
+                    return;
+                }
+
+                activeTrigger = trigger;
+                previousBodyOverflow = document.body.style.overflow;
+                image.src = src;
+                image.alt = imageTitle;
+                title.textContent = imageTitle;
+                modal.hidden = false;
+                modal.setAttribute('aria-hidden', 'false');
+                document.body.style.overflow = 'hidden';
+                window.requestAnimationFrame(() => closeButton.focus());
+            };
+
+            document.addEventListener('click', (event) => {
+                const trigger = event.target instanceof Element
+                    ? event.target.closest('[data-packing-image-preview]')
+                    : null;
+
+                if (trigger) {
+                    openModal(trigger);
+                    return;
+                }
+
+                if (event.target === modal) {
+                    closeModal();
+                }
+            });
+            closeButton.addEventListener('click', closeModal);
+            document.addEventListener('keydown', (event) => {
+                if (modal.hidden) {
+                    return;
+                }
+
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    closeModal();
+                } else if (event.key === 'Tab') {
+                    event.preventDefault();
+                    closeButton.focus();
+                }
+            });
+        })();
+
         (() => {
             const overlay = document.querySelector('[data-packing-settings-overlay]');
             const openButton = document.querySelector('[data-packing-settings-open]');
@@ -1004,10 +1145,14 @@
             const updateCurrentCount = (container) => {
                 const remaining = container?.querySelectorAll(':scope > [data-packing-card]').length ?? 0;
                 const workflowCount = document.querySelector('.packing-workflow-tab.active .packing-workflow-tab-count');
+                const mobileWorkflowCount = document.querySelector('.packing-mobile-workflow-link.active .packing-mobile-workflow-count');
                 const segmentCount = document.querySelector('.segment-tab.active .segment-tab-count');
 
                 if (workflowCount) {
                     workflowCount.textContent = String(remaining);
+                }
+                if (mobileWorkflowCount) {
+                    mobileWorkflowCount.textContent = String(remaining);
                 }
                 if (segmentCount) {
                     segmentCount.textContent = String(remaining);

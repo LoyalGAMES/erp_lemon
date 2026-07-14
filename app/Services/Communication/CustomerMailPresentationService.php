@@ -9,6 +9,21 @@ use Illuminate\Support\Facades\View;
 
 final class CustomerMailPresentationService
 {
+    /** @var array<string, int> */
+    private const SNAPSHOT_FIELDS = [
+        'from_address' => 255,
+        'from_name' => 120,
+        'reply_to_address' => 255,
+        'brand_name' => 120,
+        'logo_url' => 1000,
+        'accent_color' => 7,
+        'header_text' => 160,
+        'signature' => 1000,
+        'footer_text' => 1000,
+        'support_email' => 255,
+        'support_phone' => 40,
+    ];
+
     public function __construct(
         private readonly MailSettingsService $mailSettings,
     ) {}
@@ -44,6 +59,24 @@ final class CustomerMailPresentationService
     }
 
     /**
+     * Returns only presentation and sender fields used by the delivered message.
+     * Transport credentials and OAuth configuration are deliberately excluded.
+     *
+     * @return array<string, string>
+     */
+    public function snapshotLayout(): array
+    {
+        $settings = $this->mailSettings->data();
+        $snapshot = [];
+
+        foreach (self::SNAPSHOT_FIELDS as $key => $limit) {
+            $snapshot[$key] = mb_substr(trim((string) ($settings[$key] ?? '')), 0, $limit);
+        }
+
+        return $snapshot;
+    }
+
+    /**
      * @param  array<string, mixed>|null  $override
      * @return array<string, mixed>
      */
@@ -55,16 +88,7 @@ final class CustomerMailPresentationService
             return $layout;
         }
 
-        foreach ([
-            'brand_name' => 120,
-            'logo_url' => 1000,
-            'accent_color' => 7,
-            'header_text' => 160,
-            'signature' => 1000,
-            'footer_text' => 1000,
-            'support_email' => 255,
-            'support_phone' => 40,
-        ] as $key => $limit) {
+        foreach (self::SNAPSHOT_FIELDS as $key => $limit) {
             if (! array_key_exists($key, $override)) {
                 continue;
             }
@@ -79,7 +103,9 @@ final class CustomerMailPresentationService
                 continue;
             }
 
-            if ($key === 'support_email' && $value !== '' && filter_var($value, FILTER_VALIDATE_EMAIL) === false) {
+            if (in_array($key, ['from_address', 'reply_to_address', 'support_email'], true)
+                && $value !== ''
+                && filter_var($value, FILTER_VALIDATE_EMAIL) === false) {
                 continue;
             }
 

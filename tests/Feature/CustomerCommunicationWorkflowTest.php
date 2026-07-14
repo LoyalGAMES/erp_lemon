@@ -67,6 +67,107 @@ class CustomerCommunicationWorkflowTest extends TestCase
         });
     }
 
+    public function test_sent_order_message_has_an_immutable_preview_and_accurate_card_status(): void
+    {
+        $settings = app(MailSettingsService::class);
+        $settings->update([
+            'enabled' => true,
+            'host' => 'smtp.example.test',
+            'port' => 587,
+            'encryption' => 'tls',
+            'from_address' => 'sklep@example.test',
+            'from_name' => 'Sempre przed zmianą',
+            'reply_to_address' => 'pomoc@example.test',
+            'timeout' => 15,
+            'brand_name' => 'Marka z chwili wysyłki',
+            'accent_color' => '#315f4b',
+            'header_text' => 'Nagłówek z chwili wysyłki',
+            'signature' => 'Podpis z chwili wysyłki',
+            'footer_text' => 'Stopka z chwili wysyłki',
+            'support_email' => 'pomoc@example.test',
+            'support_phone' => '+48 500 600 700',
+        ]);
+        $order = $this->createOrder('client@example.test');
+
+        $this->post(route('orders.message.send', $order), [
+            'subject' => 'Stan faktyczny zamówienia',
+            'body' => 'To jest dokładnie wysłana treść.',
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $message = CustomerMessage::query()->firstOrFail();
+
+        $this->assertSame('sent', $message->status);
+        $this->assertSame('Marka z chwili wysyłki', data_get($message->delivery_snapshot, 'layout.brand_name'));
+        $this->assertStringContainsString('Nagłówek z chwili wysyłki', (string) $message->rendered_html_snapshot);
+        $this->assertStringContainsString('To jest dokładnie wysłana treść.', (string) $message->rendered_text_snapshot);
+
+        $settings->update([
+            'enabled' => true,
+            'host' => 'smtp.example.test',
+            'port' => 587,
+            'encryption' => 'tls',
+            'from_address' => 'nowy-sklep@example.test',
+            'from_name' => 'Sempre po zmianie',
+            'reply_to_address' => 'nowa-pomoc@example.test',
+            'timeout' => 15,
+            'brand_name' => 'Nowa marka',
+            'accent_color' => '#884422',
+            'header_text' => 'Nowy nagłówek',
+            'signature' => 'Nowy podpis',
+            'footer_text' => 'Nowa stopka',
+            'support_email' => 'nowa-pomoc@example.test',
+        ]);
+
+        $this->get(route('orders.messages.preview', [$order, $message]))
+            ->assertOk()
+            ->assertHeader('Cache-Control', 'max-age=0, no-store, private')
+            ->assertHeader('X-Content-Type-Options', 'nosniff')
+            ->assertSee('Nagłówek z chwili wysyłki')
+            ->assertSee('To jest dokładnie wysłana treść.')
+            ->assertDontSee('Nowy nagłówek');
+
+        $this->get(route('orders.show', $order))
+            ->assertOk()
+            ->assertSee('Wysłane: 1 / 1')
+            ->assertSee('Wysłano')
+            ->assertSee('Podgląd')
+            ->assertSee(route('orders.messages.preview', [$order, $message]), false);
+    }
+
+    public function test_order_message_preview_rejects_a_message_from_another_order_or_not_sent(): void
+    {
+        $order = $this->createOrder('client@example.test');
+        $otherOrder = ExternalOrder::query()->create([
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_id' => '9002',
+            'external_number' => '9002',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 10,
+            'billing_data' => ['email' => 'other@example.test'],
+            'shipping_data' => [],
+            'raw_payload' => [],
+        ]);
+        $message = CustomerMessage::query()->create([
+            'external_order_id' => $order->id,
+            'direction' => 'outgoing',
+            'type' => 'manual',
+            'status' => 'sent',
+            'recipient_email' => 'client@example.test',
+            'subject' => 'Wiadomość pierwszego zamówienia',
+            'body' => 'Poufna treść pierwszego zamówienia.',
+            'sent_at' => now(),
+        ]);
+
+        $this->get(route('orders.messages.preview', [$otherOrder, $message]))
+            ->assertNotFound();
+
+        $message->update(['status' => 'failed']);
+
+        $this->get(route('orders.messages.preview', [$order, $message]))
+            ->assertNotFound();
+    }
+
     public function test_operator_can_send_manual_message_from_return(): void
     {
         Mail::fake();

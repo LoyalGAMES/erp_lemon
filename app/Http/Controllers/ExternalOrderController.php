@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Models\CourierAccount;
+use App\Models\CustomerMessage;
 use App\Models\CustomerPayment;
 use App\Models\EmailTemplate;
 use App\Models\ExternalOrder;
@@ -14,6 +15,7 @@ use App\Models\ProductChannelMapping;
 use App\Models\StockReservation;
 use App\Services\Audit\AuditLogService;
 use App\Services\Communication\CustomerCommunicationService;
+use App\Services\Communication\CustomerMailPresentationService;
 use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderEditingService;
 use App\Services\Orders\OrderFulfillmentStatusService;
@@ -27,6 +29,7 @@ use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\View\View;
 use RuntimeException;
@@ -149,6 +152,35 @@ class ExternalOrderController extends Controller
                 ->unique('id')
                 ->values(),
         );
+    }
+
+    public function previewMessage(
+        ExternalOrder $order,
+        CustomerMessage $message,
+        CustomerMailPresentationService $presentation,
+    ): Response {
+        abort_unless(
+            (int) $message->external_order_id === (int) $order->id
+                && $message->direction === 'outgoing'
+                && $message->status === 'sent',
+            404,
+        );
+
+        $deliverySnapshot = (array) $message->delivery_snapshot;
+        $layout = is_array($deliverySnapshot['layout'] ?? null)
+            ? $deliverySnapshot['layout']
+            : null;
+        $html = filled($message->rendered_html_snapshot)
+            ? (string) $message->rendered_html_snapshot
+            : $presentation->html($message, $layout);
+
+        return response($html, 200, [
+            'Content-Type' => 'text/html; charset=UTF-8',
+            'Cache-Control' => 'private, no-store, max-age=0',
+            'Content-Security-Policy' => "default-src 'none'; img-src https: http: data:; style-src 'unsafe-inline'; script-src 'none'; object-src 'none'; frame-ancestors 'self'; base-uri 'none'; form-action 'none'",
+            'Referrer-Policy' => 'no-referrer',
+            'X-Content-Type-Options' => 'nosniff',
+        ]);
     }
 
     public function updateLines(

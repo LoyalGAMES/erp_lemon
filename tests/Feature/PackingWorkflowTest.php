@@ -158,6 +158,146 @@ class PackingWorkflowTest extends TestCase
         $this->assertNotNull($task->packed_at);
     }
 
+    public function test_primary_packing_views_render_fixed_mobile_workflow_navigation(): void
+    {
+        foreach (['collect', 'pack', 'waiting'] as $activeView) {
+            $response = $this->get(route('packing.index', ['view' => $activeView]))
+                ->assertOk()
+                ->assertSee('data-packing-mobile-navigation', false)
+                ->assertSee('data-packing-mobile-view="collect"', false)
+                ->assertSee('data-packing-mobile-view="pack"', false)
+                ->assertSee('data-packing-mobile-view="waiting"', false);
+
+            $html = $response->getContent();
+
+            $this->assertSame(3, substr_count($html, 'data-packing-mobile-view='));
+            $this->assertStringNotContainsString('data-packing-mobile-view="shipped"', $html);
+            $this->assertStringContainsString('.packing-mobile-workflow-nav { position: fixed;', $html);
+            $this->assertMatchesRegularExpression(
+                '/class="packing-mobile-workflow-link active"[^>]*data-packing-mobile-view="'.preg_quote($activeView, '/').'"[^>]*aria-current="page"/s',
+                $html,
+            );
+        }
+    }
+
+    public function test_product_image_modal_and_line_image_fallback_are_available_through_all_primary_packing_stages(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-IMAGES',
+            'name' => 'Sklep ze zdjęciami',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => 'packing-image-1',
+            'external_number' => 'IMG-1',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 149,
+            'billing_data' => [
+                'first_name' => 'Anna',
+                'last_name' => 'Zdjęciowa',
+            ],
+            'raw_payload' => [
+                'shipping_lines' => [
+                    ['method_title' => 'DPD'],
+                ],
+            ],
+            'external_created_at' => now(),
+        ]);
+        $imageUrl = 'https://cdn.example.test/products/sukienka-luna.jpg';
+        $productName = 'Sukienka LUNA Granatowa';
+
+        $order->lines()->create([
+            'external_line_id' => 'packing-image-line-1',
+            'sku' => 'SKU-IMG-1',
+            'name' => $productName,
+            'quantity' => 2,
+            'raw_payload' => [
+                'image' => [
+                    'src' => 'javascript:alert(1)',
+                    'url' => $imageUrl,
+                ],
+                'meta_data' => [
+                    ['display_key' => 'Rozmiar', 'display_value' => 'M'],
+                ],
+            ],
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'collect']))
+            ->assertOk()
+            ->assertSee($productName)
+            ->assertSee('data-packing-image-preview="'.$imageUrl.'"', false)
+            ->assertSee('src="/products/image-thumbnail?src=', false)
+            ->assertSee('data-packing-image-modal', false)
+            ->assertSee('role="dialog"', false)
+            ->assertDontSee('javascript:alert(1)', false);
+
+        $task = PackingTask::query()->firstOrFail();
+        $task->update([
+            'quantity_picked' => 2,
+            'status' => 'picked',
+            'picked_at' => now(),
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertSee($productName)
+            ->assertSee('data-packing-image-preview="'.$imageUrl.'"', false)
+            ->assertSee('src="/products/image-thumbnail?src=', false)
+            ->assertDontSee('javascript:alert(1)', false);
+
+        $task->update([
+            'status' => 'packed',
+            'packed_at' => now(),
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'waiting']))
+            ->assertOk()
+            ->assertSee('Zamówienie IMG-1')
+            ->assertSee($productName)
+            ->assertSee('SKU-IMG-1')
+            ->assertSee('data-packing-image-preview="'.$imageUrl.'"', false)
+            ->assertSee('src="/products/image-thumbnail?src=', false)
+            ->assertDontSee('javascript:alert(1)', false);
+
+        $this->get(route('packing.index', ['view' => 'history', 'date' => now()->toDateString()]))
+            ->assertOk()
+            ->assertSee($productName)
+            ->assertSee('data-packing-image-preview="'.$imageUrl.'"', false)
+            ->assertSee('src="/products/image-thumbnail?src=', false)
+            ->assertDontSee('javascript:alert(1)', false);
+
+        $task->update([
+            'status' => 'problem',
+            'metadata' => [
+                'packing_problem' => [
+                    'reason' => 'Kontrola zdjęcia produktu',
+                    'reported_at' => now()->toISOString(),
+                ],
+            ],
+        ]);
+
+        $this->get(route('packing.index', ['view' => 'problems']))
+            ->assertOk()
+            ->assertSee('Kontrola zdjęcia produktu')
+            ->assertSee($productName)
+            ->assertSee('data-packing-image-preview="'.$imageUrl.'"', false)
+            ->assertSee('src="/products/image-thumbnail?src=', false)
+            ->assertDontSee('javascript:alert(1)', false);
+
+        $task->update(['status' => 'shipped']);
+
+        $this->get(route('packing.index', ['view' => 'shipped']))
+            ->assertOk()
+            ->assertSee('Zamówienie IMG-1')
+            ->assertSee($productName)
+            ->assertSee('data-packing-image-preview="'.$imageUrl.'"', false)
+            ->assertSee('src="/products/image-thumbnail?src=', false)
+            ->assertDontSee('javascript:alert(1)', false);
+    }
+
     public function test_collect_view_falls_back_to_size_from_product_name(): void
     {
         $channel = SalesChannel::query()->create([
@@ -462,7 +602,10 @@ class PackingWorkflowTest extends TestCase
             ],
         ]);
 
-        $response = $this->get(route('packing.index', ['view' => 'collect']));
+        $response = $this->get(route('packing.index', [
+            'view' => 'collect',
+            'segment' => 'all',
+        ]));
 
         $response
             ->assertOk()
@@ -684,7 +827,7 @@ class PackingWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee('Oczekuje na kuriera')
             ->assertSee('DPD')
-            ->assertSee('Odebrano');
+            ->assertDontSee('>Odebrano<', false);
 
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/ship/v1/orders/801/label'
@@ -717,7 +860,7 @@ class PackingWorkflowTest extends TestCase
             ->assertOk()
             ->assertSee('Wysłane')
             ->assertSee('Zamówienie 801')
-            ->assertDontSee('Odebrano');
+            ->assertDontSee('>Odebrano<', false);
 
         Http::assertSent(function ($request): bool {
             $data = $request->data();

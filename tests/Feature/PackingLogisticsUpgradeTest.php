@@ -52,6 +52,7 @@ class PackingLogisticsUpgradeTest extends TestCase
             ->assertSessionHas('status');
 
         $this->assertSame('station-2', session('packing_station'));
+        $this->assertTrue(session('packing_station_initialized'));
 
         $collect = $this->get(route('packing.index', ['view' => 'collect']));
         $collect->assertOk()
@@ -65,8 +66,14 @@ class PackingLogisticsUpgradeTest extends TestCase
     {
         $this->createMixedOrder();
 
+        $this->post(route('packing.station'))
+            ->assertRedirect()
+            ->assertSessionHas('packing_station_initialized', true)
+            ->assertSessionMissing('packing_station');
+
         $this->get(route('packing.index', ['view' => 'pack']))
             ->assertOk()
+            ->assertSessionMissing('packing_station')
             ->assertSee('Automatyczny wydruk jest wyłączony dla tej sesji');
     }
 
