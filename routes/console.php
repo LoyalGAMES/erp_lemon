@@ -1,6 +1,8 @@
 <?php
 
+use App\Models\AuditLog;
 use App\Models\Invoice;
+use App\Models\Product;
 use App\Services\Communication\UnpaidOrderReminderService;
 use App\Services\Integrations\WooCommerceImportQueueService;
 use App\Services\Inventory\StockSyncQueueService;
@@ -101,6 +103,82 @@ Artisan::command('erp:dispatch-woocommerce-product-creation-recovery {--limit=10
 
     return $result['failed'] > 0 ? 1 : 0;
 })->purpose('Queue durable retries for WooCommerce products whose initial creation was interrupted.');
+
+Artisan::command('erp:inspect-woocommerce-product-creation-recovery {--limit=20 : Maximum number of recent matching failures to show}', function (): int {
+    $limit = max(1, min(100, (int) $this->option('limit')));
+    $productMorph = (new Product)->getMorphClass();
+    $recovery = app(WooCommerceProductCreationRecoveryService::class);
+    $audits = AuditLog::query()
+        ->where('action', 'product.woocommerce_create_failed')
+        ->where('auditable_type', $productMorph)
+        ->where('created_at', '>=', '2026-07-14 00:00:00')
+        ->latest('id')
+        ->limit($limit * 5)
+        ->get()
+        ->filter(function (AuditLog $audit): bool {
+            $error = trim((string) data_get($audit->metadata, 'error', ''));
+
+            return str_contains($error, 'kilka wartości')
+                && str_contains($error, 'globalnego atrybutu');
+        })
+        ->unique(fn (AuditLog $audit): string => $audit->auditable_id.'|'.(string) data_get(
+            $audit->metadata,
+            'wordpress_integration_id',
+            '',
+        ))
+        ->take($limit);
+
+    $rows = $audits->map(function (AuditLog $audit) use ($recovery): array {
+        $product = Product::query()
+            ->with(['channelMappings', 'parentRelations'])
+            ->find($audit->auditable_id);
+        $integrationId = (int) data_get($audit->metadata, 'wordpress_integration_id', 0);
+        $salesChannelId = (int) data_get($audit->metadata, 'sales_channel_id', 0);
+        $state = $product instanceof Product
+            ? (array) data_get($product->attributes, $recovery->metadataPath($integrationId), [])
+            : [];
+        $mapping = $product?->channelMappings->first(
+            fn ($candidate): bool => (int) $candidate->sales_channel_id === $salesChannelId,
+        );
+        $root = $product instanceof Product
+            && ! $product->is_translation
+            && trim((string) $product->sku) !== ''
+            && $product->masterSource() === 'erp'
+            && data_get($product->masterData(), 'product_type') !== 'variation'
+            && ! $product->parentRelations->contains(
+                fn ($relation): bool => $relation->relation_type === 'variant',
+            );
+
+        return [
+            (int) $audit->id,
+            (int) $audit->auditable_id,
+            $product?->sku ?? 'missing',
+            $integrationId,
+            $root ? 'yes' : 'no',
+            $mapping?->external_product_id ?? '-',
+            (string) ($state['status'] ?? '-'),
+            (int) ($state['attempts'] ?? 0),
+            str((string) ($state['last_error'] ?? data_get($audit->metadata, 'error', '-')))
+                ->squish()
+                ->limit(180)
+                ->toString(),
+        ];
+    })->values()->all();
+
+    $this->table(
+        ['audit', 'product', 'sku', 'integration', 'erp_root', 'woo_mapping', 'state', 'attempts', 'last_error'],
+        $rows,
+    );
+    $this->info(sprintf(
+        'Recovery diagnostics: matching=%d, queued_jobs=%d, failed_jobs=%d, revision=%s.',
+        count($rows),
+        DB::table('jobs')->where('payload', 'like', '%RetryWooCommerceProductCreationJob%')->count(),
+        DB::table('failed_jobs')->where('payload', 'like', '%RetryWooCommerceProductCreationJob%')->count(),
+        WooCommerceProductCreationRecoveryService::REVISION,
+    ));
+
+    return 0;
+})->purpose('Inspect recent duplicate-global-attribute product creation recovery without changing state.');
 
 Artisan::command('erp:refresh-ksef-submissions {--limit=25 : Maximum number of KSeF submissions to refresh} {--minutes=2 : Refresh submissions older than this many minutes}', function (): int {
     $limit = max(1, (int) $this->option('limit'));

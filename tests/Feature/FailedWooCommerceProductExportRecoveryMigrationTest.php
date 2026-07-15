@@ -14,6 +14,7 @@ use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
 use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceProductCreationRecoveryService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -154,6 +155,44 @@ final class FailedWooCommerceProductExportRecoveryMigrationTest extends TestCase
             'product_id' => $product->id,
             'sales_channel_id' => $channel->id,
         ]);
+    }
+
+    public function test_recovery_inspection_reports_state_without_dispatching_or_changing_it(): void
+    {
+        Bus::fake();
+        [$channel, $integration] = $this->createWooIntegration();
+        $product = $this->createProduct('RECOVERY-INSPECT');
+        $audit = AuditLog::query()->create([
+            'action' => 'product.woocommerce_create_failed',
+            'auditable_type' => $product->getMorphClass(),
+            'auditable_id' => $product->id,
+            'metadata' => [
+                'wordpress_integration_id' => $integration->id,
+                'sales_channel_id' => $channel->id,
+                'error' => 'WooCommerce zawiera kilka wartości SEMPRE globalnego atrybutu #90; eksport został przerwany.',
+            ],
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        app(WooCommerceProductCreationRecoveryService::class)->markPending(
+            $product,
+            $integration,
+            $audit->id,
+        );
+        $before = $product->refresh()->attributes;
+
+        $exitCode = Artisan::call('erp:inspect-woocommerce-product-creation-recovery', [
+            '--limit' => 5,
+        ]);
+        $output = Artisan::output();
+
+        $this->assertSame(0, $exitCode);
+        $this->assertStringContainsString('RECOVERY-INSPECT', $output);
+        $this->assertStringContainsString('pending', $output);
+        $this->assertStringContainsString(WooCommerceProductCreationRecoveryService::REVISION, $output);
+        $this->assertSame($before, $product->refresh()->attributes);
+        Bus::assertNotDispatched(RetryWooCommerceProductCreationJob::class);
+        $this->assertDatabaseCount('jobs', 0);
     }
 
     public function test_migration_ignores_a_failure_whose_audit_channel_does_not_match_the_integration(): void

@@ -453,6 +453,7 @@ if [[ "$maintenance_enabled" -eq 1 ]]; then
     "$php_bin" "$deploy_path/artisan" up
     maintenance_enabled=0
 fi
+"$php_bin" "$deploy_path/artisan" erp:inspect-woocommerce-product-creation-recovery --limit=20
 
 completed=1
 echo "Wdrożenie aktywne: ${release_path}"
