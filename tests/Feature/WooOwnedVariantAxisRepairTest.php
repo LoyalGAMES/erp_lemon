@@ -1082,6 +1082,76 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         Bus::assertDispatchedTimes(ExportWooCommerceProductDataJob::class, 1);
     }
 
+    public function test_successful_axis_repair_queues_a_critical_catalog_export_for_term_order_and_inherited_data(): void
+    {
+        Bus::fake([ExportWooCommerceProductDataJob::class]);
+        [$parent, $catalog] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+        $token = 'post-axis-catalog-token';
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::REVISION,
+            'status' => 'queued',
+            'pending_token' => $token,
+        ]);
+        $mapping->update(['metadata' => $metadata]);
+        $this->fakeCatalog($catalog, function (Request $request): mixed {
+            if ($request->method() === 'GET'
+                && str_ends_with(
+                    $request->url(),
+                    '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities',
+                )
+            ) {
+                return Http::response([
+                    'available' => true,
+                    'attribute_term_translation_link_available' => true,
+                    'variation_translation_link_available' => true,
+                    'variation_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations',
+                    'languages' => ['pl', 'en'],
+                    'plugin_version' => '0.5.3',
+                ]);
+            }
+
+            return null;
+        });
+
+        app(RepairWooOwnedVariantAxisJob::class, [
+            'productId' => $parent->id,
+            'token' => $token,
+        ])->handle($repair, app(LegacyVariantFamilyBackfillService::class));
+
+        $metadata = $mapping->fresh()->metadata;
+        $this->assertSame('completed', data_get(
+            $metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.status',
+        ));
+        $this->assertSame('repaired', data_get(
+            $metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.result.status',
+        ));
+        $this->assertSame('dispatched', data_get(
+            $metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.result.full_export_queue',
+        ));
+        $this->assertSame(
+            LegacyVariantFamilyBackfillService::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
+            data_get($metadata, 'product_data_export.legacy_variant_backfill.revision'),
+        );
+        $this->assertSame('queued', data_get(
+            $metadata,
+            'product_data_export.legacy_variant_backfill.status',
+        ));
+        Bus::assertDispatched(
+            ExportWooCommerceProductDataJob::class,
+            fn (ExportWooCommerceProductDataJob $job): bool => $job->queue
+                === LegacyVariantFamilyBackfillService::CRITICAL_EXPORT_QUEUE,
+        );
+        Bus::assertDispatchedTimes(ExportWooCommerceProductDataJob::class, 1);
+    }
+
     public function test_stale_product_import_cannot_restore_the_legacy_axis_after_repair(): void
     {
         [$parent, $catalog] = $this->family();

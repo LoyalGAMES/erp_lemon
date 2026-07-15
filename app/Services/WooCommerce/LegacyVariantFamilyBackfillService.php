@@ -41,6 +41,8 @@ final class LegacyVariantFamilyBackfillService
 
     public const LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION = 'legacy_size_parent_term_order_followup_2026_07_15_000018';
 
+    public const WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION = 'woo_owned_post_axis_catalog_sync_2026_07_15_000020';
+
     public const CRITICAL_EXPORT_QUEUE = 'woocommerce-critical';
 
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
@@ -224,7 +226,10 @@ final class LegacyVariantFamilyBackfillService
         }
 
         try {
-            if ($revision === self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION) {
+            if (in_array($revision, [
+                self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
+                self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
+            ], true)) {
                 ExportWooCommerceProductDataJob::dispatch(
                     $reservation['product_id'],
                     $reservation['token'],
@@ -275,6 +280,7 @@ final class LegacyVariantFamilyBackfillService
         // catalog backfill. Dispatch its revision first, then continue the
         // normal newest-first queue without visiting the same mapping twice.
         foreach ([
+            self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
             self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
             self::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
             self::LEGACY_SIZE_VARIANT_AXIS_RECOVERY_REVISION,
@@ -335,10 +341,13 @@ final class LegacyVariantFamilyBackfillService
                 }
 
                 try {
-                    if (data_get(
+                    if (in_array(data_get(
                         $mapping->metadata,
                         self::BACKFILL_PATH.'.revision',
-                    ) === self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION) {
+                    ), [
+                        self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
+                        self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
+                    ], true)) {
                         ExportWooCommerceProductDataJob::dispatch(
                             $reservation['product_id'],
                             $reservation['token'],

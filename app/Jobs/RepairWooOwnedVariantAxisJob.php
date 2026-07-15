@@ -83,7 +83,17 @@ final class RepairWooOwnedVariantAxisJob implements ShouldQueue
 
         $result = $repair->repair($product);
 
-        if (($result['allow_full_export'] ?? false) === true) {
+        if (in_array(($result['status'] ?? null), ['repaired', 'already_canonical'], true)) {
+            // Axis-only repair deliberately protects commercial data. Once
+            // the exact PL/EN family and every child alias are verified, run
+            // one durable full export so Woo receives global term order,
+            // publication dates, inherited content and final stock through
+            // the now-canonical identities.
+            $result['full_export_queue'] = $backfill->queueProductRevision(
+                $product,
+                LegacyVariantFamilyBackfillService::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
+            );
+        } elseif (($result['allow_full_export'] ?? false) === true) {
             $result['full_export_queue'] = $backfill->queueProductRevision(
                 $product,
                 WooOwnedVariantAxisRepairService::REVISION.':missing-translation:'.$this->token,
