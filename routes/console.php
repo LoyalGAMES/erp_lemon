@@ -105,6 +105,76 @@ Artisan::command('erp:dispatch-woo-owned-variant-axis-repair {--limit=10 : Maxim
     return $result['failed'] > 0 ? 1 : 0;
 })->purpose('Queue axis-only repairs for historical Woo-owned size families.');
 
+Artisan::command('erp:inspect-woo-owned-variant-axis-repair {--limit=30 : Maximum number of recent family states to show}', function (): int {
+    $limit = max(1, min(100, (int) $this->option('limit')));
+    $statePath = WooOwnedVariantAxisRepairService::STATE_PATH;
+    $mappings = ProductChannelMapping::query()
+        ->with('product:id,sku')
+        ->where(function ($query): void {
+            $query
+                ->whereNull('external_variation_id')
+                ->orWhereIn('external_variation_id', ['', '0'])
+                ->orWhereRaw("TRIM(external_variation_id) = ''");
+        })
+        ->latest('updated_at')
+        ->get()
+        ->filter(fn (ProductChannelMapping $mapping): bool => data_get(
+            $mapping->metadata,
+            $statePath.'.revision',
+        ) === WooOwnedVariantAxisRepairService::REVISION);
+    $statusCounts = $mappings
+        ->countBy(fn (ProductChannelMapping $mapping): string => (string) data_get(
+            $mapping->metadata,
+            $statePath.'.status',
+            'missing',
+        ))
+        ->sortKeys();
+
+    $this->info('Woo-owned axis state: '.($statusCounts->isEmpty()
+        ? 'no matching families'
+        : $statusCounts->map(fn (int $count, string $status): string => "{$status}={$count}")->implode(', ')));
+    $this->table(
+        ['product', 'sku', 'woo', 'status', 'queue', 'next_attempt', 'reason'],
+        $mappings
+            ->take($limit)
+            ->map(function (ProductChannelMapping $mapping) use ($statePath): array {
+                $state = (array) data_get($mapping->metadata, $statePath, []);
+
+                return [
+                    (int) $mapping->product_id,
+                    $mapping->product?->sku ?? 'missing',
+                    $mapping->external_product_id ?? '-',
+                    (string) ($state['status'] ?? '-'),
+                    (string) data_get($state, 'result.full_export_queue', '-'),
+                    (string) ($state['next_attempt_at'] ?? '-'),
+                    str((string) data_get($state, 'result.reason', '-'))
+                        ->squish()
+                        ->limit(180)
+                        ->toString(),
+                ];
+            })
+            ->values()
+            ->all(),
+    );
+    $this->info(sprintf(
+        'Woo-owned axis diagnostics: matching=%d, queued_jobs=%d, failed_jobs=%d, sync_success=%d, sync_failed=%d, revision=%s.',
+        $mappings->count(),
+        DB::table('jobs')->where('payload', 'like', '%RepairWooOwnedVariantAxisJob%')->count(),
+        DB::table('failed_jobs')->where('payload', 'like', '%RepairWooOwnedVariantAxisJob%')->count(),
+        DB::table('integration_sync_logs')
+            ->where('operation', 'repair_woo_owned_variant_axis')
+            ->where('status', 'success')
+            ->count(),
+        DB::table('integration_sync_logs')
+            ->where('operation', 'repair_woo_owned_variant_axis')
+            ->where('status', 'failed')
+            ->count(),
+        WooOwnedVariantAxisRepairService::REVISION,
+    ));
+
+    return 0;
+})->purpose('Inspect durable historical Woo-owned size-axis repair state without changing it.');
+
 Artisan::command('erp:dispatch-woocommerce-product-creation-recovery {--limit=10 : Maximum number of failed product creations to queue} {--stale-minutes=120 : Replace an abandoned creation reservation after this many minutes}', function (): int {
     $result = app(WooCommerceProductCreationRecoveryService::class)->dispatchPending(
         max(1, (int) $this->option('limit')),
