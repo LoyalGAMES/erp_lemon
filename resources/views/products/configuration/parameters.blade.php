@@ -42,7 +42,7 @@
             <a class="button secondary" href="{{ route('products.index') }}">Lista produktów</a>
             <a class="button secondary" href="{{ route('products.categories.index') }}">Kategorie</a>
         </div>
-        <div class="toolbar-note">Wartości PL i EN są łączone wierszami. Pusty wiersz EN oznacza użycie wartości PL.</div>
+        <div class="toolbar-note">Wartości PL i EN są łączone wierszami. Pusty wiersz EN oznacza użycie wartości PL. Dla parametrów wariantowych kolejność wierszy jest globalną kolejnością na sklepie, np. S przed M.</div>
     </div>
 
     <section class="card product-config-panel">
@@ -132,7 +132,7 @@
                     <label>Kolejność
                         <input name="sort_order" form="{{ $updateFormId }}" type="number" min="0" max="65000" value="{{ $definition->sort_order }}">
                     </label>
-                    <label>Dozwolone wartości (PL)
+                    <label>Dozwolone wartości (PL) @if ($definition->is_variant) — kolejność w sklepie @endif
                         <textarea name="values_text" form="{{ $updateFormId }}">{{ implode("\n", (array) $definition->values) }}</textarea>
                     </label>
                     <label>Dozwolone wartości (EN)

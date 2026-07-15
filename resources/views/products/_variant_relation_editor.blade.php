@@ -66,12 +66,15 @@
             .variant-editor-actions { display: grid; gap: 6px; justify-items: end; }
             .variant-editor-order { display: grid; gap: 4px; justify-items: end; color: var(--muted); font-size: 13px; }
             .variant-editor-order input { width: 110px; }
+            .variant-editor-reorder { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+            .variant-editor-row.is-empty .variant-editor-reorder { display: none; }
             .variant-editor-actions .toggle-row { justify-content: flex-end; }
             .related-picker-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
             @media (max-width: 820px) {
                 .variant-editor-row { grid-template-columns: 1fr; }
                 .variant-editor-actions { justify-items: start; }
                 .variant-editor-order { justify-items: start; }
+                .variant-editor-reorder { justify-content: flex-start; }
                 .variant-editor-actions .toggle-row { justify-content: flex-start; }
             }
             @media (max-width: 720px) {
@@ -79,19 +82,110 @@
             }
         </style>
     @endpush
+
+    @push('scripts')
+        <script>
+            (() => {
+                function editorRows(editor) {
+                    const list = editor?.querySelector('.variant-editor-list');
+
+                    return list ? Array.from(list.children).filter((row) => row.matches('[data-variant-editor-row]')) : [];
+                }
+
+                function rowHasSku(row) {
+                    return String(row.querySelector('[data-product-sku-hidden]')?.value || '').trim() !== '';
+                }
+
+                function orderedRows(editor) {
+                    return editorRows(editor).filter(rowHasSku);
+                }
+
+                function refreshOrderControls(editor) {
+                    const rows = orderedRows(editor);
+
+                    editorRows(editor).forEach((row) => row.classList.toggle('is-empty', !rowHasSku(row)));
+                    rows.forEach((row, index) => {
+                        const up = row.querySelector('[data-variant-order-up]');
+                        const down = row.querySelector('[data-variant-order-down]');
+
+                        if (up) up.disabled = index === 0;
+                        if (down) down.disabled = index === rows.length - 1;
+                    });
+                }
+
+                function renumberRows(editor) {
+                    const rows = orderedRows(editor);
+                    const step = rows.length <= 6553 ? 10 : 1;
+
+                    rows.forEach((row, index) => {
+                        const input = row.querySelector('[data-variant-sort-order]');
+
+                        if (input) input.value = Math.min(65535, (index + 1) * step);
+                    });
+                }
+
+                function moveVariantRow(button, direction) {
+                    const row = button.closest('[data-variant-editor-row]');
+                    const editor = button.closest('.variant-editor');
+                    const list = editor?.querySelector('.variant-editor-list');
+                    const rows = orderedRows(editor);
+                    const index = rows.indexOf(row);
+                    const target = rows[index + direction];
+
+                    if (!row || !list || index < 0 || !target) return;
+
+                    if (direction < 0) {
+                        list.insertBefore(row, target);
+                    } else {
+                        list.insertBefore(target, row);
+                    }
+
+                    renumberRows(editor);
+                    refreshOrderControls(editor);
+                    button.focus();
+                }
+
+                document.querySelectorAll('.variant-editor').forEach(refreshOrderControls);
+
+                document.addEventListener('click', (event) => {
+                    const up = event.target.closest('[data-variant-order-up]');
+                    const down = event.target.closest('[data-variant-order-down]');
+                    const button = up || down;
+
+                    if (!button) return;
+
+                    event.preventDefault();
+                    moveVariantRow(button, up ? -1 : 1);
+                });
+
+                document.addEventListener('input', (event) => {
+                    const lookup = event.target.closest('[data-product-sku-lookup]');
+
+                    if (lookup) refreshOrderControls(lookup.closest('.variant-editor'));
+                });
+
+                document.addEventListener('change', (event) => {
+                    const lookup = event.target.closest('[data-product-sku-lookup]');
+
+                    if (lookup) refreshOrderControls(lookup.closest('.variant-editor'));
+                });
+            })();
+        </script>
+    @endpush
 @endonce
 
 <div class="variant-editor">
     <div class="variant-editor-head">
         <div>
             <strong>Warianty produktu</strong>
-            <div class="toolbar-note">Atrybut oznaczony jako wariant, np. Rozmiar, określa opcje WooCommerce. Każda opcja jest osobnym SKU. Niższa liczba kolejności wyświetla wariant wcześniej w sklepie. Tutaj możesz dodać istniejący wariant; podczas kopiowania produktu jego warianty kopiują się automatycznie.</div>
+            <div class="toolbar-note">Atrybut oznaczony jako wariant, np. Rozmiar, określa opcje WooCommerce. Każda opcja jest osobnym SKU. Użyj przycisków, aby ustawić kolejność wariantów tej rodziny. Globalna kolejność wartości rozmiaru (np. S przed M) wynika z kolejności wierszy w słowniku parametrów.</div>
         </div>
+        <a class="button secondary" href="{{ route('products.parameters.index') }}">Ustaw globalną kolejność rozmiarów</a>
     </div>
 
     <div class="variant-editor-list">
         @foreach ($variantRows as $index => $row)
-            <div class="variant-editor-row @if ($row['sku'] === '') is-empty @endif">
+            <div class="variant-editor-row @if ($row['sku'] === '') is-empty @endif" data-variant-editor-row>
                 <div class="variant-editor-main">
                     <label>Wariant
                         <input
@@ -116,8 +210,12 @@
                     </div>
                 </div>
                 <div class="variant-editor-actions">
+                    <div class="variant-editor-reorder" aria-label="Zmień kolejność wariantu">
+                        <button class="button secondary" type="button" data-variant-order-up aria-label="Przesuń wariant w górę">↑ W górę</button>
+                        <button class="button secondary" type="button" data-variant-order-down aria-label="Przesuń wariant w dół">↓ W dół</button>
+                    </div>
                     <label class="variant-editor-order">Kolejność w sklepie
-                        <input name="variant_sort_order[{{ $index }}]" type="number" min="0" max="65535" step="1" value="{{ $row['sort_order'] }}">
+                        <input name="variant_sort_order[{{ $index }}]" type="number" min="0" max="65535" step="1" value="{{ $row['sort_order'] }}" data-variant-sort-order>
                     </label>
                     <input type="hidden" name="variant_remove[{{ $index }}]" value="0">
                     @if ($row['sku'] !== '')

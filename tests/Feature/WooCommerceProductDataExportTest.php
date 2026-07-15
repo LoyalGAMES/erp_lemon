@@ -1720,9 +1720,13 @@ class WooCommerceProductDataExportTest extends TestCase
                 'master' => [
                     'source' => 'erp',
                     'publication_status' => 'draft',
+                    'publication_date' => '2026-07-14T13:47',
                     'content' => [
                         'pl' => ['name' => 'Produkt PL'],
-                        'en' => ['name' => 'Product EN'],
+                        'en' => [
+                            'name' => 'Product EN',
+                            'description' => '<p>Full resumed English content</p>',
+                        ],
                     ],
                 ],
             ],
@@ -1802,6 +1806,16 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame('223', data_get($product->refresh()->attributes, 'woocommerce_translations.en.product_id'));
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123');
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223'
+            && $request['sku'] === 'SKU-RESUME'
+            && $request['name'] === 'Product EN'
+            && $request['description'] === '<p>Full resumed English content</p>'
+            && $request['date_created'] === '2026-07-14T13:47:00+02:00'
+            && collect((array) $request['meta_data'])->contains(
+                fn (array $meta): bool => $meta['key'] === '_sempre_erp_publication_date'
+                    && $meta['value'] === '2026-07-14T13:47:00',
+            ));
         $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
             && $pair[0]->url() === 'https://shop.test/wp-json/wc/v3/products')->count());
         $this->assertSame(1, Http::recorded()->filter(fn ($pair): bool => $pair[0]->method() === 'POST'
@@ -2001,6 +2015,7 @@ class WooCommerceProductDataExportTest extends TestCase
             'attributes' => ['master' => [
                 'source' => 'erp',
                 'product_type' => 'variation',
+                'publication_date' => '2026-07-15T09:15',
                 'prices' => ['retail_price_pln' => 1],
                 'content' => [
                     'pl' => ['description' => '<p>Stary opis</p>'],
@@ -2176,6 +2191,7 @@ class WooCommerceProductDataExportTest extends TestCase
             'attributes' => ['master' => [
                 'source' => 'erp',
                 'product_type' => 'variation',
+                'publication_date' => '2026-07-15T09:15',
                 'prices' => ['retail_price_pln' => 1],
                 'content' => [
                     'pl' => ['description' => '<p>Stary opis</p>'],
@@ -2243,7 +2259,9 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request['description'] === '<p>Parent EN description</p>'
             && $request['regular_price'] === '699.00'
             && $request['menu_order'] === 7
-            && $request['attributes'][0] === ['id' => 70, 'option' => 'M']);
+            && $request['attributes'][0] === ['id' => 70, 'option' => 'M']
+            && collect($request['meta_data'])->contains(fn (array $meta): bool => $meta['key'] === '_sempre_erp_publication_date'
+                && $meta['value'] === '2026-07-14T13:00:00'));
     }
 
     public function test_copied_variable_family_creates_linked_english_product_with_inherited_variant_data(): void
@@ -2262,6 +2280,17 @@ class WooCommerceProductDataExportTest extends TestCase
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             // Import is intentionally Polish-only. Exporting EN is a separate policy.
             'settings' => ['product_import' => ['languages' => ['pl']]],
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['ONE SIZE', 'S', 'M'],
+            'values_en' => ['ONE SIZE', 'S', 'M'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
         ]);
         $source = Product::query()->create([
             'sku' => 'ARDEN-SOURCE',
@@ -2397,6 +2426,7 @@ class WooCommerceProductDataExportTest extends TestCase
         $lastTermLink = $requests->search(fn ($request): bool => $request === $termLinks->last());
 
         $this->assertSame(['s-pl', 'm-pl', 's-en', 'm-en'], $termCreates->pluck('slug')->all());
+        $this->assertSame([20, 30, 20, 30], $termCreates->pluck('menu_order')->all());
         $this->assertCount(2, $termLinks);
         $termLinks->each(function ($request): void {
             $this->assertArrayHasKey('pl', $request['translations']);
@@ -3680,6 +3710,188 @@ class WooCommerceProductDataExportTest extends TestCase
             && str_contains($request->url(), 'page=2'));
         Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
             && str_contains($request->url(), '/products/attributes'));
+    }
+
+    public function test_global_attribute_syncs_canonical_term_order_for_polish_and_english_idempotently(): void
+    {
+        $attribute = [
+            'id' => 90,
+            'name' => 'Rozmiar',
+            'slug' => 'pa_rozmiar',
+            'order_by' => 'name',
+        ];
+        $terms = [
+            'pl' => [
+                ['id' => 701, 'name' => 'S', 'slug' => 's-pl', 'lang' => 'pl', 'menu_order' => 0],
+                ['id' => 702, 'name' => 'M', 'slug' => 'm-pl', 'lang' => 'pl', 'menu_order' => 0],
+            ],
+            'en' => [
+                ['id' => 801, 'name' => 'Small', 'slug' => 'small-en', 'lang' => 'en', 'menu_order' => 0],
+                ['id' => 802, 'name' => 'Medium', 'slug' => 'medium-en', 'lang' => 'en', 'menu_order' => 0],
+            ],
+        ];
+
+        Http::fake(function ($request) use (&$attribute, &$terms) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if ($request->method() === 'GET' && $path === '/wp-json/wc/v3/products/attributes') {
+                return Http::response([$attribute]);
+            }
+
+            if ($request->method() === 'PUT' && $path === '/wp-json/wc/v3/products/attributes/90') {
+                $attribute['order_by'] = (string) $request['order_by'];
+
+                return Http::response($attribute);
+            }
+
+            if ($request->method() === 'GET' && $path === '/wp-json/wc/v3/products/attributes/90/terms') {
+                return Http::response($terms[(string) ($query['lang'] ?? 'pl')] ?? []);
+            }
+
+            if ($request->method() === 'PUT'
+                && preg_match('#^/wp-json/wc/v3/products/attributes/90/terms/(\d+)$#', $path, $matches) === 1
+            ) {
+                $termId = (int) $matches[1];
+
+                foreach ($terms as $language => $languageTerms) {
+                    foreach ($languageTerms as $index => $term) {
+                        if ((int) $term['id'] !== $termId) {
+                            continue;
+                        }
+
+                        $terms[$language][$index]['menu_order'] = (int) $request['menu_order'];
+
+                        return Http::response($terms[$language][$index]);
+                    }
+                }
+            }
+
+            if ($request->method() === 'POST'
+                && $path === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/90/terms/translations'
+            ) {
+                return Http::response([
+                    'linked' => true,
+                    'attribute_id' => 90,
+                    'translations' => $request['translations'],
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+        $integration = $this->createGlobalTermIntegration(['pl', 'en']);
+        $client = app(WooCommerceClient::class);
+
+        $resolved = $client->ensureGlobalProductAttribute(
+            $integration,
+            'Rozmiar',
+            ['Small', 'Medium'],
+            'en',
+            ['S', 'M'],
+            [10, 20],
+        );
+
+        $this->assertSame(['Small', 'Medium'], $resolved['options']);
+        $this->assertSame([801, 802], $resolved['term_ids']);
+        $this->assertSame('menu_order', $attribute['order_by']);
+        $this->assertSame([10, 20], collect($terms['pl'])->pluck('menu_order')->all());
+        $this->assertSame([10, 20], collect($terms['en'])->pluck('menu_order')->all());
+        $firstMutationCount = Http::recorded()->filter(
+            fn (array $pair): bool => $pair[0]->method() === 'PUT',
+        )->count();
+        $this->assertSame(5, $firstMutationCount);
+
+        $client->ensureGlobalProductAttribute(
+            $integration,
+            'Rozmiar',
+            ['Small', 'Medium'],
+            'en',
+            ['S', 'M'],
+            [10, 20],
+        );
+
+        $this->assertSame($firstMutationCount, Http::recorded()->filter(
+            fn (array $pair): bool => $pair[0]->method() === 'PUT',
+        )->count());
+    }
+
+    public function test_export_matches_normalized_size_option_to_spaced_dictionary_value_order(): void
+    {
+        $this->fakeWooWithGlobalAttributes(function ($request) {
+            return match ([$request->method(), $request->url()]) {
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/123'] => Http::response(['id' => 123]),
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/123/variations/456'] => Http::response(['id' => 456]),
+                default => Http::response([], 404),
+            };
+        });
+        $integration = $this->createGlobalTermIntegration(['pl']);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['XS', 'S / M'],
+            'values_en' => ['XS', 'S/M'],
+            'is_variant' => true,
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'SPACED-SIZE-PARENT',
+            'name' => 'Rodzina ze spacją',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+            ]],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'SPACED-SIZE-SM',
+            'name' => 'Rodzina ze spacją - S/M',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variation',
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'value' => 's / m',
+                    'variation' => true,
+                ]],
+            ]],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $integration->sales_channel_id,
+            'external_product_id' => '123',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $integration->sales_channel_id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        app(ProductDataExportService::class)->export($parent);
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && preg_match('#/wc/v3/products/attributes/\d+/terms(?:\?|$)#', $request->url()) === 1
+            && $request['name'] === 'S/M'
+            && $request['menu_order'] === 20);
     }
 
     public function test_global_attribute_term_prefers_exact_localized_slug_over_duplicate_name_matches(): void

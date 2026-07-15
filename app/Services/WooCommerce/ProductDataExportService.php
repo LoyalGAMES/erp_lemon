@@ -451,7 +451,10 @@ final class ProductDataExportService
             }
 
             $existingReference = $this->translationReferences($product, $salesChannelId)[$language] ?? null;
-            $desiredSku = $product->sku;
+            $localizedPayload = $this->payload($product, false, $salesChannelId, $language, null, null, true);
+            $localizedPayload = $this->prepareVariablePayload($product, $variants, $localizedPayload, $language);
+            $localizedPayload = $this->globalizeProductAttributes($integration, $localizedPayload, $language);
+            $desiredSku = (string) ($localizedPayload['sku'] ?? $product->sku);
             $translatedProductId = is_array($existingReference)
                 ? trim((string) ($existingReference['product_id'] ?? ''))
                 : '';
@@ -462,15 +465,12 @@ final class ProductDataExportService
                     $salesChannelId,
                     $language,
                 );
-                $payload = $this->payload($product, false, $salesChannelId, $language, null, null, true);
-                $payload = $this->prepareVariablePayload($product, $variants, $payload, $language);
-                $payload = $this->globalizeProductAttributes($integration, $payload, $language);
-                $desiredSku = (string) ($payload['sku'] ?? $product->sku);
-                unset($payload['sku']);
+                $creationPayload = $localizedPayload;
+                unset($creationPayload['sku']);
 
                 $response = $this->client->createProductForLanguage(
                     $integration,
-                    $payload,
+                    $creationPayload,
                     $language,
                     $translationCreation['token'],
                     $translationCreation['resume'],
@@ -503,11 +503,22 @@ final class ProductDataExportService
                 $primaryExternalId,
             );
 
+            // A resumed translation may have been allocated by an older or
+            // interrupted export. Reapply the complete localized payload after
+            // Polylang linking, not just the shared SKU, so its publication
+            // date, content, media and attributes are repaired in one pass.
             if ($desiredSku !== '') {
-                $response = $this->client->updateProductDataByIds($integration, $translatedProductId, null, [
-                    'sku' => $desiredSku,
-                ], $language);
+                $localizedPayload['sku'] = $desiredSku;
+            } else {
+                unset($localizedPayload['sku']);
             }
+            $response = $this->client->updateProductDataByIds(
+                $integration,
+                $translatedProductId,
+                null,
+                $localizedPayload,
+                $language,
+            );
             $variantResponses = [];
 
             foreach ($variants as $variant) {
@@ -1214,7 +1225,13 @@ final class ProductDataExportService
      */
     private function variationPayload(Product $parent, Product $variant, int $salesChannelId, string $language = 'pl'): array
     {
+        $parentMaster = $parent->masterData();
         $master = $this->variantInheritance->masterData($parent, $variant);
+        // A variation is published as part of its parent family. Historical
+        // child records may still contain their own stale date (or none at
+        // all), therefore the parent date is the only canonical value for PL
+        // and every translated variation.
+        data_set($master, 'publication_date', data_get($parentMaster, 'publication_date'));
         $payload = $this->payload(
             $variant,
             true,
@@ -1223,7 +1240,6 @@ final class ProductDataExportService
             $this->mappingHasStockReleasePending($parent, $salesChannelId),
             $master,
         );
-        $parentMaster = $parent->masterData();
         $parentRegularPrice = data_get($parentMaster, 'prices.retail_price_pln');
         $parentSalePrice = data_get($parentMaster, 'prices.sale_price_pln');
         $parentSaleStartsAt = data_get($parentMaster, 'prices.sale_price_starts_at');
@@ -1420,7 +1436,7 @@ final class ProductDataExportService
 
     /**
      * @param  array<string, mixed>  $master
-     * @return list<array{source_name:string,source_options:list<string>,name:string,visible:bool,variation:bool,options:list<string>}>
+     * @return list<array{source_name:string,source_options:list<string>,source_option_orders:list<int|null>,name:string,visible:bool,variation:bool,options:list<string>}>
      */
     private function attributes(array $master, string $language = 'pl'): array
     {
@@ -1437,6 +1453,10 @@ final class ProductDataExportService
                 return [
                     'source_name' => trim((string) ($row['name'] ?? $name)),
                     'source_options' => [trim((string) ($row['value'] ?? $value))],
+                    'source_option_orders' => $this->parameterOptionMenuOrders(
+                        $row,
+                        [trim((string) ($row['value'] ?? $value))],
+                    ),
                     'name' => $name,
                     'visible' => true,
                     'variation' => (bool) ($row['variation'] ?? false),
@@ -1450,7 +1470,7 @@ final class ProductDataExportService
 
     /**
      * @param  Collection<int, Product>  $variants
-     * @return list<array{source_name:string,source_options:list<string>,name:string,visible:bool,variation:bool,options:list<string>}>
+     * @return list<array{source_name:string,source_options:list<string>,source_option_orders:list<int|null>,name:string,visible:bool,variation:bool,options:list<string>}>
      */
     private function variableAttributes(Product $product, Collection $variants, string $language = 'pl'): array
     {
@@ -1533,6 +1553,10 @@ final class ProductDataExportService
             ->push([
                 'source_name' => $sourceVariantAttribute,
                 'source_options' => $sourceVariantOptions,
+                'source_option_orders' => $this->parameterOptionMenuOrders(
+                    $translationSource,
+                    $sourceVariantOptions,
+                ),
                 'name' => $variantAttribute,
                 'visible' => true,
                 'variation' => true,
@@ -1552,7 +1576,7 @@ final class ProductDataExportService
     }
 
     /**
-     * @return list<array{source_name:string,source_options:list<string>,name:string,option:string}>
+     * @return list<array{source_name:string,source_options:list<string>,source_option_orders:list<int|null>,name:string,option:string}>
      */
     private function variationAttributes(Product $parent, Product $variant, string $language = 'pl'): array
     {
@@ -1568,14 +1592,20 @@ final class ProductDataExportService
             ?? ['name' => $sourceVariantAttribute];
         $variantAttribute = $this->translatedParameterName($translationSource, $language);
 
+        $sourceOption = $this->variationOption(
+            $variant,
+            $sourceVariantAttribute,
+            $sourceVariantAttribute,
+            'pl',
+        );
+
         return [[
             'source_name' => $sourceVariantAttribute,
-            'source_options' => [$this->variationOption(
-                $variant,
-                $sourceVariantAttribute,
-                $sourceVariantAttribute,
-                'pl',
-            )],
+            'source_options' => [$sourceOption],
+            'source_option_orders' => $this->parameterOptionMenuOrders(
+                $translationSource,
+                [$sourceOption],
+            ),
             'name' => $variantAttribute,
             'option' => $this->variationOption(
                 $variant,
@@ -1632,6 +1662,7 @@ final class ProductDataExportService
                 $options,
                 $language,
                 $sourceOptions,
+                (array) ($attribute['source_option_orders'] ?? []),
             );
             $attributeId = (int) $global['id'];
 
@@ -2010,6 +2041,41 @@ final class ProductDataExportService
 
             return $name !== '' && mb_strtolower(trim((string) $definition->name)) === $name;
         });
+    }
+
+    /**
+     * The order of values in ERP's shared parameter dictionary is the global
+     * storefront order for a WooCommerce taxonomy. Returning null for an
+     * unknown value deliberately avoids letting the last exported product
+     * redefine a catalog-wide term order from its local family order.
+     *
+     * @param  list<string>  $sourceOptions
+     * @return list<int|null>
+     */
+    private function parameterOptionMenuOrders(array $parameter, array $sourceOptions): array
+    {
+        $definition = $this->parameterDefinition($parameter);
+
+        if (! $definition instanceof ProductParameterDefinition) {
+            return array_fill(0, count($sourceOptions), null);
+        }
+
+        $orders = collect((array) $definition->values)
+            ->map(fn (mixed $value): string => $this->variantOptions->identity(
+                (string) $definition->name,
+                $value,
+            ))
+            ->filter()
+            ->unique()
+            ->values()
+            ->mapWithKeys(fn (string $value, int $index): array => [$value => ($index + 1) * 10]);
+
+        return collect($sourceOptions)
+            ->map(fn (mixed $option): ?int => $orders->get($this->variantOptions->identity(
+                (string) $definition->name,
+                $option,
+            )))
+            ->all();
     }
 
     /**

@@ -29,6 +29,8 @@ final class LegacyVariantFamilyBackfillService
 
     public const GLOBAL_ATTRIBUTE_TERM_RECOVERY_REVISION = 'translated_global_attribute_taxonomy_2026_07_15_000010';
 
+    public const PUBLICATION_DATE_AND_ATTRIBUTE_ORDER_REVISION = 'publication_date_and_attribute_order_2026_07_15_000011';
+
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 
     /** @var array<string, bool> */
@@ -164,6 +166,9 @@ final class LegacyVariantFamilyBackfillService
             'failed' => 0,
         ];
 
+        // Repair the newest catalog entries first. They are the products an
+        // operator has just published and is actively checking, while the
+        // same bounded queue still works through the complete history.
         foreach (ProductChannelMapping::query()
             ->where(function ($query): void {
                 $query
@@ -171,8 +176,7 @@ final class LegacyVariantFamilyBackfillService
                     ->orWhereIn('external_variation_id', ['', '0'])
                     ->orWhereRaw("TRIM(external_variation_id) = ''");
             })
-            ->orderBy('id')
-            ->lazyById(100) as $mapping) {
+            ->lazyByIdDesc(100) as $mapping) {
             if ($result['dispatched'] >= max(1, $limit)) {
                 break;
             }

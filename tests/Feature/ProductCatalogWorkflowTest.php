@@ -1998,6 +1998,12 @@ class ProductCatalogWorkflowTest extends TestCase
 
         $this->get(route('products.edit', $parent))
             ->assertOk()
+            ->assertSee('data-variant-editor-row', false)
+            ->assertSee('data-variant-order-up', false)
+            ->assertSee('data-variant-order-down', false)
+            ->assertSee('↑ W górę')
+            ->assertSee('↓ W dół')
+            ->assertSee('Ustaw globalną kolejność rozmiarów')
             ->assertSee('name="variant_sort_order[0]" type="number" min="0" max="65535" step="1" value="10"', false)
             ->assertSee('name="variant_sort_order[1]" type="number" min="0" max="65535" step="1" value="20"', false);
 

@@ -907,6 +907,7 @@ final class WooCommerceClient
      *
      * @param  list<string>  $options
      * @param  list<string>  $sourceOptions  Logical Polish values aligned with localized options.
+     * @param  list<int|null>  $menuOrders  Canonical dictionary ranks aligned with source options.
      * @return array{id:int,name:string,options:list<string>,term_ids:list<int>}
      */
     public function ensureGlobalProductAttribute(
@@ -915,6 +916,7 @@ final class WooCommerceClient
         array $options,
         ?string $language = null,
         array $sourceOptions = [],
+        array $menuOrders = [],
     ): array {
         $sourceName = trim($sourceName);
 
@@ -923,13 +925,17 @@ final class WooCommerceClient
         }
 
         $optionPairs = collect($options)
-            ->map(function (mixed $option, int $index) use ($sourceOptions): array {
+            ->map(function (mixed $option, int $index) use ($sourceOptions, $menuOrders): array {
                 $localized = trim((string) $option);
                 $source = trim((string) ($sourceOptions[$index] ?? $localized));
+                $menuOrder = $menuOrders[$index] ?? null;
 
                 return [
                     'localized' => $localized,
                     'source' => $source !== '' ? $source : $localized,
+                    'menu_order' => is_numeric($menuOrder)
+                        ? max(0, min(65535, (int) $menuOrder))
+                        : null,
                 ];
             })
             ->filter(fn (array $pair): bool => $pair['localized'] !== '')
@@ -991,6 +997,28 @@ final class WooCommerceClient
             throw new RuntimeException("WooCommerce zwrócił nieprawidłowe ID globalnego atrybutu {$sourceName}.");
         }
 
+        if (collect($optionPairs)->contains(fn (array $pair): bool => $pair['menu_order'] !== null)
+            && array_key_exists('order_by', $attribute)
+            && (string) $attribute['order_by'] !== 'menu_order'
+        ) {
+            $response = $this->request($integration)->put(
+                $this->endpoint($integration, "/products/attributes/{$attributeId}"),
+                ['order_by' => 'menu_order'],
+            );
+
+            if (! $response->successful()) {
+                throw new RuntimeException(
+                    "Ustawienie własnej kolejności globalnego atrybutu {$sourceName} zwróciło HTTP {$response->status()}.",
+                );
+            }
+
+            $updated = $response->json();
+            $attribute = is_array($updated)
+                ? array_merge($attribute, $updated)
+                : array_merge($attribute, ['order_by' => 'menu_order']);
+            $this->replaceGlobalProductAttributeCache($integration, $attribute);
+        }
+
         $resolvedOptions = [];
         $resolvedTermIds = [];
         $language = filled($language) ? mb_strtolower(trim((string) $language)) : null;
@@ -1005,6 +1033,8 @@ final class WooCommerceClient
                     $attributeId,
                     $pair['source'],
                     'pl',
+                    [],
+                    $pair['menu_order'],
                 );
                 $excludedTargetTermIds[] = (int) $sourceTerm['id'];
             }
@@ -1015,6 +1045,7 @@ final class WooCommerceClient
                 $pair['localized'],
                 $language,
                 $excludedTargetTermIds,
+                $pair['menu_order'],
             );
             $resolvedOptions[] = trim((string) ($term['name'] ?? $pair['localized'])) ?: $pair['localized'];
             $resolvedTermIds[] = (int) $term['id'];
@@ -1138,6 +1169,7 @@ final class WooCommerceClient
         string $option,
         ?string $language,
         array $excludedTermIds = [],
+        ?int $menuOrder = null,
     ): array {
         $language = filled($language) ? mb_strtolower(trim((string) $language)) : null;
         $term = $this->findGlobalProductAttributeTerm(
@@ -1160,10 +1192,16 @@ final class WooCommerceClient
 
             try {
                 // As above, never replay a mutating POST automatically.
-                $response = $this->request($integration, retry: false)->post($url, [
+                $termPayload = [
                     'name' => $option,
                     'slug' => $this->globalProductAttributeTermSlug($option, $language),
-                ]);
+                ];
+
+                if ($menuOrder !== null) {
+                    $termPayload['menu_order'] = max(0, min(65535, $menuOrder));
+                }
+
+                $response = $this->request($integration, retry: false)->post($url, $termPayload);
             } catch (Throwable $exception) {
                 $creationException = $exception;
             }
@@ -1197,6 +1235,31 @@ final class WooCommerceClient
                     $creationException,
                 );
             }
+        }
+
+        if ($menuOrder !== null
+            && array_key_exists('menu_order', $term)
+            && (int) $term['menu_order'] !== $menuOrder
+        ) {
+            $response = $this->request($integration)->put(
+                $this->endpoint(
+                    $integration,
+                    "/products/attributes/{$attributeId}/terms/".(int) $term['id'],
+                ),
+                ['menu_order' => $menuOrder],
+            );
+
+            if (! $response->successful()) {
+                throw new RuntimeException(
+                    "Ustawienie kolejności wartości {$option} globalnego atrybutu #{$attributeId} zwróciło HTTP {$response->status()}.",
+                );
+            }
+
+            $updated = $response->json();
+            $term = is_array($updated)
+                ? array_merge($term, $updated)
+                : array_merge($term, ['menu_order' => $menuOrder]);
+            $this->replaceGlobalProductAttributeTermCache($integration, $attributeId, $term);
         }
 
         return $term;
@@ -1465,6 +1528,27 @@ final class WooCommerceClient
         }
     }
 
+    /** @param array<string, mixed> $attribute */
+    private function replaceGlobalProductAttributeCache(
+        WordpressIntegration $integration,
+        array $attribute,
+    ): void {
+        $cacheKey = $this->globalProductAttributeCacheKey($integration);
+
+        if (! array_key_exists($cacheKey, $this->globalProductAttributesCache)) {
+            return;
+        }
+
+        $attributeId = (int) ($attribute['id'] ?? 0);
+        $this->globalProductAttributesCache[$cacheKey] = collect(
+            $this->globalProductAttributesCache[$cacheKey],
+        )
+            ->map(fn (array $cached): array => (int) ($cached['id'] ?? 0) === $attributeId
+                ? array_merge($cached, $attribute)
+                : $cached)
+            ->all();
+    }
+
     private function forgetGlobalProductAttributes(WordpressIntegration $integration): void
     {
         unset($this->globalProductAttributesCache[$this->globalProductAttributeCacheKey($integration)]);
@@ -1481,6 +1565,28 @@ final class WooCommerceClient
 
         if (array_key_exists($cacheKey, $this->globalProductAttributeTermsCache)) {
             $this->globalProductAttributeTermsCache[$cacheKey][] = $term;
+        }
+    }
+
+    /** @param array<string, mixed> $term */
+    private function replaceGlobalProductAttributeTermCache(
+        WordpressIntegration $integration,
+        int $attributeId,
+        array $term,
+    ): void {
+        $prefix = $this->globalProductAttributeCacheKey($integration).'|'.$attributeId.'|';
+        $termId = (int) ($term['id'] ?? 0);
+
+        foreach ($this->globalProductAttributeTermsCache as $cacheKey => $cachedTerms) {
+            if (! str_starts_with($cacheKey, $prefix)) {
+                continue;
+            }
+
+            $this->globalProductAttributeTermsCache[$cacheKey] = collect($cachedTerms)
+                ->map(fn (array $cached): array => (int) ($cached['id'] ?? 0) === $termId
+                    ? array_merge($cached, $term)
+                    : $cached)
+                ->all();
         }
     }
 
