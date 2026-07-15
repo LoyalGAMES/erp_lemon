@@ -1057,6 +1057,15 @@ class ProductController extends Controller
         ProductDataExportService $exportService,
         AuditLogService $audit,
     ): RedirectResponse {
+        $lock = Cache::lock(
+            ExportWooCommerceProductDataJob::lockKey($product->id),
+            ExportWooCommerceProductDataJob::LOCK_SECONDS,
+        );
+
+        if (! $lock->get()) {
+            return back()->with('status', 'Tworzenie lub synchronizacja tego produktu w WooCommerce już trwa.');
+        }
+
         try {
             $result = $exportService->create($product, $integration);
         } catch (\Throwable $exception) {
@@ -1067,6 +1076,8 @@ class ProductController extends Controller
             ]);
 
             return back()->with('error', $exception->getMessage());
+        } finally {
+            $lock->release();
         }
 
         $product->refresh();

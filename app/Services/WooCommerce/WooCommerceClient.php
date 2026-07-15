@@ -1214,23 +1214,152 @@ final class WooCommerceClient
     ): ?array {
         $slug = $this->globalProductAttributeTermSlug($option, $language);
         $normalizedName = mb_strtolower(trim($option));
-        $matches = collect($this->globalProductAttributeTerms($integration, $attributeId, $language))
-            ->filter(function (array $term) use ($slug, $normalizedName): bool {
-                return Str::slug((string) ($term['slug'] ?? '')) === $slug
-                    || mb_strtolower(trim((string) ($term['name'] ?? ''))) === $normalizedName;
-            })
+        $candidates = collect($this->globalProductAttributeTerms($integration, $attributeId, $language))
             ->filter(fn (array $term): bool => (int) ($term['id'] ?? 0) > 0)
             ->reject(fn (array $term): bool => in_array((int) $term['id'], $excludedTermIds, true))
             ->unique(fn (array $term): int => (int) $term['id'])
             ->values();
 
-        if ($matches->count() > 1) {
-            throw new RuntimeException(
-                "WooCommerce zawiera kilka wartości {$option} globalnego atrybutu #{$attributeId}; eksport został przerwany.",
-            );
+        $matches = $candidates
+            ->filter(function (array $term) use ($slug, $normalizedName): bool {
+                return Str::slug((string) ($term['slug'] ?? '')) === $slug
+                    || mb_strtolower(trim((string) ($term['name'] ?? ''))) === $normalizedName;
+            })
+            ->values();
+
+        if ($matches->isEmpty()) {
+            return null;
         }
 
-        return $matches->first();
+        if ($matches->count() === 1) {
+            $match = $matches->first();
+
+            if ($language === null) {
+                return $match;
+            }
+
+            if ($this->globalProductAttributeTermMatchesLanguage($match, $language)) {
+                return $match;
+            }
+
+            if ($this->globalProductAttributeTermHasLanguageIdentity($match)
+                || $this->globalProductAttributeTermHasForeignLocalizedSlug(
+                    $integration,
+                    $match,
+                    $option,
+                    $language,
+                )
+            ) {
+                return null;
+            }
+
+            return $match;
+        }
+
+        // Prefer an explicit Polylang identity when the REST response exposes
+        // it. Some installations return terms from more than one language even
+        // for a request containing ?lang=, so usage count alone must never be
+        // treated as a language signal.
+        $languageMatches = $language === null
+            ? collect()
+            : $matches->filter(
+                fn (array $term): bool => $this->globalProductAttributeTermMatchesLanguage($term, $language),
+            )->values();
+
+        if ($languageMatches->count() === 1) {
+            return $languageMatches->first();
+        }
+
+        if ($languageMatches->count() > 1) {
+            $matches = $languageMatches;
+        }
+
+        // Keep a legacy term that is already used by the catalog instead of
+        // switching products to an empty term left by an interrupted preflight.
+        // This is safe only for the language-neutral base slug in the Polish
+        // source language. A used `*-en` term must not win a Polish lookup.
+        $allCountsKnown = $matches->every(
+            fn (array $term): bool => array_key_exists('count', $term) && is_numeric($term['count']),
+        );
+        $usedMatches = $matches
+            ->filter(fn (array $term): bool => (int) ($term['count'] ?? 0) > 0)
+            ->values();
+
+        // Polylang installations can expose all language terms even when the
+        // WooCommerce REST request contains ?lang=. Labels such as "SEMPRE"
+        // are identical in PL and EN, while ERP's deterministic slugs remain
+        // distinct (sempre-pl / sempre-en). An exact localized slug is the only
+        // safe fallback when usage counts do not identify one canonical term.
+        $slugMatches = $matches
+            ->filter(fn (array $term): bool => Str::slug((string) ($term['slug'] ?? '')) === $slug)
+            ->values();
+
+        if ($usedMatches->count() > 1) {
+            $slugMatches = collect();
+        } elseif ($allCountsKnown && $usedMatches->count() === 1) {
+            $used = $usedMatches->first();
+            $usedSlug = Str::slug((string) ($used['slug'] ?? ''));
+            $baseSlug = $this->globalProductAttributeTermSlug($option);
+
+            if ($usedSlug === $slug
+                || ($language === 'pl' && $usedSlug === $baseSlug)
+            ) {
+                return $used;
+            }
+        }
+
+        if ($slugMatches->count() === 1) {
+            return $slugMatches->first();
+        }
+
+        $details = $matches
+            ->map(fn (array $term): string => sprintf(
+                '#%d slug=%s count=%s',
+                (int) ($term['id'] ?? 0),
+                trim((string) ($term['slug'] ?? '')) ?: '-',
+                array_key_exists('count', $term) ? (string) $term['count'] : '?',
+            ))
+            ->implode(', ');
+
+        throw new RuntimeException(
+            "WooCommerce zawiera kilka wartości {$option} globalnego atrybutu #{$attributeId} ({$details}); eksport został przerwany.",
+        );
+    }
+
+    /** @param array<string, mixed> $term */
+    private function globalProductAttributeTermHasLanguageIdentity(array $term): bool
+    {
+        return filled($term['lang'] ?? $term['language'] ?? null)
+            || array_key_exists('translations', $term);
+    }
+
+    /** @param array<string, mixed> $term */
+    private function globalProductAttributeTermMatchesLanguage(array $term, string $language): bool
+    {
+        $termId = (int) ($term['id'] ?? 0);
+        $termLanguage = mb_strtolower(trim((string) ($term['lang'] ?? $term['language'] ?? '')));
+        $translatedTermId = (int) data_get($term, "translations.{$language}", 0);
+
+        return $termLanguage === $language
+            || ($termId > 0 && $translatedTermId === $termId);
+    }
+
+    /** @param array<string, mixed> $term */
+    private function globalProductAttributeTermHasForeignLocalizedSlug(
+        WordpressIntegration $integration,
+        array $term,
+        string $option,
+        string $language,
+    ): bool {
+        $termSlug = Str::slug((string) ($term['slug'] ?? ''));
+
+        return collect($integration->productExportLanguages())
+            ->map(fn (mixed $candidate): string => mb_strtolower(trim((string) $candidate)))
+            ->filter(fn (string $candidate): bool => $candidate !== '' && $candidate !== $language)
+            ->contains(
+                fn (string $candidate): bool => $termSlug
+                    === $this->globalProductAttributeTermSlug($option, $candidate),
+            );
     }
 
     /**

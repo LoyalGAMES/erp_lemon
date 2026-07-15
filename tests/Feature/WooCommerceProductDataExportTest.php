@@ -3656,6 +3656,336 @@ class WooCommerceProductDataExportTest extends TestCase
             && str_contains($request->url(), '/products/attributes'));
     }
 
+    public function test_global_attribute_term_prefers_exact_localized_slug_over_duplicate_name_matches(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 701, 'name' => 'SEMPRE', 'slug' => 'sempre'],
+            ['id' => 702, 'name' => 'SEMPRE', 'slug' => 'sempre-pl'],
+            ['id' => 703, 'name' => 'SEMPRE', 'slug' => 'sempre-kopia'],
+        ]);
+        $integration = $this->createGlobalTermIntegration();
+
+        $resolved = app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+            $integration,
+            'Oficjalny producent',
+            ['SEMPRE'],
+            'pl',
+        );
+
+        $this->assertSame(90, $resolved['id']);
+        $this->assertSame(['SEMPRE'], $resolved['options']);
+        $this->assertSame([702], $resolved['term_ids']);
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes/90/terms'));
+    }
+
+    public function test_global_attribute_term_prefers_used_legacy_slug_over_empty_localized_slug(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 701, 'name' => 'SEMPRE', 'slug' => 'sempre', 'count' => 835],
+            ['id' => 702, 'name' => 'SEMPRE', 'slug' => 'sempre-pl', 'count' => 0],
+        ]);
+        $integration = $this->createGlobalTermIntegration();
+
+        $resolved = app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+            $integration,
+            'Oficjalny producent',
+            ['SEMPRE'],
+            'pl',
+        );
+
+        $this->assertSame(['SEMPRE'], $resolved['options']);
+        $this->assertSame([701], $resolved['term_ids']);
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes/90/terms'));
+    }
+
+    public function test_global_attribute_term_does_not_treat_a_used_foreign_language_term_as_polish(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 702, 'name' => 'SEMPRE', 'slug' => 'sempre-pl', 'count' => 0],
+            ['id' => 703, 'name' => 'SEMPRE', 'slug' => 'sempre-en', 'count' => 835],
+        ]);
+        $integration = $this->createGlobalTermIntegration();
+
+        $resolved = app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+            $integration,
+            'Oficjalny producent',
+            ['SEMPRE'],
+            'pl',
+        );
+
+        $this->assertSame([702], $resolved['term_ids']);
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes/90/terms'));
+    }
+
+    public function test_global_attribute_term_does_not_treat_a_single_explicit_english_term_as_polish(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 703, 'name' => 'SEMPRE', 'slug' => 'sempre-en', 'lang' => 'en', 'count' => 835],
+        ], function ($request) {
+            if ($request->method() === 'POST'
+                && str_contains($request->url(), '/wc/v3/products/attributes/90/terms')
+            ) {
+                return Http::response([
+                    'id' => 702,
+                    'name' => 'SEMPRE',
+                    'slug' => 'sempre-pl',
+                    'lang' => 'pl',
+                    'count' => 0,
+                ], 201);
+            }
+
+            return Http::response([], 404);
+        });
+        $integration = $this->createGlobalTermIntegration();
+
+        $resolved = app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+            $integration,
+            'Oficjalny producent',
+            ['SEMPRE'],
+            'pl',
+        );
+
+        $this->assertSame([702], $resolved['term_ids']);
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes/90/terms')
+            && $request['slug'] === 'sempre-pl');
+    }
+
+    public function test_global_attribute_term_does_not_reuse_an_implicit_polish_slug_for_english(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 702, 'name' => 'SEMPRE', 'slug' => 'sempre-pl', 'count' => 0],
+        ], function ($request) {
+            if ($request->method() === 'POST'
+                && str_contains($request->url(), '/wc/v3/products/attributes/90/terms')
+            ) {
+                return Http::response([
+                    'id' => 703,
+                    'name' => 'SEMPRE',
+                    'slug' => 'sempre-en',
+                    'count' => 0,
+                ], 201);
+            }
+
+            if ($request->method() === 'POST'
+                && str_contains($request->url(), '/catalog/products/attributes/90/terms/translations')
+            ) {
+                return Http::response([
+                    'linked' => true,
+                    'attribute_id' => 90,
+                    'translations' => ['en' => 703, 'pl' => 702],
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+        $integration = $this->createGlobalTermIntegration(['pl', 'en']);
+
+        $resolved = app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+            $integration,
+            'Oficjalny producent',
+            ['SEMPRE'],
+            'en',
+            ['SEMPRE'],
+        );
+
+        $this->assertSame([703], $resolved['term_ids']);
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes/90/terms')
+            && str_contains($request->url(), 'lang=en')
+            && $request['slug'] === 'sempre-en');
+    }
+
+    public function test_global_attribute_term_keeps_two_used_terms_ambiguous_even_with_one_exact_slug(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 701, 'name' => 'SEMPRE', 'slug' => 'sempre', 'count' => 835],
+            ['id' => 702, 'name' => 'SEMPRE', 'slug' => 'sempre-pl', 'count' => 12],
+        ]);
+        $integration = $this->createGlobalTermIntegration();
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('kilka wartości SEMPRE globalnego atrybutu #90');
+
+        app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+            $integration,
+            'Oficjalny producent',
+            ['SEMPRE'],
+            'pl',
+        );
+    }
+
+    public function test_global_attribute_term_keeps_identical_canonical_slugs_ambiguous_without_creating_another_term(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 702, 'name' => 'SEMPRE', 'slug' => 'sempre-pl'],
+            ['id' => 703, 'name' => 'SEMPRE', 'slug' => 'sempre-pl'],
+        ]);
+        $integration = $this->createGlobalTermIntegration();
+
+        try {
+            app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+                $integration,
+                'Oficjalny producent',
+                ['SEMPRE'],
+                'pl',
+            );
+            $this->fail('Dwa różne termy o kanonicznym slugu muszą pozostać niejednoznaczne.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'kilka wartości SEMPRE globalnego atrybutu #90',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes/90/terms'));
+    }
+
+    public function test_global_attribute_term_keeps_name_only_duplicate_slugs_ambiguous_without_creating_another_term(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 701, 'name' => 'SEMPRE', 'slug' => 'sempre', 'count' => 835],
+            ['id' => 703, 'name' => 'SEMPRE', 'slug' => 'sempre-kopia', 'count' => 12],
+        ]);
+        $integration = $this->createGlobalTermIntegration();
+
+        try {
+            app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+                $integration,
+                'Oficjalny producent',
+                ['SEMPRE'],
+                'pl',
+            );
+            $this->fail('Duplikaty nazwy bez kanonicznego sluga muszą pozostać niejednoznaczne.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'kilka wartości SEMPRE globalnego atrybutu #90',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes/90/terms'));
+    }
+
+    public function test_product_export_uses_canonical_sempre_term_and_does_not_create_a_duplicate(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 701, 'name' => 'SEMPRE', 'slug' => 'sempre'],
+            ['id' => 702, 'name' => 'SEMPRE', 'slug' => 'sempre-pl'],
+        ], function ($request) {
+            if ($request->method() === 'PUT'
+                && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
+            ) {
+                return Http::response(['id' => 123, 'sku' => 'SEMPRE-CANONICAL']);
+            }
+
+            return Http::response([], 404);
+        });
+        $integration = $this->createGlobalTermIntegration();
+        $product = Product::query()->create([
+            'sku' => 'SEMPRE-CANONICAL',
+            'name' => 'Produkt SEMPRE',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'content' => ['pl' => ['name' => 'Produkt SEMPRE']],
+                'parameters' => [[
+                    'name' => 'Oficjalny producent',
+                    'value' => 'SEMPRE',
+                ]],
+            ]],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $integration->sales_channel_id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        $result = app(ProductDataExportService::class)->export($product);
+
+        $this->assertSame(1, $result['exported']);
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
+            && $request['attributes'] === [[
+                'id' => 90,
+                'visible' => true,
+                'variation' => false,
+                'options' => ['SEMPRE'],
+            ]]);
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes/90/terms'));
+    }
+
+    public function test_unmapped_simple_product_creation_uses_used_legacy_sempre_term_without_creating_a_duplicate(): void
+    {
+        $this->fakeSempreGlobalAttributeTerms([
+            ['id' => 701, 'name' => 'SEMPRE', 'slug' => 'sempre', 'count' => 835],
+            ['id' => 702, 'name' => 'SEMPRE', 'slug' => 'sempre-pl', 'count' => 0],
+        ], function ($request) {
+            if ($request->method() === 'POST'
+                && $request->url() === 'https://shop.test/wp-json/wc/v3/products'
+            ) {
+                return Http::response([
+                    'id' => 321,
+                    'sku' => 'SEMPRE-NEW-SIMPLE',
+                    'name' => 'Nowy produkt SEMPRE',
+                    'permalink' => 'https://shop.test/produkt/nowy-produkt-sempre',
+                ], 201);
+            }
+
+            return Http::response([], 404);
+        });
+        $integration = $this->createGlobalTermIntegration();
+        $product = Product::query()->create([
+            'sku' => 'SEMPRE-NEW-SIMPLE',
+            'name' => 'Nowy produkt SEMPRE',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'simple',
+                'content' => ['pl' => ['name' => 'Nowy produkt SEMPRE']],
+                'parameters' => [[
+                    'name' => 'Oficjalny producent',
+                    'value' => 'SEMPRE',
+                ]],
+            ]],
+        ]);
+
+        $result = app(ProductDataExportService::class)->create($product, $integration);
+
+        $this->assertSame('321', $result['mapping']->external_product_id);
+        $this->assertDatabaseHas('product_channel_mappings', [
+            'product_id' => $product->id,
+            'sales_channel_id' => $integration->sales_channel_id,
+            'external_product_id' => '321',
+            'external_variation_id' => null,
+            'external_sku' => 'SEMPRE-NEW-SIMPLE',
+        ]);
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products'
+            && $request['attributes'] === [[
+                'id' => 90,
+                'visible' => true,
+                'variation' => false,
+                'options' => ['SEMPRE'],
+            ]]);
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes/90/terms'));
+    }
+
     public function test_global_attribute_failure_aborts_before_updating_existing_product(): void
     {
         Http::fake(function ($request) {
@@ -3752,6 +4082,55 @@ class WooCommerceProductDataExportTest extends TestCase
                     ],
                 ],
             ],
+        ]);
+    }
+
+    /**
+     * @param  list<array{id:int,name:string,slug:string,count?:int,lang?:string,language?:string,translations?:array<string,int>}>  $terms
+     */
+    private function fakeSempreGlobalAttributeTerms(array $terms, ?callable $fallback = null): void
+    {
+        Http::fake(function ($request) use ($terms, $fallback) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET' && $path === '/wp-json/wc/v3/products/attributes') {
+                return Http::response([[
+                    'id' => 90,
+                    'name' => 'Oficjalny producent',
+                    'slug' => 'pa_oficjalny-producent',
+                ]]);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/90/terms'
+            ) {
+                return Http::response($terms);
+            }
+
+            if (is_callable($fallback)) {
+                return $fallback($request);
+            }
+
+            return Http::response([], 404);
+        });
+    }
+
+    private function createGlobalTermIntegration(array $languages = ['pl']): WordpressIntegration
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        return WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => $languages]],
         ]);
     }
 

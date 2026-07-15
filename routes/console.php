@@ -12,6 +12,7 @@ use App\Services\Payments\PayuRefundService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippedOrderWooSyncService;
 use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
+use App\Services\WooCommerce\WooCommerceProductCreationRecoveryService;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -81,6 +82,25 @@ Artisan::command('erp:dispatch-legacy-variant-backfill {--limit=10 : Maximum num
 
     return $result['failed'] > 0 ? 1 : 0;
 })->purpose('Queue durable full WooCommerce exports for historical catalog repairs.');
+
+Artisan::command('erp:dispatch-woocommerce-product-creation-recovery {--limit=10 : Maximum number of failed product creations to queue} {--stale-minutes=120 : Replace an abandoned creation reservation after this many minutes}', function (): int {
+    $result = app(WooCommerceProductCreationRecoveryService::class)->dispatchPending(
+        max(1, (int) $this->option('limit')),
+        max(1, (int) $this->option('stale-minutes')),
+    );
+
+    $this->info(sprintf(
+        'WooCommerce product creation recovery: scanned %d, dispatched %d, active %d, backoff %d, skipped %d, failed %d.',
+        $result['scanned'],
+        $result['dispatched'],
+        $result['active'],
+        $result['backoff'],
+        $result['skipped'],
+        $result['failed'],
+    ));
+
+    return $result['failed'] > 0 ? 1 : 0;
+})->purpose('Queue durable retries for WooCommerce products whose initial creation was interrupted.');
 
 Artisan::command('erp:refresh-ksef-submissions {--limit=25 : Maximum number of KSeF submissions to refresh} {--minutes=2 : Refresh submissions older than this many minutes}', function (): int {
     $limit = max(1, (int) $this->option('limit'));
@@ -378,6 +398,11 @@ Schedule::command('erp:release-stale-woocommerce-imports --minutes=60')
 
 Schedule::command('erp:dispatch-legacy-variant-backfill --limit=10 --stale-minutes=120')
     ->cron('*/5 * * * *')
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:dispatch-woocommerce-product-creation-recovery --limit=10 --stale-minutes=120')
+    ->everyMinute()
     ->withoutOverlapping(10)
     ->runInBackground();
 
