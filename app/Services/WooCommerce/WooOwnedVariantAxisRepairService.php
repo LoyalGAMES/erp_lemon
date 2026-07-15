@@ -28,7 +28,7 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_owned_size_variant_axis_2026_07_15_000016';
+    public const REVISION = 'woo_owned_size_variant_axis_2026_07_15_000017';
 
     public const STATE_PATH = 'maintenance.woo_owned_variant_axis_repair';
 
@@ -214,6 +214,7 @@ final class WooOwnedVariantAxisRepairService
         }
 
         $targetResolution = $this->remoteTargets($product);
+        $variationOptionHints = $this->localVariationOptionHints($product);
 
         if ($targetResolution['error'] !== null) {
             return [
@@ -237,7 +238,12 @@ final class WooOwnedVariantAxisRepairService
                 $target['external_product_id'],
                 $this->apiLanguage($target['language']),
             );
-            $plan = $this->familyPlan($parent, $variations);
+            $plan = $this->familyPlan(
+                $parent,
+                $variations,
+                null,
+                $variationOptionHints,
+            );
 
             if ($plan['status'] === 'unsafe') {
                 return [
@@ -339,6 +345,7 @@ final class WooOwnedVariantAxisRepairService
                 $entry['parent'],
                 $entry['variations'],
                 $globalSize,
+                $variationOptionHints,
             );
 
             if ($resolvedPlan['status'] === 'unsafe' || $resolvedPlan['status'] === 'requires_global') {
@@ -927,6 +934,149 @@ final class WooOwnedVariantAxisRepairService
             $product,
             $product->variantChildren,
         ) !== null;
+    }
+
+    /**
+     * A small part of the historical catalog has variation rows whose remote
+     * option was erased while the variation ID/SKU, stock and local imported
+     * family stayed intact. Build a fail-closed SKU => Size hint from that
+     * local family. It is used only when the live row has no option; a live
+     * non-empty value must still agree with the hint.
+     *
+     * @return array<string, string> Canonical option keys keyed by uppercase SKU.
+     */
+    private function localVariationOptionHints(Product $product): array
+    {
+        $product->loadMissing('variantChildren');
+        $children = $product->variantChildren;
+
+        if ($children->isEmpty()) {
+            return [];
+        }
+
+        $declared = trim((string) data_get($product->masterData(), 'variant_attribute', ''));
+        $sizeAttribute = $this->variantOptions->isSizeAttribute($declared)
+            ? $declared
+            : $this->legacySizeAxis->recover($product, $children);
+
+        if ($sizeAttribute === null || ! $this->variantOptions->isSizeAttribute($sizeAttribute)) {
+            return [];
+        }
+
+        $parentOptions = collect((array) data_get($product->masterData(), 'parameters', []))
+            ->filter(fn (mixed $parameter): bool => is_array($parameter)
+                && collect([
+                    $parameter['name'] ?? null,
+                    $parameter['name_en'] ?? null,
+                    $parameter['slug'] ?? null,
+                ])->filter()->contains(fn (mixed $name): bool => $this->attributeKey((string) $name)
+                    === $this->attributeKey($sizeAttribute)))
+            ->flatMap(fn (array $parameter): Collection => $this->localOptionValues(
+                $parameter['value'] ?? null,
+            ));
+
+        if ($parentOptions->isEmpty()) {
+            $parentOptions = collect((array) data_get($product->attributes, 'woocommerce_attributes', []))
+                ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                    && $this->isSizeAttribute($attribute))
+                ->flatMap(fn (array $attribute): Collection => collect((array) ($attribute['options'] ?? [])));
+        }
+
+        $orderedOptions = $this->orderedSizeOptions($sizeAttribute, $parentOptions->all());
+        $canonicalByKey = collect($orderedOptions)
+            ->mapWithKeys(fn (string $option): array => [$this->optionKey($option) => $option]);
+
+        if ($canonicalByKey->isEmpty()) {
+            return [];
+        }
+
+        $hints = [];
+        $usedOptionKeys = [];
+
+        foreach ($children as $child) {
+            $sku = mb_strtoupper(trim((string) $child->sku));
+
+            if ($sku === '' || isset($hints[$sku])) {
+                return [];
+            }
+
+            $rawOptions = collect((array) data_get($child->masterData(), 'parameters', []))
+                ->filter(fn (mixed $parameter): bool => is_array($parameter)
+                    && collect([
+                        $parameter['name'] ?? null,
+                        $parameter['name_en'] ?? null,
+                        $parameter['slug'] ?? null,
+                    ])->filter()->contains(fn (mixed $name): bool => $this->legacySizeAxis->isLegacyGeneric(
+                        (string) $name,
+                    ) || $this->attributeKey((string) $name) === $this->attributeKey($sizeAttribute)))
+                ->flatMap(fn (array $parameter): Collection => $this->localOptionValues(
+                    $parameter['value'] ?? null,
+                ));
+
+            $relationOption = trim((string) data_get($child->pivot?->metadata, 'variant_option', ''));
+
+            if ($relationOption !== '') {
+                $rawOptions->push($relationOption);
+            }
+
+            collect((array) data_get(
+                $child->attributes,
+                'woocommerce_variation_attributes',
+                data_get($child->attributes, 'woocommerce_attributes', []),
+            ))
+                ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                    && ($this->isGenericAttribute($attribute) || $this->isSizeAttribute($attribute)))
+                ->each(function (array $attribute) use ($rawOptions): void {
+                    $option = trim((string) ($attribute['option'] ?? ''));
+
+                    if ($option !== '') {
+                        $rawOptions->push($option);
+                    }
+                });
+
+            $keys = $rawOptions
+                ->map(fn (mixed $option): string => $this->optionKey((string) $option))
+                ->filter()
+                ->unique()
+                ->values();
+
+            if ($keys->count() !== 1 || ! $canonicalByKey->has($keys->first())) {
+                return [];
+            }
+
+            $key = (string) $keys->first();
+
+            if (isset($usedOptionKeys[$key])) {
+                return [];
+            }
+
+            $usedOptionKeys[$key] = true;
+            $hints[$sku] = $key;
+        }
+
+        $expected = $canonicalByKey->keys()->sort()->values()->all();
+        $actual = collect(array_values($hints))->sort()->values()->all();
+
+        return $expected === $actual ? $hints : [];
+    }
+
+    /** @return Collection<int, string> */
+    private function localOptionValues(mixed $value): Collection
+    {
+        if (is_array($value)) {
+            return collect($value)
+                ->flatMap(fn (mixed $option): Collection => $this->localOptionValues($option))
+                ->values();
+        }
+
+        if (! is_scalar($value)) {
+            return collect();
+        }
+
+        return collect(preg_split('/\s*\|\s*/u', trim((string) $value)) ?: [])
+            ->map(fn (mixed $option): string => trim((string) $option))
+            ->filter()
+            ->values();
     }
 
     /**
@@ -1674,6 +1824,7 @@ final class WooOwnedVariantAxisRepairService
     /**
      * @param  array<string, mixed>  $parent
      * @param  list<array<string, mixed>>  $variations
+     * @param  array<string, string>  $variationOptionHints  Canonical option keys keyed by unique SKU.
      * @return array{
      *   status:'canonical'|'repair'|'requires_global'|'unsafe',
      *   reason:string,
@@ -1690,6 +1841,7 @@ final class WooOwnedVariantAxisRepairService
         array $parent,
         array $variations,
         ?array $resolvedGlobalSize = null,
+        array $variationOptionHints = [],
     ): array {
         if (isset($parent['type']) && (string) $parent['type'] !== 'variable') {
             return $this->unsafePlan('Produkt nie jest produktem wariantowym.');
@@ -1753,10 +1905,8 @@ final class WooOwnedVariantAxisRepairService
         $canonicalByKey = collect($orderedOptions)
             ->mapWithKeys(fn (string $option): array => [$this->optionKey($option) => $option]);
 
-        if ($canonicalByKey->isEmpty()
-            || $canonicalByKey->count() !== count((array) ($sourceSize['options'] ?? []))
-        ) {
-            return $this->unsafePlan('Rozmiar/Size zawiera puste albo zduplikowane wartości.');
+        if ($canonicalByKey->isEmpty()) {
+            return $this->unsafePlan('Rozmiar/Size nie zawiera żadnej jednoznacznej wartości.');
         }
 
         if ($sourceSizeId <= 0 && is_array($resolvedGlobalSize)) {
@@ -1827,8 +1977,12 @@ final class WooOwnedVariantAxisRepairService
                 $sourceSize,
                 $resolvedGlobalSize,
             ));
+            $sku = mb_strtoupper(trim((string) ($variation['sku'] ?? '')));
+            $hintKey = $sku === ''
+                ? ''
+                : trim((string) ($variationOptionHints[$sku] ?? ''));
 
-            if ($recognized->isEmpty() || $recognized->count() !== $rows->count()) {
+            if ($recognized->count() !== $rows->count()) {
                 return $this->unsafePlan("Wariant #{$variationId} ma dodatkową albo brakującą oś.");
             }
 
@@ -1840,14 +1994,20 @@ final class WooOwnedVariantAxisRepairService
                 ->unique()
                 ->values();
 
-            if ($keys->count() !== 1 || ! $canonicalByKey->has($keys->first())) {
+            if ($keys->isEmpty() && $hintKey !== '') {
+                $keys->push($hintKey);
+            }
+
+            if ($keys->count() !== 1
+                || ! $canonicalByKey->has($keys->first())
+                || ($hintKey !== '' && $hintKey !== $keys->first())
+            ) {
                 return $this->unsafePlan("Wariant #{$variationId} nie mapuje się 1:1 na globalny rozmiar.");
             }
 
             $optionKey = (string) $keys->first();
             $variationOptions[$variationId] = $canonicalByKey->get($optionKey);
             $variationOptionKeys[$variationId] = $optionKey;
-            $sku = mb_strtoupper(trim((string) ($variation['sku'] ?? '')));
 
             if ($sku !== '') {
                 if (isset($skuOptionKeys[$sku]) && $skuOptionKeys[$sku] !== $optionKey) {

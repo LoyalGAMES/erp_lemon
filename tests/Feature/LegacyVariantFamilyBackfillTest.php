@@ -284,7 +284,7 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
         ));
     }
 
-    public function test_latest_size_axis_repair_is_dispatched_before_a_newer_broad_backfill(): void
+    public function test_latest_size_axis_followup_is_dispatched_before_a_newer_broad_backfill(): void
     {
         Bus::fake();
         Http::fake(fn () => Http::response([
@@ -341,7 +341,7 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
         $service = app(LegacyVariantFamilyBackfillService::class);
         $service->markPendingRevision(
             $priorityProduct,
-            LegacyVariantFamilyBackfillService::LEGACY_SIZE_VARIANT_AXIS_RECOVERY_REVISION,
+            LegacyVariantFamilyBackfillService::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
         );
         $service->markPendingRevision($newerBroadProduct, 'older-broad-revision');
 

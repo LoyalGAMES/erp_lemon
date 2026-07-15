@@ -37,6 +37,8 @@ final class LegacyVariantFamilyBackfillService
 
     public const LEGACY_SIZE_VARIANT_AXIS_RECOVERY_REVISION = 'legacy_size_variant_axis_recovery_2026_07_15_000015';
 
+    public const LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION = 'legacy_size_variant_axis_followup_2026_07_15_000017';
+
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 
     /** @var array<string, bool> */
@@ -259,7 +261,11 @@ final class LegacyVariantFamilyBackfillService
         // A narrow corrective migration must not wait behind an older broad
         // catalog backfill. Dispatch its revision first, then continue the
         // normal newest-first queue without visiting the same mapping twice.
-        foreach ([self::LEGACY_SIZE_VARIANT_AXIS_RECOVERY_REVISION, null] as $priorityRevision) {
+        foreach ([
+            self::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
+            self::LEGACY_SIZE_VARIANT_AXIS_RECOVERY_REVISION,
+            null,
+        ] as $priorityRevision) {
             foreach ($this->pendingMappingCandidates($priorityRevision) as $mapping) {
                 if ($result['dispatched'] >= max(1, $limit)) {
                     break 2;
