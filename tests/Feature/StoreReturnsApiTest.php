@@ -186,6 +186,48 @@ class StoreReturnsApiTest extends TestCase
         $this->assertSame('Jan Testowy', data_get($returnCase->metadata, 'refund_recipient_name'));
     }
 
+    public function test_split_family_uses_cod_payment_from_child_order(): void
+    {
+        $order = $this->createOrder();
+        $order->update(['raw_payload' => []]);
+        ExternalOrder::query()->create([
+            'split_parent_order_id' => $order->id,
+            'split_root_order_id' => $order->id,
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_id' => '9001-COD',
+            'external_number' => '12345/S1',
+            'status' => 'completed',
+            'currency' => 'PLN',
+            'total_gross' => 0,
+            'billing_data' => $order->billing_data,
+            'raw_payload' => [
+                'payment_method' => 'inpost_cod',
+                'payment_method_title' => 'InPost – płatność przy odbiorze',
+            ],
+        ]);
+
+        $this->postJson('/api/store-returns/lookup-order', [
+            'order_reference' => '12345',
+            'contact' => 'klient@example.test',
+        ], $this->authHeaders())
+            ->assertOk()
+            ->assertJsonPath('order.refund_method', 'bank_transfer')
+            ->assertJsonPath('order.payment_method', 'InPost – płatność przy odbiorze');
+    }
+
+    public function test_unknown_payment_does_not_fall_back_to_cashback(): void
+    {
+        $order = $this->createOrder();
+        $order->update(['raw_payload' => ['payment_method' => 'custom_gateway']]);
+
+        $this->postJson('/api/store-returns/lookup-order', [
+            'order_reference' => '12345',
+            'contact' => 'klient@example.test',
+        ], $this->authHeaders())
+            ->assertOk()
+            ->assertJsonPath('order.refund_method', 'unavailable');
+    }
+
     public function test_store_return_rejects_quantity_above_remaining_returnable(): void
     {
         $this->createOrder();
@@ -682,6 +724,10 @@ class StoreReturnsApiTest extends TestCase
                 'phone' => '+48 123 123 123',
                 'first_name' => 'Jan',
                 'last_name' => 'Testowy',
+            ],
+            'raw_payload' => [
+                'payment_method' => 'stripe',
+                'payment_method_title' => 'Karta Stripe',
             ],
         ]);
 

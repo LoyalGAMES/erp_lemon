@@ -111,7 +111,7 @@ class LL_Returns_Order_Service {
 			'order_number'    => $order['order_number'],
 			'currency'        => $order['currency'],
 			'payment_method'  => isset( $order['payment_method'] ) ? $order['payment_method'] : '',
-			'refund_method'   => isset( $order['refund_method'] ) ? $order['refund_method'] : 'cashback',
+			'refund_method'   => isset( $order['refund_method'] ) ? $order['refund_method'] : 'unavailable',
 			'items'           => $items,
 		);
 	}
@@ -245,6 +245,22 @@ class LL_Returns_Order_Service {
 			return new WP_Error( 'll_returns_no_returnable_items', __( 'W tym zamowieniu nie ma produktow dostepnych do zwrotu.', 'lemon-woo-returns' ) );
 		}
 
+		$payment_method = strtolower( (string) $order->get_payment_method() );
+		$payment_title  = strtolower( (string) $order->get_payment_method_title() );
+		$payment_text   = $payment_method . ' ' . $payment_title;
+		$is_cod         = in_array( $payment_method, array( 'cod', 'cash_on_delivery', 'cash-on-delivery' ), true )
+			|| false !== strpos( $payment_text, 'pobran' )
+			|| false !== strpos( $payment_text, 'przy odbiorze' )
+			|| false !== strpos( $payment_text, 'cash on delivery' );
+		$is_online      = false;
+
+		foreach ( array( 'payu', 'stripe', 'paypal', 'przelewy24', 'p24', 'tpay', 'blik', 'autopay', 'woocommerce_payments' ) as $marker ) {
+			if ( false !== strpos( $payment_text, $marker ) ) {
+				$is_online = true;
+				break;
+			}
+		}
+
 		return array(
 			'source'          => 'woocommerce',
 			'order_id'        => (string) $order->get_id(),
@@ -256,7 +272,7 @@ class LL_Returns_Order_Service {
 			'customer_email'  => (string) $order->get_billing_email(),
 			'customer_phone'  => (string) $order->get_billing_phone(),
 			'payment_method'  => (string) $order->get_payment_method_title(),
-			'refund_method'   => 'cod' === $order->get_payment_method() ? 'bank_transfer' : 'cashback',
+			'refund_method'   => $is_cod ? 'bank_transfer' : ( $is_online ? 'cashback' : 'unavailable' ),
 			'accounted_return_references' => array(),
 			'items'           => $items,
 		);
@@ -415,7 +431,9 @@ class LL_Returns_Order_Service {
 			'customer_email'  => isset( $data['customer_email'] ) ? sanitize_email( (string) $data['customer_email'] ) : '',
 			'customer_phone'  => isset( $data['customer_phone'] ) ? sanitize_text_field( (string) $data['customer_phone'] ) : '',
 			'payment_method'  => isset( $data['payment_method'] ) ? sanitize_text_field( (string) $data['payment_method'] ) : '',
-			'refund_method'   => isset( $data['refund_method'] ) && 'bank_transfer' === sanitize_key( (string) $data['refund_method'] ) ? 'bank_transfer' : 'cashback',
+			'refund_method'   => isset( $data['refund_method'] ) && in_array( sanitize_key( (string) $data['refund_method'] ), array( 'bank_transfer', 'cashback' ), true )
+				? sanitize_key( (string) $data['refund_method'] )
+				: 'unavailable',
 			'accounted_return_references' => array_values( array_unique( $accounted_references ) ),
 			'items'           => $items,
 		);

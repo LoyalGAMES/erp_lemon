@@ -196,6 +196,11 @@ class LL_Returns_Shortcodes {
 							</div>
 						</div>
 
+						<div class="ll-returns__payment-option ll-returns__payment-option--warning" data-ll-payment-unavailable hidden>
+							<strong>Nie udało się rozpoznać płatności</strong>
+							<small>Nie możemy bezpiecznie dobrać sposobu zwrotu pieniędzy. Skontaktuj się z obsługą sklepu.</small>
+						</div>
+
 						<div class="ll-returns__actions ll-returns__actions--split">
 							<button type="button" class="ll-returns__button ll-returns__button--ghost" data-ll-returns-back="items"><?php echo esc_html( $texts['back_button'] ); ?></button>
 							<button type="submit" class="ll-returns__button ll-returns__button--primary"><?php echo esc_html( $texts['next_button'] ); ?></button>

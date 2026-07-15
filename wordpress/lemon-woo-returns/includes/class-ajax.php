@@ -143,9 +143,13 @@ class LL_Returns_Ajax {
 			$return_method = 'own_shipping';
 		}
 
-		$refund_method       = isset( $order['refund_method'] ) && 'bank_transfer' === $order['refund_method'] ? 'bank_transfer' : 'cashback';
+		$refund_method       = isset( $order['refund_method'] ) ? $order['refund_method'] : 'unavailable';
 		$refund_bank_account = '';
 		$refund_recipient    = '';
+
+		if ( ! in_array( $refund_method, array( 'cashback', 'bank_transfer' ), true ) ) {
+			$this->send_error( __( 'Nie udalo sie rozpoznac metody platnosci zamowienia. Skontaktuj sie z obsluga sklepu.', 'lemon-woo-returns' ), 422, 'll_returns_unknown_payment_method' );
+		}
 
 		if ( 'bank_transfer' === $refund_method ) {
 			$refund_bank_account = isset( $request['refund_bank_account'] ) ? preg_replace( '/\D+/', '', (string) wp_unslash( $request['refund_bank_account'] ) ) : '';

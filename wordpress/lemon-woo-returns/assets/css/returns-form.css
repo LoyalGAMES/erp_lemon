@@ -413,6 +413,11 @@
 	display: none;
 }
 
+.ll-returns__payment-option--warning {
+	border-color: var(--ll-returns-danger);
+	background: var(--ll-returns-error-bg);
+}
+
 .ll-returns__payment-option strong,
 .ll-returns__payment-option small {
 	display: block;

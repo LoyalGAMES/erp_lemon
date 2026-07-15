@@ -121,6 +121,7 @@
 		var cashbackOption = root.querySelector('[data-ll-cashback-option]');
 		var bankOption = root.querySelector('[data-ll-bank-option]');
 		var paymentSummary = root.querySelector('[data-ll-payment-method-summary]');
+		var paymentUnavailable = root.querySelector('[data-ll-payment-unavailable]');
 
 		if (ownShippingCopy) {
 			ownShippingCopy.textContent = cfg.ownShippingInstructions || '';
@@ -309,14 +310,19 @@
 
 		function preparePaymentStep() {
 			var isBankTransfer = state.order && state.order.refund_method === 'bank_transfer';
-			state.refundMethod = isBankTransfer ? 'bank_transfer' : 'cashback';
+			var isCashback = state.order && state.order.refund_method === 'cashback';
+			state.refundMethod = isBankTransfer ? 'bank_transfer' : (isCashback ? 'cashback' : 'unavailable');
 
 			if (cashbackOption) {
-				cashbackOption.hidden = isBankTransfer;
+				cashbackOption.hidden = !isCashback;
 			}
 
 			if (bankOption) {
 				bankOption.hidden = !isBankTransfer;
+			}
+
+			if (paymentUnavailable) {
+				paymentUnavailable.hidden = isBankTransfer || isCashback;
 			}
 
 			if (paymentSummary) {
@@ -388,6 +394,11 @@
 		if (paymentForm) {
 			paymentForm.addEventListener('submit', function (event) {
 				event.preventDefault();
+
+				if (state.refundMethod === 'unavailable') {
+					showNotice('Nie udało się rozpoznać metody płatności zamówienia. Skontaktuj się z obsługą sklepu.', 'error');
+					return;
+				}
 
 				var formData = new FormData(paymentForm);
 				var account = text(formData.get('refund_bank_account')).replace(/\D/g, '');

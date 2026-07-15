@@ -75,7 +75,10 @@ final class StoreReturnIntakeService
     public function serializeOrderForStore(ExternalOrder $order): array
     {
         $rootOrder = $this->rootOrder($order);
+        $family = $this->familyOrders($rootOrder);
         $state = $this->familyAvailability($rootOrder);
+        $paymentOrder = $family->first(fn (ExternalOrder $candidate): bool => filled(data_get($candidate->raw_payload, 'payment_method'))
+            || filled(data_get($candidate->raw_payload, 'payment_method_title'))) ?? $rootOrder;
 
         return [
             'source' => 'erp',
@@ -87,8 +90,8 @@ final class StoreReturnIntakeService
             'currency' => (string) $rootOrder->currency,
             'customer_email' => (string) data_get($rootOrder->billing_data, 'email', ''),
             'customer_phone' => (string) (data_get($rootOrder->billing_data, 'phone') ?: data_get($rootOrder->shipping_data, 'phone', '')),
-            'payment_method' => (string) (data_get($rootOrder->raw_payload, 'payment_method_title') ?: data_get($rootOrder->raw_payload, 'payment_method', '')),
-            'refund_method' => $this->paymentMethods->isCashOnDelivery($rootOrder) ? 'bank_transfer' : 'cashback',
+            'payment_method' => (string) (data_get($paymentOrder->raw_payload, 'payment_method_title') ?: data_get($paymentOrder->raw_payload, 'payment_method', '')),
+            'refund_method' => $this->refundMethodForOrderFamily($rootOrder, $family),
             'accounted_return_references' => $state['accounted_return_references'],
             'items' => collect($state['groups'])
                 ->map(function (array $group): array {
@@ -298,8 +301,14 @@ final class StoreReturnIntakeService
     /** @param array<string, mixed> $payload @return array{method:string,bank_account:?string,recipient_name:?string} */
     private function validatedRefundDetails(ExternalOrder $order, array $payload): array
     {
-        if (! $this->paymentMethods->isCashOnDelivery($order)) {
+        $refundMethod = $this->refundMethodForOrderFamily($order);
+
+        if ($refundMethod === 'cashback') {
             return ['method' => 'cashback', 'bank_account' => null, 'recipient_name' => null];
+        }
+
+        if ($refundMethod !== 'bank_transfer') {
+            throw new RuntimeException('Nie udało się jednoznacznie rozpoznać metody płatności zamówienia. Skontaktuj się z obsługą sklepu.');
         }
 
         $account = $this->paymentMethods->refundBankAccount([
@@ -317,6 +326,22 @@ final class StoreReturnIntakeService
             'bank_account' => $account,
             'recipient_name' => $recipient !== '' ? mb_substr($recipient, 0, 255) : null,
         ];
+    }
+
+    /** @param Collection<int, ExternalOrder>|null $family */
+    private function refundMethodForOrderFamily(ExternalOrder $order, ?Collection $family = null): string
+    {
+        $family ??= $this->familyOrders($order);
+
+        if ($family->contains(fn (ExternalOrder $candidate): bool => $this->paymentMethods->isCashOnDelivery($candidate))) {
+            return 'bank_transfer';
+        }
+
+        if ($family->contains(fn (ExternalOrder $candidate): bool => $this->paymentMethods->isOnline($candidate))) {
+            return 'cashback';
+        }
+
+        return 'unavailable';
     }
 
     private function contactMatchesOrder(ExternalOrder $order, string $contact): bool
