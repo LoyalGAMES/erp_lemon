@@ -168,10 +168,22 @@ final class WooCommerceImportService
                     $stats['duplicate_sku_resolved']++;
                 }
 
+                $existingAttributes = (array) $product->attributes;
+                $preserveSynchronizedVariantAxis = $this->shouldPreserveSynchronizedVariantAxis(
+                    $product,
+                );
                 $attributes = array_replace_recursive(
-                    (array) $product->attributes,
+                    $existingAttributes,
                     $this->woocommerceAttributes($item),
                 );
+
+                if ($preserveSynchronizedVariantAxis) {
+                    $attributes = $this->restoreSynchronizedVariantAxisAttributes(
+                        $attributes,
+                        $existingAttributes,
+                        $item,
+                    );
+                }
 
                 if (! $product->isErpMaster()) {
                     $incomingEan = $this->eanForImport($item);
@@ -195,6 +207,13 @@ final class WooCommerceImportService
                         (array) data_get($attributes, 'master', []),
                         $masterData,
                     );
+
+                    if ($preserveSynchronizedVariantAxis) {
+                        $mergedMaster = $this->restoreSynchronizedMasterVariantAxis(
+                            $mergedMaster,
+                            (array) data_get($existingAttributes, 'master', []),
+                        );
+                    }
                     $mergedMaster['media'] = $masterData['media'];
 
                     if ($product->isStorefrontHidden()) {
@@ -1580,12 +1599,25 @@ final class WooCommerceImportService
             return;
         }
 
+        $relationIdentity = [
+            'parent_product_id' => $parentMapping->product_id,
+            'child_product_id' => $product->id,
+            'relation_type' => 'variant',
+        ];
+        $existingRelation = ProductRelation::query()->where($relationIdentity)->first();
+        $preserveSynchronizedOrder = $existingRelation instanceof ProductRelation
+            && $this->shouldPreserveSynchronizedVariantAxis(
+                $product,
+            );
+
+        if ($preserveSynchronizedOrder) {
+            // The relation already carries the verified option, order and
+            // repair marker. A pre-repair payload must not replace any of it.
+            return;
+        }
+
         ProductRelation::query()->updateOrCreate(
-            [
-                'parent_product_id' => $parentMapping->product_id,
-                'child_product_id' => $product->id,
-                'relation_type' => 'variant',
-            ],
+            $relationIdentity,
             [
                 'sort_order' => $this->variationSortOrder($item),
                 'metadata' => [
@@ -1640,6 +1672,113 @@ final class WooCommerceImportService
         $kind = isset($item['variation_id']) ? 'VARIANT' : 'PARENT';
 
         return "WC-{$channel}-{$kind}-{$externalId}";
+    }
+
+    /**
+     * An import may have fetched the old text axis immediately before the
+     * axis-only repair acquired its family lock. Once the repair commits, that
+     * stale item must not be allowed to overwrite the verified local snapshot.
+     * Canonical incoming axes still pass through normally.
+     */
+    private function shouldPreserveSynchronizedVariantAxis(Product $product): bool
+    {
+        return data_get(
+            $product->masterData(),
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.revision',
+        ) === WooOwnedVariantAxisRepairService::REVISION;
+    }
+
+    /** @param array<string,mixed> $row */
+    private function isImportedAxisCandidate(array $row, int $currentId, bool $isVariation): bool
+    {
+        $name = (string) ($row['name'] ?? $row['slug'] ?? '');
+
+        return (int) ($row['id'] ?? 0) === $currentId
+            || $this->legacySizeAxis->isLegacyGeneric($name)
+            || $this->variantOptions->isSizeAttribute($name)
+            || (! $isVariation && (bool) ($row['variation'] ?? false));
+    }
+
+    /**
+     * @param  array<string,mixed>  $attributes
+     * @param  array<string,mixed>  $existingAttributes
+     * @param  array<string,mixed>  $item
+     * @return array<string,mixed>
+     */
+    private function restoreSynchronizedVariantAxisAttributes(
+        array $attributes,
+        array $existingAttributes,
+        array $item,
+    ): array {
+        $isVariation = isset($item['variation_id']);
+        $sourceKey = $isVariation ? 'woocommerce_variation_attributes' : 'woocommerce_attributes';
+        $currentRows = collect((array) data_get($existingAttributes, $sourceKey, []))
+            ->filter(fn (mixed $row): bool => is_array($row))
+            ->values();
+        $currentAxis = $currentRows->first(fn (array $row): bool => (int) ($row['id'] ?? 0) > 0
+            && ($isVariation
+                || (bool) ($row['variation'] ?? false)
+                    && $this->variantOptions->isSizeAttribute((string) ($row['name'] ?? $row['slug'] ?? ''))));
+
+        if (! is_array($currentAxis)) {
+            return $attributes;
+        }
+
+        if ($isVariation) {
+            $attributes['woocommerce_variation_attributes'] = [$currentAxis];
+            $attributes['woocommerce_attributes'] = [$currentAxis];
+
+            return $attributes;
+        }
+
+        $currentId = (int) $currentAxis['id'];
+        $incomingNonAxes = collect((array) ($item['attributes'] ?? []))
+            ->filter(fn (mixed $row): bool => is_array($row))
+            ->reject(fn (array $row): bool => $this->isImportedAxisCandidate($row, $currentId, false))
+            ->values();
+        $attributes['woocommerce_attributes'] = $incomingNonAxes
+            ->push($currentAxis)
+            ->sortBy(fn (array $row): int => (int) ($row['position'] ?? PHP_INT_MAX))
+            ->values()
+            ->all();
+        $currentDefaults = collect((array) data_get(
+            $existingAttributes,
+            'woocommerce_default_attributes',
+            [],
+        ))->filter(fn (mixed $row): bool => is_array($row))->values()->all();
+        $attributes['woocommerce_default_attributes'] = $currentDefaults;
+
+        return $attributes;
+    }
+
+    /**
+     * @param  array<string,mixed>  $mergedMaster
+     * @param  array<string,mixed>  $existingMaster
+     * @return array<string,mixed>
+     */
+    private function restoreSynchronizedMasterVariantAxis(
+        array $mergedMaster,
+        array $existingMaster,
+    ): array {
+        $mergedMaster['variant_attribute'] = $existingMaster['variant_attribute'] ?? 'Rozmiar';
+        $currentAxisParameters = collect((array) ($existingMaster['parameters'] ?? []))
+            ->filter(fn (mixed $parameter): bool => is_array($parameter))
+            ->filter(fn (array $parameter): bool => (bool) ($parameter['variation'] ?? false)
+                || $this->legacySizeAxis->isLegacyGeneric((string) ($parameter['name'] ?? ''))
+                || $this->variantOptions->isSizeAttribute((string) ($parameter['name'] ?? '')))
+            ->values();
+        $nonAxisParameters = collect((array) ($mergedMaster['parameters'] ?? []))
+            ->filter(fn (mixed $parameter): bool => is_array($parameter))
+            ->reject(fn (array $parameter): bool => (bool) ($parameter['variation'] ?? false)
+                || $this->legacySizeAxis->isLegacyGeneric((string) ($parameter['name'] ?? ''))
+                || $this->variantOptions->isSizeAttribute((string) ($parameter['name'] ?? '')))
+            ->values();
+        $mergedMaster['parameters'] = $nonAxisParameters
+            ->concat($currentAxisParameters)
+            ->values()
+            ->all();
+
+        return $mergedMaster;
     }
 
     /**

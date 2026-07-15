@@ -31,6 +31,7 @@ use App\Services\Products\ProductVariantInheritanceService;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceProductCreationRecoveryService;
+use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -1061,9 +1062,17 @@ class ProductController extends Controller
         ProductDataExportService $exportService,
         AuditLogService $audit,
         ProductStorefrontVisibilityService $storefront,
+        WooOwnedVariantAxisRepairService $axisRepair,
     ): RedirectResponse {
+        if ($axisRepair->blocksFullExport($product)) {
+            return back()->with(
+                'error',
+                'Ta historyczna rodzina ma zablokowany pełny eksport do czasu bezpiecznej naprawy osi Rozmiar w ERP i WooCommerce.',
+            );
+        }
+
         $lock = Cache::lock(
-            ExportWooCommerceProductDataJob::lockKey($product->id),
+            ExportWooCommerceProductDataJob::lockKey($axisRepair->familyRootId((int) $product->id)),
             ExportWooCommerceProductDataJob::LOCK_SECONDS,
         );
 

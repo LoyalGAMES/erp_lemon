@@ -154,6 +154,88 @@ final class LegacyVariantFamilyBackfillService
     }
 
     /**
+     * Durably request and, when the integration is ready, immediately queue a
+     * full export for one exact product family. A currently active export is
+     * left untouched; its completion observes the newer requested revision
+     * and leaves a follow-up pass pending.
+     *
+     * @return 'dispatched'|'active'|'backoff'|'unready'|'missing'
+     */
+    public function queueProductRevision(
+        Product $product,
+        string $revision,
+        int $staleMinutes = 120,
+    ): string {
+        if ($this->markPendingRevision($product, $revision) === 0) {
+            return 'missing';
+        }
+
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $product->id)
+            ->where(function ($query): void {
+                $query
+                    ->whereNull('external_variation_id')
+                    ->orWhereIn('external_variation_id', ['', '0'])
+                    ->orWhereRaw("TRIM(external_variation_id) = ''");
+            })
+            ->orderBy('id')
+            ->first();
+
+        if (! $mapping instanceof ProductChannelMapping) {
+            return 'missing';
+        }
+
+        $localState = $this->localReservationState($mapping, max(1, $staleMinutes));
+
+        if ($localState === 'active') {
+            return 'active';
+        }
+
+        if ($localState === 'backoff') {
+            return 'backoff';
+        }
+
+        // Queue workers are long-lived; a plugin upgrade must be observable
+        // immediately instead of reusing readiness from an earlier attempt.
+        $this->integrationReadiness = [];
+
+        if (! $this->productIntegrationsReady((int) $product->id)) {
+            return 'unready';
+        }
+
+        $reservation = $this->reserve((int) $mapping->id, max(1, $staleMinutes));
+
+        if ($reservation['status'] === 'active') {
+            return 'active';
+        }
+
+        if ($reservation['status'] === 'backoff') {
+            return 'backoff';
+        }
+
+        if ($reservation['status'] !== 'reserved') {
+            return 'missing';
+        }
+
+        try {
+            ExportWooCommerceProductDataJob::dispatch(
+                $reservation['product_id'],
+                $reservation['token'],
+            )->onConnection('database');
+        } catch (Throwable $exception) {
+            $this->releaseFailedReservation(
+                $reservation['product_id'],
+                $reservation['token'],
+                $exception,
+            );
+
+            throw $exception;
+        }
+
+        return 'dispatched';
+    }
+
+    /**
      * @return array{scanned: int, dispatched: int, skipped_active: int, skipped_backoff: int, skipped_unready: int, failed: int}
      */
     public function dispatchPending(int $limit = 10, int $staleMinutes = 120): array

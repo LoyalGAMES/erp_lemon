@@ -10,6 +10,7 @@ use App\Models\ProductChannelMapping;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
 use App\Services\WooCommerce\ProductDataExportService;
+use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
@@ -47,7 +48,9 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
         }
 
         return [
-            (new WithoutOverlapping(self::lockKey($this->productId)))
+            (new WithoutOverlapping(self::lockKey(
+                app(WooOwnedVariantAxisRepairService::class)->familyRootId($this->productId),
+            )))
                 ->releaseAfter(60)
                 ->expireAfter(self::LOCK_SECONDS)
                 ->withPrefix('')
@@ -60,8 +63,10 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
         return "woocommerce-product-data:{$productId}";
     }
 
-    public function handle(ProductDataExportService $exporter): void
-    {
+    public function handle(
+        ProductDataExportService $exporter,
+        ?WooOwnedVariantAxisRepairService $axisRepair = null,
+    ): void {
         try {
             $product = Product::query()
                 ->with('channelMappings.salesChannel')
@@ -72,6 +77,14 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
             }
 
             if (! $this->hasCurrentSyncToken($product)) {
+                return;
+            }
+
+            if (($axisRepair ?? app(WooOwnedVariantAxisRepairService::class))->blocksFullExport($product)) {
+                // Keep the current export token and let the queue retry after
+                // both the remote and local family axes are canonical.
+                $this->release(60);
+
                 return;
             }
 

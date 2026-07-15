@@ -798,6 +798,87 @@ final class WooCommerceClient
     }
 
     /**
+     * Read one product without running the broad catalog-import transformer.
+     * Corrective jobs use the live Woo payload as their safety preflight and
+     * must never infer the current attribute axis from a stale ERP snapshot.
+     *
+     * @return array<string, mixed>
+     */
+    public function productById(
+        WordpressIntegration $integration,
+        string $externalProductId,
+    ): array {
+        $response = $this->request($integration)->get($this->endpoint(
+            $integration,
+            "/products/{$externalProductId}",
+        ));
+
+        if (! $response->successful()) {
+            throw new RuntimeException(
+                "Pobranie produktu WooCommerce #{$externalProductId} zwróciło HTTP {$response->status()}.",
+            );
+        }
+
+        $json = $response->json();
+
+        return is_array($json) ? $json : [];
+    }
+
+    /**
+     * Read raw variations for one exact translated parent. Unlike the import
+     * iterator, this method keeps their real parent/variation IDs and payload.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function productVariationsByParent(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        ?string $language = null,
+    ): array {
+        $items = [];
+
+        for ($page = 1; $page <= 50; $page++) {
+            $query = [
+                'per_page' => 100,
+                'page' => $page,
+            ];
+
+            if (filled($language)) {
+                $query['lang'] = mb_strtolower(trim((string) $language));
+            }
+
+            $response = $this->request($integration)->get(
+                $this->endpoint($integration, "/products/{$externalProductId}/variations"),
+                $query,
+            );
+
+            if (! $response->successful()) {
+                throw new RuntimeException(
+                    "Pobranie wariantów WooCommerce #{$externalProductId} zwróciło HTTP {$response->status()} na stronie {$page}.",
+                );
+            }
+
+            $variations = $response->json();
+
+            if (! is_array($variations) || $variations === []) {
+                break;
+            }
+
+            foreach ($variations as $variation) {
+                if (is_array($variation)) {
+                    $items[] = $variation;
+                }
+            }
+
+            if (count($variations) < 100) {
+                break;
+            }
+        }
+
+        return $items;
+    }
+
+    /**
      * Create a translated variation without assigning the canonical SKU until
      * Polylang has linked it to the primary variation. WooCommerce otherwise
      * rejects the second post as a duplicate SKU. The deterministic temporary
@@ -1283,6 +1364,42 @@ final class WooCommerceClient
             'options' => $resolvedOptions,
             'term_ids' => $resolvedTermIds,
         ];
+    }
+
+    /**
+     * Resolve an already existing global product attribute without creating or
+     * changing anything in WooCommerce. Maintenance repairs use this read-only
+     * path so a custom-text legacy attribute can never create a second taxonomy.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function globalProductAttributeByName(
+        WordpressIntegration $integration,
+        string $sourceName,
+    ): ?array {
+        return $this->findGlobalProductAttribute($integration, $sourceName);
+    }
+
+    /**
+     * Read the existing terms of a global product attribute without creating,
+     * translating or reordering them.
+     *
+     * @return list<array<string, mixed>>
+     */
+    public function globalProductAttributeTermsById(
+        WordpressIntegration $integration,
+        int $attributeId,
+        ?string $language = null,
+    ): array {
+        if ($attributeId <= 0) {
+            throw new RuntimeException('Pobranie wartości globalnego atrybutu wymaga prawidłowego ID.');
+        }
+
+        return $this->globalProductAttributeTerms(
+            $integration,
+            $attributeId,
+            filled($language) ? mb_strtolower(trim((string) $language)) : null,
+        );
     }
 
     /** @param array<string, int> $translations */
@@ -2487,6 +2604,45 @@ final class WooCommerceClient
         $json = $response->json();
 
         return is_array($json) ? $json : [];
+    }
+
+    /**
+     * Correct a legacy variation axis with a mechanically restricted payload.
+     * This guard prevents a maintenance job from ever sending commercial or
+     * editorial fields such as stock, prices, dates, content or images.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    public function updateProductVariantAxisByIds(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        ?string $externalVariationId,
+        array $payload,
+        ?string $language = null,
+    ): array {
+        $allowedKeys = filled($externalVariationId)
+            ? ['attributes', 'menu_order']
+            : ['attributes', 'default_attributes'];
+        $unexpectedKeys = array_values(array_diff(array_keys($payload), $allowedKeys));
+
+        if ($unexpectedKeys !== []) {
+            throw new RuntimeException(
+                'Naprawa osi wariantów zawiera niedozwolone pola: '.implode(', ', $unexpectedKeys).'.',
+            );
+        }
+
+        if (! isset($payload['attributes']) || ! is_array($payload['attributes'])) {
+            throw new RuntimeException('Naprawa osi wariantów wymaga jawnej listy atrybutów.');
+        }
+
+        return $this->updateProductDataByIds(
+            $integration,
+            $externalProductId,
+            $externalVariationId,
+            $payload,
+            $language,
+        );
     }
 
     /**
