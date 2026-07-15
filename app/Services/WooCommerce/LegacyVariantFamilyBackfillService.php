@@ -39,6 +39,10 @@ final class LegacyVariantFamilyBackfillService
 
     public const LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION = 'legacy_size_variant_axis_followup_2026_07_15_000017';
 
+    public const LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION = 'legacy_size_parent_term_order_followup_2026_07_15_000018';
+
+    public const CRITICAL_EXPORT_QUEUE = 'woocommerce-critical';
+
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 
     /** @var array<string, bool> */
@@ -220,10 +224,19 @@ final class LegacyVariantFamilyBackfillService
         }
 
         try {
-            ExportWooCommerceProductDataJob::dispatch(
-                $reservation['product_id'],
-                $reservation['token'],
-            )->onConnection('database');
+            if ($revision === self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION) {
+                ExportWooCommerceProductDataJob::dispatch(
+                    $reservation['product_id'],
+                    $reservation['token'],
+                )
+                    ->onConnection('database')
+                    ->onQueue(self::CRITICAL_EXPORT_QUEUE);
+            } else {
+                ExportWooCommerceProductDataJob::dispatch(
+                    $reservation['product_id'],
+                    $reservation['token'],
+                )->onConnection('database');
+            }
         } catch (Throwable $exception) {
             $this->releaseFailedReservation(
                 $reservation['product_id'],
@@ -262,6 +275,7 @@ final class LegacyVariantFamilyBackfillService
         // catalog backfill. Dispatch its revision first, then continue the
         // normal newest-first queue without visiting the same mapping twice.
         foreach ([
+            self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
             self::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
             self::LEGACY_SIZE_VARIANT_AXIS_RECOVERY_REVISION,
             null,
@@ -321,10 +335,22 @@ final class LegacyVariantFamilyBackfillService
                 }
 
                 try {
-                    ExportWooCommerceProductDataJob::dispatch(
-                        $reservation['product_id'],
-                        $reservation['token'],
-                    )->onConnection('database');
+                    if (data_get(
+                        $mapping->metadata,
+                        self::BACKFILL_PATH.'.revision',
+                    ) === self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION) {
+                        ExportWooCommerceProductDataJob::dispatch(
+                            $reservation['product_id'],
+                            $reservation['token'],
+                        )
+                            ->onConnection('database')
+                            ->onQueue(self::CRITICAL_EXPORT_QUEUE);
+                    } else {
+                        ExportWooCommerceProductDataJob::dispatch(
+                            $reservation['product_id'],
+                            $reservation['token'],
+                        )->onConnection('database');
+                    }
                     $result['dispatched']++;
                 } catch (Throwable $exception) {
                     report($exception);

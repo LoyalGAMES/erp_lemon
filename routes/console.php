@@ -662,7 +662,7 @@ Schedule::command('erp:release-stale-woocommerce-imports --minutes=60')
     ->runInBackground();
 
 Schedule::command('erp:dispatch-legacy-variant-backfill --limit=10 --stale-minutes=120')
-    ->cron('*/5 * * * *')
+    ->everyMinute()
     ->withoutOverlapping(10)
     ->runInBackground();
 
@@ -706,11 +706,17 @@ Schedule::command('erp:send-unpaid-order-reminders --limit=100')
     ->withoutOverlapping(10)
     ->runInBackground();
 
+// Keep corrective catalog traffic isolated from the default queue. A bounded
+// repair worker gives it prompt progress without starving stock, order, KSeF,
+// import, or other operational jobs handled by the default worker below.
+Schedule::command('queue:work --queue=woocommerce-critical,woocommerce-repair --stop-when-empty --sleep=1 --tries=2 --timeout=900 --max-jobs=30 --max-time=3300')
+    ->everyMinute()
+    ->withoutOverlapping(60)
+    ->runInBackground();
+
 // Production uses the database queue by default. Drain it from the same
-// scheduler installed during deploy so imports, KSeF and stock jobs do not
-// silently wait forever when a separate Supervisor worker is unavailable.
-// The database queue remains safe when a dedicated worker is running too.
-Schedule::command('queue:work --stop-when-empty --sleep=1 --tries=2 --timeout=900 --max-time=3300')
+// scheduler installed during deploy when Supervisor is unavailable.
+Schedule::command('queue:work --queue=default --stop-when-empty --sleep=1 --tries=2 --timeout=900 --max-time=3300')
     ->everyMinute()
     ->withoutOverlapping(60)
     ->runInBackground();

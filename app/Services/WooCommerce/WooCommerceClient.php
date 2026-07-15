@@ -1297,9 +1297,11 @@ final class WooCommerceClient
             throw new RuntimeException("WooCommerce zwrócił nieprawidłowe ID globalnego atrybutu {$sourceName}.");
         }
 
+        // An omitted field is not confirmation that the remote taxonomy uses
+        // the requested order. Some Woo/Polylang response filters remove it,
+        // while the storefront then falls back to alphabetical term order.
         if (collect($optionPairs)->contains(fn (array $pair): bool => $pair['menu_order'] !== null)
-            && array_key_exists('order_by', $attribute)
-            && (string) $attribute['order_by'] !== 'menu_order'
+            && (string) ($attribute['order_by'] ?? '') !== 'menu_order'
         ) {
             $response = $this->request($integration)->put(
                 $this->endpoint($integration, "/products/attributes/{$attributeId}"),
@@ -1313,9 +1315,11 @@ final class WooCommerceClient
             }
 
             $updated = $response->json();
-            $attribute = is_array($updated)
-                ? array_merge($attribute, $updated)
-                : array_merge($attribute, ['order_by' => 'menu_order']);
+            $attribute = array_merge(
+                $attribute,
+                is_array($updated) ? $updated : [],
+                ['order_by' => 'menu_order'],
+            );
             $this->replaceGlobalProductAttributeCache($integration, $attribute);
         }
 
@@ -1573,9 +1577,12 @@ final class WooCommerceClient
             }
         }
 
+        // Treat a missing response field as unknown and write the canonical
+        // value once. The updated response is cached, keeping later calls in
+        // this export idempotent.
         if ($menuOrder !== null
-            && array_key_exists('menu_order', $term)
-            && (int) $term['menu_order'] !== $menuOrder
+            && (! array_key_exists('menu_order', $term)
+                || (int) $term['menu_order'] !== $menuOrder)
         ) {
             $response = $this->request($integration)->put(
                 $this->endpoint(
@@ -1592,9 +1599,11 @@ final class WooCommerceClient
             }
 
             $updated = $response->json();
-            $term = is_array($updated)
-                ? array_merge($term, $updated)
-                : array_merge($term, ['menu_order' => $menuOrder]);
+            $term = array_merge(
+                $term,
+                is_array($updated) ? $updated : [],
+                ['menu_order' => $menuOrder],
+            );
             $this->replaceGlobalProductAttributeTermCache($integration, $attributeId, $term);
         }
 

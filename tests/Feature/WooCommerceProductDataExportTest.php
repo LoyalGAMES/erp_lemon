@@ -4319,6 +4319,80 @@ class WooCommerceProductDataExportTest extends TestCase
         )->count());
     }
 
+    public function test_global_attribute_sync_repairs_order_when_woocommerce_omits_order_fields(): void
+    {
+        $attribute = [
+            'id' => 90,
+            'name' => 'Rozmiar',
+            'slug' => 'pa_rozmiar',
+        ];
+        $terms = [
+            ['id' => 701, 'name' => 'S/M', 'slug' => 's-m'],
+            ['id' => 702, 'name' => 'M/L', 'slug' => 'm-l'],
+        ];
+
+        Http::fake(function ($request) use (&$attribute, &$terms) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET' && $path === '/wp-json/wc/v3/products/attributes') {
+                return Http::response([$attribute]);
+            }
+
+            if ($request->method() === 'PUT' && $path === '/wp-json/wc/v3/products/attributes/90') {
+                // Reproduce a response filter that strips the order field
+                // even though Woo accepted the requested mutation.
+                return Http::response($attribute);
+            }
+
+            if ($request->method() === 'GET' && $path === '/wp-json/wc/v3/products/attributes/90/terms') {
+                return Http::response($terms);
+            }
+
+            if ($request->method() === 'PUT'
+                && preg_match('#^/wp-json/wc/v3/products/attributes/90/terms/(\d+)$#', $path, $matches) === 1
+            ) {
+                $termId = (int) $matches[1];
+                $index = collect($terms)->search(
+                    fn (array $term): bool => (int) $term['id'] === $termId,
+                );
+
+                // The term response may omit menu_order for the same reason.
+                return Http::response($terms[$index]);
+            }
+
+            return Http::response([], 404);
+        });
+        $integration = $this->createGlobalTermIntegration(['pl']);
+        $client = app(WooCommerceClient::class);
+
+        $resolved = $client->ensureGlobalProductAttribute(
+            $integration,
+            'Rozmiar',
+            ['S/M', 'M/L'],
+            'pl',
+            ['S/M', 'M/L'],
+            [10, 20],
+        );
+
+        $this->assertSame(['S/M', 'M/L'], $resolved['options']);
+        $this->assertSame(3, Http::recorded()->filter(
+            fn (array $pair): bool => $pair[0]->method() === 'PUT',
+        )->count());
+
+        $client->ensureGlobalProductAttribute(
+            $integration,
+            'Rozmiar',
+            ['S/M', 'M/L'],
+            'pl',
+            ['S/M', 'M/L'],
+            [10, 20],
+        );
+
+        $this->assertSame(3, Http::recorded()->filter(
+            fn (array $pair): bool => $pair[0]->method() === 'PUT',
+        )->count());
+    }
+
     public function test_export_matches_normalized_size_option_to_spaced_dictionary_value_order(): void
     {
         $this->fakeWooWithGlobalAttributes(function ($request) {
@@ -5031,10 +5105,26 @@ class WooCommerceProductDataExportTest extends TestCase
                         'id' => $nextAttributeId++,
                         'name' => (string) $request['name'],
                         'slug' => (string) $request['slug'],
+                        'order_by' => (string) ($request['order_by'] ?? 'menu_order'),
                     ];
                     $attributes[$attribute['slug']] = $attribute;
 
                     return Http::response($attribute, 201);
+                }
+            }
+
+            if (preg_match('#^/wp-json/wc/v3/products/attributes/(\d+)$#', $path, $matches) === 1
+                && $request->method() === 'PUT'
+            ) {
+                $attributeId = (int) $matches[1];
+                $key = collect($attributes)->search(
+                    fn (array $attribute): bool => (int) $attribute['id'] === $attributeId,
+                );
+
+                if ($key !== false) {
+                    $attributes[$key]['order_by'] = (string) $request['order_by'];
+
+                    return Http::response($attributes[$key]);
                 }
             }
 
@@ -5060,12 +5150,33 @@ class WooCommerceProductDataExportTest extends TestCase
                         'id' => $nextTermId++,
                         'name' => (string) $request['name'],
                         'slug' => (string) $request['slug'],
+                        'menu_order' => (int) ($request['menu_order'] ?? 0),
                         '_language' => $language,
                     ];
                     $terms[$attributeId][] = $term;
                     unset($term['_language']);
 
                     return Http::response($term, 201);
+                }
+            }
+
+            if (preg_match(
+                '#^/wp-json/wc/v3/products/attributes/(\d+)/terms/(\d+)$#',
+                $path,
+                $matches,
+            ) === 1 && $request->method() === 'PUT') {
+                $attributeId = (int) $matches[1];
+                $termId = (int) $matches[2];
+                $index = collect($terms[$attributeId] ?? [])->search(
+                    fn (array $term): bool => (int) $term['id'] === $termId,
+                );
+
+                if ($index !== false) {
+                    $terms[$attributeId][$index]['menu_order'] = (int) $request['menu_order'];
+                    $term = $terms[$attributeId][$index];
+                    unset($term['_language']);
+
+                    return Http::response($term);
                 }
             }
 

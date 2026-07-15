@@ -284,7 +284,7 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
         ));
     }
 
-    public function test_latest_size_axis_followup_is_dispatched_before_a_newer_broad_backfill(): void
+    public function test_latest_parent_term_order_followup_uses_critical_queue_before_a_newer_broad_backfill(): void
     {
         Bus::fake();
         Http::fake(fn () => Http::response([
@@ -341,13 +341,18 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
         $service = app(LegacyVariantFamilyBackfillService::class);
         $service->markPendingRevision(
             $priorityProduct,
-            LegacyVariantFamilyBackfillService::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
+            LegacyVariantFamilyBackfillService::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
         );
         $service->markPendingRevision($newerBroadProduct, 'older-broad-revision');
 
         $result = $service->dispatchPending(1);
 
         $this->assertSame(1, $result['dispatched']);
+        Bus::assertDispatched(
+            ExportWooCommerceProductDataJob::class,
+            fn (ExportWooCommerceProductDataJob $job): bool => $job->queue
+                === LegacyVariantFamilyBackfillService::CRITICAL_EXPORT_QUEUE,
+        );
         Bus::assertDispatched(ExportWooCommerceProductDataJob::class, 1);
         $this->assertSame('queued', data_get(
             $priorityMapping->refresh()->metadata,
@@ -365,6 +370,57 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
             $newerBroadMapping->metadata,
             'product_data_export.pending_token',
         ));
+    }
+
+    public function test_regular_backfill_stays_on_the_default_queue_and_full_export_failures_back_off(): void
+    {
+        Bus::fake();
+        Http::fake(fn () => Http::response([
+            'available' => true,
+            'attribute_term_translation_link_available' => true,
+            'variation_translation_link_available' => true,
+            'languages' => ['pl', 'en'],
+            'plugin_version' => '0.5.3',
+        ]));
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-DEFAULT-BACKFILL',
+            'name' => 'B2C default backfill',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Woo default backfill',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl', 'en']]],
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'DEFAULT-BACKFILL',
+            'name' => 'Default backfill',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp', 'product_type' => 'simple']],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '1003',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $service = app(LegacyVariantFamilyBackfillService::class);
+        $service->markPendingRevision($product, 'ordinary-revision');
+
+        $this->assertSame(1, $service->dispatchPending(1)['dispatched']);
+        Bus::assertDispatched(
+            ExportWooCommerceProductDataJob::class,
+            fn (ExportWooCommerceProductDataJob $job): bool => $job->queue === null,
+        );
+        $this->assertSame([60, 120, 300, 900], (new ExportWooCommerceProductDataJob($product->id))->backoff());
     }
 
     public function test_migration_queues_one_durable_family_export_that_creates_the_missing_english_family(): void

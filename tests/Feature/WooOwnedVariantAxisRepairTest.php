@@ -21,6 +21,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
 
@@ -928,6 +929,11 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
 
         $result = app(WooOwnedVariantAxisRepairService::class)->dispatchPending(10, 120);
         $this->assertSame(1, $result['dispatched']);
+        Bus::assertDispatched(
+            RepairWooOwnedVariantAxisJob::class,
+            fn (RepairWooOwnedVariantAxisJob $job): bool => $job->queue
+                === WooOwnedVariantAxisRepairService::REPAIR_QUEUE,
+        );
         Bus::assertDispatched(RepairWooOwnedVariantAxisJob::class, 1);
     }
 
@@ -1026,6 +1032,195 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             $mapping->metadata,
             'product_data_export.legacy_variant_backfill.status',
         ));
+    }
+
+    public function test_parent_term_order_followup_requeues_completed_000017_and_preserves_an_active_export(): void
+    {
+        [$parent] = $this->family();
+
+        foreach (collect([$parent, ...$parent->variantChildren()->get()]) as $product) {
+            $attributes = (array) $product->attributes;
+            data_set($attributes, 'master.source', 'erp');
+            $product->update(['attributes' => $attributes]);
+        }
+
+        (require database_path(
+            'migrations/2026_07_15_000015_recover_legacy_size_variant_axes.php',
+        ))->up();
+        (require database_path(
+            'migrations/2026_07_15_000017_requeue_historical_size_axis_repairs.php',
+        ))->up();
+
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, 'product_data_export.pending_token', 'older-active-export');
+        data_set($metadata, 'product_data_export.requested_at', now()->toISOString());
+        data_set($metadata, 'product_data_export.legacy_variant_backfill.status', 'completed');
+        data_set(
+            $metadata,
+            'product_data_export.legacy_variant_backfill.revision',
+            LegacyVariantFamilyBackfillService::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
+        );
+        data_set(
+            $metadata,
+            'product_data_export.legacy_variant_backfill.queued_revision',
+            LegacyVariantFamilyBackfillService::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
+        );
+        $mapping->update(['metadata' => $metadata]);
+        $queuedExportId = DB::table('jobs')->insertGetId([
+            'queue' => 'default',
+            'payload' => json_encode([
+                'displayName' => ExportWooCommerceProductDataJob::class,
+                'data' => ['command' => 'serialized:older-active-export'],
+            ]),
+            'attempts' => 0,
+            'reserved_at' => null,
+            'available_at' => now()->timestamp,
+            'created_at' => now()->timestamp,
+        ]);
+
+        (require database_path(
+            'migrations/2026_07_15_000018_requeue_erp_size_parent_term_order.php',
+        ))->up();
+
+        $metadata = $mapping->fresh()->metadata;
+        $this->assertSame(
+            LegacyVariantFamilyBackfillService::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
+            data_get($metadata, 'product_data_export.legacy_variant_backfill.revision'),
+        );
+        $this->assertSame('pending', data_get(
+            $metadata,
+            'product_data_export.legacy_variant_backfill.status',
+        ));
+        $this->assertSame('older-active-export', data_get(
+            $metadata,
+            'product_data_export.pending_token',
+        ));
+        $this->assertSame(
+            LegacyVariantFamilyBackfillService::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
+            data_get($metadata, 'product_data_export.legacy_variant_backfill.queued_revision'),
+        );
+        $this->assertSame(
+            LegacyVariantFamilyBackfillService::CRITICAL_EXPORT_QUEUE,
+            DB::table('jobs')->where('id', $queuedExportId)->value('queue'),
+        );
+    }
+
+    public function test_parent_term_order_followup_skips_a_family_with_partial_recovery_markers(): void
+    {
+        [$parent] = $this->family();
+
+        foreach (collect([$parent, ...$parent->variantChildren()->get()]) as $product) {
+            $attributes = (array) $product->attributes;
+            data_set($attributes, 'master.source', 'erp');
+            $product->update(['attributes' => $attributes]);
+        }
+
+        (require database_path(
+            'migrations/2026_07_15_000015_recover_legacy_size_variant_axes.php',
+        ))->up();
+        (require database_path(
+            'migrations/2026_07_15_000017_requeue_historical_size_axis_repairs.php',
+        ))->up();
+
+        $relation = ProductRelation::query()
+            ->where('parent_product_id', $parent->id)
+            ->where('relation_type', 'variant')
+            ->firstOrFail();
+        $relationMetadata = (array) $relation->metadata;
+        data_forget($relationMetadata, 'maintenance.legacy_size_variant_axis_recovery.revision');
+        $relation->update(['metadata' => $relationMetadata]);
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+
+        (require database_path(
+            'migrations/2026_07_15_000018_requeue_erp_size_parent_term_order.php',
+        ))->up();
+
+        $this->assertSame(
+            LegacyVariantFamilyBackfillService::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
+            data_get(
+                $mapping->fresh()->metadata,
+                'product_data_export.legacy_variant_backfill.revision',
+            ),
+        );
+    }
+
+    public function test_parent_term_order_followup_does_not_overwrite_an_unrelated_newer_revision(): void
+    {
+        [$parent] = $this->family();
+
+        foreach (collect([$parent, ...$parent->variantChildren()->get()]) as $product) {
+            $attributes = (array) $product->attributes;
+            data_set($attributes, 'master.source', 'erp');
+            $product->update(['attributes' => $attributes]);
+        }
+
+        (require database_path(
+            'migrations/2026_07_15_000015_recover_legacy_size_variant_axes.php',
+        ))->up();
+        (require database_path(
+            'migrations/2026_07_15_000017_requeue_historical_size_axis_repairs.php',
+        ))->up();
+
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, 'product_data_export.legacy_variant_backfill.revision', 'unrelated-newer-revision');
+        $mapping->update(['metadata' => $metadata]);
+
+        (require database_path(
+            'migrations/2026_07_15_000018_requeue_erp_size_parent_term_order.php',
+        ))->up();
+
+        $this->assertSame('unrelated-newer-revision', data_get(
+            $mapping->fresh()->metadata,
+            'product_data_export.legacy_variant_backfill.revision',
+        ));
+    }
+
+    public function test_parent_term_order_migration_rehomes_only_unreserved_axis_jobs(): void
+    {
+        $now = now()->timestamp;
+        $axisJobId = DB::table('jobs')->insertGetId([
+            'queue' => 'default',
+            'payload' => json_encode(['displayName' => RepairWooOwnedVariantAxisJob::class]),
+            'attempts' => 0,
+            'reserved_at' => null,
+            'available_at' => $now,
+            'created_at' => $now,
+        ]);
+        $unrelatedJobId = DB::table('jobs')->insertGetId([
+            'queue' => 'default',
+            'payload' => json_encode(['displayName' => ExportWooCommerceProductDataJob::class]),
+            'attempts' => 0,
+            'reserved_at' => null,
+            'available_at' => $now,
+            'created_at' => $now,
+        ]);
+        $reservedAxisJobId = DB::table('jobs')->insertGetId([
+            'queue' => 'default',
+            'payload' => json_encode(['displayName' => RepairWooOwnedVariantAxisJob::class]),
+            'attempts' => 1,
+            'reserved_at' => $now,
+            'available_at' => $now,
+            'created_at' => $now,
+        ]);
+
+        (require database_path(
+            'migrations/2026_07_15_000018_requeue_erp_size_parent_term_order.php',
+        ))->up();
+
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::REPAIR_QUEUE,
+            DB::table('jobs')->where('id', $axisJobId)->value('queue'),
+        );
+        $this->assertSame('default', DB::table('jobs')->where('id', $unrelatedJobId)->value('queue'));
+        $this->assertSame('default', DB::table('jobs')->where('id', $reservedAxisJobId)->value('queue'));
     }
 
     public function test_followup_migration_does_not_queue_an_unmarked_erp_family(): void

@@ -32,6 +32,8 @@ final class WooOwnedVariantAxisRepairService
 
     public const STATE_PATH = 'maintenance.woo_owned_variant_axis_repair';
 
+    public const REPAIR_QUEUE = 'woocommerce-repair';
+
     /** @var list<string> */
     private const PROTECTED_PRODUCT_FIELDS = [
         'name',
@@ -165,7 +167,9 @@ final class WooOwnedVariantAxisRepairService
                 RepairWooOwnedVariantAxisJob::dispatch(
                     $reservation['product_id'],
                     $reservation['token'],
-                )->onConnection('database');
+                )
+                    ->onConnection('database')
+                    ->onQueue(self::REPAIR_QUEUE);
                 $result['dispatched']++;
             } catch (Throwable $exception) {
                 report($exception);

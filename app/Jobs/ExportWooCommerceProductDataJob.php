@@ -33,6 +33,12 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
 
     public const LOCK_SECONDS = 3600;
 
+    /** @return list<int> */
+    public function backoff(): array
+    {
+        return [60, 120, 300, 900];
+    }
+
     public function __construct(
         private readonly int $productId,
         private readonly ?string $syncToken = null,
