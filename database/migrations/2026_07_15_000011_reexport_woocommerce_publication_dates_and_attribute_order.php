@@ -108,7 +108,11 @@ return new class extends Migration
         $orders = [];
 
         foreach (ProductParameterDefinition::query()->orderBy('id')->get() as $definition) {
-            if (! $definition->is_variant || ! collect([
+            // Historical imports did not always promote the shared Rozmiar
+            // definition to `is_variant`, even though individual products use
+            // it as their variant axis. The taxonomy is global in Woo, so every
+            // size dictionary must share the same canonical row order.
+            if (! collect([
                 $definition->name,
                 $definition->name_en,
                 $definition->slug,

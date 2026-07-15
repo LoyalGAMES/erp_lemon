@@ -29,7 +29,7 @@ final class LegacyVariantFamilyBackfillService
 
     public const GLOBAL_ATTRIBUTE_TERM_RECOVERY_REVISION = 'translated_global_attribute_taxonomy_2026_07_15_000010';
 
-    public const PUBLICATION_DATE_AND_ATTRIBUTE_ORDER_REVISION = 'publication_date_and_attribute_order_2026_07_15_000011';
+    public const PUBLICATION_DATE_AND_ATTRIBUTE_ORDER_REVISION = 'publication_date_and_attribute_order_all_size_definitions_2026_07_15_000012';
 
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 

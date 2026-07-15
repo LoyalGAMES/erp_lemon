@@ -40,7 +40,10 @@ final class WooCommercePublicationDateAndAttributeOrderBackfillMigrationTest ext
                 'input_type' => 'select',
                 'values' => ['M', 'S', 'M/L', 'S/M'],
                 'values_en' => ['Medium', 'Small', 'Medium/Large', 'Small/Medium'],
-                'is_variant' => true,
+                // This reproduces old production dictionaries: products used
+                // Rozmiar as their variant axis, while the shared definition
+                // itself was never promoted to the variant flag.
+                'is_variant' => false,
                 'is_required' => false,
                 'sort_order' => 10,
             ]);
@@ -300,7 +303,7 @@ final class WooCommercePublicationDateAndAttributeOrderBackfillMigrationTest ext
     private function runMigration(): void
     {
         (require database_path(
-            'migrations/2026_07_15_000011_reexport_woocommerce_publication_dates_and_attribute_order.php',
+            'migrations/2026_07_15_000012_requeue_all_size_definitions_for_woocommerce_order.php',
         ))->up();
     }
 }
