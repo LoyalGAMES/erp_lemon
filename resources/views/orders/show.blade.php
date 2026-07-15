@@ -595,7 +595,7 @@
                                 @endif
                             </div>
                             <div class="shipping-label-card-actions">
-                                @if (data_get($label->response_payload, 'source') !== 'manual_inpost_tracking_number'
+                                @if (! in_array(data_get($label->response_payload, 'source'), ['manual_tracking_number', 'manual_inpost_tracking_number'], true)
                                     && ($label->purpose !== 'shipment' || (! $orderOperationsLocked
                                     && ! in_array(mb_strtolower((string) $order->status), ['cancellation-pending', 'cancelled', 'canceled', 'refunded'], true)
                                     && in_array(mb_strtolower((string) $label->status), ['generated', 'picked_up', 'delivered'], true))))

@@ -19,6 +19,7 @@ use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderEditingService;
 use App\Services\Orders\OrderWzDocumentService;
 use App\Services\Packing\PackingTaskService;
+use App\Services\Shipping\ShippingProviderResolver;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -29,27 +30,32 @@ class OrderFullEditingWorkflowTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_manual_inpost_number_can_be_added_from_order_editor_for_tracking(): void
+    public function test_manual_gls_number_can_be_added_from_order_editor_with_gls_tracking_link(): void
     {
         [, , , , $order] = $this->createOrderContext();
         app(PackingTaskService::class)->syncForOrder($order);
 
-        $trackingNumber = '520000123456789012345678';
+        $trackingNumber = 'GLS123456789PL';
 
         $this->get(route('orders.edit', $order))
             ->assertOk()
-            ->assertSee('Ręczna przesyłka InPost')
-            ->assertSee(route('orders.labels.inpost-manual.store', $order), false);
+            ->assertSee('Ręczna przesyłka')
+            ->assertSee(route('orders.labels.manual.store', $order), false);
 
-        $this->post(route('orders.labels.inpost-manual.store', $order), [
+        $this->post(route('orders.labels.manual.store', $order), [
+            'provider' => 'gls',
             'tracking_number' => $trackingNumber,
         ])->assertRedirect()->assertSessionHas('status');
 
         $label = ShippingLabel::query()->sole();
-        $this->assertSame('inpost', $label->provider);
+        $this->assertSame('gls', $label->provider);
         $this->assertSame('generated', $label->status);
         $this->assertSame($trackingNumber, $label->tracking_number);
-        $this->assertSame('manual_inpost_tracking_number', data_get($label->response_payload, 'source'));
+        $this->assertSame('manual_tracking_number', data_get($label->response_payload, 'source'));
+        $this->assertSame(
+            'https://gls-group.com/PL/pl/sledzenie-paczek/?match='.rawurlencode($trackingNumber),
+            app(ShippingProviderResolver::class)->trackingUrl($label),
+        );
         $this->assertNotNull($label->next_tracking_check_at);
         $this->assertSame('', $label->path);
     }

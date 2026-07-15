@@ -661,9 +661,13 @@
                                         </button>
                                     </div>
                                 </form>
-                                <form method="POST" action="{{ route('packing.orders.pack-manual-inpost', $order) }}" data-packing-ajax>
+                                <form method="POST" action="{{ route('packing.orders.pack-manual-shipment', $order) }}" data-packing-ajax>
                                     @csrf
-                                    <input name="tracking_number" inputmode="numeric" pattern="[0-9]{10,30}" maxlength="30" required placeholder="Ręczny numer InPost">
+                                    <select name="provider" required aria-label="Przewoźnik ręcznej przesyłki">
+                                        <option value="inpost">InPost</option>
+                                        <option value="gls">GLS</option>
+                                    </select>
+                                    <input name="tracking_number" maxlength="40" required placeholder="Ręczny numer przesyłki">
                                     <button class="button secondary" type="submit">Dodaj numer i spakuj</button>
                                 </form>
                                 <form method="POST" action="{{ route('packing.orders.pack', $order) }}" data-packing-ajax onsubmit="return confirm('Spakować zamówienie bez listu przewozowego?');">
@@ -680,7 +684,7 @@
                             @if ($shippingLabel)
                                 <form method="POST" action="{{ route('packing.orders.pack', $order) }}" data-packing-ajax>
                                     @csrf
-                                    <button class="button" type="submit">{{ data_get($shippingLabel->response_payload, 'source') === 'manual_inpost_tracking_number' ? 'Spakuj' : 'Spakuj i wydrukuj' }}</button>
+                                    <button class="button" type="submit">{{ in_array(data_get($shippingLabel->response_payload, 'source'), ['manual_tracking_number', 'manual_inpost_tracking_number'], true) ? 'Spakuj' : 'Spakuj i wydrukuj' }}</button>
                                 </form>
                             @endif
                         </div>

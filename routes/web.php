@@ -177,7 +177,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/packing/tasks/{task}/pack', [PackingController::class, 'pack'])->name('packing.tasks.pack');
         Route::post('/packing/tasks/{task}/reopen', [PackingController::class, 'reopen'])->name('packing.tasks.reopen');
         Route::post('/packing/orders/{order}/pack', [PackingController::class, 'packOrder'])->name('packing.orders.pack');
-        Route::post('/packing/orders/{order}/pack-manual-inpost', [PackingController::class, 'packWithManualInPost'])->name('packing.orders.pack-manual-inpost');
+        Route::post('/packing/orders/{order}/pack-manual-shipment', [PackingController::class, 'packWithManualShipment'])->name('packing.orders.pack-manual-shipment');
         Route::post('/packing/orders/{order}/mark-shipped', [PackingController::class, 'markOrderShipped'])->name('packing.orders.mark-shipped');
         Route::post('/packing/orders/{order}/unpack', [PackingController::class, 'unpackOrder'])->name('packing.orders.unpack');
         Route::post('/packing/orders/{order}/problem', [PackingController::class, 'problemOrder'])->name('packing.orders.problem');
@@ -250,7 +250,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
     Route::middleware(EnsureErpRole::class.':order_editing')->group(function (): void {
         Route::get('/orders/{order}/edit', [ExternalOrderController::class, 'edit'])->name('orders.edit');
         Route::put('/orders/{order}', [ExternalOrderController::class, 'update'])->name('orders.update');
-        Route::post('/orders/{order}/manual-inpost-label', [ExternalOrderController::class, 'storeManualInPostLabel'])->name('orders.labels.inpost-manual.store');
+        Route::post('/orders/{order}/manual-shipping-label', [ExternalOrderController::class, 'storeManualShippingLabel'])->name('orders.labels.manual.store');
         Route::get('/orders/{order}/products/lookup', [ExternalOrderController::class, 'lookupProducts'])->name('orders.products.lookup');
     });
 

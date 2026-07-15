@@ -321,7 +321,7 @@ class ExternalOrderController extends Controller
             ->with('status', $message);
     }
 
-    public function storeManualInPostLabel(
+    public function storeManualShippingLabel(
         Request $request,
         ExternalOrder $order,
         ShippingLabelService $shippingLabels,
@@ -329,19 +329,20 @@ class ExternalOrderController extends Controller
         $this->assertCanEditOrder($request, $order);
 
         $validated = $request->validate([
-            'tracking_number' => ['required', 'string', 'regex:/^[0-9]{10,30}$/'],
+            'provider' => ['required', 'string', 'in:inpost,gls'],
+            'tracking_number' => ['required', 'string', 'regex:/^[0-9A-Za-z-]{8,40}$/'],
         ], [
-            'tracking_number.regex' => 'Numer przesyłki InPost powinien zawierać od 10 do 30 cyfr.',
+            'tracking_number.regex' => 'Numer przesyłki powinien zawierać od 8 do 40 liter, cyfr lub myślników.',
         ]);
 
         $trackingNumber = trim((string) $validated['tracking_number']);
         try {
-            $shippingLabels->registerManualInPost($order, $trackingNumber);
+            $shippingLabels->registerManualShipment($order, (string) $validated['provider'], $trackingNumber);
         } catch (RuntimeException $exception) {
             return back()->withInput()->with('error', $exception->getMessage());
         }
 
-        return back()->with('status', "Numer przesyłki InPost {$trackingNumber} zapisano i włączono do śledzenia.");
+        return back()->with('status', "Numer przesyłki {$trackingNumber} zapisano dla przewoźnika ".mb_strtoupper((string) $validated['provider']).'.');
     }
 
     public function lookupProducts(Request $request, ExternalOrder $order): JsonResponse

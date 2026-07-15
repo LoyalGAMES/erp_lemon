@@ -51,8 +51,9 @@ final class ShippingLabelService
         }
     }
 
-    public function registerManualInPost(ExternalOrder $order, string $trackingNumber): ShippingLabel
+    public function registerManualShipment(ExternalOrder $order, string $provider, string $trackingNumber): ShippingLabel
     {
+        $provider = mb_strtolower(trim($provider));
         $trackingNumber = trim($trackingNumber);
         $duplicate = ShippingLabel::query()
             ->where(fn ($query) => $query->where('tracking_number', $trackingNumber)->orWhere('label_number', $trackingNumber))
@@ -62,30 +63,34 @@ final class ShippingLabelService
             throw new RuntimeException('Ten numer przesyłki jest już przypisany do innego zamówienia.');
         }
 
-        $label = ShippingLabel::query()->updateOrCreate(
-            ['idempotency_key' => 'manual:inpost:order:'.$order->id],
-            [
-                'sales_channel_id' => $order->sales_channel_id,
-                'external_order_id' => $order->id,
-                'purpose' => 'shipment',
-                'status' => 'generated',
-                'provider' => 'inpost',
-                'label_number' => $trackingNumber,
-                'tracking_number' => $trackingNumber,
-                'tracking_status' => null,
-                'tracking_checked_at' => null,
-                'next_tracking_check_at' => now(),
-                'tracking_attempts' => 0,
-                'tracking_last_error' => null,
-                'disk' => 'local',
-                'path' => '',
-                'response_payload' => ['source' => 'manual_inpost_tracking_number'],
-                'generated_at' => now(),
-            ],
-        );
-
-        $this->audit->record('shipping_label.manual_inpost_added', $label, null, [
+        $label = ShippingLabel::query()
+            ->where('external_order_id', $order->id)
+            ->where('idempotency_key', 'like', 'manual:%')
+            ->first() ?? new ShippingLabel;
+        $label->fill([
+            'idempotency_key' => 'manual:shipment:order:'.$order->id,
+            'sales_channel_id' => $order->sales_channel_id,
             'external_order_id' => $order->id,
+            'purpose' => 'shipment',
+            'status' => 'generated',
+            'provider' => $provider,
+            'label_number' => $trackingNumber,
+            'tracking_number' => $trackingNumber,
+            'tracking_status' => null,
+            'tracking_checked_at' => null,
+            'next_tracking_check_at' => now(),
+            'tracking_attempts' => 0,
+            'tracking_last_error' => null,
+            'disk' => 'local',
+            'path' => '',
+            'response_payload' => ['source' => 'manual_tracking_number', 'provider' => $provider],
+            'generated_at' => now(),
+        ]);
+        $label->save();
+
+        $this->audit->record('shipping_label.manual_added', $label, null, [
+            'external_order_id' => $order->id,
+            'provider' => $provider,
             'tracking_number' => $trackingNumber,
         ]);
 

@@ -127,12 +127,18 @@
 
     @if ($editingAllowed)
         <article class="card order-edit-intro">
-            <strong>Ręczna przesyłka InPost</strong>
+            <strong>Ręczna przesyłka</strong>
             <p class="order-edit-help">Jeśli etykieta została utworzona poza ERP, wpisz jej numer. System nie będzie miał pliku do wydruku, ale przesyłka będzie automatycznie śledzona.</p>
-            <form class="order-edit-grid" method="POST" action="{{ route('orders.labels.inpost-manual.store', $order) }}">
+            <form class="order-edit-grid" method="POST" action="{{ route('orders.labels.manual.store', $order) }}">
                 @csrf
-                <label>Numer etykiety / przesyłki InPost
-                    <input name="tracking_number" inputmode="numeric" pattern="[0-9]{10,30}" maxlength="30" value="{{ old('tracking_number') }}" required placeholder="np. 520000123456789012345678">
+                <label>Przewoźnik
+                    <select name="provider" required>
+                        <option value="inpost" @selected(old('provider') === 'inpost')>InPost</option>
+                        <option value="gls" @selected(old('provider') === 'gls')>GLS</option>
+                    </select>
+                </label>
+                <label>Numer etykiety / przesyłki
+                    <input name="tracking_number" maxlength="40" value="{{ old('tracking_number') }}" required placeholder="Numer przesyłki od przewoźnika">
                 </label>
                 <div style="align-self: end;"><button class="button" type="submit">Zapisz numer do śledzenia</button></div>
             </form>

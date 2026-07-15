@@ -331,14 +331,15 @@ class PackingController extends Controller
         ]);
     }
 
-    public function packWithManualInPost(
+    public function packWithManualShipment(
         Request $request,
         ExternalOrder $order,
         ShippingLabelService $shippingLabels,
         PackingFulfillmentService $fulfillment,
     ): RedirectResponse|JsonResponse {
         $data = $request->validate([
-            'tracking_number' => ['required', 'string', 'regex:/^[0-9]{10,30}$/'],
+            'provider' => ['required', 'string', 'in:inpost,gls'],
+            'tracking_number' => ['required', 'string', 'regex:/^[0-9A-Za-z-]{8,40}$/'],
         ]);
 
         try {
@@ -346,14 +347,14 @@ class PackingController extends Controller
             if ($activeTasks->isEmpty() || $activeTasks->contains(fn (PackingTask $task): bool => $task->status !== 'picked')) {
                 throw new RuntimeException('Najpierw zbierz wszystkie pozycje z tego zamówienia.');
             }
-            $label = $shippingLabels->registerManualInPost($order, (string) $data['tracking_number']);
+            $label = $shippingLabels->registerManualShipment($order, (string) $data['provider'], (string) $data['tracking_number']);
             $result = $fulfillment->completePackedOrder($order);
         } catch (RuntimeException $exception) {
             return $this->packingActionError($request, $exception->getMessage());
         }
 
-        return $this->packingActionSuccess($request, "Spakowano zamówienie {$order->external_number} z ręcznym numerem InPost {$label->trackingIdentifier()}.", [
-            'action' => 'packing.completed_manual_inpost',
+        return $this->packingActionSuccess($request, "Spakowano zamówienie {$order->external_number} z ręcznym numerem ".mb_strtoupper((string) $data['provider'])." {$label->trackingIdentifier()}.", [
+            'action' => 'packing.completed_manual_shipment',
             'order_id' => $order->id,
             'warnings' => $result['warnings'],
             'ui' => ['remove_submitted_card' => true, 'destination' => 'waiting'],
@@ -983,7 +984,7 @@ class PackingController extends Controller
         if ($label->purpose !== 'shipment'
             || $label->external_order_id === null
             || trim((string) $label->path) === ''
-            || data_get($label->response_payload, 'source') === 'manual_inpost_tracking_number'
+            || in_array(data_get($label->response_payload, 'source'), ['manual_tracking_number', 'manual_inpost_tracking_number'], true)
             || ! in_array(mb_strtolower((string) $label->status), self::DOWNLOADABLE_SHIPMENT_LABEL_STATUSES, true)) {
             return false;
         }

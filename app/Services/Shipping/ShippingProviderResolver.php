@@ -84,6 +84,10 @@ final class ShippingProviderResolver
             return 'https://inpost.pl/sledzenie-przesylek?number='.rawurlencode($number);
         }
 
+        if ($provider === 'gls' || str_contains($blpaczkaCourier, 'gls')) {
+            return 'https://gls-group.com/PL/pl/sledzenie-paczek/?match='.rawurlencode($number);
+        }
+
         return null;
     }
 
