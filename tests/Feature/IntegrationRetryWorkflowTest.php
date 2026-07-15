@@ -354,7 +354,7 @@ class IntegrationRetryWorkflowTest extends TestCase
         $this->assertStringContainsString('erp:queue-woocommerce-imports --orders', $output);
         $this->assertStringContainsString('erp:queue-woocommerce-imports --customers', $output);
         $this->assertStringContainsString(
-            'queue:work --queue=woocommerce-critical,woocommerce-repair --stop-when-empty',
+            'queue:work --queue=woocommerce-size-order,woocommerce-critical,woocommerce-repair --stop-when-empty',
             $output,
         );
         $this->assertStringContainsString(

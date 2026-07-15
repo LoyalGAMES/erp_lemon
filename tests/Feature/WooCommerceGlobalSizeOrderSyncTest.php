@@ -15,8 +15,10 @@ use App\Services\WooCommerce\WooCommerceGlobalSizeOrderSyncService;
 use Illuminate\Contracts\Events\ShouldHandleEventsAfterCommit;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 use Tests\TestCase;
@@ -261,6 +263,149 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
 
                 return true;
             },
+        );
+    }
+
+    public function test_the_followup_migration_promotes_only_the_exact_unreserved_size_order_job(): void
+    {
+        $this->createSizeDefinition();
+        $active = $this->createWooIntegration('GLOBAL-SIZE-QUEUE-PROMOTION');
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+        $timestamp = now()->timestamp;
+        $delayedUntil = $timestamp + 3600;
+        $waitingId = DB::table('jobs')->insertGetId([
+            'queue' => 'woocommerce-critical',
+            'payload' => json_encode([
+                'displayName' => SyncWooCommerceGlobalSizeOrderJob::class,
+            ], JSON_THROW_ON_ERROR),
+            'attempts' => 0,
+            'reserved_at' => null,
+            'available_at' => $delayedUntil,
+            'created_at' => $timestamp,
+        ]);
+        $reservedId = DB::table('jobs')->insertGetId([
+            'queue' => 'woocommerce-critical',
+            'payload' => json_encode([
+                'displayName' => SyncWooCommerceGlobalSizeOrderJob::class,
+            ], JSON_THROW_ON_ERROR),
+            'attempts' => 1,
+            'reserved_at' => $timestamp,
+            'available_at' => $timestamp,
+            'created_at' => $timestamp,
+        ]);
+        $unrelatedId = DB::table('jobs')->insertGetId([
+            'queue' => 'woocommerce-critical',
+            'payload' => json_encode([
+                'displayName' => 'App\\Jobs\\ExportWooCommerceProductDataJob',
+                'command' => SyncWooCommerceGlobalSizeOrderJob::class,
+            ], JSON_THROW_ON_ERROR),
+            'attempts' => 0,
+            'reserved_at' => null,
+            'available_at' => $timestamp,
+            'created_at' => $timestamp,
+        ]);
+
+        (require database_path(
+            'migrations/2026_07_16_000022_promote_woo_size_order_sync_queue.php',
+        ))->up();
+
+        $this->assertSame(
+            SyncWooCommerceGlobalSizeOrderJob::QUEUE,
+            DB::table('jobs')->where('id', $waitingId)->value('queue'),
+        );
+        $this->assertLessThanOrEqual(
+            now()->timestamp,
+            DB::table('jobs')->where('id', $waitingId)->value('available_at'),
+        );
+        $this->assertSame(
+            'woocommerce-critical',
+            DB::table('jobs')->where('id', $reservedId)->value('queue'),
+        );
+        $this->assertSame(
+            'woocommerce-critical',
+            DB::table('jobs')->where('id', $unrelatedId)->value('queue'),
+        );
+        Bus::assertDispatchedTimes(SyncWooCommerceGlobalSizeOrderJob::class, 1);
+        Bus::assertDispatched(
+            SyncWooCommerceGlobalSizeOrderJob::class,
+            function (SyncWooCommerceGlobalSizeOrderJob $job) use ($active): bool {
+                $this->assertSame((int) $active->id, $job->integrationId);
+                $this->assertSame(
+                    'dedicated_size_order_queue_2026_07_16_000022',
+                    $job->trigger,
+                );
+                $this->assertSame('database', $job->connection);
+                $this->assertSame(SyncWooCommerceGlobalSizeOrderJob::QUEUE, $job->queue);
+                $this->assertTrue($job->afterCommit);
+
+                return true;
+            },
+        );
+    }
+
+    public function test_the_deploy_postcondition_requires_a_fresh_success_for_every_active_integration(): void
+    {
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-POSTCONDITION');
+        $since = now()->subMinute();
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'out',
+            'operation' => 'sync_woocommerce_global_size_order',
+            'status' => 'success',
+            'external_resource' => 'product_attribute',
+            'response_payload' => ['status' => 'synchronized'],
+            'attempts' => 1,
+            'started_at' => now(),
+            'finished_at' => now(),
+        ]);
+
+        $exitCode = Artisan::call('erp:verify-woocommerce-global-size-order-sync', [
+            '--since' => $since->toIso8601String(),
+        ]);
+
+        $this->assertSame(0, $exitCode);
+        $this->assertStringContainsString(
+            'active=1, fresh_success=1, missing=-, pending=0, failed=0',
+            Artisan::output(),
+        );
+    }
+
+    public function test_the_deploy_postcondition_rejects_a_pending_exact_job_and_missing_success(): void
+    {
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-POSTCONDITION-PENDING');
+        $timestamp = now()->timestamp;
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'out',
+            'operation' => 'sync_woocommerce_global_size_order',
+            'status' => 'success',
+            'external_resource' => 'product_attribute',
+            'response_payload' => ['status' => 'skipped_no_size_definition'],
+            'attempts' => 1,
+            'started_at' => now(),
+            'finished_at' => now(),
+        ]);
+        DB::table('jobs')->insert([
+            'queue' => SyncWooCommerceGlobalSizeOrderJob::QUEUE,
+            'payload' => json_encode([
+                'displayName' => SyncWooCommerceGlobalSizeOrderJob::class,
+            ], JSON_THROW_ON_ERROR),
+            'attempts' => 1,
+            'reserved_at' => null,
+            'available_at' => $timestamp + 60,
+            'created_at' => $timestamp,
+        ]);
+
+        $exitCode = Artisan::call('erp:verify-woocommerce-global-size-order-sync', [
+            '--since' => now()->subMinute()->toIso8601String(),
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString(
+            "active=1, fresh_success=0, missing={$integration->id}, pending=1, failed=0",
+            Artisan::output(),
         );
     }
 

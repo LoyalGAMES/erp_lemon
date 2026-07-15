@@ -23,7 +23,7 @@ final class SyncWooCommerceGlobalSizeOrderJob implements ShouldBeUnique, ShouldQ
     use Queueable;
     use SerializesModels;
 
-    public const QUEUE = 'woocommerce-critical';
+    public const QUEUE = 'woocommerce-size-order';
 
     public int $tries = 70;
 

@@ -709,7 +709,7 @@ Schedule::command('erp:send-unpaid-order-reminders --limit=100')
 // Keep corrective catalog traffic isolated from the default queue. A bounded
 // repair worker gives it prompt progress without starving stock, order, KSeF,
 // import, or other operational jobs handled by the default worker below.
-Schedule::command('queue:work --queue=woocommerce-critical,woocommerce-repair --stop-when-empty --sleep=1 --tries=2 --timeout=900 --max-jobs=30 --max-time=3300')
+Schedule::command('queue:work --queue=woocommerce-size-order,woocommerce-critical,woocommerce-repair --stop-when-empty --sleep=1 --tries=2 --timeout=900 --max-jobs=30 --max-time=3300')
     ->everyMinute()
     ->withoutOverlapping(60)
     ->runInBackground();

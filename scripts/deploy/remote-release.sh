@@ -273,6 +273,7 @@ maintenance_enabled=0
 migration_started=0
 migration_completed=0
 bootstrap_moved=0
+size_order_sync_verified=1
 previous_release=''
 rollback_release=''
 legacy_release=''
@@ -437,6 +438,34 @@ migration_completed=1
     "$php_bin" artisan erp:preflight
 )
 
+# Migrations can queue this small, existing-term-only WooCommerce repair. The
+# old workers are already stopped, so drain its dedicated queue before an
+# ordinary catalog export can acquire the shared catalog lock. --force is
+# required because the ERP remains in maintenance until activation completes.
+size_order_sync_since="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+if ! (
+    cd "$release_path"
+    "$php_bin" artisan queue:work database \
+        --queue=woocommerce-size-order \
+        --stop-when-empty \
+        --sleep=1 \
+        --tries=2 \
+        --timeout=360 \
+        --max-jobs=10 \
+        --max-time=600 \
+        --force
+); then
+    echo 'Ostrzeżenie: natychmiastowy worker kolejności rozmiarów zakończył próbę błędem; zadanie pozostaje w trwałej kolejce.' >&2
+fi
+if ! (
+    cd "$release_path"
+    "$php_bin" artisan erp:verify-woocommerce-global-size-order-sync \
+        --since="$size_order_sync_since"
+); then
+    size_order_sync_verified=0
+    echo 'Błąd: dedykowana naprawa kolejności rozmiarów nie spełniła warunku końcowego.' >&2
+fi
+
 if [[ "$bootstrap_mode" == 'legacy-directory' ]]; then
     legacy_release="${releases_root}/legacy-${release_id}"
     [[ ! -e "$legacy_release" ]] || fail 'katalog legacy dla bootstrapu już istnieje.'
@@ -480,6 +509,9 @@ fi
 "$php_bin" "$deploy_path/artisan" erp:inspect-woo-owned-variant-axis-repair --limit=30
 
 completed=1
+if [[ "$size_order_sync_verified" -ne 1 ]]; then
+    fail 'Kod został aktywowany, ale naprawa globalnej kolejności rozmiarów WooCommerce nie zakończyła się sukcesem; sprawdź log joba powyżej.'
+fi
 echo "Wdrożenie aktywne: ${release_path}"
 echo "Backup bazy: ${backup_directory}"
 if [[ -n "$previous_release" ]]; then
