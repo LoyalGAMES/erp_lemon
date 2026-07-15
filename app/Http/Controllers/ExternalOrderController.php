@@ -29,6 +29,7 @@ use App\Services\Packing\ProductSegmentService;
 use App\Services\Payments\OrderSettlementService;
 use App\Services\Payments\PaymentMethodClassifier;
 use App\Services\Shipping\ShippingLabelService;
+use App\Services\Shipping\ShippingProviderResolver;
 use App\Services\WooCommerce\WooCommerceOrderStatusService;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -164,6 +165,7 @@ class ExternalOrderController extends Controller
         Request $request,
         ExternalOrder $order,
         OrderEditingService $editing,
+        ShippingProviderResolver $shippingProviders,
     ): View {
         $this->assertCanEditOrder($request, $order);
         $order->load([
@@ -204,6 +206,7 @@ class ExternalOrderController extends Controller
             'expectedVersion' => $editing->version($order),
             'expectedRemoteModifiedAt' => $editing->expectedRemoteModifiedAt($order),
             'orderStatusOptions' => $this->orderStatusOptions((string) $order->status),
+            'detectedShippingProvider' => $shippingProviders->providerForOrder($order),
             'returnTo' => $returnTo,
             'backUrl' => $backUrl,
         ]);
@@ -325,6 +328,7 @@ class ExternalOrderController extends Controller
         Request $request,
         ExternalOrder $order,
         ShippingLabelService $shippingLabels,
+        ShippingProviderResolver $shippingProviders,
     ): RedirectResponse {
         $this->assertCanEditOrder($request, $order);
 
@@ -337,6 +341,10 @@ class ExternalOrderController extends Controller
 
         $trackingNumber = trim((string) $validated['tracking_number']);
         try {
+            $detectedProvider = $shippingProviders->providerForOrder($order);
+            if ($detectedProvider !== null && $detectedProvider !== $validated['provider']) {
+                throw new RuntimeException('Wybrany przewoźnik nie zgadza się z metodą dostawy zamówienia.');
+            }
             $shippingLabels->registerManualShipment($order, (string) $validated['provider'], $trackingNumber);
         } catch (RuntimeException $exception) {
             return back()->withInput()->with('error', $exception->getMessage());

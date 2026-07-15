@@ -624,6 +624,7 @@
                         </details>
 
                         <div class="order-actions">
+                            @php $detectedShippingProvider = $order->detected_shipping_provider ?? null; @endphp
                             @if ($shippingLabel)
                                 <div class="shipment-label-panel">
                                     <div class="shipment-label-number">
@@ -639,6 +640,7 @@
                                     </div>
                                 </div>
                             @else
+                                @if ($detectedShippingProvider !== 'gls')
                                 <form class="label-account-form" method="POST" action="{{ route('packing.orders.complete-with-label', $order) }}" data-packing-ajax>
                                     @csrf
                                     @if ($courierAccounts->isNotEmpty())
@@ -661,12 +663,18 @@
                                         </button>
                                     </div>
                                 </form>
+                                @endif
                                 <form method="POST" action="{{ route('packing.orders.pack-manual-shipment', $order) }}" data-packing-ajax>
                                     @csrf
+                                    @if ($detectedShippingProvider)
+                                        <input type="hidden" name="provider" value="{{ $detectedShippingProvider }}">
+                                        <span class="status">{{ $detectedShippingProvider === 'gls' ? 'GLS' : 'InPost' }}</span>
+                                    @else
                                     <select name="provider" required aria-label="Przewoźnik ręcznej przesyłki">
                                         <option value="inpost">InPost</option>
                                         <option value="gls">GLS</option>
                                     </select>
+                                    @endif
                                     <input name="tracking_number" maxlength="40" required placeholder="Ręczny numer przesyłki">
                                     <button class="button secondary" type="submit">Dodaj numer i spakuj</button>
                                 </form>

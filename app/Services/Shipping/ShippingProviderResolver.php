@@ -4,10 +4,33 @@ declare(strict_types=1);
 
 namespace App\Services\Shipping;
 
+use App\Models\ExternalOrder;
 use App\Models\ShippingLabel;
 
 final class ShippingProviderResolver
 {
+    public function providerForOrder(ExternalOrder $order): ?string
+    {
+        $methods = collect((array) data_get($order->raw_payload, 'shipping_lines', []))
+            ->map(fn (mixed $line): string => is_array($line)
+                ? $this->normalize((string) ($line['method_title'] ?? $line['method_id'] ?? ''))
+                : '')
+            ->filter();
+
+        if ($methods->contains(fn (string $method): bool => str_contains($method, 'gls'))) {
+            return 'gls';
+        }
+
+        if ($methods->contains(fn (string $method): bool => str_contains($method, 'inpost')
+            || str_contains($method, 'paczkomat')
+            || str_contains($method, 'easy-pack')
+            || str_contains($method, 'easypack'))) {
+            return 'inpost';
+        }
+
+        return null;
+    }
+
     public function providerKey(ShippingLabel $label): ?string
     {
         $provider = $this->normalize((string) ($label->provider ?: $label->courierAccount?->provider));

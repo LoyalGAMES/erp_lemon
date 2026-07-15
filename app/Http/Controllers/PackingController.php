@@ -112,7 +112,7 @@ class PackingController extends Controller
                 $segments,
             ),
         ];
-        $readyOrders = $this->readyOrders($tasks, $segments);
+        $readyOrders = $this->readyOrders($tasks, $segments, $providers);
         $shippedOrdersCount = PackingTask::query()
             ->where('status', 'shipped')
             ->distinct()
@@ -336,6 +336,7 @@ class PackingController extends Controller
         ExternalOrder $order,
         ShippingLabelService $shippingLabels,
         PackingFulfillmentService $fulfillment,
+        ShippingProviderResolver $providers,
     ): RedirectResponse|JsonResponse {
         $data = $request->validate([
             'provider' => ['required', 'string', 'in:inpost,gls'],
@@ -343,6 +344,10 @@ class PackingController extends Controller
         ]);
 
         try {
+            $detectedProvider = $providers->providerForOrder($order);
+            if ($detectedProvider !== null && $detectedProvider !== $data['provider']) {
+                throw new RuntimeException('Wybrany przewoźnik nie zgadza się z metodą dostawy zamówienia.');
+            }
             $activeTasks = $order->packingTasks()->where('status', '!=', 'cancelled')->get();
             if ($activeTasks->isEmpty() || $activeTasks->contains(fn (PackingTask $task): bool => $task->status !== 'picked')) {
                 throw new RuntimeException('Najpierw zbierz wszystkie pozycje z tego zamówienia.');
@@ -485,7 +490,11 @@ class PackingController extends Controller
         ExternalOrder $order,
         PackingFulfillmentService $fulfillment,
         PackingSettingsService $settings,
+        ShippingProviderResolver $providers,
     ): RedirectResponse|JsonResponse {
+        if ($providers->providerForOrder($order) === 'gls') {
+            return $this->packingActionError($request, 'Dla zamówienia GLS nie można generować etykiety InPost. Podaj ręczny numer GLS albo spakuj bez listu przewozowego.');
+        }
         $data = $request->validate([
             'courier_account_id' => [
                 'nullable',
@@ -760,13 +769,13 @@ class PackingController extends Controller
      * @param  Collection<int, PackingTask>  $tasks
      * @return Collection<int, ExternalOrder>
      */
-    private function readyOrders(Collection $tasks, ProductSegmentService $segments): Collection
+    private function readyOrders(Collection $tasks, ProductSegmentService $segments, ShippingProviderResolver $providers): Collection
     {
         return $tasks
             ->groupBy('external_order_id')
             ->filter(fn (Collection $group): bool => $group->where('status', 'open')->isEmpty()
                 && $group->where('status', 'picked')->isNotEmpty())
-            ->map(function (Collection $group) use ($segments): ?ExternalOrder {
+            ->map(function (Collection $group) use ($segments, $providers): ?ExternalOrder {
                 /** @var PackingTask|null $first */
                 $first = $group->first();
                 $order = $first?->order;
@@ -781,6 +790,7 @@ class PackingController extends Controller
                     ->unique()
                     ->values()
                     ->all();
+                $order->detected_shipping_provider = $providers->providerForOrder($order);
                 $label = $order->shipmentLabels?->firstWhere('status', 'generated');
                 $order->shipment_label_download_allowed = $label instanceof ShippingLabel
                     && $this->shipmentLabelCanBeDownloaded($label, $order);

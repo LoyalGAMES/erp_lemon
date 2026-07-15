@@ -132,10 +132,15 @@
             <form class="order-edit-grid" method="POST" action="{{ route('orders.labels.manual.store', $order) }}">
                 @csrf
                 <label>Przewoźnik
+                    @if ($detectedShippingProvider ?? null)
+                        <input type="hidden" name="provider" value="{{ $detectedShippingProvider }}">
+                        <input value="{{ $detectedShippingProvider === 'gls' ? 'GLS' : 'InPost' }}" readonly>
+                    @else
                     <select name="provider" required>
                         <option value="inpost" @selected(old('provider') === 'inpost')>InPost</option>
                         <option value="gls" @selected(old('provider') === 'gls')>GLS</option>
                     </select>
+                    @endif
                 </label>
                 <label>Numer etykiety / przesyłki
                     <input name="tracking_number" maxlength="40" value="{{ old('tracking_number') }}" required placeholder="Numer przesyłki od przewoźnika">

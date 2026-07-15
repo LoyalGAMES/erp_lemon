@@ -28,6 +28,25 @@ class PackingShipmentAutomationTest extends TestCase
 
     private int $sequence = 1200;
 
+    public function test_gls_order_hides_and_blocks_inpost_generation_during_packing(): void
+    {
+        $channel = $this->createChannel();
+        [$order] = $this->createOrderWithTask($channel, 'picked', 'GLS Kurier');
+
+        $this->get(route('packing.index', ['view' => 'pack']))
+            ->assertOk()
+            ->assertDontSee(route('packing.orders.complete-with-label', $order), false)
+            ->assertSee(route('packing.orders.pack-manual-shipment', $order), false)
+            ->assertSee('<input type="hidden" name="provider" value="gls">', false)
+            ->assertSee('Pomiń list przewozowy i spakuj');
+
+        $this->postJson(route('packing.orders.complete-with-label', $order), [
+            'parcel_template' => 'small',
+        ])->assertStatus(409)->assertJsonPath('ok', false);
+
+        $this->assertDatabaseCount('shipping_labels', 0);
+    }
+
     public function test_selecting_parcel_size_generates_prints_and_completes_order_in_one_request(): void
     {
         Storage::fake('local');
