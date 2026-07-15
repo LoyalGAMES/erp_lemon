@@ -898,18 +898,20 @@ final class OrderEditingService
                 'source' => 'order_editor',
             ];
 
-            $billing = is_array($response['billing'] ?? null)
-                ? $response['billing']
-                : array_merge(
-                    (array) $lockedOrder->billing_data,
-                    (array) ($payload['billing'] ?? []),
-                );
-            $shipping = is_array($response['shipping'] ?? null)
-                ? $response['shipping']
-                : array_merge(
-                    (array) $lockedOrder->shipping_data,
-                    (array) ($payload['shipping'] ?? []),
-                );
+            // WooCommerce extensions sometimes return only the address fields
+            // they changed. Replacing the complete local address with that
+            // partial response can silently drop phone/e-mail/postcode and
+            // makes the next courier-label request invalid.
+            $billing = array_merge(
+                (array) $lockedOrder->billing_data,
+                (array) ($payload['billing'] ?? []),
+                is_array($response['billing'] ?? null) ? $response['billing'] : [],
+            );
+            $shipping = array_merge(
+                (array) $lockedOrder->shipping_data,
+                (array) ($payload['shipping'] ?? []),
+                is_array($response['shipping'] ?? null) ? $response['shipping'] : [],
+            );
 
             if (array_key_exists('billing_tax_id', $details)) {
                 $billing['billing_nip'] = trim((string) $details['billing_tax_id']);

@@ -42,8 +42,11 @@ final class CustomerMailContextService
         $trackingLabel = $this->trackingLabel($order);
         $paymentUrl = $this->httpUrl($context['payment_url'] ?? null)
             ?? $this->paymentLinks->resolve($order);
-        $trackingUrl = $this->httpUrl($context['tracking_url'] ?? null)
-            ?? ($trackingLabel instanceof ShippingLabel ? $this->shippingProviders->trackingUrl($trackingLabel) : null);
+        $trackingAllowed = in_array($trigger, ['order_packed', 'order_courier_picked_up', 'order_delivered'], true);
+        $trackingUrl = $trackingAllowed
+            ? ($this->httpUrl($context['tracking_url'] ?? null)
+                ?? ($trackingLabel instanceof ShippingLabel ? $this->shippingProviders->trackingUrl($trackingLabel) : null))
+            : null;
         $orderUrl = $this->orderUrl($order);
         $paymentCategory = $this->paymentMethods->category($order);
         [$actionLabel, $actionUrl] = $this->orderAction(
@@ -60,11 +63,16 @@ final class CustomerMailContextService
             ->all();
         $totals = $this->orderTotals($order, $lines);
         $progress = $this->orderProgress($trigger);
-        $trackingNumber = trim((string) (
-            $context['tracking_number']
-            ?? $trackingLabel?->trackingIdentifier()
-            ?? ''
-        ));
+        $trackingNumber = $trackingAllowed
+            ? trim((string) ($context['tracking_number'] ?? $trackingLabel?->trackingIdentifier() ?? ''))
+            : '';
+        $shippingLabelAvailable = (bool) ($context['shipping_label_available'] ?? ($trackingAllowed && $trackingLabel instanceof ShippingLabel));
+        $shippingLabelNotice = trim((string) ($context['shipping_label_notice'] ?? ''));
+        if ($trigger === 'order_packed' && $shippingLabelNotice === '') {
+            $shippingLabelNotice = $shippingLabelAvailable
+                ? 'Numer listu przewozowego: '.$trackingNumber.'.'.($trackingUrl !== null ? "\nŚledzenie przesyłki: {$trackingUrl}" : '')
+                : 'Zamówienie przygotowano bez listu przewozowego. Numer śledzenia nie jest dostępny.';
+        }
         $invoice = $order->invoices
             ->reject(fn ($invoice): bool => $invoice->type === 'proforma')
             ->sortByDesc('id')
@@ -99,6 +107,8 @@ final class CustomerMailContextService
             'payment_instruction' => $this->paymentMethods->customerInstruction($order, $trigger),
             'tracking_number' => $trackingNumber,
             'tracking_url' => $trackingUrl,
+            'shipping_label_available' => $shippingLabelAvailable,
+            'shipping_label_notice' => $shippingLabelNotice,
             'courier_name' => $trackingLabel instanceof ShippingLabel
                 ? $this->shippingProviders->courierName($trackingLabel, $context['courier'] ?? null)
                 : trim((string) ($context['courier'] ?? '')),

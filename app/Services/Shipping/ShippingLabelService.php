@@ -51,6 +51,47 @@ final class ShippingLabelService
         }
     }
 
+    public function registerManualInPost(ExternalOrder $order, string $trackingNumber): ShippingLabel
+    {
+        $trackingNumber = trim($trackingNumber);
+        $duplicate = ShippingLabel::query()
+            ->where(fn ($query) => $query->where('tracking_number', $trackingNumber)->orWhere('label_number', $trackingNumber))
+            ->first();
+
+        if ($duplicate instanceof ShippingLabel && (int) $duplicate->external_order_id !== (int) $order->id) {
+            throw new RuntimeException('Ten numer przesyłki jest już przypisany do innego zamówienia.');
+        }
+
+        $label = ShippingLabel::query()->updateOrCreate(
+            ['idempotency_key' => 'manual:inpost:order:'.$order->id],
+            [
+                'sales_channel_id' => $order->sales_channel_id,
+                'external_order_id' => $order->id,
+                'purpose' => 'shipment',
+                'status' => 'generated',
+                'provider' => 'inpost',
+                'label_number' => $trackingNumber,
+                'tracking_number' => $trackingNumber,
+                'tracking_status' => null,
+                'tracking_checked_at' => null,
+                'next_tracking_check_at' => now(),
+                'tracking_attempts' => 0,
+                'tracking_last_error' => null,
+                'disk' => 'local',
+                'path' => '',
+                'response_payload' => ['source' => 'manual_inpost_tracking_number'],
+                'generated_at' => now(),
+            ],
+        );
+
+        $this->audit->record('shipping_label.manual_inpost_added', $label, null, [
+            'external_order_id' => $order->id,
+            'tracking_number' => $trackingNumber,
+        ]);
+
+        return $label;
+    }
+
     private function generateForOrderWhileLocked(
         ExternalOrder $order,
         ?CourierAccount $courierAccount = null,
@@ -76,6 +117,7 @@ final class ShippingLabelService
             ->shipments()
             ->where('external_order_id', $order->id)
             ->where('status', 'generated')
+            ->where(fn ($query) => $query->whereNull('idempotency_key')->orWhere('idempotency_key', 'not like', 'manual:%'))
             ->latest('generated_at')
             ->latest('id')
             ->first();

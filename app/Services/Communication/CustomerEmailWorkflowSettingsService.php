@@ -182,11 +182,11 @@ final class CustomerEmailWorkflowSettingsService
                 "Aby nie opóźniać dostawy, podzieliliśmy zamówienie na osobne przesyłki. Numer wydzielonej części to {{child_order_number}}.\n\nKażda paczka otrzyma własne potwierdzenie wysyłki i numer śledzenia.",
             ),
             'order_packed' => $this->mail(
-                'order', 'invoice', 'Zamówienie spakowane',
-                'Po zakończeniu pakowania',
-                'Paczka jest gotowa, dokument sprzedaży może zostać dołączony, a klient widzi, co zapakowano.',
-                'Zamówienie {{order_number}} jest już spakowane',
-                "Twoje zamówienie zostało starannie spakowane i czeka na odbiór przez przewoźnika.\n\nGdy kurier przejmie paczkę, otrzymasz numer śledzenia i bezpośredni link do przesyłki.",
+                'order', 'invoice', 'Oczekuje na kuriera',
+                'Po przeniesieniu do „Oczekuje na kuriera”',
+                'Paczka jest gotowa. Mail rozróżnia zamówienia z listem przewozowym i bez niego.',
+                'Zamówienie {{order_number}} oczekuje na kuriera',
+                "Twoje zamówienie zostało starannie spakowane i czeka na odbiór przez przewoźnika.\n\n{{shipping_label_notice}}",
             ),
             'order_courier_picked_up' => $this->mail(
                 'order', 'shipment', 'Paczka w drodze',

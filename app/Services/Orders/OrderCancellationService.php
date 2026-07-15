@@ -16,6 +16,7 @@ use App\Models\WarehouseDocument;
 use App\Services\Audit\AuditLogService;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Inventory\StockReservationService;
+use App\Services\Inventory\WarehouseDocumentNumberService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Payments\WooCommerceRefundService;
@@ -36,6 +37,7 @@ final class OrderCancellationService
         private readonly ShippingCancellationService $shipping,
         private readonly OrderFulfillmentStatusService $fulfillmentStatus,
         private readonly WarehouseDocumentPostingService $documentPosting,
+        private readonly WarehouseDocumentNumberService $documentNumbers,
         private readonly PackingTaskService $packingTasks,
         private readonly StockReservationService $reservations,
         private readonly OrderCancellationInvoiceService $invoiceReversal,
@@ -46,7 +48,7 @@ final class OrderCancellationService
     ) {}
 
     /**
-     * @param  array{source?:string,preserve_packing_problem?:bool,suppress_default_customer_notification?:bool}  $context
+     * @param  array{source?:string,preserve_packing_problem?:bool,suppress_default_customer_notification?:bool,restore_stock?:bool}  $context
      * @return array{cancellation:OrderCancellation,already_completed:bool,attention_required:bool,warnings:list<string>}
      */
     public function cancel(
@@ -80,11 +82,13 @@ final class OrderCancellationService
         ExternalOrder $order,
         string $reason,
         ?int $requestedBy = null,
+        bool $restoreStock = true,
     ): array {
         return $this->cancel($order, $reason, $requestedBy, [
             'source' => 'packing_problem',
             'preserve_packing_problem' => true,
             'suppress_default_customer_notification' => true,
+            'restore_stock' => $restoreStock,
         ]);
     }
 
@@ -330,8 +334,9 @@ final class OrderCancellationService
             $warnings[] = (string) ($refund['message'] ?? 'Zwrot płatności wymaga ręcznej obsługi.');
         }
 
-        $this->runStep($cancellation, 'warehouse_documents', function () use ($family): array {
+        $this->runStep($cancellation, 'warehouse_documents', function () use ($family, $context, $cancellation): array {
             $cancelled = [];
+            $writeOffs = [];
 
             foreach ($this->wzDocuments($family) as $document) {
                 if ($document->status === 'cancelled') {
@@ -340,11 +345,31 @@ final class OrderCancellationService
                     continue;
                 }
 
+                $wasPosted = $document->status === 'posted';
+                $lines = $document->lines()->get();
                 $this->documentPosting->cancel($document);
                 $cancelled[] = (int) $document->id;
+
+                if ($wasPosted && ! (bool) ($context['restore_stock'] ?? true)) {
+                    $rw = WarehouseDocument::query()->create([
+                        'number' => $this->documentNumbers->next('RW'),
+                        'type' => 'RW',
+                        'status' => 'draft',
+                        'source_warehouse_id' => $document->source_warehouse_id,
+                        'document_date' => now(),
+                        'external_reference' => $document->external_reference,
+                        'notes' => 'Rozchód po anulowaniu zamówienia bez przywracania towaru do sprzedaży.',
+                        'metadata' => ['order_cancellation_uuid' => $cancellation->uuid, 'source_wz_id' => $document->id],
+                    ]);
+                    foreach ($lines as $line) {
+                        $rw->lines()->create(['product_id' => $line->product_id, 'quantity' => $line->quantity]);
+                    }
+                    $this->documentPosting->post($rw);
+                    $writeOffs[] = $rw->id;
+                }
             }
 
-            return ['cancelled_document_ids' => array_values(array_unique($cancelled))];
+            return ['cancelled_document_ids' => array_values(array_unique($cancelled)), 'write_off_document_ids' => $writeOffs];
         });
 
         $this->runStep($cancellation, 'inventory_and_packing', function () use ($family, $cancellation, $context): array {
@@ -523,6 +548,7 @@ final class OrderCancellationService
                         'context' => [
                             'preserve_packing_problem' => (bool) ($context['preserve_packing_problem'] ?? false),
                             'suppress_default_customer_notification' => (bool) ($context['suppress_default_customer_notification'] ?? false),
+                            'restore_stock' => (bool) ($context['restore_stock'] ?? true),
                         ],
                         'family_before' => $family->map(fn (ExternalOrder $member): array => [
                             'id' => $member->id,
@@ -541,6 +567,7 @@ final class OrderCancellationService
                 $metadata['context'] = [
                     'preserve_packing_problem' => (bool) ($context['preserve_packing_problem'] ?? false),
                     'suppress_default_customer_notification' => (bool) ($context['suppress_default_customer_notification'] ?? false),
+                    'restore_stock' => (bool) ($context['restore_stock'] ?? true),
                 ];
                 $cancellation->update([
                     'status' => 'requested',
@@ -826,7 +853,7 @@ final class OrderCancellationService
      * from a different screen.
      *
      * @param  array<string, mixed>  $requested
-     * @return array{source:string,preserve_packing_problem:bool,suppress_default_customer_notification:bool}
+     * @return array{source:string,preserve_packing_problem:bool,suppress_default_customer_notification:bool,restore_stock:bool}
      */
     private function effectiveContext(OrderCancellation $cancellation, array $requested): array
     {
@@ -841,6 +868,9 @@ final class OrderCancellationService
             'suppress_default_customer_notification' => array_key_exists('suppress_default_customer_notification', $persisted)
                 ? (bool) $persisted['suppress_default_customer_notification']
                 : (bool) ($requested['suppress_default_customer_notification'] ?? false),
+            'restore_stock' => array_key_exists('restore_stock', $persisted)
+                ? (bool) $persisted['restore_stock']
+                : (bool) ($requested['restore_stock'] ?? true),
         ];
     }
 

@@ -260,12 +260,13 @@ class PackingController extends Controller
             'task_ids' => ['required', 'array', 'min:1'],
             'task_ids.*' => ['integer', 'exists:packing_tasks,id'],
             'reason' => ['required', 'string', 'max:1000'],
+            'restore_stock' => ['sometimes', 'boolean'],
         ]);
 
         $reason = trim((string) $data['reason']);
 
         try {
-            $result = $problems->reportTasks($data['task_ids'], $reason);
+            $result = $problems->reportTasks($data['task_ids'], $reason, (bool) ($data['restore_stock'] ?? true));
         } catch (RuntimeException $exception) {
             return $this->packingActionError($request, $exception->getMessage());
         }
@@ -328,6 +329,50 @@ class PackingController extends Controller
             'warnings' => $result['warnings'],
             'ui' => ['remove_submitted_card' => true, 'destination' => 'waiting'],
         ]);
+    }
+
+    public function packWithManualInPost(
+        Request $request,
+        ExternalOrder $order,
+        ShippingLabelService $shippingLabels,
+        PackingFulfillmentService $fulfillment,
+    ): RedirectResponse|JsonResponse {
+        $data = $request->validate([
+            'tracking_number' => ['required', 'string', 'regex:/^[0-9]{10,30}$/'],
+        ]);
+
+        try {
+            $activeTasks = $order->packingTasks()->where('status', '!=', 'cancelled')->get();
+            if ($activeTasks->isEmpty() || $activeTasks->contains(fn (PackingTask $task): bool => $task->status !== 'picked')) {
+                throw new RuntimeException('Najpierw zbierz wszystkie pozycje z tego zamówienia.');
+            }
+            $label = $shippingLabels->registerManualInPost($order, (string) $data['tracking_number']);
+            $result = $fulfillment->completePackedOrder($order);
+        } catch (RuntimeException $exception) {
+            return $this->packingActionError($request, $exception->getMessage());
+        }
+
+        return $this->packingActionSuccess($request, "Spakowano zamówienie {$order->external_number} z ręcznym numerem InPost {$label->trackingIdentifier()}.", [
+            'action' => 'packing.completed_manual_inpost',
+            'order_id' => $order->id,
+            'warnings' => $result['warnings'],
+            'ui' => ['remove_submitted_card' => true, 'destination' => 'waiting'],
+        ]);
+    }
+
+    public function markOrderShipped(ExternalOrder $order, PackingFulfillmentService $fulfillment): RedirectResponse
+    {
+        $result = $fulfillment->markOrderPickedUpByCourier($order, [
+            'source' => 'manual_order_confirmation',
+            'picked_up_at' => now()->toISOString(),
+        ]);
+
+        $message = "Zamówienie {$order->external_number} oznaczono jako wysłane.";
+        if ($result['warnings'] !== []) {
+            $message .= ' Ostrzeżenia: '.implode(' | ', $result['warnings']);
+        }
+
+        return back()->with($result['tasks'] > 0 ? 'status' : 'error', $message);
     }
 
     public function unpackOrder(Request $request, ExternalOrder $order, PackingFulfillmentService $fulfillment): RedirectResponse
@@ -408,12 +453,13 @@ class PackingController extends Controller
     {
         $data = $request->validate([
             'reason' => ['required', 'string', 'max:1000'],
+            'restore_stock' => ['sometimes', 'boolean'],
         ]);
 
         $reason = trim((string) $data['reason']);
 
         try {
-            $result = $problems->reportOrder($order, $reason);
+            $result = $problems->reportOrder($order, $reason, (bool) ($data['restore_stock'] ?? true));
         } catch (RuntimeException $exception) {
             return $this->packingActionError($request, $exception->getMessage());
         }
@@ -936,6 +982,8 @@ class PackingController extends Controller
     ): bool {
         if ($label->purpose !== 'shipment'
             || $label->external_order_id === null
+            || trim((string) $label->path) === ''
+            || data_get($label->response_payload, 'source') === 'manual_inpost_tracking_number'
             || ! in_array(mb_strtolower((string) $label->status), self::DOWNLOADABLE_SHIPMENT_LABEL_STATUSES, true)) {
             return false;
         }

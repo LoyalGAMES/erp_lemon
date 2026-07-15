@@ -27,7 +27,7 @@ final class PackingProblemService
      * @param  array<int|string>  $taskIds
      * @return array{tasks:int,orders:int,warnings:list<string>}
      */
-    public function reportTasks(array $taskIds, string $reason): array
+    public function reportTasks(array $taskIds, string $reason, bool $restoreStock = true): array
     {
         $ids = collect($taskIds)
             ->map(fn (mixed $id): int => (int) $id)
@@ -49,7 +49,7 @@ final class PackingProblemService
         $warnings = [];
 
         foreach ($orders as $order) {
-            $result = $this->reportOrder($order, $reason);
+            $result = $this->reportOrder($order, $reason, $restoreStock);
             $tasks += $result['tasks'];
             $warnings = array_merge($warnings, $result['warnings']);
         }
@@ -64,7 +64,7 @@ final class PackingProblemService
     /**
      * @return array{tasks:int,orders:int,warnings:list<string>}
      */
-    public function reportOrder(ExternalOrder $order, string $reason): array
+    public function reportOrder(ExternalOrder $order, string $reason, bool $restoreStock = true): array
     {
         $order = ExternalOrder::query()->findOrFail($order->id);
         $taskStatuses = PackingTask::query()
@@ -81,6 +81,7 @@ final class PackingProblemService
                 $order,
                 $reason,
                 Auth::id(),
+                $restoreStock,
             );
         } catch (Throwable $exception) {
             throw new RuntimeException(
@@ -106,6 +107,7 @@ final class PackingProblemService
             'problem_note' => $reason,
             'cancellation_uuid' => $cancellationResult['cancellation']->uuid,
             'refund_status' => $cancellationResult['cancellation']->refund_status,
+            'stock_restored' => $restoreStock,
         ]);
 
         if (! $message instanceof CustomerMessage) {

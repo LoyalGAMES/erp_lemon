@@ -468,8 +468,9 @@
                         </div>
 
                         <div class="collect-actions">
-                            <form id="{{ $problemFormId }}" method="POST" action="{{ route('packing.groups.problem') }}" data-packing-ajax>
+                            <form id="{{ $problemFormId }}" method="POST" action="{{ route('packing.groups.problem') }}" data-packing-ajax data-packing-problem>
                                 @csrf
+                                <input type="hidden" name="restore_stock" value="1">
                                 @foreach ($collectOrder['task_ids'] as $taskId)
                                     <input type="hidden" name="task_ids[]" value="{{ $taskId }}">
                                 @endforeach
@@ -660,16 +661,26 @@
                                         </button>
                                     </div>
                                 </form>
+                                <form method="POST" action="{{ route('packing.orders.pack-manual-inpost', $order) }}" data-packing-ajax>
+                                    @csrf
+                                    <input name="tracking_number" inputmode="numeric" pattern="[0-9]{10,30}" maxlength="30" required placeholder="Ręczny numer InPost">
+                                    <button class="button secondary" type="submit">Dodaj numer i spakuj</button>
+                                </form>
+                                <form method="POST" action="{{ route('packing.orders.pack', $order) }}" data-packing-ajax onsubmit="return confirm('Spakować zamówienie bez listu przewozowego?');">
+                                    @csrf
+                                    <button class="button secondary" type="submit">Pomiń list przewozowy i spakuj</button>
+                                </form>
                             @endif
-                            <form class="order-problem-form" method="POST" action="{{ route('packing.orders.problem', $order) }}" data-packing-ajax>
+                            <form class="order-problem-form" method="POST" action="{{ route('packing.orders.problem', $order) }}" data-packing-ajax data-packing-problem>
                                 @csrf
+                                <input type="hidden" name="restore_stock" value="1">
                                 <input name="reason" placeholder="Notatka problemu dla klienta" required maxlength="1000">
                                 <button class="button danger" type="submit">Problem</button>
                             </form>
                             @if ($shippingLabel)
                                 <form method="POST" action="{{ route('packing.orders.pack', $order) }}" data-packing-ajax>
                                     @csrf
-                                    <button class="button" type="submit">Spakuj i wydrukuj</button>
+                                    <button class="button" type="submit">{{ data_get($shippingLabel->response_payload, 'source') === 'manual_inpost_tracking_number' ? 'Spakuj' : 'Spakuj i wydrukuj' }}</button>
                                 </form>
                             @endif
                         </div>
@@ -775,6 +786,10 @@
                                                 @if ($queuedOrder['tracking_url'])
                                                     <a class="button secondary" href="{{ $queuedOrder['tracking_url'] }}" target="_blank" rel="noopener noreferrer">Śledź paczkę</a>
                                                 @endif
+                                                <form method="POST" action="{{ route('packing.orders.mark-shipped', $queuedOrder['id']) }}" onsubmit="return confirm('Oznaczyć to zamówienie jako wysłane?');">
+                                                    @csrf
+                                                    <button class="button" type="submit">Oznacz jako wysłane</button>
+                                                </form>
                                             </div>
                                         </div>
                                         <form class="order-rollback-form" method="POST" action="{{ route('packing.orders.unpack', $queuedOrder['id']) }}">
@@ -1185,6 +1200,12 @@
 
             forms.forEach((form) => form.addEventListener('submit', async (event) => {
                 event.preventDefault();
+
+                if (form.hasAttribute('data-packing-problem')) {
+                    form.querySelector('input[name="restore_stock"]').value = window.confirm(
+                        'Czy przywrócić stan magazynowy anulowanego zamówienia do sprzedaży?\n\nOK = Tak, Anuluj = Nie'
+                    ) ? '1' : '0';
+                }
 
                 if (form.dataset.packingSubmitting === 'true') {
                     return;

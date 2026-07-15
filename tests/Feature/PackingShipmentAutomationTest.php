@@ -750,6 +750,9 @@ class PackingShipmentAutomationTest extends TestCase
         $this->assertSame('packed', $task->fresh()->status);
         $this->assertSame('station-retry', data_get($task->fresh()->metadata, 'packing_completion.print_station.code'));
         $this->assertDatabaseCount('print_jobs', 0);
+        $message = CustomerMessage::query()->where('external_order_id', $order->id)->where('trigger', 'order_packed')->sole();
+        $this->assertStringContainsString('bez listu przewozowego', $message->renderedBody());
+        $this->assertStringNotContainsString('Śledzenie przesyłki:', $message->renderedBody());
         Http::assertNotSent(fn ($request): bool => str_contains($request->url(), '/wp-json/ship/v1/orders/'));
     }
 

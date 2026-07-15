@@ -29,6 +29,31 @@ class OrderFullEditingWorkflowTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_manual_inpost_number_can_be_added_from_order_editor_for_tracking(): void
+    {
+        [, , , , $order] = $this->createOrderContext();
+        app(PackingTaskService::class)->syncForOrder($order);
+
+        $trackingNumber = '520000123456789012345678';
+
+        $this->get(route('orders.edit', $order))
+            ->assertOk()
+            ->assertSee('Ręczna przesyłka InPost')
+            ->assertSee(route('orders.labels.inpost-manual.store', $order), false);
+
+        $this->post(route('orders.labels.inpost-manual.store', $order), [
+            'tracking_number' => $trackingNumber,
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $label = ShippingLabel::query()->sole();
+        $this->assertSame('inpost', $label->provider);
+        $this->assertSame('generated', $label->status);
+        $this->assertSame($trackingNumber, $label->tracking_number);
+        $this->assertSame('manual_inpost_tracking_number', data_get($label->response_payload, 'source'));
+        $this->assertNotNull($label->next_tracking_check_at);
+        $this->assertSame('', $label->path);
+    }
+
     protected function setUp(): void
     {
         parent::setUp();
@@ -148,8 +173,9 @@ class OrderFullEditingWorkflowTest extends TestCase
             'currency' => 'PLN',
             'total' => '264.50',
             'date_modified_gmt' => '2026-07-14T10:20:30',
-            'billing' => $billing,
-            'shipping' => $shipping,
+            // Some WooCommerce extensions return partial address objects.
+            'billing' => ['first_name' => $billing['first_name']],
+            'shipping' => ['address_1' => $shipping['address_1']],
             'customer_note' => 'Proszę zadzwonić przed dostawą.',
             'payment_method' => 'cod',
             'payment_method_title' => 'Płatność przy odbiorze',

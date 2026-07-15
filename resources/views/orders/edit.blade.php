@@ -104,6 +104,41 @@
         </div>
     </div>
 
+    @if ($canViewOrderDetails && $editingAllowed && ! in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true))
+        <article class="card order-edit-intro">
+            <strong>Status zamówienia</strong>
+            <form class="order-edit-grid" method="POST" action="{{ route('orders.status.update', $order) }}">
+                @csrf
+                @method('PATCH')
+                <label>Status WooCommerce
+                    <select name="status" required>
+                        @foreach ($orderStatusOptions as $statusValue => $statusLabel)
+                            <option value="{{ $statusValue }}" @selected(old('status', $order->status) === $statusValue)>{{ $statusLabel }}</option>
+                        @endforeach
+                    </select>
+                </label>
+                <label>Powód anulowania
+                    <input name="cancellation_reason" maxlength="1000" value="{{ old('cancellation_reason') }}" placeholder="Wymagany po wybraniu „Anulowane”">
+                </label>
+                <div class="wide"><button class="button" type="submit">Zapisz status</button></div>
+            </form>
+        </article>
+    @endif
+
+    @if ($editingAllowed)
+        <article class="card order-edit-intro">
+            <strong>Ręczna przesyłka InPost</strong>
+            <p class="order-edit-help">Jeśli etykieta została utworzona poza ERP, wpisz jej numer. System nie będzie miał pliku do wydruku, ale przesyłka będzie automatycznie śledzona.</p>
+            <form class="order-edit-grid" method="POST" action="{{ route('orders.labels.inpost-manual.store', $order) }}">
+                @csrf
+                <label>Numer etykiety / przesyłki InPost
+                    <input name="tracking_number" inputmode="numeric" pattern="[0-9]{10,30}" maxlength="30" value="{{ old('tracking_number') }}" required placeholder="np. 520000123456789012345678">
+                </label>
+                <div style="align-self: end;"><button class="button" type="submit">Zapisz numer do śledzenia</button></div>
+            </form>
+        </article>
+    @endif
+
     @if ($errors->any())
         <div class="alert error" role="alert">
             <strong>Nie zapisano zamówienia. Popraw wskazane dane:</strong>

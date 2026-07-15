@@ -18,6 +18,7 @@ use App\Services\Audit\AuditLogService;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Communication\CustomerMailPresentationService;
 use App\Services\Inventory\StockReservationService;
+use App\Services\Orders\OrderCancellationService;
 use App\Services\Orders\OrderEditingService;
 use App\Services\Orders\OrderFulfillmentStatusService;
 use App\Services\Orders\OrderMutationLock;
@@ -202,6 +203,7 @@ class ExternalOrderController extends Controller
             'canViewOrderDetails' => $canViewOrders,
             'expectedVersion' => $editing->version($order),
             'expectedRemoteModifiedAt' => $editing->expectedRemoteModifiedAt($order),
+            'orderStatusOptions' => $this->orderStatusOptions((string) $order->status),
             'returnTo' => $returnTo,
             'backUrl' => $backUrl,
         ]);
@@ -317,6 +319,29 @@ class ExternalOrderController extends Controller
                 ? route('packing.index', ['view' => 'pack'])
                 : route('orders.show', $freshOrder))
             ->with('status', $message);
+    }
+
+    public function storeManualInPostLabel(
+        Request $request,
+        ExternalOrder $order,
+        ShippingLabelService $shippingLabels,
+    ): RedirectResponse {
+        $this->assertCanEditOrder($request, $order);
+
+        $validated = $request->validate([
+            'tracking_number' => ['required', 'string', 'regex:/^[0-9]{10,30}$/'],
+        ], [
+            'tracking_number.regex' => 'Numer przesyłki InPost powinien zawierać od 10 do 30 cyfr.',
+        ]);
+
+        $trackingNumber = trim((string) $validated['tracking_number']);
+        try {
+            $shippingLabels->registerManualInPost($order, $trackingNumber);
+        } catch (RuntimeException $exception) {
+            return back()->withInput()->with('error', $exception->getMessage());
+        }
+
+        return back()->with('status', "Numer przesyłki InPost {$trackingNumber} zapisano i włączono do śledzenia.");
     }
 
     public function lookupProducts(Request $request, ExternalOrder $order): JsonResponse
@@ -437,16 +462,38 @@ class ExternalOrderController extends Controller
         PackingTaskService $packingTasks,
         AuditLogService $audit,
         CustomerCommunicationService $communication,
+        OrderCancellationService $cancellations,
         OrderMutationLock $orderMutationLock,
     ): RedirectResponse {
         $validated = $request->validate([
             'status' => ['required', 'string', 'max:80', 'regex:/^[a-z0-9][a-z0-9-]*$/'],
+            'cancellation_reason' => ['nullable', 'required_if:status,cancelled', 'string', 'min:3', 'max:1000'],
         ]);
 
-        if (in_array($validated['status'], ['cancelled', 'refunded'], true)) {
+        if ($validated['status'] === 'refunded') {
             return back()->withInput()->with(
                 'error',
                 'Status anulowania lub zwrotu można ustawić wyłącznie dedykowaną operacją, która bezpiecznie cofa dokumenty i rozliczenia.',
+            );
+        }
+
+        if ($validated['status'] === 'cancelled') {
+            try {
+                $result = $cancellations->cancel(
+                    $order,
+                    (string) $validated['cancellation_reason'],
+                    Auth::id(),
+                    ['source' => 'order_status_edit'],
+                );
+            } catch (Throwable $exception) {
+                return back()->withInput()->with('error', 'Nie udało się anulować zamówienia: '.$exception->getMessage());
+            }
+
+            return back()->with(
+                $result['attention_required'] ? 'error' : 'status',
+                $result['attention_required']
+                    ? 'Anulowanie wymaga interwencji. '.implode(' | ', $result['warnings'])
+                    : 'Zamówienie anulowano. Cofnięto wysyłkę, dokumenty i rezerwacje oraz zapisano rozliczenie.',
             );
         }
 
@@ -502,7 +549,7 @@ class ExternalOrderController extends Controller
         $notificationTrigger = match ((string) $freshOrder->status) {
             'processing' => 'order_received',
             'cancelled' => 'order_cancelled',
-            'failed' => 'order_payment_failed',
+            'failed' => 'order_cancelled',
             'refunded' => 'order_refunded',
             default => null,
         };
@@ -852,6 +899,7 @@ class ExternalOrderController extends Controller
             'ready-to-ship' => 'Gotowe do wysyłki',
             'completed' => 'Zrealizowane',
             'failed' => 'Nieudane',
+            'cancelled' => 'Anulowane',
         ];
 
         if ($currentStatus !== '' && ! array_key_exists($currentStatus, $options)) {

@@ -219,6 +219,7 @@ final class PackingFulfillmentService
             ->shipments()
             ->where('external_order_id', $order->id)
             ->where('status', 'generated')
+            ->where(fn ($query) => $query->whereNull('idempotency_key')->orWhere('idempotency_key', 'not like', 'manual:%'))
             ->latest('generated_at')
             ->latest('id')
             ->first();
@@ -303,9 +304,18 @@ final class PackingFulfillmentService
             'warnings' => $warnings,
         ]);
 
+        $mailLabel = $label ?? ShippingLabel::query()
+            ->shipments()
+            ->where('external_order_id', $order->id)
+            ->whereIn('status', ['generated', 'picked_up'])
+            ->latest('generated_at')
+            ->latest('id')
+            ->first();
+        $trackingNumber = $mailLabel?->trackingIdentifier();
         $this->communication->sendOrderStatus($order, 'order_packed', [
-            'label_id' => $label?->id,
-            'tracking_number' => $label?->tracking_number,
+            'label_id' => $mailLabel?->id,
+            'tracking_number' => $trackingNumber,
+            'shipping_label_available' => $mailLabel instanceof ShippingLabel,
         ]);
 
         return [

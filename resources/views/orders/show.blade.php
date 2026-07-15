@@ -224,6 +224,9 @@
                             @endforeach
                         </select>
                     </label>
+                    <label>Powód anulowania (wymagany dla statusu „Anulowane”)
+                        <input name="cancellation_reason" maxlength="1000" value="{{ old('cancellation_reason') }}" placeholder="Komentarz dla klienta i historii anulowania">
+                    </label>
                     <button class="button" type="submit">Zapisz status</button>
                 </form>
             @endif
@@ -592,9 +595,10 @@
                                 @endif
                             </div>
                             <div class="shipping-label-card-actions">
-                                @if ($label->purpose !== 'shipment' || (! $orderOperationsLocked
+                                @if (data_get($label->response_payload, 'source') !== 'manual_inpost_tracking_number'
+                                    && ($label->purpose !== 'shipment' || (! $orderOperationsLocked
                                     && ! in_array(mb_strtolower((string) $order->status), ['cancellation-pending', 'cancelled', 'canceled', 'refunded'], true)
-                                    && in_array(mb_strtolower((string) $label->status), ['generated', 'picked_up', 'delivered'], true)))
+                                    && in_array(mb_strtolower((string) $label->status), ['generated', 'picked_up', 'delivered'], true))))
                                     <a class="button secondary" href="{{ $label->purpose === 'shipment' ? route('packing.labels.download', $label) : route('returns.labels.download', $label) }}">Pobierz etykietę</a>
                                 @endif
                                 @if ($trackingUrl)

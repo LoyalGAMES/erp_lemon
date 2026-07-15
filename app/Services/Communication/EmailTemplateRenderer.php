@@ -23,6 +23,7 @@ final class EmailTemplateRenderer
             'payment_url' => 'Link do płatności',
             'tracking_number' => 'Numer śledzenia',
             'tracking_url' => 'Link do śledzenia przesyłki',
+            'shipping_label_notice' => 'Informacja o liście przewozowym',
             'courier_name' => 'Nazwa przewoźnika',
             'invoice_number' => 'Numer faktury lub korekty',
             'child_order_number' => 'Numer zamówienia częściowego',
