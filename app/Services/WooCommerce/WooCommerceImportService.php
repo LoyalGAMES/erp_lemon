@@ -91,6 +91,7 @@ final class WooCommerceImportService
             'stock_skipped_waiting_reservations' => 0,
             'skipped' => 0,
             'skipped_missing_identifier' => 0,
+            'skipped_routing_only_alias' => 0,
             'products_total_before' => Product::query()->count(),
             'products_primary_before' => Product::query()->where('is_translation', false)->count(),
             'categories_total_before' => ProductCategory::query()
@@ -125,6 +126,20 @@ final class WooCommerceImportService
                 } elseif (($item['type'] ?? null) === 'simple') {
                     $stats['source_simple_products']++;
                 }
+            }
+
+            $historicalAlias = $this->aliasForWooItem($integration, $item, true);
+
+            if ($historicalAlias instanceof ProductChannelAlias
+                && ! $historicalAlias->isOutboundSyncEnabled()
+            ) {
+                // Keep this identity available to productForOrderLine(), but
+                // never let a superseded catalog item replace the canonical
+                // mapping or recreate a duplicate ERP product.
+                $stats['skipped']++;
+                $stats['skipped_routing_only_alias']++;
+
+                continue;
             }
 
             $sourceSku = trim((string) ($item['sku'] ?? ''));
@@ -1373,15 +1388,18 @@ final class WooCommerceImportService
     /**
      * @param  array<string, mixed>  $item
      */
-    private function aliasForWooItem(WordpressIntegration $integration, array $item): ?ProductChannelAlias
-    {
+    private function aliasForWooItem(
+        WordpressIntegration $integration,
+        array $item,
+        bool $includeRoutingOnly = false,
+    ): ?ProductChannelAlias {
         $externalProductId = trim((string) ($item['id'] ?? ''));
 
         if ($externalProductId === '') {
             return null;
         }
 
-        return ProductChannelAlias::query()
+        $alias = ProductChannelAlias::query()
             ->with('product')
             ->where('sales_channel_id', $integration->sales_channel_id)
             ->where('external_key', ProductChannelAlias::externalKey(
@@ -1389,6 +1407,15 @@ final class WooCommerceImportService
                 isset($item['variation_id']) ? (string) $item['variation_id'] : null,
             ))
             ->first();
+
+        if (! $includeRoutingOnly
+            && $alias instanceof ProductChannelAlias
+            && ! $alias->isOutboundSyncEnabled()
+        ) {
+            return null;
+        }
+
+        return $alias;
     }
 
     /**
@@ -1427,11 +1454,16 @@ final class WooCommerceImportService
                 ),
             ));
 
-        return $mapped || ProductChannelAlias::query()
+        if ($mapped) {
+            return true;
+        }
+
+        return ProductChannelAlias::query()
             ->where('product_id', $product->id)
             ->where('sales_channel_id', $integration->sales_channel_id)
             ->whereIn('external_key', $externalKeys->all())
-            ->exists();
+            ->get()
+            ->contains(fn (ProductChannelAlias $alias): bool => $alias->isOutboundSyncEnabled());
     }
 
     /**
@@ -1445,6 +1477,13 @@ final class WooCommerceImportService
     ): array {
         $aliases = 0;
         $merged = 0;
+        $supportedLanguages = collect([
+            ...$integration->productImportLanguages(),
+            ...$integration->productExportLanguages(),
+        ])
+            ->map(fn (mixed $language): string => $this->normalizeLanguage($language))
+            ->filter()
+            ->unique();
         $primaryKey = ProductChannelAlias::externalKey(
             (string) ($item['id'] ?? ''),
             isset($item['variation_id']) ? (string) $item['variation_id'] : null,
@@ -1452,6 +1491,12 @@ final class WooCommerceImportService
 
         foreach ((array) ($item['erp_translations'] ?? []) as $language => $translation) {
             if (! is_array($translation)) {
+                continue;
+            }
+
+            $language = $this->normalizeLanguage($language);
+
+            if (! $supportedLanguages->contains($language)) {
                 continue;
             }
 
@@ -1488,7 +1533,7 @@ final class WooCommerceImportService
                 $this->translationMerge->merge($canonical, $legacyMapping->product, [
                     'reason' => 'woocommerce_polylang_import',
                     'sales_channel_id' => (int) $integration->sales_channel_id,
-                    'language' => $this->normalizeLanguage($language),
+                    'language' => $language,
                     'external_product_id' => $externalProductId,
                     'external_variation_id' => $externalVariationId,
                 ]);
@@ -1499,6 +1544,15 @@ final class WooCommerceImportService
                 ->where('sales_channel_id', $integration->sales_channel_id)
                 ->where('external_key', $externalKey)
                 ->first();
+            $metadata = array_replace_recursive((array) $existingAlias?->metadata, [
+                'source' => 'woocommerce_polylang_import',
+                'translation_group' => $item['lemon_erp_translation_group'] ?? null,
+                'synced_at' => now()->toISOString(),
+            ]);
+            data_forget(
+                $metadata,
+                WooOwnedVariantAxisRepairService::STATE_PATH.'.routing_only',
+            );
 
             ProductChannelAlias::query()->updateOrCreate(
                 [
@@ -1510,13 +1564,9 @@ final class WooCommerceImportService
                     'external_product_id' => $externalProductId,
                     'external_variation_id' => filled($externalVariationId) ? $externalVariationId : null,
                     'external_sku' => $this->nullableString($translation['sku'] ?? null),
-                    'language' => $this->normalizeLanguage($language),
+                    'language' => $language,
                     'source_product_id' => $sourceProductId,
-                    'metadata' => array_replace_recursive((array) $existingAlias?->metadata, [
-                        'source' => 'woocommerce_polylang_import',
-                        'translation_group' => $item['lemon_erp_translation_group'] ?? null,
-                        'synced_at' => now()->toISOString(),
-                    ]),
+                    'metadata' => $metadata,
                 ],
             );
             $aliases++;

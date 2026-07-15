@@ -42,13 +42,22 @@ final class RepairWooOwnedVariantAxisJob implements ShouldQueue
     /** @return list<object> */
     public function middleware(): array
     {
-        return [
-            (new WithoutOverlapping(ExportWooCommerceProductDataJob::lockKey($this->productId)))
+        $familyRootId = app(WooOwnedVariantAxisRepairService::class)
+            ->familyRootId($this->productId);
+        $middleware = [
+            (new WithoutOverlapping(ExportWooCommerceProductDataJob::lockKey($familyRootId)))
                 ->releaseAfter(60)
                 ->expireAfter(ExportWooCommerceProductDataJob::LOCK_SECONDS)
                 ->withPrefix('')
                 ->shared(),
         ];
+
+        ImportWooCommerceProductsJob::catalogIntegrationIdsForProduct($familyRootId)
+            ->each(function (int $integrationId) use (&$middleware): void {
+                $middleware[] = ImportWooCommerceProductsJob::catalogLock($integrationId);
+            });
+
+        return $middleware;
     }
 
     public function handle(

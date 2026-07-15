@@ -382,6 +382,36 @@ final class WooOwnedVariantAxisRepairService
             }
         }
 
+        try {
+            $discoveredAliases = $identity['contract']
+                ? $this->preflightDiscoveredAliases($product, $plans)
+                : [];
+        } catch (RuntimeException $exception) {
+            return [
+                'status' => 'manual_review',
+                'targets' => count($plans),
+                'mutations' => 0,
+                'reason' => $exception->getMessage(),
+                'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
+            ];
+        }
+
+        // Persist only identities proven by the reciprocal catalog contract.
+        // This transaction repeats the ownership checks immediately before
+        // any WooCommerce PUT, so a concurrent import cannot make us mutate a
+        // family after claiming one of its translation identities elsewhere.
+        try {
+            $this->persistDiscoveredAliases($discoveredAliases);
+        } catch (RuntimeException $exception) {
+            return [
+                'status' => 'manual_review',
+                'targets' => count($plans),
+                'mutations' => 0,
+                'reason' => $exception->getMessage(),
+                'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
+            ];
+        }
+
         $mutations = 0;
 
         // Finish and verify one language at a time. If any write/read fails,
@@ -479,6 +509,314 @@ final class WooOwnedVariantAxisRepairService
             'mutations' => $mutations,
             'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
         ];
+    }
+
+    /**
+     * Build every parent and child alias from the verified Polylang contract
+     * and reject local identity conflicts before the first WooCommerce PUT.
+     *
+     * @param  list<array<string,mixed>>  $plans
+     * @return list<array{product_id:int,sales_channel_id:int,external_product_id:string,external_variation_id:?string,external_sku:?string,language:string,translation_group:string}>
+     */
+    private function preflightDiscoveredAliases(Product $product, array $plans): array
+    {
+        $records = collect();
+
+        foreach (collect($plans)->groupBy(fn (array $entry): int => (int) $entry['target']['integration']->id) as $integrationPlans) {
+            $primary = $integrationPlans->first(
+                fn (array $entry): bool => (bool) data_get($entry, 'target.is_primary', false),
+            );
+
+            if (! is_array($primary)) {
+                continue;
+            }
+
+            $primaryLanguage = $this->language(data_get($primary, 'target.language', 'pl'));
+            $primaryParentId = trim((string) data_get($primary, 'target.external_product_id', ''));
+            $salesChannelId = (int) data_get($primary, 'target.sales_channel_id', 0);
+            $primaryVariationsById = collect((array) ($primary['variations'] ?? []))
+                ->filter(fn (mixed $variation): bool => is_array($variation))
+                ->keyBy(fn (array $variation): string => trim((string) ($variation['id'] ?? '')));
+            $localByPrimaryVariationId = $product->variantChildren
+                ->flatMap(function (Product $variant) use ($salesChannelId, $primaryParentId): Collection {
+                    return $variant->channelMappings
+                        ->filter(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $salesChannelId
+                            && trim((string) $mapping->external_product_id) === $primaryParentId
+                            && filled($mapping->external_variation_id))
+                        ->map(fn (ProductChannelMapping $mapping): array => [
+                            'external_variation_id' => trim((string) $mapping->external_variation_id),
+                            'product' => $variant,
+                        ]);
+                })
+                ->keyBy('external_variation_id')
+                ->map(fn (array $entry): Product => $entry['product']);
+
+            foreach ($integrationPlans->reject(
+                fn (array $entry): bool => (bool) data_get($entry, 'target.is_primary', false),
+            ) as $entry) {
+                $target = $entry['target'];
+                $language = $this->language($target['language']);
+                $externalProductId = trim((string) $target['external_product_id']);
+                $translationGroup = trim((string) ($entry['parent']['lemon_erp_translation_group'] ?? ''));
+                $records->push([
+                    'product_id' => (int) $product->id,
+                    'sales_channel_id' => (int) $target['sales_channel_id'],
+                    'external_product_id' => $externalProductId,
+                    'external_variation_id' => null,
+                    'external_sku' => filled($entry['parent']['sku'] ?? null)
+                        ? trim((string) $entry['parent']['sku'])
+                        : null,
+                    'language' => $language,
+                    'translation_group' => $translationGroup,
+                ]);
+
+                foreach ($entry['variations'] as $variation) {
+                    $translationMap = $this->translationIdMap(
+                        $variation['lemon_erp_translations'] ?? [],
+                    );
+                    $primaryVariationId = (string) ($translationMap[$primaryLanguage] ?? '');
+                    $localVariant = $localByPrimaryVariationId->get($primaryVariationId);
+                    $primaryVariation = $primaryVariationsById->get($primaryVariationId);
+                    $externalVariationId = trim((string) ($variation['id'] ?? ''));
+                    $localSku = mb_strtoupper(trim((string) $localVariant?->sku));
+                    $primaryRemoteSku = mb_strtoupper(trim((string) data_get(
+                        $primaryVariation,
+                        'sku',
+                        '',
+                    )));
+
+                    if (! $localVariant instanceof Product
+                        || ! is_array($primaryVariation)
+                        || $localSku === ''
+                        || $primaryRemoteSku === ''
+                        || $localSku !== $primaryRemoteSku
+                        || ! ctype_digit($externalVariationId)
+                        || (int) $externalVariationId <= 0
+                    ) {
+                        throw new RuntimeException(
+                            "Nie można jednoznacznie przypisać wariantu {$language} #{$externalVariationId} do lokalnej rodziny ERP.",
+                        );
+                    }
+
+                    $records->push([
+                        'product_id' => (int) $localVariant->id,
+                        'sales_channel_id' => (int) $target['sales_channel_id'],
+                        'external_product_id' => $externalProductId,
+                        'external_variation_id' => $externalVariationId,
+                        'external_sku' => filled($variation['sku'] ?? null)
+                            ? trim((string) $variation['sku'])
+                            : $localVariant->sku,
+                        'language' => $language,
+                        'translation_group' => trim((string) ($variation['lemon_erp_translation_group'] ?? '')),
+                    ]);
+                }
+            }
+        }
+
+        $records = $records
+            ->unique(fn (array $record): string => $record['sales_channel_id'].'|'.ProductChannelAlias::externalKey(
+                $record['external_product_id'],
+                $record['external_variation_id'],
+            ))
+            ->values();
+
+        foreach ($records as $record) {
+            $externalKey = ProductChannelAlias::externalKey(
+                $record['external_product_id'],
+                $record['external_variation_id'],
+            );
+            $aliasOwner = ProductChannelAlias::query()
+                ->where('sales_channel_id', $record['sales_channel_id'])
+                ->where('external_key', $externalKey)
+                ->value('product_id');
+
+            if ($aliasOwner !== null && (int) $aliasOwner !== $record['product_id']) {
+                throw new RuntimeException(
+                    "Identyfikator WooCommerce {$externalKey} jest już aliasem innego produktu ERP.",
+                );
+            }
+
+            $mappingConflict = ProductChannelMapping::query()
+                ->where('sales_channel_id', $record['sales_channel_id'])
+                ->where('external_product_id', $record['external_product_id'])
+                ->when(
+                    filled($record['external_variation_id']),
+                    fn ($query) => $query->where('external_variation_id', $record['external_variation_id']),
+                    fn ($query) => $query->where(function ($nested): void {
+                        $nested
+                            ->whereNull('external_variation_id')
+                            ->orWhereIn('external_variation_id', ['', '0'])
+                            ->orWhereRaw("TRIM(external_variation_id) = ''");
+                    }),
+                )
+                ->where('product_id', '!=', $record['product_id'])
+                ->exists();
+
+            if ($mappingConflict) {
+                throw new RuntimeException(
+                    "Identyfikator WooCommerce {$externalKey} ma już mapowanie do innego produktu ERP; wymagane jest bezpieczne scalenie tłumaczenia.",
+                );
+            }
+        }
+
+        return $records->all();
+    }
+
+    /**
+     * @param  list<array{product_id:int,sales_channel_id:int,external_product_id:string,external_variation_id:?string,external_sku:?string,language:string,translation_group:string}>  $records
+     */
+    private function persistDiscoveredAliases(array $records): void
+    {
+        if ($records === []) {
+            return;
+        }
+
+        DB::transaction(function () use ($records): void {
+            foreach ($records as $record) {
+                $externalKey = ProductChannelAlias::externalKey(
+                    $record['external_product_id'],
+                    $record['external_variation_id'],
+                );
+                $alias = ProductChannelAlias::query()
+                    ->where('sales_channel_id', $record['sales_channel_id'])
+                    ->where('external_key', $externalKey)
+                    ->lockForUpdate()
+                    ->first();
+
+                if ($alias instanceof ProductChannelAlias
+                    && (int) $alias->product_id !== $record['product_id']
+                ) {
+                    throw new RuntimeException(
+                        "Identyfikator WooCommerce {$externalKey} został w międzyczasie przypisany innemu produktowi ERP.",
+                    );
+                }
+
+                $mappingOwner = ProductChannelMapping::query()
+                    ->where('sales_channel_id', $record['sales_channel_id'])
+                    ->where('external_product_id', $record['external_product_id'])
+                    ->when(
+                        filled($record['external_variation_id']),
+                        fn ($query) => $query->where('external_variation_id', $record['external_variation_id']),
+                        fn ($query) => $query->where(function ($nested): void {
+                            $nested
+                                ->whereNull('external_variation_id')
+                                ->orWhereIn('external_variation_id', ['', '0'])
+                                ->orWhereRaw("TRIM(external_variation_id) = ''");
+                        }),
+                    )
+                    ->where('product_id', '!=', $record['product_id'])
+                    ->lockForUpdate()
+                    ->value('product_id');
+
+                if ($mappingOwner !== null) {
+                    throw new RuntimeException(
+                        "Identyfikator WooCommerce {$externalKey} został w międzyczasie zmapowany do innego produktu ERP.",
+                    );
+                }
+
+                if ($alias instanceof ProductChannelAlias) {
+                    $sameIdentity = trim((string) $alias->external_product_id)
+                            === $record['external_product_id']
+                        && trim((string) $alias->external_variation_id)
+                            === trim((string) $record['external_variation_id'])
+                        && $this->language($alias->language ?? 'en') === $record['language'];
+
+                    if (! $sameIdentity) {
+                        throw new RuntimeException(
+                            "Alias WooCommerce {$externalKey} ma sprzeczne lokalne języki aliasu i kontraktu albo niespójną tożsamość.",
+                        );
+                    }
+
+                    $metadata = (array) $alias->metadata;
+                    $changed = false;
+
+                    if ($alias->language === null && $record['language'] === 'en') {
+                        $alias->language = 'en';
+                        $changed = true;
+                    }
+
+                    if (! $alias->isOutboundSyncEnabled()) {
+                        data_forget($metadata, self::STATE_PATH.'.routing_only');
+                        data_set($metadata, self::STATE_PATH.'.reactivated_at', now()->toISOString());
+                        $alias->metadata = $metadata;
+                        $changed = true;
+                    }
+
+                    if ($changed) {
+                        $alias->save();
+                    }
+
+                    continue;
+                }
+
+                $alias = new ProductChannelAlias([
+                    'sales_channel_id' => $record['sales_channel_id'],
+                    'external_key' => $externalKey,
+                ]);
+                $alias->fill([
+                    'product_id' => $record['product_id'],
+                    'external_product_id' => $record['external_product_id'],
+                    'external_variation_id' => $record['external_variation_id'],
+                    'external_sku' => $record['external_sku'],
+                    'language' => $record['language'],
+                    'metadata' => array_replace_recursive((array) $alias->metadata, [
+                        'source' => 'woo_axis_repair_contract_discovery',
+                        'translation_group' => $record['translation_group'],
+                        'discovered_at' => now()->toISOString(),
+                    ]),
+                ])->save();
+            }
+
+            collect($records)
+                ->groupBy(fn (array $record): string => implode('|', [
+                    $record['product_id'],
+                    $record['sales_channel_id'],
+                ]))
+                ->each(function (Collection $identityRecords): void {
+                    $first = $identityRecords->first();
+
+                    if (! is_array($first)) {
+                        return;
+                    }
+
+                    $expectedKeys = $identityRecords
+                        ->map(fn (array $record): string => ProductChannelAlias::externalKey(
+                            $record['external_product_id'],
+                            $record['external_variation_id'],
+                        ))
+                        ->unique();
+
+                    ProductChannelAlias::query()
+                        ->where('product_id', $first['product_id'])
+                        ->where('sales_channel_id', $first['sales_channel_id'])
+                        ->lockForUpdate()
+                        ->get()
+                        ->reject(fn (ProductChannelAlias $alias): bool => $expectedKeys->contains(
+                            $alias->external_key,
+                        ))
+                        ->each(function (ProductChannelAlias $alias) use ($first): void {
+                            $metadata = (array) $alias->metadata;
+                            data_set($metadata, self::STATE_PATH.'.routing_only', true);
+                            data_set(
+                                $metadata,
+                                self::STATE_PATH.'.superseded_at',
+                                data_get($metadata, self::STATE_PATH.'.superseded_at')
+                                    ?? now()->toISOString(),
+                            );
+                            data_set(
+                                $metadata,
+                                self::STATE_PATH.'.reason',
+                                'outside_verified_translation_contract',
+                            );
+                            data_set(
+                                $metadata,
+                                self::STATE_PATH.'.translation_group',
+                                $first['translation_group'],
+                            );
+                            $alias->forceFill(['metadata' => $metadata])->save();
+                        });
+                });
+        }, 3);
     }
 
     /** @param array<string,mixed> $entry */
@@ -1340,7 +1678,7 @@ final class WooOwnedVariantAxisRepairService
 
     /**
      * @return array{
-     *   targets:list<array{integration:WordpressIntegration,sales_channel_id:int,external_product_id:string,language:string,is_primary:bool}>,
+     *   targets:list<array{integration:WordpressIntegration,sales_channel_id:int,external_product_id:string,language:string,is_primary:bool,discovered?:bool}>,
      *   error:?string,
      *   retryable:bool,
      *   allow_full_export:bool
@@ -1386,7 +1724,46 @@ final class WooOwnedVariantAxisRepairService
                 'external_product_id' => $externalProductId,
                 'language' => $primaryLanguage,
                 'is_primary' => true,
+                'discovered' => false,
             ]);
+
+            $requiredLanguages = collect([
+                ...$integration->productImportLanguages(),
+                ...$integration->productExportLanguages(),
+            ])
+                ->map(fn (mixed $language): string => $this->language($language))
+                ->unique()
+                ->values();
+            $discovery = $this->discoverContractTranslationTargets(
+                $integration,
+                (int) $mapping->sales_channel_id,
+                $externalProductId,
+                $primaryLanguage,
+                $requiredLanguages->all(),
+                $requiredLanguages
+                    ->reject(fn (string $language): bool => $language === $primaryLanguage)
+                    ->values()
+                    ->all(),
+            );
+
+            if ($discovery['error'] !== null) {
+                return [
+                    'targets' => $targets->all(),
+                    'error' => $discovery['error'],
+                    'retryable' => false,
+                    'allow_full_export' => false,
+                ];
+            }
+
+            if ($discovery['contract']) {
+                // The plugin contract is the only outbound translation
+                // authority. Historical aliases outside that exact family
+                // remain available for order routing but are not repair
+                // targets and are demoted after full preflight.
+                $targets->push(...$discovery['targets']);
+
+                continue;
+            }
 
             ProductChannelAlias::query()
                 ->where('product_id', $product->id)
@@ -1399,6 +1776,7 @@ final class WooOwnedVariantAxisRepairService
                 })
                 ->orderBy('id')
                 ->get()
+                ->filter(fn (ProductChannelAlias $alias): bool => $alias->isOutboundSyncEnabled())
                 ->each(function (ProductChannelAlias $alias) use ($integration, $mapping, $targets): void {
                     $externalProductId = trim((string) $alias->external_product_id);
 
@@ -1412,8 +1790,26 @@ final class WooOwnedVariantAxisRepairService
                         'external_product_id' => $externalProductId,
                         'language' => $this->language($alias->language ?? 'en'),
                         'is_primary' => false,
+                        'discovered' => false,
                     ]);
                 });
+        }
+
+        $conflictingTarget = $targets
+            ->groupBy(fn (array $target): string => $target['integration']->id.'|'.$target['external_product_id'])
+            ->first(fn (Collection $sameIdentity): bool => $sameIdentity
+                ->pluck('language')
+                ->map(fn (mixed $language): string => $this->language($language))
+                ->unique()
+                ->count() > 1);
+
+        if ($conflictingTarget instanceof Collection) {
+            return [
+                'targets' => $targets->all(),
+                'error' => 'Ten sam produkt WooCommerce ma sprzeczne lokalne języki aliasu i kontraktu; szeroki eksport nie zostanie uruchomiony.',
+                'retryable' => false,
+                'allow_full_export' => false,
+            ];
         }
 
         $targets = $targets
@@ -1476,6 +1872,114 @@ final class WooOwnedVariantAxisRepairService
             'retryable' => false,
             'allow_full_export' => false,
         ];
+    }
+
+    /**
+     * Discover an already existing Polylang family only from the immutable
+     * catalog identity that plugin 0.5.3 appends to the exact primary product
+     * GET. Names and shared SKUs are deliberately not discovery authorities.
+     * Every discovered counterpart is fetched and fully verified later by
+     * remoteIdentity() before the first remote write.
+     *
+     * @param  list<string>  $requiredLanguages
+     * @param  list<string>  $missingLanguages
+     * @return array{
+     *   contract:bool,
+     *   targets:list<array{integration:WordpressIntegration,sales_channel_id:int,external_product_id:string,language:string,is_primary:bool,discovered:bool}>,
+     *   error:?string
+     * }
+     */
+    private function discoverContractTranslationTargets(
+        WordpressIntegration $integration,
+        int $salesChannelId,
+        string $primaryExternalId,
+        string $primaryLanguage,
+        array $requiredLanguages,
+        array $missingLanguages,
+    ): array {
+        $primary = $this->client->productById($integration, $primaryExternalId);
+        $hasContract = array_key_exists('lemon_erp_catalog_contract', $primary)
+            || array_key_exists('lemon_erp_language', $primary)
+            || array_key_exists('lemon_erp_translations', $primary)
+            || array_key_exists('lemon_erp_translation_group', $primary);
+
+        if (! $hasContract) {
+            return ['contract' => false, 'targets' => [], 'error' => null];
+        }
+
+        foreach ([
+            'lemon_erp_catalog_contract',
+            'lemon_erp_language',
+            'lemon_erp_translations',
+            'lemon_erp_translation_group',
+        ] as $key) {
+            if (! array_key_exists($key, $primary)) {
+                return [
+                    'contract' => true,
+                    'targets' => [],
+                    'error' => 'Główny produkt WooCommerce ma niepełny kontrakt katalogowy Lemon ERP; istniejące tłumaczenie nie zostanie zgadnięte.',
+                ];
+            }
+        }
+
+        if ((int) $primary['lemon_erp_catalog_contract'] !== 1) {
+            return [
+                'contract' => true,
+                'targets' => [],
+                'error' => 'Główny produkt WooCommerce ma nieobsługiwaną wersję kontraktu katalogowego Lemon ERP.',
+            ];
+        }
+
+        $primaryLanguage = $this->language($primaryLanguage);
+        $actualLanguage = $this->language($primary['lemon_erp_language']);
+        $map = $this->translationIdMap($primary['lemon_erp_translations']);
+        $requiredLanguages = collect($requiredLanguages)
+            ->map(fn (mixed $language): string => $this->language($language))
+            ->unique()
+            ->sort()
+            ->values();
+        $missingLanguages = collect($missingLanguages)
+            ->map(fn (mixed $language): string => $this->language($language))
+            ->unique()
+            ->values();
+
+        if ($actualLanguage !== $primaryLanguage
+            || ($map[$primaryLanguage] ?? 0) !== (int) $primaryExternalId
+            || count(array_unique(array_values($map))) !== count($map)
+            || collect(array_keys($map))->sort()->values()->all() !== $requiredLanguages->all()
+            || trim((string) $primary['lemon_erp_translation_group']) !== $this->translationGroup('product', $map)
+        ) {
+            return [
+                'contract' => true,
+                'targets' => [],
+                'error' => 'Kontrakt tłumaczeń głównego produktu WooCommerce nie odpowiada dokładnie skonfigurowanej rodzinie językowej.',
+            ];
+        }
+
+        $targets = [];
+
+        foreach ($missingLanguages as $language) {
+            $externalId = (string) ($map[$language] ?? '');
+
+            if (! ctype_digit($externalId) || (int) $externalId <= 0 || $externalId === $primaryExternalId) {
+                return [
+                    'contract' => true,
+                    'targets' => [],
+                    'error' => 'Kontrakt tłumaczeń WooCommerce nie zawiera jednoznacznego ID wersji '.mb_strtoupper($language).'.',
+                ];
+            }
+
+            $targets[] = [
+                'integration' => $integration,
+                'sales_channel_id' => $salesChannelId,
+                'external_product_id' => $externalId,
+                'language' => $language,
+                'is_primary' => false,
+                'discovered' => true,
+            ];
+        }
+
+        return ['contract' => true, 'targets' => $targets, 'error' => null];
     }
 
     /**
@@ -1592,17 +2096,26 @@ final class WooOwnedVariantAxisRepairService
             }
 
             $variationRecords = collect();
-            $hasParentGroupField = $integrationPlans->contains(fn (array $entry): bool => collect($entry['variations'])
-                ->contains(fn (array $variation): bool => array_key_exists('lemon_erp_parent_translation_group', $variation)));
 
             foreach ($integrationPlans as $entry) {
                 $language = $this->language($entry['target']['language']);
 
                 foreach ($entry['variations'] as $variation) {
-                    foreach (['lemon_erp_language', 'lemon_erp_translations', 'lemon_erp_translation_group'] as $key) {
+                    foreach ([
+                        'lemon_erp_catalog_contract',
+                        'lemon_erp_language',
+                        'lemon_erp_translations',
+                        'lemon_erp_translation_group',
+                        'lemon_erp_parent_translations',
+                        'lemon_erp_parent_translation_group',
+                    ] as $key) {
                         if (! array_key_exists($key, $variation)) {
                             return ['contract' => true, 'error' => 'Wariant #'.($variation['id'] ?? '?').' ma niepełny kontrakt tłumaczeń.'];
                         }
+                    }
+
+                    if ((int) $variation['lemon_erp_catalog_contract'] !== 1) {
+                        return ['contract' => true, 'error' => 'Wariant #'.($variation['id'] ?? '?').' ma nieobsługiwaną wersję kontraktu katalogowego.'];
                     }
 
                     if ($this->language($variation['lemon_erp_language']) !== $language) {
@@ -1621,9 +2134,15 @@ final class WooOwnedVariantAxisRepairService
                         return ['contract' => true, 'error' => "Wariant #{$id} ma nieprawidłowy identyfikator grupy tłumaczeń."];
                     }
 
-                    if ($hasParentGroupField
-                        && trim((string) ($variation['lemon_erp_parent_translation_group'] ?? '')) !== $parentGroup
-                    ) {
+                    $parentMap = $this->translationIdMap($variation['lemon_erp_parent_translations']);
+                    $expectedParentMap = $expectedParents;
+                    ksort($expectedParentMap);
+
+                    if ($parentMap !== $expectedParentMap) {
+                        return ['contract' => true, 'error' => "Wariant #{$id} ma niespójną mapę tłumaczeń rodziców."];
+                    }
+
+                    if (trim((string) $variation['lemon_erp_parent_translation_group']) !== $parentGroup) {
                         return ['contract' => true, 'error' => "Wariant #{$id} wskazuje inną grupę rodziców."];
                     }
 
@@ -1669,10 +2188,19 @@ final class WooOwnedVariantAxisRepairService
         string $kind,
         array $expectedMap,
     ): ?string {
-        foreach (['lemon_erp_language', 'lemon_erp_translations', 'lemon_erp_translation_group'] as $key) {
+        foreach ([
+            'lemon_erp_catalog_contract',
+            'lemon_erp_language',
+            'lemon_erp_translations',
+            'lemon_erp_translation_group',
+        ] as $key) {
             if (! array_key_exists($key, $item)) {
                 return 'Rodzic ma niepełny kontrakt tłumaczeń Lemon ERP.';
             }
+        }
+
+        if ((int) $item['lemon_erp_catalog_contract'] !== 1) {
+            return 'Rodzic ma nieobsługiwaną wersję kontraktu katalogowego Lemon ERP.';
         }
 
         if ($this->language($item['lemon_erp_language']) !== $language) {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Jobs\ExportWooCommerceProductDataJob;
+use App\Jobs\ImportWooCommerceProductsJob;
 use App\Models\AuditLog;
 use App\Models\IntegrationSyncLog;
 use App\Models\Product;
@@ -309,7 +310,7 @@ class WooCommerceProductDataExportTest extends TestCase
         $job->setJob(new SyncJob(app(), '{}', 'sync', 'sync'));
         $job->handle(app(ProductDataExportService::class));
 
-        $this->assertCount(1, $job->middleware());
+        $this->assertCount(2, $job->middleware());
         $this->assertSame($syncToken, data_get($mapping->fresh()->metadata, 'product_data_export.pending_token'));
         $this->assertDatabaseCount('integration_sync_logs', 0);
     }
@@ -378,7 +379,7 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertNull(data_get($mapping->fresh()->metadata, 'product_data_export.pending_token'));
     }
 
-    public function test_manual_export_does_not_overlap_an_active_automatic_export(): void
+    public function test_manual_export_does_not_overlap_an_active_catalog_import(): void
     {
         Http::fake();
         $channel = SalesChannel::query()->create([
@@ -387,7 +388,7 @@ class WooCommerceProductDataExportTest extends TestCase
             'type' => 'woocommerce',
             'is_active' => true,
         ]);
-        WordpressIntegration::query()->create([
+        $integration = WordpressIntegration::query()->create([
             'sales_channel_id' => $channel->id,
             'name' => 'Test Woo',
             'base_url' => 'https://shop.test',
@@ -410,8 +411,8 @@ class WooCommerceProductDataExportTest extends TestCase
             'stock_sync_enabled' => true,
         ]);
         $lock = Cache::lock(
-            ExportWooCommerceProductDataJob::lockKey($product->id),
-            ExportWooCommerceProductDataJob::LOCK_SECONDS,
+            ImportWooCommerceProductsJob::catalogLockKey($integration->id),
+            ImportWooCommerceProductsJob::CATALOG_LOCK_SECONDS,
         );
         $this->assertTrue($lock->get());
 
@@ -424,6 +425,126 @@ class WooCommerceProductDataExportTest extends TestCase
         }
 
         Http::assertNothingSent();
+
+        $releasedFamilyLock = Cache::lock(
+            ExportWooCommerceProductDataJob::lockKey($product->id),
+            ExportWooCommerceProductDataJob::LOCK_SECONDS,
+        );
+        $this->assertTrue($releasedFamilyLock->get());
+        $releasedFamilyLock->release();
+    }
+
+    public function test_manual_creation_does_not_overlap_an_active_catalog_import(): void
+    {
+        Http::fake();
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-CREATE-LOCKED',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-CREATE-LOCKED',
+            'name' => 'Produkt oczekujący',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp']],
+        ]);
+        $lock = Cache::lock(
+            ImportWooCommerceProductsJob::catalogLockKey($integration->id),
+            ImportWooCommerceProductsJob::CATALOG_LOCK_SECONDS,
+        );
+        $this->assertTrue($lock->get());
+
+        try {
+            $this->post(route('products.woocommerce.create', [$product, $integration]))
+                ->assertRedirect()
+                ->assertSessionHas('status');
+        } finally {
+            $lock->release();
+        }
+
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('product_channel_mappings', 0);
+    }
+
+    public function test_manual_creation_for_a_variant_uses_the_parent_family_lock(): void
+    {
+        Http::fake();
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-CREATE-VARIANT-LOCKED',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'SKU-CREATE-FAMILY',
+            'name' => 'Rodzina synchronizowana',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+            ]],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'SKU-CREATE-FAMILY-S',
+            'name' => 'Wariant S',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variation',
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'value' => 'S',
+                    'variation' => true,
+                ]],
+            ]],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        $lock = Cache::lock(
+            ExportWooCommerceProductDataJob::lockKey($parent->id),
+            ExportWooCommerceProductDataJob::LOCK_SECONDS,
+        );
+        $this->assertTrue($lock->get());
+
+        try {
+            $this->post(route('products.woocommerce.create', [$variant, $integration]))
+                ->assertRedirect()
+                ->assertSessionHas('status');
+        } finally {
+            $lock->release();
+        }
+
+        Http::assertNothingSent();
+        $this->assertDatabaseCount('product_channel_mappings', 0);
     }
 
     public function test_discovered_translation_reference_does_not_overwrite_newer_erp_media(): void

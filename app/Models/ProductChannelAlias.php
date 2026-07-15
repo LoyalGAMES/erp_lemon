@@ -75,6 +75,14 @@ class ProductChannelAlias extends Model
         return $this->belongsTo(SalesChannel::class);
     }
 
+    public function isOutboundSyncEnabled(): bool
+    {
+        return data_get(
+            $this->metadata,
+            'maintenance.woo_owned_variant_axis_repair.routing_only',
+        ) !== true;
+    }
+
     private static function normalizeVariationId(mixed $variationId): ?string
     {
         if ($variationId === null) {

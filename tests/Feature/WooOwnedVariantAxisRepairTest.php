@@ -15,6 +15,7 @@ use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
+use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceImportService;
 use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -28,6 +29,34 @@ use Tests\TestCase;
 final class WooOwnedVariantAxisRepairTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_import_and_axis_repair_share_the_same_integration_catalog_lock(): void
+    {
+        [$parent] = $this->family();
+        $channelId = (int) ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->value('sales_channel_id');
+        $integrationId = (int) WordpressIntegration::query()
+            ->where('sales_channel_id', $channelId)
+            ->value('id');
+
+        $importMiddleware = (new ImportWooCommerceProductsJob($integrationId, 1))->middleware();
+        $repairMiddleware = (new RepairWooOwnedVariantAxisJob($parent->id, 'repair-token'))->middleware();
+
+        $this->assertCount(1, $importMiddleware);
+        $this->assertCount(2, $repairMiddleware);
+        $this->assertSame(70, (new ImportWooCommerceProductsJob($integrationId, 1))->tries);
+        $this->assertSame(2, (new ImportWooCommerceProductsJob($integrationId, 1))->maxExceptions);
+        $this->assertSame(
+            ImportWooCommerceProductsJob::catalogLockKey($integrationId),
+            $importMiddleware[0]->key,
+        );
+        $this->assertTrue(collect($repairMiddleware)->contains(
+            fn (object $middleware): bool => ($middleware->key ?? null)
+                === ImportWooCommerceProductsJob::catalogLockKey($integrationId),
+        ));
+        $this->assertTrue($importMiddleware[0]->shareKey);
+    }
 
     public function test_it_repairs_only_the_global_size_axis_for_existing_polish_and_english_products(): void
     {
@@ -509,6 +538,339 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame([['id' => 1, 'option' => 'S/M']], $catalog->variations[223][224]['attributes']);
     }
 
+    public function test_the_primary_catalog_contract_discovers_and_persists_missing_english_family_aliases(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        ProductChannelAlias::query()->where('language', 'en')->delete();
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        $this->assertSame(2, $result['targets']);
+        $this->assertSame(6, $result['mutations']);
+
+        $aliases = ProductChannelAlias::query()
+            ->where('language', 'en')
+            ->orderByRaw('external_variation_id IS NOT NULL')
+            ->orderBy('external_variation_id')
+            ->get();
+        $this->assertCount(3, $aliases);
+        $this->assertSame('223', (string) $aliases[0]->external_product_id);
+        $this->assertNull($aliases[0]->external_variation_id);
+        $this->assertSame($parent->id, $aliases[0]->product_id);
+        $this->assertSame(
+            ['224', '225'],
+            $aliases->skip(1)->pluck('external_variation_id')->map(fn ($id): string => (string) $id)->all(),
+        );
+        $this->assertTrue($aliases->every(fn (ProductChannelAlias $alias): bool => data_get(
+            $alias->metadata,
+            'source',
+        ) === 'woo_axis_repair_contract_discovery'));
+
+        $putCount = Http::recorded()
+            ->map(fn (array $record): Request => $record[0])
+            ->where(fn (Request $request): bool => $request->method() === 'PUT')
+            ->count();
+        $second = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+        $this->assertSame('already_canonical', $second['status']);
+        $this->assertSame($putCount, Http::recorded()
+            ->map(fn (array $record): Request => $record[0])
+            ->where(fn (Request $request): bool => $request->method() === 'PUT')
+            ->count());
+    }
+
+    public function test_contract_discovery_does_not_write_an_english_axis_that_is_already_canonical(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        ProductChannelAlias::query()->where('language', 'en')->delete();
+        $catalog->products[223]['attributes'] = collect($catalog->products[223]['attributes'])
+            ->reject(fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) === 8)
+            ->map(function (array $attribute): array {
+                if ((int) ($attribute['id'] ?? 0) === 1) {
+                    $attribute['variation'] = true;
+                    $attribute['options'] = ['S/M', 'M/L'];
+                }
+
+                return $attribute;
+            })
+            ->values()
+            ->all();
+        $catalog->products[223]['default_attributes'] = [[
+            'id' => 1,
+            'name' => 'Size',
+            'option' => 'M/L',
+        ]];
+        $catalog->variations[223][224]['attributes'] = [['id' => 1, 'name' => 'Size', 'option' => 'S/M']];
+        $catalog->variations[223][224]['menu_order'] = 10;
+        $catalog->variations[223][225]['attributes'] = [['id' => 1, 'name' => 'Size', 'option' => 'M/L']];
+        $catalog->variations[223][225]['menu_order'] = 20;
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status']);
+        $this->assertSame(3, $result['mutations']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT'
+            && str_contains((string) parse_url($request->url(), PHP_URL_PATH), '/products/223'));
+        $this->assertSame([['id' => 1, 'name' => 'Size', 'option' => 'S/M']], $catalog->variations[223][224]['attributes']);
+        $this->assertSame([['id' => 1, 'name' => 'Size', 'option' => 'M/L']], $catalog->variations[223][225]['attributes']);
+    }
+
+    public function test_contract_discovery_rejects_a_non_reciprocal_english_family_before_any_write(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        ProductChannelAlias::query()->where('language', 'en')->delete();
+        $catalog->products[223]['lemon_erp_translations'] = ['pl' => 999, 'en' => 223];
+        $catalog->products[223]['lemon_erp_translation_group'] = 'product:223|999';
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertStringContainsString('Mapa tłumaczeń rodzica', $result['reason']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+        $this->assertFalse(ProductChannelAlias::query()->where('language', 'en')->exists());
+    }
+
+    public function test_contract_discovery_rejects_an_english_identity_mapped_to_another_local_product(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        ProductChannelAlias::query()->where('language', 'en')->delete();
+        $channelId = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->value('sales_channel_id');
+        $foreign = $this->product('FOREIGN-EN', 'Obce mapowanie EN', [
+            'master' => ['source' => 'woocommerce_import', 'product_type' => 'simple'],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $foreign->id,
+            'sales_channel_id' => $channelId,
+            'external_product_id' => '223',
+            'external_variation_id' => null,
+            'external_sku' => 'FOREIGN-EN',
+            'stock_sync_enabled' => true,
+            'metadata' => ['source' => 'woocommerce_import', 'language' => 'en'],
+        ]);
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertStringContainsString('mapowanie do innego produktu ERP', $result['reason']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+        $this->assertFalse(ProductChannelAlias::query()->where('language', 'en')->exists());
+    }
+
+    public function test_contract_preflight_repairs_missing_child_aliases_when_the_english_parent_alias_already_exists(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        $parentAlias = ProductChannelAlias::query()
+            ->where('product_id', $parent->id)
+            ->where('language', 'en')
+            ->firstOrFail();
+        $parentAlias->forceFill([
+            'language' => null,
+            'metadata' => ['source' => 'existing_verified_import', 'keep' => true],
+        ])->save();
+        $parentAliasMetadata = $parentAlias->metadata;
+        ProductChannelAlias::query()
+            ->where('language', 'en')
+            ->where('product_id', '!=', $parent->id)
+            ->delete();
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status']);
+        $childIds = $parent->variantChildren()->pluck('products.id');
+        $childAliases = ProductChannelAlias::query()
+            ->whereIn('product_id', $childIds)
+            ->where('language', 'en')
+            ->orderBy('external_variation_id')
+            ->get();
+        $this->assertSame(['224', '225'], $childAliases
+            ->pluck('external_variation_id')
+            ->map(fn ($id): string => (string) $id)
+            ->all());
+        $this->assertSame($parentAliasMetadata, $parentAlias->refresh()->metadata);
+    }
+
+    public function test_contract_preflight_disables_stale_outbound_aliases_but_preserves_merge_routing(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        $child = $parent->variantChildren()->orderBy('products.sku')->firstOrFail();
+        $channelId = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->value('sales_channel_id');
+        $stale = ProductChannelAlias::query()->create([
+            'product_id' => $child->id,
+            'sales_channel_id' => $channelId,
+            'external_product_id' => '999',
+            'external_variation_id' => '998',
+            'external_sku' => $child->sku,
+            'language' => 'en',
+            'metadata' => ['source' => 'historical_stale_alias'],
+        ]);
+        $staleParent = ProductChannelAlias::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channelId,
+            'external_product_id' => '999',
+            'external_variation_id' => null,
+            'external_sku' => $parent->sku,
+            'language' => 'en',
+            'metadata' => ['source' => 'historical_stale_parent_alias'],
+        ]);
+        $german = ProductChannelAlias::query()->create([
+            'product_id' => $child->id,
+            'sales_channel_id' => $channelId,
+            'external_product_id' => '777',
+            'external_variation_id' => '778',
+            'external_sku' => $child->sku,
+            'language' => 'de',
+            'metadata' => ['source' => 'other_language'],
+        ]);
+        $mergedSource = $this->product('MERGED-HISTORY', 'Scalony historyczny wariant', []);
+        $merged = ProductChannelAlias::query()->create([
+            'product_id' => $child->id,
+            'source_product_id' => $mergedSource->id,
+            'sales_channel_id' => $channelId,
+            'external_product_id' => '666',
+            'external_variation_id' => '667',
+            'external_sku' => $child->sku,
+            'language' => 'en',
+            'metadata' => [
+                'source' => 'ProductTranslationMergeService',
+                'product_merge' => ['merged_from_product_id' => $mergedSource->id],
+            ],
+        ]);
+        $canonicalChildAlias = ProductChannelAlias::query()
+            ->where('product_id', $child->id)
+            ->where('sales_channel_id', $channelId)
+            ->where('external_product_id', '223')
+            ->where('language', 'en')
+            ->firstOrFail();
+        $translationReferences = new \ReflectionMethod(
+            ProductDataExportService::class,
+            'translationReferences',
+        );
+        $translationReferences->setAccessible(true);
+        $referencesBeforeRepair = $translationReferences->invoke(
+            app(ProductDataExportService::class),
+            $child,
+            $channelId,
+        );
+        $this->assertSame('223', data_get($referencesBeforeRepair, 'en.product_id'));
+        $this->assertSame(
+            (string) $canonicalChildAlias->external_variation_id,
+            data_get($referencesBeforeRepair, 'en.variation_id'),
+        );
+        $checkedBeforePut = false;
+        $this->fakeCatalog($catalog, function (Request $request) use ($stale, &$checkedBeforePut) {
+            if ($request->method() === 'PUT' && ! $checkedBeforePut) {
+                $this->assertFalse($stale->refresh()->isOutboundSyncEnabled());
+                $checkedBeforePut = true;
+            }
+
+            return null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status']);
+        $this->assertTrue($checkedBeforePut);
+        $this->assertDatabaseHas('product_channel_aliases', ['id' => $stale->id]);
+        $this->assertFalse($stale->refresh()->isOutboundSyncEnabled());
+        $this->assertFalse($staleParent->refresh()->isOutboundSyncEnabled());
+        $this->assertDatabaseHas('product_channel_aliases', ['id' => $german->id]);
+        $this->assertFalse($german->refresh()->isOutboundSyncEnabled());
+        $this->assertDatabaseHas('product_channel_aliases', ['id' => $merged->id]);
+        $this->assertFalse($merged->refresh()->isOutboundSyncEnabled());
+        $this->assertSame(1, ProductChannelAlias::query()
+            ->where('product_id', $child->id)
+            ->where('sales_channel_id', $channelId)
+            ->where('language', 'en')
+            ->get()
+            ->filter(fn (ProductChannelAlias $alias): bool => $alias->isOutboundSyncEnabled())
+            ->count());
+        $referencesAfterRepair = $translationReferences->invoke(
+            app(ProductDataExportService::class),
+            $child->fresh(),
+            $channelId,
+        );
+        $this->assertSame('223', data_get($referencesAfterRepair, 'en.product_id'));
+        Http::assertNotSent(fn (Request $request): bool => str_contains(
+            $request->url(),
+            '/products/999',
+        ) || str_contains($request->url(), '/products/666')
+            || str_contains($request->url(), '/products/777'));
+    }
+
+    public function test_contract_alias_preflight_rejects_swapped_primary_variant_mapping_owners(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        ProductChannelAlias::query()->where('language', 'en')->delete();
+        $children = $parent->variantChildren()->orderBy('products.sku')->get();
+        $mappings = ProductChannelMapping::query()
+            ->whereIn('product_id', $children->pluck('id'))
+            ->orderBy('external_variation_id')
+            ->get();
+        $firstId = $mappings[0]->external_variation_id;
+        $secondId = $mappings[1]->external_variation_id;
+        $mappings[0]->update(['external_variation_id' => '999999999']);
+        $mappings[1]->update(['external_variation_id' => $firstId]);
+        $mappings[0]->update(['external_variation_id' => $secondId]);
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertStringContainsString('jednoznacznie przypisać wariantu en', $result['reason']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+        $this->assertFalse(ProductChannelAlias::query()->where('language', 'en')->exists());
+    }
+
+    public function test_contract_discovery_rejects_a_stale_alias_language_for_the_same_remote_id(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        $parentAlias = ProductChannelAlias::query()
+            ->where('product_id', $parent->id)
+            ->where('language', 'en')
+            ->firstOrFail();
+        $parentAlias->update(['language' => 'de']);
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertFalse((bool) ($result['allow_full_export'] ?? false));
+        $this->assertStringContainsString('sprzeczne lokalne języki aliasu i kontraktu', $result['reason']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_contract_discovery_rejects_an_unsupported_catalog_contract_version(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        ProductChannelAlias::query()->where('language', 'en')->delete();
+        $catalog->products[123]['lemon_erp_catalog_contract'] = 2;
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertStringContainsString('nieobsługiwaną wersję kontraktu', $result['reason']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    }
+
     public function test_custom_text_repair_rejects_a_different_positive_global_size_id_with_the_same_name(): void
     {
         [$parent, $catalog] = $this->family();
@@ -615,11 +977,12 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
 
     public function test_missing_english_alias_allows_the_full_export_that_will_create_it(): void
     {
-        [$parent] = $this->family();
+        [$parent, $catalog] = $this->family();
         ProductChannelAlias::query()
             ->where('product_id', $parent->id)
             ->where('language', 'en')
             ->delete();
+        $this->fakeCatalog($catalog);
         $repair = app(WooOwnedVariantAxisRepairService::class);
         $result = $repair->repair($parent->fresh());
 
@@ -648,7 +1011,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
     public function test_missing_english_alias_automatically_queues_the_full_export(): void
     {
         Bus::fake([ExportWooCommerceProductDataJob::class]);
-        [$parent] = $this->family();
+        [$parent, $catalog] = $this->family();
         ProductChannelAlias::query()
             ->where('product_id', $parent->id)
             ->where('language', 'en')
@@ -666,7 +1029,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         ]);
         $mapping->update(['metadata' => $metadata]);
 
-        Http::fake(function (Request $request): mixed {
+        $this->fakeCatalog($catalog, function (Request $request): mixed {
             if ($request->method() === 'GET'
                 && str_ends_with(
                     $request->url(),
@@ -683,7 +1046,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 ]);
             }
 
-            return Http::response([], 404);
+            return null;
         });
 
         app(RepairWooOwnedVariantAxisJob::class, [
@@ -1583,22 +1946,27 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
     private function applyLemonContract(object $catalog): void
     {
         foreach ([123 => 'pl', 223 => 'en'] as $parentId => $language) {
+            $catalog->products[$parentId]['lemon_erp_catalog_contract'] = 1;
             $catalog->products[$parentId]['lemon_erp_language'] = $language;
             $catalog->products[$parentId]['lemon_erp_translations'] = ['pl' => 123, 'en' => 223];
             $catalog->products[$parentId]['lemon_erp_translation_group'] = 'product:123|223';
         }
 
         foreach ([[123, 124, 'pl', 124, 224], [223, 224, 'en', 124, 224]] as [$parentId, $variationId, $language, $plId, $enId]) {
+            $catalog->variations[$parentId][$variationId]['lemon_erp_catalog_contract'] = 1;
             $catalog->variations[$parentId][$variationId]['lemon_erp_language'] = $language;
             $catalog->variations[$parentId][$variationId]['lemon_erp_translations'] = ['pl' => $plId, 'en' => $enId];
             $catalog->variations[$parentId][$variationId]['lemon_erp_translation_group'] = "variation:{$plId}|{$enId}";
+            $catalog->variations[$parentId][$variationId]['lemon_erp_parent_translations'] = ['pl' => 123, 'en' => 223];
             $catalog->variations[$parentId][$variationId]['lemon_erp_parent_translation_group'] = 'product:123|223';
         }
 
         foreach ([[123, 125, 'pl', 125, 225], [223, 225, 'en', 125, 225]] as [$parentId, $variationId, $language, $plId, $enId]) {
+            $catalog->variations[$parentId][$variationId]['lemon_erp_catalog_contract'] = 1;
             $catalog->variations[$parentId][$variationId]['lemon_erp_language'] = $language;
             $catalog->variations[$parentId][$variationId]['lemon_erp_translations'] = ['pl' => $plId, 'en' => $enId];
             $catalog->variations[$parentId][$variationId]['lemon_erp_translation_group'] = "variation:{$plId}|{$enId}";
+            $catalog->variations[$parentId][$variationId]['lemon_erp_parent_translations'] = ['pl' => 123, 'en' => 223];
             $catalog->variations[$parentId][$variationId]['lemon_erp_parent_translation_group'] = 'product:123|223';
         }
     }

@@ -89,6 +89,7 @@ final class StockSyncExportService
             ->where('product_id', $item->product_id)
             ->where('sales_channel_id', $item->sales_channel_id)
             ->get()
+            ->filter(fn (ProductChannelAlias $alias): bool => $alias->isOutboundSyncEnabled())
             ->each(function (ProductChannelAlias $alias) use ($targets): void {
                 $targets->push(new ProductChannelMapping([
                     'product_id' => $alias->product_id,

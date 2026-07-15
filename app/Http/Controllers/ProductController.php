@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Jobs\ExportWooCommerceProductDataJob;
+use App\Jobs\ImportWooCommerceProductsJob;
 use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductChannelMapping;
@@ -33,6 +34,7 @@ use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceProductCreationRecoveryService;
 use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Carbon\CarbonImmutable;
+use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -1071,16 +1073,26 @@ class ProductController extends Controller
             );
         }
 
-        $lock = Cache::lock(
-            ExportWooCommerceProductDataJob::lockKey($axisRepair->familyRootId((int) $product->id)),
-            ExportWooCommerceProductDataJob::LOCK_SECONDS,
+        $familyRootId = $axisRepair->familyRootId((int) $product->id);
+        $locks = $this->acquireWooCommerceMutationLocks(
+            $familyRootId,
+            ImportWooCommerceProductsJob::catalogIntegrationIdsForProduct($familyRootId),
         );
 
-        if (! $lock->get()) {
+        if ($locks === null) {
             return back()->with('status', 'Synchronizacja tego produktu z WooCommerce już trwa. Nowsze dane zostaną wysłane po jej zakończeniu.');
         }
 
         try {
+            $product->refresh();
+
+            if ($axisRepair->blocksFullExport($product)) {
+                return back()->with(
+                    'error',
+                    'Ta historyczna rodzina została właśnie skierowana do bezpiecznej naprawy osi Rozmiar. Pełny eksport pozostaje wstrzymany.',
+                );
+            }
+
             $result = $exportService->export($product);
             $storefront->completeSuccessfulManualExport($product);
         } catch (\Throwable $exception) {
@@ -1090,7 +1102,7 @@ class ProductController extends Controller
 
             return back()->with('error', $exception->getMessage());
         } finally {
-            $lock->release();
+            $this->releaseWooCommerceMutationLocks($locks);
         }
 
         $product->refresh();
@@ -1108,13 +1120,14 @@ class ProductController extends Controller
         ProductDataExportService $exportService,
         AuditLogService $audit,
         WooCommerceProductCreationRecoveryService $creationRecovery,
+        WooOwnedVariantAxisRepairService $axisRepair,
     ): RedirectResponse {
-        $lock = Cache::lock(
-            ExportWooCommerceProductDataJob::lockKey($product->id),
-            ExportWooCommerceProductDataJob::LOCK_SECONDS,
+        $locks = $this->acquireWooCommerceMutationLocks(
+            $axisRepair->familyRootId((int) $product->id),
+            collect([(int) $integration->id]),
         );
 
-        if (! $lock->get()) {
+        if ($locks === null) {
             return back()->with('status', 'Tworzenie lub synchronizacja tego produktu w WooCommerce już trwa.');
         }
 
@@ -1135,7 +1148,7 @@ class ProductController extends Controller
 
             return back()->with('error', $exception->getMessage());
         } finally {
-            $lock->release();
+            $this->releaseWooCommerceMutationLocks($locks);
         }
 
         $product->refresh();
@@ -1167,6 +1180,61 @@ class ProductController extends Controller
                 ? "Produkt utworzony w WooCommerce dla kanału {$channel} razem z {$variantCount} wariantami."
                 : "Produkt utworzony w WooCommerce dla kanału {$channel}.",
         );
+    }
+
+    /**
+     * Acquire the same ordered family → integration locks as queued catalog
+     * jobs so a manual button cannot overlap an import or axis repair.
+     *
+     * @param  iterable<mixed>  $integrationIds
+     * @return list<Lock>|null
+     */
+    private function acquireWooCommerceMutationLocks(
+        int $familyRootId,
+        iterable $integrationIds,
+    ): ?array {
+        $locks = [
+            Cache::lock(
+                ExportWooCommerceProductDataJob::lockKey($familyRootId),
+                ExportWooCommerceProductDataJob::LOCK_SECONDS,
+            ),
+        ];
+
+        collect($integrationIds)
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->unique()
+            ->sort()
+            ->each(function (int $integrationId) use (&$locks): void {
+                $locks[] = Cache::lock(
+                    ImportWooCommerceProductsJob::catalogLockKey($integrationId),
+                    ImportWooCommerceProductsJob::CATALOG_LOCK_SECONDS,
+                );
+            });
+
+        $acquired = [];
+
+        foreach ($locks as $lock) {
+            if ($lock->get()) {
+                $acquired[] = $lock;
+
+                continue;
+            }
+
+            $this->releaseWooCommerceMutationLocks($acquired);
+
+            return null;
+        }
+
+        return $acquired;
+    }
+
+    /** @param list<Lock> $locks */
+    private function releaseWooCommerceMutationLocks(array $locks): void
+    {
+        foreach (array_reverse($locks) as $lock) {
+            $lock->release();
+        }
     }
 
     public function generateGs1Ean(

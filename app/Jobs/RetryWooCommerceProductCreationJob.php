@@ -44,6 +44,7 @@ final class RetryWooCommerceProductCreationJob implements ShouldQueue
                 ->expireAfter(ExportWooCommerceProductDataJob::LOCK_SECONDS)
                 ->withPrefix('')
                 ->shared(),
+            ImportWooCommerceProductsJob::catalogLock($this->integrationId),
         ];
     }
 

@@ -191,13 +191,43 @@ COMPOSER
     cat >"$temporary_directory/bin/fake-php" <<'PHP'
 #!/usr/bin/env bash
 set -euo pipefail
+if [[ -n "${FAKE_DEPLOY_LOG:-}" ]]; then
+    printf 'php %s\n' "$*" >>"$FAKE_DEPLOY_LOG"
+fi
 if [[ "${1:-}" == */scripts/deploy/backup-database.php ]]; then
     mkdir -p "$3"
     printf '%s\n' 'verified backup' > "$3/integration-backup.sql"
 fi
 exit 0
 PHP
-    chmod +x "$temporary_directory/bin/fake-composer" "$temporary_directory/bin/fake-php"
+    cat >"$temporary_directory/bin/pgrep" <<'PGREP'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FAKE_DEPLOY_LOG:-}" ]]; then
+    printf 'pgrep %s\n' "$*" >>"$FAKE_DEPLOY_LOG"
+fi
+if [[ -n "${FAKE_PGREP_STATE:-}" && -f "$FAKE_PGREP_STATE" ]]; then
+    remaining="$(cat "$FAKE_PGREP_STATE")"
+    if (( remaining > 0 )); then
+        printf '%s\n' "$((remaining - 1))" >"$FAKE_PGREP_STATE"
+        exit 0
+    fi
+fi
+exit 1
+PGREP
+    cat >"$temporary_directory/bin/sleep" <<'SLEEP'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ -n "${FAKE_DEPLOY_LOG:-}" ]]; then
+    printf 'sleep %s\n' "$*" >>"$FAKE_DEPLOY_LOG"
+fi
+exit 0
+SLEEP
+    chmod +x \
+        "$temporary_directory/bin/fake-composer" \
+        "$temporary_directory/bin/fake-php" \
+        "$temporary_directory/bin/pgrep" \
+        "$temporary_directory/bin/sleep"
 
     create_fake_release() {
         local release_id="$1"
@@ -484,9 +514,14 @@ PHP
         bash "$repository_root/scripts/deploy/initialize-release.sh" \
         "$integration_deploy_path" "$second_release" >/dev/null
     create_fake_release "$second_release"
+    deploy_log="$temporary_directory/deploy-order.log"
+    pgrep_state="$temporary_directory/pgrep-state"
+    printf '%s\n' '1' >"$pgrep_state"
     PATH="$temporary_directory/bin:$PATH" \
         PHP_BIN="$temporary_directory/bin/fake-php" \
         COMPOSER_BIN="$temporary_directory/bin/fake-composer" \
+        FAKE_DEPLOY_LOG="$deploy_log" \
+        FAKE_PGREP_STATE="$pgrep_state" \
         FAKE_CRONTAB_MODE=missing \
         FAKE_CRONTAB_SOURCE="$temporary_directory/unused" \
         FAKE_CRONTAB_INSTALLED="$temporary_directory/integration-crontab" \
@@ -498,6 +533,15 @@ PHP
         fail 'PREVIOUS nie zachował pierwszego wydania.'
     [[ "$(cat "$integration_deploy_path/tools/windows-print-listener/dist/CURRENT")" == '0.2.0-201-1' ]] ||
         fail 'kolejny deploy zgubił współdzielony instalator Windows.'
+    queue_restart_line="$(grep -nF ' queue:restart' "$deploy_log" | head -n 1 | cut -d: -f1)"
+    worker_wait_line="$(grep -nF 'pgrep ' "$deploy_log" | head -n 1 | cut -d: -f1)"
+    migration_line="$(grep -nF 'php artisan migrate --force' "$deploy_log" | head -n 1 | cut -d: -f1)"
+    [[ -n "$queue_restart_line" && -n "$worker_wait_line" && -n "$migration_line" ]] ||
+        fail 'deploy nie zarejestrował pełnej sekwencji restart-worker-migracja.'
+    (( queue_restart_line < worker_wait_line && worker_wait_line < migration_line )) ||
+        fail 'migracja ruszyła przed pełnym zakończeniem starych workerów kolejki.'
+    grep -Fq 'sleep 2' "$deploy_log" ||
+        fail 'deploy nie czekał na aktywnego workera po queue:restart.'
 
     mkdir -p "${integration_deploy_path}.deploy/releases/${second_release}/database/migrations"
     printf '%s\n' '<?php // schema required by second release' \

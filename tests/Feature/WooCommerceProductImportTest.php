@@ -1615,6 +1615,101 @@ class WooCommerceProductImportTest extends TestCase
         );
     }
 
+    public function test_catalog_import_skips_a_routing_only_alias_without_breaking_order_line_routing(): void
+    {
+        Http::fake(function ($request) {
+            $url = $request->url();
+
+            if (str_contains($url, '/products/categories')) {
+                return Http::response([]);
+            }
+
+            if (str_contains($url, '/products')) {
+                parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+                if ((int) ($query['page'] ?? 1) > 1) {
+                    return Http::response([]);
+                }
+
+                return Http::response([[
+                    'id' => 999,
+                    'sku' => 'SKU-CANONICAL',
+                    'name' => 'Historyczny wpis Woo',
+                    'type' => 'simple',
+                    'status' => 'publish',
+                ]]);
+            }
+
+            return Http::response([]);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-ROUTING-ONLY',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl']]],
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-CANONICAL',
+            'name' => 'Produkt kanoniczny',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $mapping = ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelAlias::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '999',
+            'external_sku' => $product->sku,
+            'language' => 'en',
+            'metadata' => [
+                'maintenance' => [
+                    'woo_owned_variant_axis_repair' => [
+                        'routing_only' => true,
+                    ],
+                ],
+            ],
+        ]);
+
+        $stats = app(WooCommerceImportService::class)->importProducts($integration);
+
+        $this->assertSame(1, $stats['source_items']);
+        $this->assertSame(1, $stats['skipped']);
+        $this->assertSame(1, $stats['skipped_routing_only_alias']);
+        $this->assertSame('123', (string) $mapping->fresh()->external_product_id);
+        $this->assertDatabaseCount('products', 1);
+        $this->assertDatabaseCount('product_channel_mappings', 1);
+
+        $orderResolver = new \ReflectionMethod(
+            WooCommerceImportService::class,
+            'productForOrderLine',
+        );
+        $orderResolver->setAccessible(true);
+        $resolved = $orderResolver->invoke(
+            app(WooCommerceImportService::class),
+            $integration,
+            ['product_id' => 999, 'variation_id' => 0],
+            '',
+        );
+        $this->assertSame($product->id, $resolved?->id);
+    }
+
     /**
      * @return array{integration:WordpressIntegration,channel:SalesChannel,warehouse:Warehouse,product:Product,balance:StockBalance}
      */

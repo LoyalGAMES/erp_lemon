@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Jobs;
 
 use App\Models\IntegrationSyncLog;
+use App\Models\ProductChannelMapping;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\WooCommerceImportService;
 use Illuminate\Bus\Queueable;
@@ -12,7 +13,9 @@ use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Collection;
 use Throwable;
 
 final class ImportWooCommerceProductsJob implements ShouldBeUnique, ShouldQueue
@@ -22,11 +25,18 @@ final class ImportWooCommerceProductsJob implements ShouldBeUnique, ShouldQueue
     use Queueable;
     use SerializesModels;
 
-    public int $tries = 2;
+    // Lock contention releases the job and consumes a queue attempt. Keep
+    // enough attempts for catalog maintenance while preserving the original
+    // two-failure limit for actual importer exceptions.
+    public int $tries = 70;
+
+    public int $maxExceptions = 2;
 
     public int $timeout = 900;
 
     public int $uniqueFor = 1200;
+
+    public const CATALOG_LOCK_SECONDS = 3600;
 
     public function __construct(
         private readonly int $integrationId,
@@ -36,6 +46,41 @@ final class ImportWooCommerceProductsJob implements ShouldBeUnique, ShouldQueue
     public function uniqueId(): string
     {
         return 'woocommerce-products-log:'.$this->syncLogId;
+    }
+
+    /** @return list<object> */
+    public function middleware(): array
+    {
+        return [self::catalogLock($this->integrationId)];
+    }
+
+    public static function catalogLock(int $integrationId): WithoutOverlapping
+    {
+        return (new WithoutOverlapping(self::catalogLockKey($integrationId)))
+            ->releaseAfter(60)
+            ->expireAfter(self::CATALOG_LOCK_SECONDS)
+            ->withPrefix('')
+            ->shared();
+    }
+
+    public static function catalogLockKey(int $integrationId): string
+    {
+        return "woocommerce-catalog-integration:{$integrationId}";
+    }
+
+    /** @return Collection<int,int> */
+    public static function catalogIntegrationIdsForProduct(int $familyRootId): Collection
+    {
+        $salesChannelIds = ProductChannelMapping::query()
+            ->where('product_id', $familyRootId)
+            ->distinct()
+            ->pluck('sales_channel_id');
+
+        return WordpressIntegration::query()
+            ->whereIn('sales_channel_id', $salesChannelIds)
+            ->orderBy('id')
+            ->pluck('id')
+            ->map(fn (mixed $id): int => (int) $id);
     }
 
     public function handle(WooCommerceImportService $importer): void

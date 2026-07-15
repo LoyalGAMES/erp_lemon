@@ -49,19 +49,24 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
      */
     public function middleware(): array
     {
-        if ($this->syncToken === null) {
-            return [];
-        }
+        $familyRootId = app(WooOwnedVariantAxisRepairService::class)
+            ->familyRootId($this->productId);
+        $middleware = [];
 
-        return [
-            (new WithoutOverlapping(self::lockKey(
-                app(WooOwnedVariantAxisRepairService::class)->familyRootId($this->productId),
-            )))
+        if ($this->syncToken !== null) {
+            $middleware[] = (new WithoutOverlapping(self::lockKey($familyRootId)))
                 ->releaseAfter(60)
                 ->expireAfter(self::LOCK_SECONDS)
                 ->withPrefix('')
-                ->shared(),
-        ];
+                ->shared();
+        }
+
+        ImportWooCommerceProductsJob::catalogIntegrationIdsForProduct($familyRootId)
+            ->each(function (mixed $integrationId) use (&$middleware): void {
+                $middleware[] = ImportWooCommerceProductsJob::catalogLock((int) $integrationId);
+            });
+
+        return $middleware;
     }
 
     public static function lockKey(int $productId): string

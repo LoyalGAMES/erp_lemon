@@ -17,6 +17,7 @@ use App\Models\Warehouse;
 use App\Models\WarehouseChannelRoute;
 use App\Models\WordpressIntegration;
 use App\Services\Inventory\StockSyncQueueService;
+use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\StockSyncExportService;
 use App\Support\OperationalStatus;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -92,6 +93,32 @@ class StockSyncExportTest extends TestCase
             'external_sku' => 'SKU-003',
             'language' => 'en',
         ]);
+        ProductChannelAlias::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '125',
+            'external_sku' => 'SKU-003',
+            'language' => 'en',
+            'metadata' => [
+                'maintenance' => [
+                    'woo_owned_variant_axis_repair' => [
+                        'routing_only' => true,
+                    ],
+                ],
+            ],
+        ]);
+
+        $translationReferences = new \ReflectionMethod(
+            ProductDataExportService::class,
+            'translationReferences',
+        );
+        $translationReferences->setAccessible(true);
+        $references = $translationReferences->invoke(
+            app(ProductDataExportService::class),
+            $product,
+            $channel->id,
+        );
+        $this->assertSame('124', data_get($references, 'en.product_id'));
 
         $queueItem = StockSyncQueueItem::query()->create([
             'warehouse_id' => $warehouse->id,
@@ -118,6 +145,8 @@ class StockSyncExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
             && $request['stock_quantity'] === 8);
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/125');
     }
 
     public function test_stock_queue_item_is_exported_to_woocommerce_variation(): void

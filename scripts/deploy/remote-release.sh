@@ -32,6 +32,7 @@ marker="${deploy_root}/DEPLOY_PATH"
 
 command -v flock >/dev/null 2>&1 || fail 'na serwerze brakuje programu flock.'
 command -v rsync >/dev/null 2>&1 || fail 'na serwerze brakuje programu rsync.'
+command -v pgrep >/dev/null 2>&1 || fail 'na serwerze brakuje programu pgrep.'
 php_bin="${PHP_BIN:-$(command -v php || true)}"
 composer_bin="${COMPOSER_BIN:-$(command -v composer || true)}"
 [[ -n "$php_bin" && -x "$php_bin" ]] || fail 'nie znaleziono wykonywalnego PHP.'
@@ -194,6 +195,26 @@ secure_runtime_permissions() {
         chgrp -R "$group" "$release/vendor"
         chmod -R g+rX,o-rwx "$release/vendor"
     fi
+}
+
+wait_for_queue_workers() {
+    local timeout_seconds="${QUEUE_DRAIN_TIMEOUT_SECONDS:-920}"
+    local deadline
+
+    [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] ||
+        fail 'QUEUE_DRAIN_TIMEOUT_SECONDS musi być dodatnią liczbą całkowitą.'
+    deadline=$((SECONDS + timeout_seconds))
+
+    # The scheduler starts workers from DEPLOY_PATH as `php artisan
+    # queue:work`, so the absolute application path is not present in their
+    # process title. The deploy account is dedicated to this application;
+    # wait for all of its Laravel queue workers after queue:restart instead of
+    # allowing an old full catalog export to overlap a data migration.
+    while pgrep -u "$(id -u)" -f -- '(^|[[:space:]/])artisan[[:space:]]+queue:work([[:space:]]|$)' >/dev/null; do
+        (( SECONDS < deadline )) ||
+            fail "workery kolejki nie zakończyły pracy w ciągu ${timeout_seconds} sekund."
+        sleep 2
+    done
 }
 
 prepare_release_runtime() {
@@ -384,6 +405,7 @@ if [[ "$bootstrap_mode" != 'fresh' ]]; then
     "$php_bin" "$deploy_path/artisan" down --retry=60
     maintenance_enabled=1
     "$php_bin" "$deploy_path/artisan" queue:restart
+    wait_for_queue_workers
 fi
 if [[ "$bootstrap_mode" == 'legacy-directory' ]]; then
     sync_bootstrap_runtime "$deploy_path"

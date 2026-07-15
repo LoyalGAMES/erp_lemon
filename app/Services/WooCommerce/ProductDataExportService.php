@@ -933,19 +933,30 @@ final class ProductDataExportService
             ->where('sales_channel_id', $salesChannelId)
             ->whereNotNull('language')
             ->orderBy('id')
-            ->get();
+            ->get()
+            ->filter(fn (ProductChannelAlias $alias): bool => $alias->isOutboundSyncEnabled());
 
         if ($aliases->isNotEmpty()) {
             return $aliases
-                ->mapWithKeys(fn (ProductChannelAlias $alias): array => [
-                    (string) $alias->language => [
+                ->groupBy(fn (ProductChannelAlias $alias): string => (string) $alias->language)
+                ->mapWithKeys(function (Collection $languageAliases, string $language): array {
+                    // A merge alias remains useful for historical inbound
+                    // identities. If a current contract alias for the same
+                    // language also exists, it must be the sole translation
+                    // reference used to build parent/variation endpoints.
+                    $alias = $languageAliases->first(
+                        fn (ProductChannelAlias $candidate): bool => blank($candidate->source_product_id)
+                            && data_get($candidate->metadata, 'product_merge') === null,
+                    ) ?? $languageAliases->first();
+
+                    return [$language => [
                         'product_id' => (string) $alias->external_product_id,
                         'variation_id' => $alias->external_variation_id !== null
                             ? (string) $alias->external_variation_id
                             : null,
                         'sku' => $alias->external_sku !== null ? (string) $alias->external_sku : null,
-                    ],
-                ])
+                    ]];
+                })
                 ->all();
         }
 
