@@ -110,6 +110,8 @@ class LL_Returns_Order_Service {
 			'order_reference' => $order['order_reference'],
 			'order_number'    => $order['order_number'],
 			'currency'        => $order['currency'],
+			'payment_method'  => isset( $order['payment_method'] ) ? $order['payment_method'] : '',
+			'refund_method'   => isset( $order['refund_method'] ) ? $order['refund_method'] : 'cashback',
 			'items'           => $items,
 		);
 	}
@@ -253,6 +255,8 @@ class LL_Returns_Order_Service {
 			'currency'        => $order->get_currency(),
 			'customer_email'  => (string) $order->get_billing_email(),
 			'customer_phone'  => (string) $order->get_billing_phone(),
+			'payment_method'  => (string) $order->get_payment_method_title(),
+			'refund_method'   => 'cod' === $order->get_payment_method() ? 'bank_transfer' : 'cashback',
 			'accounted_return_references' => array(),
 			'items'           => $items,
 		);
@@ -410,6 +414,8 @@ class LL_Returns_Order_Service {
 			'currency'        => isset( $data['currency'] ) ? sanitize_text_field( (string) $data['currency'] ) : '',
 			'customer_email'  => isset( $data['customer_email'] ) ? sanitize_email( (string) $data['customer_email'] ) : '',
 			'customer_phone'  => isset( $data['customer_phone'] ) ? sanitize_text_field( (string) $data['customer_phone'] ) : '',
+			'payment_method'  => isset( $data['payment_method'] ) ? sanitize_text_field( (string) $data['payment_method'] ) : '',
+			'refund_method'   => isset( $data['refund_method'] ) && 'bank_transfer' === sanitize_key( (string) $data['refund_method'] ) ? 'bank_transfer' : 'cashback',
 			'accounted_return_references' => array_values( array_unique( $accounted_references ) ),
 			'items'           => $items,
 		);

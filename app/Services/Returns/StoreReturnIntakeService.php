@@ -11,6 +11,7 @@ use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
 use App\Services\Orders\OrderCancellationGuard;
 use App\Services\Orders\OrderMutationLock;
+use App\Services\Payments\PaymentMethodClassifier;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -29,6 +30,7 @@ final class StoreReturnIntakeService
         private readonly ReturnSettingsService $settings,
         private readonly OrderMutationLock $orderLock,
         private readonly OrderCancellationGuard $cancellationGuard,
+        private readonly PaymentMethodClassifier $paymentMethods,
     ) {}
 
     /**
@@ -85,6 +87,8 @@ final class StoreReturnIntakeService
             'currency' => (string) $rootOrder->currency,
             'customer_email' => (string) data_get($rootOrder->billing_data, 'email', ''),
             'customer_phone' => (string) (data_get($rootOrder->billing_data, 'phone') ?: data_get($rootOrder->shipping_data, 'phone', '')),
+            'payment_method' => (string) (data_get($rootOrder->raw_payload, 'payment_method_title') ?: data_get($rootOrder->raw_payload, 'payment_method', '')),
+            'refund_method' => $this->paymentMethods->isCashOnDelivery($rootOrder) ? 'bank_transfer' : 'cashback',
             'accounted_return_references' => $state['accounted_return_references'],
             'items' => collect($state['groups'])
                 ->map(function (array $group): array {
@@ -137,6 +141,7 @@ final class StoreReturnIntakeService
         }
 
         $settings = $this->settings->data();
+        $refund = $this->validatedRefundDetails($order, $payload);
         $contact = trim((string) ($payload['customer_contact'] ?? ''));
         $email = trim((string) ($payload['customer_email'] ?? ''));
 
@@ -149,8 +154,8 @@ final class StoreReturnIntakeService
         try {
             $returnCase = $this->orderLock->forOrderFamily(
                 $order,
-                function () use ($payload, $order, $settings, $contact, $email, $returnReference, &$created): ReturnCase {
-                    return DB::transaction(function () use ($payload, $order, $settings, $contact, $email, $returnReference, &$created): ReturnCase {
+                function () use ($payload, $order, $settings, $refund, $contact, $email, $returnReference, &$created): ReturnCase {
+                    return DB::transaction(function () use ($payload, $order, $settings, $refund, $contact, $email, $returnReference, &$created): ReturnCase {
                         $rootOrderId = (int) ($order->split_root_order_id ?: $order->id);
                         $order = ExternalOrder::query()
                             ->lockForUpdate()
@@ -190,6 +195,9 @@ final class StoreReturnIntakeService
                                 'local_return_id' => $payload['local_return_id'] ?? null,
                                 'site_url' => filled($payload['site_url'] ?? null) ? (string) $payload['site_url'] : null,
                                 'return_method' => filled($payload['return_method'] ?? null) ? (string) $payload['return_method'] : null,
+                                'refund_method' => $refund['method'],
+                                'refund_bank_account' => $refund['bank_account'],
+                                'refund_recipient_name' => $refund['recipient_name'],
                                 'customer_contact' => $contact !== '' ? $contact : null,
                                 'customer_phone' => filled($payload['customer_phone'] ?? null) ? (string) $payload['customer_phone'] : null,
                                 'external_order_number' => (string) ($payload['order_number'] ?? $payload['order_reference'] ?? ''),
@@ -285,6 +293,30 @@ final class StoreReturnIntakeService
             'cancelled' => 'cancelled',
             default => 'processing',
         };
+    }
+
+    /** @param array<string, mixed> $payload @return array{method:string,bank_account:?string,recipient_name:?string} */
+    private function validatedRefundDetails(ExternalOrder $order, array $payload): array
+    {
+        if (! $this->paymentMethods->isCashOnDelivery($order)) {
+            return ['method' => 'cashback', 'bank_account' => null, 'recipient_name' => null];
+        }
+
+        $account = $this->paymentMethods->refundBankAccount([
+            'refund_bank_account' => $payload['refund_bank_account'] ?? null,
+        ]);
+
+        if ($account === null) {
+            throw new RuntimeException('Dla zamówienia pobraniowego podaj poprawny 26-cyfrowy numer rachunku do zwrotu.');
+        }
+
+        $recipient = trim((string) ($payload['refund_recipient_name'] ?? ''));
+
+        return [
+            'method' => 'bank_transfer',
+            'bank_account' => $account,
+            'recipient_name' => $recipient !== '' ? mb_substr($recipient, 0, 255) : null,
+        ];
     }
 
     private function contactMatchesOrder(ExternalOrder $order, string $contact): bool

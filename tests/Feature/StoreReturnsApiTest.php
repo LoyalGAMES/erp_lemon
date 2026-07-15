@@ -139,6 +139,53 @@ class StoreReturnsApiTest extends TestCase
         Queue::assertPushed(SendReturnWaitingForPackageMailJob::class, 1);
     }
 
+    public function test_lookup_exposes_cashback_for_automatic_payment(): void
+    {
+        $order = $this->createOrder();
+        $order->update(['raw_payload' => [
+            'payment_method' => 'stripe',
+            'payment_method_title' => 'Karta Stripe',
+        ]]);
+
+        $this->postJson('/api/store-returns/lookup-order', [
+            'order_reference' => '12345',
+            'contact' => 'klient@example.test',
+        ], $this->authHeaders())
+            ->assertOk()
+            ->assertJsonPath('order.payment_method', 'Karta Stripe')
+            ->assertJsonPath('order.refund_method', 'cashback');
+    }
+
+    public function test_cod_return_requires_bank_account_and_enters_mbank_metadata(): void
+    {
+        $order = $this->createOrder();
+        $order->update(['raw_payload' => [
+            'payment_method' => 'cod',
+            'payment_method_title' => 'Płatność za pobraniem',
+        ]]);
+        $payload = [
+            'return_reference' => 'LLR-COD-ACCOUNT',
+            'order_reference' => '12345',
+            'customer_contact' => 'klient@example.test',
+            'refund_method' => 'cashback',
+            'items' => [['id' => '771', 'quantity' => 1]],
+        ];
+
+        $this->postJson('/api/store-returns', $payload, $this->authHeaders())
+            ->assertStatus(422)
+            ->assertJsonPath('success', false);
+
+        $this->postJson('/api/store-returns', $payload + [
+            'refund_bank_account' => 'PL11 1020 3352 0000 2053 1234 5060',
+            'refund_recipient_name' => 'Jan Testowy',
+        ], $this->authHeaders())->assertOk();
+
+        $returnCase = ReturnCase::query()->firstOrFail();
+        $this->assertSame('bank_transfer', data_get($returnCase->metadata, 'refund_method'));
+        $this->assertSame('11102033520000205312345060', data_get($returnCase->metadata, 'refund_bank_account'));
+        $this->assertSame('Jan Testowy', data_get($returnCase->metadata, 'refund_recipient_name'));
+    }
+
     public function test_store_return_rejects_quantity_above_remaining_returnable(): void
     {
         $this->createOrder();

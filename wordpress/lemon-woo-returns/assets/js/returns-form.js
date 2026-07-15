@@ -102,7 +102,10 @@
 			lookupToken: '',
 			orderReference: '',
 			contact: '',
-			selectedItems: []
+			selectedItems: [],
+			refundMethod: 'cashback',
+			refundBankAccount: '',
+			refundRecipientName: ''
 		};
 
 		var views = root.querySelectorAll('[data-ll-returns-view]');
@@ -110,10 +113,14 @@
 		var notice = root.querySelector('[data-ll-returns-notice]');
 		var lookupForm = root.querySelector('[data-ll-returns-lookup-form]');
 		var itemsForm = root.querySelector('[data-ll-returns-items-form]');
+		var paymentForm = root.querySelector('[data-ll-returns-payment-form]');
 		var shippingForm = root.querySelector('[data-ll-returns-shipping-form]');
 		var itemsNode = root.querySelector('[data-ll-returns-items]');
 		var orderSummary = root.querySelector('[data-ll-returns-order-summary]');
 		var ownShippingCopy = root.querySelector('[data-ll-own-shipping-copy]');
+		var cashbackOption = root.querySelector('[data-ll-cashback-option]');
+		var bankOption = root.querySelector('[data-ll-bank-option]');
+		var paymentSummary = root.querySelector('[data-ll-payment-method-summary]');
 
 		if (ownShippingCopy) {
 			ownShippingCopy.textContent = cfg.ownShippingInstructions || '';
@@ -300,6 +307,30 @@
 			return selected;
 		}
 
+		function preparePaymentStep() {
+			var isBankTransfer = state.order && state.order.refund_method === 'bank_transfer';
+			state.refundMethod = isBankTransfer ? 'bank_transfer' : 'cashback';
+
+			if (cashbackOption) {
+				cashbackOption.hidden = isBankTransfer;
+			}
+
+			if (bankOption) {
+				bankOption.hidden = !isBankTransfer;
+			}
+
+			if (paymentSummary) {
+				paymentSummary.textContent = state.order && state.order.payment_method
+					? 'Płatność zamówienia: ' + text(state.order.payment_method)
+					: '';
+			}
+
+			var accountInput = paymentForm && paymentForm.querySelector('[name="refund_bank_account"]');
+			if (accountInput) {
+				accountInput.required = isBankTransfer;
+			}
+		}
+
 		if (lookupForm) {
 			lookupForm.addEventListener('submit', function (event) {
 				event.preventDefault();
@@ -349,6 +380,31 @@
 				}
 
 				state.selectedItems = selected;
+				preparePaymentStep();
+				setView('payment');
+			});
+		}
+
+		if (paymentForm) {
+			paymentForm.addEventListener('submit', function (event) {
+				event.preventDefault();
+
+				var formData = new FormData(paymentForm);
+				var account = text(formData.get('refund_bank_account')).replace(/\D/g, '');
+
+				if (state.refundMethod === 'bank_transfer') {
+					if (account.length === 28 && account.slice(0, 2) === '48') {
+						account = account.slice(2);
+					}
+
+					if (account.length !== 26) {
+						showNotice('Podaj poprawny 26-cyfrowy numer rachunku do zwrotu.', 'error');
+						return;
+					}
+				}
+
+				state.refundBankAccount = state.refundMethod === 'bank_transfer' ? account : '';
+				state.refundRecipientName = state.refundMethod === 'bank_transfer' ? text(formData.get('refund_recipient_name')).trim() : '';
 				setView('shipping');
 			});
 		}
@@ -364,6 +420,9 @@
 					contact: state.contact,
 					lookup_token: state.lookupToken,
 					return_method: text(formData.get('return_method') || 'own_shipping'),
+					refund_method: state.refundMethod,
+					refund_bank_account: state.refundBankAccount,
+					refund_recipient_name: state.refundRecipientName,
 					customer_note: text(formData.get('customer_note') || ''),
 					items: state.selectedItems
 				};

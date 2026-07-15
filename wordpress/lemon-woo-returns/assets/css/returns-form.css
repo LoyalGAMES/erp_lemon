@@ -60,7 +60,7 @@
 
 .ll-returns__steps {
 	display: grid;
-	grid-template-columns: repeat(3, minmax(0, 1fr));
+	grid-template-columns: repeat(4, minmax(0, 1fr));
 	gap: 8px;
 	margin: 0 0 24px;
 	padding: 0;
@@ -400,6 +400,37 @@
 	color: var(--ll-returns-muted);
 	font-size: 13px;
 	line-height: 1.45;
+}
+
+.ll-returns__payment-option {
+	padding: 18px;
+	border: 1px solid var(--ll-returns-text);
+	border-radius: var(--ll-returns-radius);
+	background: var(--ll-returns-selected-bg);
+}
+
+.ll-returns__payment-option[hidden] {
+	display: none;
+}
+
+.ll-returns__payment-option strong,
+.ll-returns__payment-option small {
+	display: block;
+}
+
+.ll-returns__payment-option strong {
+	font-size: 17px;
+}
+
+.ll-returns__payment-option small {
+	margin-top: 6px;
+	color: var(--ll-returns-muted);
+	font-size: 14px;
+	line-height: 1.5;
+}
+
+.ll-returns__bank-fields {
+	margin-top: 18px;
 }
 
 .ll-returns__success {

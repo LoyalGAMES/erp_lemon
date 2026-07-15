@@ -16,8 +16,7 @@ class StoreReturnsController extends Controller
 {
     public function __construct(
         private readonly StoreReturnIntakeService $intake,
-    ) {
-    }
+    ) {}
 
     /**
      * Endpoint wyszukiwania zamówienia dla formularza zwrotu w sklepie.
@@ -65,6 +64,9 @@ class StoreReturnsController extends Controller
             'order_number' => ['nullable', 'string', 'max:80'],
             'order_id' => ['nullable'],
             'return_method' => ['nullable', 'string', 'max:40'],
+            'refund_method' => ['nullable', 'string', 'in:cashback,bank_transfer'],
+            'refund_bank_account' => ['nullable', 'string', 'max:34'],
+            'refund_recipient_name' => ['nullable', 'string', 'max:255'],
             'customer_contact' => ['nullable', 'string', 'max:255'],
             'customer_email' => ['nullable', 'string', 'max:255'],
             'customer_phone' => ['nullable', 'string', 'max:64'],

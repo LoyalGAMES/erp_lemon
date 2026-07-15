@@ -7,9 +7,10 @@ Modul WordPress/WooCommerce do przyjmowania zgloszen zwrotow przez klientow zalo
 1. Klient podaje numer zamowienia oraz e-mail albo telefon.
 2. Formularz pokazuje produkty z zamowienia i pozwala wybrac pozycje, ilosc oraz powod zwrotu.
    Pozycje i sztuki zajete przez aktywne zgloszenia nie sa ponownie dostepne; czesciowo zwrocona pozycja zachowuje pozostala ilosc.
-3. Klient wybiera forme odeslania: wlasna przesylka albo Wygodne Zwroty.
-4. Zgloszenie zwrotu jest najpierw trwale zapisywane lokalnie, a nastepnie wysylane do ERP. Po sukcesie klient dostaje numer zgloszenia. Dla Wygodnych Zwrotow pojawia sie link do nadania.
-5. Status zgloszenia jest synchronizowany z ERP. Dopiero status finalny, np. `Zwrot zrealizowany`, tworzy natywny zwrot WooCommerce na pozycjach zgloszenia.
+3. Formularz dobiera sposob zwrotu pieniedzy: cashback dla platnosci automatycznej albo rachunek bankowy dla pobrania.
+4. Klient wybiera forme odeslania: wlasna przesylka albo Wygodne Zwroty.
+5. Zgloszenie zwrotu jest najpierw trwale zapisywane lokalnie, a nastepnie wysylane do ERP. Po sukcesie klient dostaje numer zgloszenia. Dla Wygodnych Zwrotow pojawia sie link do nadania.
+6. Status zgloszenia jest synchronizowany z ERP. Dopiero status finalny, np. `Zwrot zrealizowany`, tworzy natywny zwrot WooCommerce na pozycjach zgloszenia.
 
 ## Instalacja
 

@@ -143,6 +143,24 @@ class LL_Returns_Ajax {
 			$return_method = 'own_shipping';
 		}
 
+		$refund_method       = isset( $order['refund_method'] ) && 'bank_transfer' === $order['refund_method'] ? 'bank_transfer' : 'cashback';
+		$refund_bank_account = '';
+		$refund_recipient    = '';
+
+		if ( 'bank_transfer' === $refund_method ) {
+			$refund_bank_account = isset( $request['refund_bank_account'] ) ? preg_replace( '/\D+/', '', (string) wp_unslash( $request['refund_bank_account'] ) ) : '';
+
+			if ( 28 === strlen( $refund_bank_account ) && 0 === strpos( $refund_bank_account, '48' ) ) {
+				$refund_bank_account = substr( $refund_bank_account, 2 );
+			}
+
+			if ( 26 !== strlen( $refund_bank_account ) ) {
+				$this->send_error( __( 'Podaj poprawny 26-cyfrowy numer rachunku do zwrotu.', 'lemon-woo-returns' ), 422, 'll_returns_invalid_bank_account' );
+			}
+
+			$refund_recipient = isset( $request['refund_recipient_name'] ) ? sanitize_text_field( wp_unslash( $request['refund_recipient_name'] ) ) : '';
+		}
+
 		$order_lock = $this->acquire_order_lock( isset( $order['return_order_key'] ) ? $order['return_order_key'] : $order['order_id'] );
 
 		if ( is_wp_error( $order_lock ) ) {
@@ -178,6 +196,9 @@ class LL_Returns_Ajax {
 						'customer_phone'     => $order['customer_phone'],
 						'customer_user_id'   => get_current_user_id(),
 						'return_method'      => $return_method,
+						'refund_method'      => $refund_method,
+						'refund_bank_account' => $refund_bank_account,
+						'refund_recipient_name' => $refund_recipient,
 						'customer_note'      => isset( $request['customer_note'] ) ? sanitize_textarea_field( wp_unslash( $request['customer_note'] ) ) : '',
 						'items'              => $items,
 						'created_at'         => current_time( 'mysql' ),

@@ -117,6 +117,7 @@ class LL_Returns_Shortcodes {
 				<ol class="ll-returns__steps" aria-label="<?php echo esc_attr( $texts['steps_aria_label'] ); ?>">
 					<li class="ll-returns__step is-active" data-ll-step-indicator="lookup"><?php echo esc_html( $texts['step_lookup'] ); ?></li>
 					<li class="ll-returns__step" data-ll-step-indicator="items"><?php echo esc_html( $texts['step_items'] ); ?></li>
+					<li class="ll-returns__step" data-ll-step-indicator="payment"><?php echo esc_html( $texts['step_payment'] ); ?></li>
 					<li class="ll-returns__step" data-ll-step-indicator="shipping"><?php echo esc_html( $texts['step_shipping'] ); ?></li>
 				</ol>
 
@@ -166,6 +167,42 @@ class LL_Returns_Shortcodes {
 					</form>
 				</section>
 
+				<section class="ll-returns__panel" data-ll-returns-view="payment" hidden>
+					<form data-ll-returns-payment-form>
+						<div class="ll-returns__section-head">
+							<div>
+								<h3><?php echo esc_html( $texts['payment_title'] ); ?></h3>
+								<p data-ll-payment-method-summary></p>
+							</div>
+						</div>
+
+						<div class="ll-returns__payment-option" data-ll-cashback-option>
+							<strong><?php echo esc_html( $texts['cashback_title'] ); ?></strong>
+							<small><?php echo esc_html( $texts['cashback_description'] ); ?></small>
+						</div>
+
+						<div class="ll-returns__payment-option" data-ll-bank-option hidden>
+							<strong><?php echo esc_html( $texts['bank_transfer_title'] ); ?></strong>
+							<small><?php echo esc_html( $texts['bank_transfer_description'] ); ?></small>
+							<div class="ll-returns__field-grid ll-returns__bank-fields">
+								<label class="ll-returns__field">
+									<span><?php echo esc_html( $texts['bank_recipient_label'] ); ?></span>
+									<input type="text" name="refund_recipient_name" maxlength="255" autocomplete="name">
+								</label>
+								<label class="ll-returns__field">
+									<span><?php echo esc_html( $texts['bank_account_label'] ); ?></span>
+									<input type="text" name="refund_bank_account" maxlength="34" inputmode="numeric" autocomplete="off" placeholder="PL00 0000 0000 0000 0000 0000 0000">
+								</label>
+							</div>
+						</div>
+
+						<div class="ll-returns__actions ll-returns__actions--split">
+							<button type="button" class="ll-returns__button ll-returns__button--ghost" data-ll-returns-back="items"><?php echo esc_html( $texts['back_button'] ); ?></button>
+							<button type="submit" class="ll-returns__button ll-returns__button--primary"><?php echo esc_html( $texts['next_button'] ); ?></button>
+						</div>
+					</form>
+				</section>
+
 				<section class="ll-returns__panel" data-ll-returns-view="shipping" hidden>
 					<form data-ll-returns-shipping-form>
 						<div class="ll-returns__shipping-options" role="radiogroup" aria-label="<?php echo esc_attr( $texts['shipping_aria_label'] ); ?>">
@@ -192,7 +229,7 @@ class LL_Returns_Shortcodes {
 						</label>
 
 						<div class="ll-returns__actions ll-returns__actions--split">
-							<button type="button" class="ll-returns__button ll-returns__button--ghost" data-ll-returns-back="items">
+							<button type="button" class="ll-returns__button ll-returns__button--ghost" data-ll-returns-back="payment">
 								<?php echo esc_html( $texts['back_button'] ); ?>
 							</button>
 							<button type="submit" class="ll-returns__button ll-returns__button--primary">
