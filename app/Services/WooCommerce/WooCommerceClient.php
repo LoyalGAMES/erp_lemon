@@ -1274,6 +1274,27 @@ final class WooCommerceClient
             $matches = $languageMatches;
         }
 
+        // WooCommerce/Polylang can ignore `?lang=` for attribute-term
+        // collections and return every translation with the same visible
+        // name. Deterministic localized slugs still let us discard terms
+        // that explicitly belong to another configured language. This keeps
+        // the legacy Polish base slug (`sempre`) separate from `sempre-en`
+        // without using the mutable usage count as a language signal.
+        if ($language !== null && $languageMatches->isEmpty()) {
+            $languageScopedMatches = $matches
+                ->reject(fn (array $term): bool => $this->globalProductAttributeTermHasForeignLocalizedSlug(
+                    $integration,
+                    $term,
+                    $option,
+                    $language,
+                ))
+                ->values();
+
+            if ($languageScopedMatches->isNotEmpty()) {
+                $matches = $languageScopedMatches;
+            }
+        }
+
         // Keep a legacy term that is already used by the catalog instead of
         // switching products to an empty term left by an interrupted preflight.
         // This is safe only for the language-neutral base slug in the Polish
@@ -1293,6 +1314,26 @@ final class WooCommerceClient
         $slugMatches = $matches
             ->filter(fn (array $term): bool => Str::slug((string) ($term['slug'] ?? '')) === $slug)
             ->values();
+
+        // The unsuffixed legacy slug belongs to the Polish source catalog.
+        // For another language, a single exact localized slug is therefore
+        // safe when its only competitor is that Polish base term. Unknown
+        // duplicate slugs remain ambiguous and still abort the export.
+        if ($language !== null && $language !== 'pl' && $slugMatches->count() === 1) {
+            $exactMatchId = (int) ($slugMatches->first()['id'] ?? 0);
+            $baseSlug = $this->globalProductAttributeTermSlug($option);
+            $otherMatches = $matches
+                ->reject(fn (array $term): bool => (int) ($term['id'] ?? 0) === $exactMatchId)
+                ->values();
+
+            if ($otherMatches->isNotEmpty()
+                && $otherMatches->every(
+                    fn (array $term): bool => Str::slug((string) ($term['slug'] ?? '')) === $baseSlug,
+                )
+            ) {
+                return $slugMatches->first();
+            }
+        }
 
         if ($usedMatches->count() > 1) {
             $slugMatches = collect();

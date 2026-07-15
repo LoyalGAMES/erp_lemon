@@ -23,7 +23,7 @@ final class FailedWooCommerceProductExportRecoveryMigrationTest extends TestCase
 {
     use RefreshDatabase;
 
-    private const RECOVERY_REVISION = 'global_attribute_term_recovery_2026_07_15_000008';
+    private const RECOVERY_REVISION = 'global_attribute_term_recovery_2026_07_15_000009';
 
     public function test_migration_re_marks_pending_creating_and_latest_failed_mapped_products(): void
     {
@@ -363,7 +363,7 @@ final class FailedWooCommerceProductExportRecoveryMigrationTest extends TestCase
     private function runRecoveryMigration(): void
     {
         (require database_path(
-            'migrations/2026_07_15_000008_requeue_woocommerce_exports_blocked_by_global_attribute_terms.php',
+            'migrations/2026_07_15_000009_retry_global_attribute_term_recovery_with_language_slugs.php',
         ))->up();
     }
 }

@@ -15,7 +15,7 @@ use Throwable;
 
 final class WooCommerceProductCreationRecoveryService
 {
-    public const REVISION = 'duplicate_global_attribute_term_2026_07_15_000008';
+    public const REVISION = 'duplicate_global_attribute_term_2026_07_15_000009';
 
     private const ROOT_PATH = 'woocommerce_creation_recovery.'.self::REVISION;
 

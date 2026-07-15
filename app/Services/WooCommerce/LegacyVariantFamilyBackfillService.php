@@ -27,7 +27,7 @@ final class LegacyVariantFamilyBackfillService
      */
     public const MISSING_PRODUCT_TRANSLATIONS_REVISION = 'missing_product_translations_2026_07_14_000007';
 
-    public const GLOBAL_ATTRIBUTE_TERM_RECOVERY_REVISION = 'global_attribute_term_recovery_2026_07_15_000008';
+    public const GLOBAL_ATTRIBUTE_TERM_RECOVERY_REVISION = 'global_attribute_term_recovery_2026_07_15_000009';
 
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 
