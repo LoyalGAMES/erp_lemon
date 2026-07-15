@@ -29,6 +29,7 @@ use App\Services\Products\ProductStorefrontVisibilityService;
 use App\Services\Products\ProductVariantInheritanceService;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use App\Services\WooCommerce\ProductDataExportService;
+use App\Services\WooCommerce\WooCommerceProductCreationRecoveryService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
@@ -1056,6 +1057,7 @@ class ProductController extends Controller
         WordpressIntegration $integration,
         ProductDataExportService $exportService,
         AuditLogService $audit,
+        WooCommerceProductCreationRecoveryService $creationRecovery,
     ): RedirectResponse {
         $lock = Cache::lock(
             ExportWooCommerceProductDataJob::lockKey($product->id),
@@ -1069,11 +1071,17 @@ class ProductController extends Controller
         try {
             $result = $exportService->create($product, $integration);
         } catch (\Throwable $exception) {
-            $audit->record('product.woocommerce_create_failed', $product, null, null, [
+            $failureAudit = $audit->record('product.woocommerce_create_failed', $product, null, null, [
                 'wordpress_integration_id' => $integration->id,
                 'sales_channel_id' => $integration->sales_channel_id,
                 'error' => $exception->getMessage(),
             ]);
+            $creationRecovery->markPendingForFailure(
+                $product,
+                $integration,
+                $failureAudit,
+                $exception,
+            );
 
             return back()->with('error', $exception->getMessage());
         } finally {

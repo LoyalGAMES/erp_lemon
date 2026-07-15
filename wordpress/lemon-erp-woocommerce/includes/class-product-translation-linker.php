@@ -15,7 +15,7 @@ if (! defined('ABSPATH')) {
  */
 final class Lemon_Erp_Product_Translation_Linker
 {
-    private const PLUGIN_VERSION = '0.5.1';
+    private const PLUGIN_VERSION = '0.5.2';
 
     private const CATALOG_CONTRACT = 1;
 
@@ -79,8 +79,21 @@ final class Lemon_Erp_Product_Translation_Linker
     public function capabilities(WP_REST_Request $request): WP_REST_Response
     {
         $polylangAvailable = $this->polylangAvailable();
+        $attributeBootstrap = class_exists(Lemon_Erp_Global_Attribute_Taxonomies::class)
+            ? Lemon_Erp_Global_Attribute_Taxonomies::readiness()
+            : [
+                'revision' => null,
+                'completed' => false,
+                'state' => 'unavailable',
+                'not_ready_taxonomies' => [],
+                'not_ready_taxonomies_count' => 0,
+                'unassigned_terms_count' => 0,
+                'unassigned_term_taxonomies' => [],
+            ];
         $attributeTermLinkAvailable = $this->polylangTermsAvailable()
-            && current_user_can('manage_product_terms');
+            && current_user_can('manage_product_terms')
+            && $attributeBootstrap['completed'] === true
+            && $attributeBootstrap['not_ready_taxonomies_count'] === 0;
         $languages = $polylangAvailable
             ? array_values(array_filter(array_map(
                 fn (mixed $language): ?string => $this->languageSlug($language),
@@ -94,6 +107,13 @@ final class Lemon_Erp_Product_Translation_Linker
             'languages' => array_values(array_unique($languages)),
             'attribute_term_translation_link_available' => $attributeTermLinkAvailable,
             'attribute_term_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/{attribute_id}/terms/translations',
+            'attribute_term_translation_bootstrap_revision' => $attributeBootstrap['revision'],
+            'attribute_term_translation_bootstrap_completed' => $attributeBootstrap['completed'],
+            'attribute_term_translation_bootstrap_state' => $attributeBootstrap['state'],
+            'attribute_term_translation_taxonomies_not_ready' => $attributeBootstrap['not_ready_taxonomies'],
+            'attribute_term_translation_taxonomies_not_ready_count' => $attributeBootstrap['not_ready_taxonomies_count'],
+            'attribute_term_translation_unassigned_terms_count' => $attributeBootstrap['unassigned_terms_count'],
+            'attribute_term_translation_unassigned_term_taxonomies' => $attributeBootstrap['unassigned_term_taxonomies'],
             'catalog_contract' => self::CATALOG_CONTRACT,
             'plugin_version' => self::PLUGIN_VERSION,
         ], 200);
@@ -209,6 +229,24 @@ final class Lemon_Erp_Product_Translation_Linker
             );
         }
 
+        $attributeBootstrap = class_exists(Lemon_Erp_Global_Attribute_Taxonomies::class)
+            ? Lemon_Erp_Global_Attribute_Taxonomies::readiness()
+            : ['completed' => false, 'not_ready_taxonomies' => []];
+
+        if ($attributeBootstrap['completed'] !== true
+            || $attributeBootstrap['not_ready_taxonomies'] !== []
+        ) {
+            return new WP_Error(
+                'lemon_erp_attribute_term_bootstrap_incomplete',
+                __('Języki istniejących wartości globalnych atrybutów WooCommerce nie zostały jeszcze bezpiecznie przygotowane.', 'lemon-erp-woocommerce'),
+                [
+                    'status' => 409,
+                    'bootstrap_revision' => $attributeBootstrap['revision'] ?? null,
+                    'not_ready_taxonomies' => $attributeBootstrap['not_ready_taxonomies'],
+                ],
+            );
+        }
+
         $attributeId = (int) $request->get_param('attribute_id');
         $taxonomy = function_exists('wc_attribute_taxonomy_name_by_id')
             ? sanitize_key((string) wc_attribute_taxonomy_name_by_id($attributeId))
@@ -237,6 +275,7 @@ final class Lemon_Erp_Product_Translation_Linker
             (array) pll_languages_list(['fields' => 'slug']),
         )));
         $requestedTermIds = array_values($translations);
+        $snapshot = [];
 
         foreach ($translations as $language => $termId) {
             if (! in_array($language, $activeLanguages, true)) {
@@ -264,6 +303,31 @@ final class Lemon_Erp_Product_Translation_Linker
                     ['status' => 403],
                 );
             }
+
+            $currentLanguage = $this->languageSlug(pll_get_term_language($termId, 'slug'));
+
+            // This endpoint links a known family; it is not a language
+            // migration endpoint. Never let an ordinary ERP request move a
+            // term which Polylang or an operator assigned to another language.
+            if ($currentLanguage !== null && $currentLanguage !== $language) {
+                return new WP_Error(
+                    'lemon_erp_attribute_term_language_conflict',
+                    sprintf(
+                        __('Wartość atrybutu %1$d ma już język %2$s zamiast oczekiwanego %3$s.', 'lemon-erp-woocommerce'),
+                        $termId,
+                        $currentLanguage,
+                        $language,
+                    ),
+                    ['status' => 409],
+                );
+            }
+
+            $snapshot[$termId] = [
+                'language' => $currentLanguage,
+                'translations' => $this->termTranslationMap(
+                    (array) pll_get_term_translations($termId),
+                ),
+            ];
         }
 
         foreach ($requestedTermIds as $termId) {
@@ -286,18 +350,52 @@ final class Lemon_Erp_Product_Translation_Linker
         }
 
         // Do not mutate any language before the complete taxonomy, language,
-        // capability and existing-family validation above has succeeded.
+        // capability and existing-family validation above has succeeded. Each
+        // language assignment is verified before the next term can be touched;
+        // on any partial failure the exact pre-request family is restored.
         foreach ($translations as $language => $termId) {
-            pll_set_term_language($termId, $language);
+            try {
+                pll_set_term_language($termId, $language);
+            } catch (Throwable) {
+                return $this->attributeTermMutationFailure(
+                    'lemon_erp_attribute_term_language_verification_failed',
+                    __('Polylang nie zapisał języka wartości globalnego atrybutu.', 'lemon-erp-woocommerce'),
+                    $taxonomy,
+                    $snapshot,
+                );
+            }
+
+            if ($this->languageSlug(pll_get_term_language($termId, 'slug')) !== $language) {
+                return $this->attributeTermMutationFailure(
+                    'lemon_erp_attribute_term_language_verification_failed',
+                    sprintf(
+                        __('Polylang nie potwierdził języka %1$s wartości atrybutu %2$d.', 'lemon-erp-woocommerce'),
+                        $language,
+                        $termId,
+                    ),
+                    $taxonomy,
+                    $snapshot,
+                );
+            }
         }
 
-        pll_save_term_translations($translations);
+        try {
+            pll_save_term_translations($translations);
+        } catch (Throwable) {
+            return $this->attributeTermMutationFailure(
+                'lemon_erp_attribute_term_translation_verification_failed',
+                __('Polylang nie zapisał powiązania tłumaczeń wartości atrybutu.', 'lemon-erp-woocommerce'),
+                $taxonomy,
+                $snapshot,
+            );
+        }
 
         if (! $this->attributeTermsAlreadyLinked($taxonomy, $translations)) {
-            return new WP_Error(
+            return $this->attributeTermMutationFailure(
                 'lemon_erp_attribute_term_translation_verification_failed',
                 __('Polylang nie potwierdził dokładnego powiązania tłumaczeń wartości atrybutu.', 'lemon-erp-woocommerce'),
-                ['status' => 500],
+                $taxonomy,
+                $snapshot,
             );
         }
 
@@ -490,6 +588,102 @@ final class Lemon_Erp_Product_Translation_Linker
                 || $term->taxonomy !== $taxonomy
                 || $this->languageSlug(pll_get_term_language($termId, 'slug')) !== $language
                 || $this->termTranslationMap((array) pll_get_term_translations($termId)) !== $translations
+            ) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @param  array<int, array{language:?string, translations:array<string, int>}>  $snapshot
+     */
+    private function attributeTermMutationFailure(
+        string $code,
+        string $message,
+        string $taxonomy,
+        array $snapshot,
+    ): WP_Error {
+        return new WP_Error($code, $message, [
+            'status' => 500,
+            'compensated' => $this->restoreAttributeTermSnapshot($taxonomy, $snapshot),
+        ]);
+    }
+
+    /**
+     * Best-effort compensation for a Polylang write interrupted halfway.
+     *
+     * Saving a one-term map is Polylang's public, stable way to detach that
+     * term from its current translation family. Once every requested term is
+     * isolated, the language assignments and the original multi-term families
+     * can be rebuilt from the snapshot without guessing any relationship.
+     *
+     * @param  array<int, array{language:?string, translations:array<string, int>}>  $snapshot
+     */
+    private function restoreAttributeTermSnapshot(string $taxonomy, array $snapshot): bool
+    {
+        try {
+            foreach ($snapshot as $termId => $state) {
+                $currentLanguage = $this->languageSlug(pll_get_term_language($termId, 'slug'));
+
+                if ($currentLanguage !== null) {
+                    pll_save_term_translations([$currentLanguage => $termId]);
+                }
+            }
+
+            foreach ($snapshot as $termId => $state) {
+                $language = $state['language'];
+
+                if ($language === null) {
+                    if (! function_exists('wp_delete_object_term_relationships')) {
+                        return false;
+                    }
+
+                    $result = wp_delete_object_term_relationships($termId, 'term_language');
+
+                    if (is_wp_error($result)) {
+                        return false;
+                    }
+                } elseif ($this->languageSlug(pll_get_term_language($termId, 'slug')) !== $language) {
+                    pll_set_term_language($termId, $language);
+                }
+
+                if ($this->languageSlug(pll_get_term_language($termId, 'slug')) !== $language) {
+                    return false;
+                }
+            }
+
+            $restoredFamilies = [];
+
+            foreach ($snapshot as $state) {
+                $translations = $state['translations'];
+
+                if (count($translations) < 2) {
+                    continue;
+                }
+
+                $familyKey = implode('|', array_map(
+                    static fn (string $language, int $termId): string => $language.':'.$termId,
+                    array_keys($translations),
+                    array_values($translations),
+                ));
+
+                if (isset($restoredFamilies[$familyKey])) {
+                    continue;
+                }
+
+                pll_save_term_translations($translations);
+                $restoredFamilies[$familyKey] = true;
+            }
+        } catch (Throwable) {
+            return false;
+        }
+
+        foreach ($snapshot as $termId => $state) {
+            if (! get_term($termId, $taxonomy) instanceof WP_Term
+                || $this->languageSlug(pll_get_term_language($termId, 'slug')) !== $state['language']
+                || $this->termTranslationMap((array) pll_get_term_translations($termId)) !== $state['translations']
             ) {
                 return false;
             }

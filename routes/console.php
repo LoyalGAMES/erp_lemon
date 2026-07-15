@@ -92,11 +92,12 @@ Artisan::command('erp:dispatch-woocommerce-product-creation-recovery {--limit=10
     );
 
     $this->info(sprintf(
-        'WooCommerce product creation recovery: scanned %d, dispatched %d, active %d, backoff %d, skipped %d, failed %d.',
+        'WooCommerce product creation recovery: scanned %d, dispatched %d, active %d, backoff %d, plugin unready %d, skipped %d, failed %d.',
         $result['scanned'],
         $result['dispatched'],
         $result['active'],
         $result['backoff'],
+        $result['unready'],
         $result['skipped'],
         $result['failed'],
     ));
@@ -115,11 +116,10 @@ Artisan::command('erp:inspect-woocommerce-product-creation-recovery {--limit=20 
         ->latest('id')
         ->limit($limit * 5)
         ->get()
-        ->filter(function (AuditLog $audit): bool {
+        ->filter(function (AuditLog $audit) use ($recovery): bool {
             $error = trim((string) data_get($audit->metadata, 'error', ''));
 
-            return str_contains($error, 'kilka wartości')
-                && str_contains($error, 'globalnego atrybutu');
+            return $recovery->isRetryableFailure($error);
         })
         ->unique(fn (AuditLog $audit): string => $audit->auditable_id.'|'.(string) data_get(
             $audit->metadata,

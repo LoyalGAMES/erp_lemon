@@ -59,7 +59,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $package = $packages->build();
         $zip = new ZipArchive;
 
-        $this->assertSame('0.5.1', $package['version']);
+        $this->assertSame('0.5.2', $package['version']);
         $this->assertTrue($zip->open($package['path']) === true);
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-customer-webhook.php'),
@@ -70,8 +70,46 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-product-publication-date.php'),
         );
+        $this->assertNotFalse(
+            $zip->locateName('lemon-erp-woocommerce/includes/class-global-attribute-taxonomies.php'),
+        );
+        $taxonomyModule = $zip->getFromName(
+            'lemon-erp-woocommerce/includes/class-global-attribute-taxonomies.php',
+        );
+        $this->assertIsString($taxonomyModule);
+        $this->assertStringContainsString('TERM_LANGUAGE_BOOTSTRAP_REVISION', $taxonomyModule);
+        $this->assertStringContainsString(
+            "add_action('init', [self::class, 'bootstrapTermLanguages'], 100);",
+            $taxonomyModule,
+        );
+        $this->assertStringContainsString("'lang' => ''", $taxonomyModule);
+        $translationLinker = $zip->getFromName(
+            'lemon-erp-woocommerce/includes/class-product-translation-linker.php',
+        );
+        $this->assertIsString($translationLinker);
+        $this->assertStringContainsString(
+            "'attribute_term_translation_bootstrap_completed'",
+            $translationLinker,
+        );
+        $this->assertStringContainsString(
+            "'attribute_term_translation_unassigned_terms_count'",
+            $translationLinker,
+        );
         $mainFile = $zip->getFromName('lemon-erp-woocommerce/lemon-erp-woocommerce.php');
         $this->assertIsString($mainFile);
+        $this->assertStringContainsString(
+            'Lemon_Erp_Global_Attribute_Taxonomies::register();',
+            $mainFile,
+        );
+        $taxonomyRegistration = strpos($mainFile, 'Lemon_Erp_Global_Attribute_Taxonomies::register();');
+        $pluginsLoadedHook = strpos($mainFile, "add_action('plugins_loaded'");
+        $this->assertIsInt($taxonomyRegistration);
+        $this->assertIsInt($pluginsLoadedHook);
+        $this->assertLessThan(
+            $pluginsLoadedHook,
+            $taxonomyRegistration,
+            'The Polylang taxonomy filter must be registered before plugins_loaded.',
+        );
         $this->assertStringContainsString(
             "'product_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/translations'",
             $mainFile,
@@ -82,6 +120,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             '/wp-json/wc-lemon-erp/v1/catalog/products/translations',
             $readme,
         );
+        $this->assertStringContainsString('Wersja `0.5.2`', $readme);
         $zip->close();
     }
 }

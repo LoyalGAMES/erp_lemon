@@ -154,7 +154,7 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
                 return Http::response([
                     'available' => true,
                     'languages' => ['pl', 'en'],
-                    'plugin_version' => '0.5.1',
+                    'plugin_version' => '0.5.2',
                 ]);
             }
 
@@ -323,7 +323,7 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
                         'resource' => 'product_translation_link',
                         'languages' => ['pl', 'en'],
                         'catalog_contract' => 1,
-                        'plugin_version' => '0.5.1',
+                        'plugin_version' => '0.5.2',
                     ])
                     : Http::response(['code' => 'rest_no_route'], 404);
             }

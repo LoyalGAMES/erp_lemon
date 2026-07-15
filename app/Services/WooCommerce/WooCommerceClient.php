@@ -23,7 +23,7 @@ final class WooCommerceClient
 
     private const CATALOG_PLUGIN_MINIMUM_VERSION = '0.2.0';
 
-    private const PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION = '0.5.1';
+    private const PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION = '0.5.2';
 
     private const PRODUCT_TRANSLATION_CREATION_META_KEY = '_sempre_erp_translation_creation_token';
 

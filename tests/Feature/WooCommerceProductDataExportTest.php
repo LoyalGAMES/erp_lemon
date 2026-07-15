@@ -1610,6 +1610,12 @@ class WooCommerceProductDataExportTest extends TestCase
     public function test_new_bilingual_product_creates_and_links_polylang_translation(): void
     {
         Http::fake(function ($request) {
+            if ($request->method() === 'GET'
+                && str_ends_with($request->url(), '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities')
+            ) {
+                return Http::response($this->readyProductTranslationCapabilities());
+            }
+
             if ($request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products') {
                 return Http::response(['id' => 555, 'sku' => 'SKU-BILINGUAL'], 201);
             }
@@ -1724,6 +1730,12 @@ class WooCommerceProductDataExportTest extends TestCase
 
         $retry = false;
         Http::fake(function ($request) use (&$retry) {
+            if ($request->method() === 'GET'
+                && str_ends_with($request->url(), '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities')
+            ) {
+                return Http::response($this->readyProductTranslationCapabilities());
+            }
+
             if (! $retry && $request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products') {
                 return Http::response(['id' => 123, 'sku' => 'SKU-RESUME', 'name' => 'Produkt PL']);
             }
@@ -1836,6 +1848,12 @@ class WooCommerceProductDataExportTest extends TestCase
         $creationSku = null;
         Http::fake(function ($request) use (&$retry, &$creationToken, &$creationSku) {
             $url = $request->url();
+
+            if ($request->method() === 'GET'
+                && str_ends_with($url, '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities')
+            ) {
+                return Http::response($this->readyProductTranslationCapabilities());
+            }
 
             if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products') {
                 return Http::response(['id' => 555, 'sku' => 'SKU-AMBIGUOUS-EN'], 201);
@@ -2868,7 +2886,15 @@ class WooCommerceProductDataExportTest extends TestCase
 
     public function test_product_create_resumes_synchronization_when_channel_mapping_already_exists(): void
     {
-        Http::fake();
+        Http::fake(function ($request) {
+            if ($request->method() === 'GET'
+                && str_ends_with($request->url(), '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities')
+            ) {
+                return Http::response($this->readyProductTranslationCapabilities());
+            }
+
+            return Http::response([]);
+        });
 
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
@@ -4216,6 +4242,17 @@ class WooCommerceProductDataExportTest extends TestCase
         ]);
     }
 
+    /** @return array<string, mixed> */
+    private function readyProductTranslationCapabilities(): array
+    {
+        return [
+            'available' => true,
+            'plugin_version' => '0.5.2',
+            'languages' => ['pl', 'en'],
+            'attribute_term_translation_link_available' => true,
+        ];
+    }
+
     /**
      * Add a small stateful Woo taxonomy server in front of a test's existing
      * HTTP fake. Product export now resolves global attributes and their terms
@@ -4240,6 +4277,17 @@ class WooCommerceProductDataExportTest extends TestCase
         ) {
             $url = $request->url();
             $path = (string) parse_url($url, PHP_URL_PATH);
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities'
+            ) {
+                return Http::response([
+                    'available' => true,
+                    'plugin_version' => '0.5.2',
+                    'languages' => ['pl', 'en'],
+                    'attribute_term_translation_link_available' => true,
+                ]);
+            }
 
             if ($path === '/wp-json/wc/v3/products/attributes') {
                 if ($request->method() === 'GET') {

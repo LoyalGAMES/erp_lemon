@@ -241,6 +241,8 @@ final class ProductDataExportService
             throw new RuntimeException('Integracja WooCommerce nie ma przypisanego kanału sprzedaży.');
         }
 
+        $this->assertProductTranslationCreationReady($integration);
+
         $existingMapping = $product->channelMappings
             ->first(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === (int) $integration->sales_channel_id);
 
@@ -412,6 +414,20 @@ final class ProductDataExportService
             'variant_responses' => $variantResponses,
             'translation_responses' => $translationResponses,
         ];
+    }
+
+    private function assertProductTranslationCreationReady(WordpressIntegration $integration): void
+    {
+        $languages = $integration->productExportLanguages();
+        $needsTranslations = collect($languages)->contains(
+            fn (mixed $language): bool => mb_strtolower(trim((string) $language)) !== 'pl',
+        );
+
+        if ($needsTranslations
+            && ! $this->client->productTranslationLinkingAvailable($integration, $languages)
+        ) {
+            throw WooCommerceProductTranslationNotReadyException::forRequiredLanguages();
+        }
     }
 
     /**

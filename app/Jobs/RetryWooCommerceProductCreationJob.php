@@ -53,8 +53,10 @@ final class RetryWooCommerceProductCreationJob implements ShouldQueue
         return [60, 300, 900, 1800];
     }
 
-    public function handle(ProductDataExportService $exporter): void
-    {
+    public function handle(
+        ProductDataExportService $exporter,
+        WooCommerceProductCreationRecoveryService $recovery,
+    ): void {
         $product = Product::query()->find($this->productId);
         $integration = WordpressIntegration::query()
             ->with('salesChannel')
@@ -103,11 +105,28 @@ final class RetryWooCommerceProductCreationJob implements ShouldQueue
             return;
         }
 
+        if (! $recovery->productTranslationCreationReady($integration)) {
+            $this->markState('pending');
+
+            return;
+        }
+
         $this->markAttempt();
 
         try {
             $result = $exporter->create($product, $integration);
         } catch (Throwable $exception) {
+            if ($recovery->isRetryableFailure($exception)) {
+                $this->markState(
+                    'pending',
+                    $exception,
+                    null,
+                    $this->retryDelayMinutes(),
+                );
+
+                return;
+            }
+
             $this->markState('queued', $exception);
 
             throw $exception;
@@ -170,8 +189,14 @@ final class RetryWooCommerceProductCreationJob implements ShouldQueue
         string $status,
         ?Throwable $exception = null,
         ?string $externalProductId = null,
+        ?int $retryAfterMinutes = null,
     ): void {
-        DB::transaction(function () use ($status, $exception, $externalProductId): void {
+        DB::transaction(function () use (
+            $status,
+            $exception,
+            $externalProductId,
+            $retryAfterMinutes,
+        ): void {
             $product = Product::query()->lockForUpdate()->find($this->productId);
 
             if (! $product instanceof Product) {
@@ -198,12 +223,34 @@ final class RetryWooCommerceProductCreationJob implements ShouldQueue
                 data_set($attributes, $path.'.external_product_id', $externalProductId);
             }
 
-            if (in_array($status, ['completed', 'failed', 'skipped'], true)) {
+            if ($retryAfterMinutes !== null && $status === 'pending') {
+                data_set(
+                    $attributes,
+                    $path.'.next_attempt_at',
+                    now()->addMinutes(max(1, $retryAfterMinutes))->toISOString(),
+                );
+            } elseif ($status !== 'queued') {
+                data_forget($attributes, $path.'.next_attempt_at');
+            }
+
+            if (in_array($status, ['pending', 'completed', 'failed', 'skipped'], true)) {
                 data_forget($attributes, $path.'.token');
                 data_forget($attributes, $path.'.queued_at');
             }
 
             $product->forceFill(['attributes' => $attributes])->save();
         });
+    }
+
+    private function retryDelayMinutes(): int
+    {
+        $attempts = max(1, (int) data_get(
+            Product::query()->find($this->productId)?->attributes,
+            $this->metadataPath().'.attempts',
+            1,
+        ));
+        $delays = [1, 2, 5, 15, 60, 360];
+
+        return $delays[min($attempts - 1, count($delays) - 1)];
     }
 }

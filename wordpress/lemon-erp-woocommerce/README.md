@@ -8,6 +8,7 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 - idempotentne wiązanie polskich i angielskich kategorii utworzonych przez ERP,
 - idempotentne przypisywanie języków i wiązanie tłumaczeń produktów utworzonych przez ERP,
 - idempotentne wiązanie osobnych terminów PL/EN globalnych atrybutów WooCommerce,
+- automatyczne wymuszenie obsługi języków Polylang dla wszystkich globalnych atrybutów WooCommerce (`pa_*`),
 - ustawianie daty publikacji na produktach i wariantach przed ich zapisem przez WooCommerce REST,
 - natychmiastowe, asynchroniczne powiadomienia ERP o utworzeniu lub zmianie konta klienta,
 - REST endpoint do zapisu danych faktury na zamówieniu,
@@ -22,7 +23,7 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 5. Upewnij się, że użytkownik WordPress używany w Lemon ERP ma uprawnienia do edycji zamówień WooCommerce.
 6. W Lemon ERP w integracji WooCommerce ustaw tryb faktur na `Wtyczka Lemon ERP bez Media Library`.
 
-Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, natychmiastowa synchronizacja klientów wersji co najmniej `0.4.1`, a bezpieczne wiązanie tłumaczeń produktów i automatyczny backfill wariantów wersji co najmniej `0.5.1`.
+Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, natychmiastowa synchronizacja klientów wersji co najmniej `0.4.1`, a bezpieczne wiązanie tłumaczeń produktów i automatyczny backfill wariantów wersji co najmniej `0.5.1`. Wersja `0.5.2` rejestruje wszystkie globalne taksonomie atrybutów WooCommerce jako tłumaczone w Polylang już podczas ładowania wtyczek i ukrywa tę wymuszoną decyzję na ekranie ustawień Polylang. Przy pierwszym uruchomieniu bezpiecznie przypisuje język także istniejącym wartościom tych atrybutów: zachowuje każde wcześniejsze przypisanie, rozpoznaje deterministyczny sufiks aktywnego języka (np. `-en`), a pozostałym wartościom nadaje domyślny język sklepu. Ten wznawialny bootstrap nie łączy samodzielnie par tłumaczeń; robi to dopiero ERP, mając pewne ID obu terminów.
 
 ## Natychmiastowa synchronizacja klientów
 
@@ -91,7 +92,7 @@ POST /wp-json/wc-lemon-erp/v1/catalog/products/attributes/{attribute_id}/terms/t
 
 Body ma postać `{"translations":{"pl":301,"en":302}}`. `attribute_id` jest numerycznym ID globalnego atrybutu WooCommerce; wtyczka sama rozwiązuje i ogranicza taksonomię do konkretnego `pa_*`. Każdy język musi wskazywać osobny term — także dla neutralnych wartości takich jak `S` — a wszystkie termy muszą należeć dokładnie do tej samej taksonomii. Użytkownik kluczy REST musi mieć jednocześnie uprawnienia `manage_woocommerce`, `manage_product_terms` i prawo edycji każdego termu. Przed zmianą wtyczka sprawdza aktywne języki, wcześniejsze rodziny oraz pełną mapę; identyczne ponowienie jest idempotentne i zwraca tę samą zweryfikowaną relację.
 
-Przed automatycznym backfillem ERP potwierdza wersję wtyczki, aktywny Polylang i wymagane języki bez wykonywania zmian:
+Przed automatycznym backfillem ERP potwierdza wersję wtyczki, aktywny Polylang, wymagane języki, przetłumaczenie wszystkich taksonomii `pa_*` oraz pełne zakończenie bootstrapu istniejących wartości bez wykonywania zmian. Odpowiedź zawiera wersję i stan bootstrapu, liczbę niegotowych taksonomii oraz liczbę wartości bez języka:
 
 ```text
 GET /wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities

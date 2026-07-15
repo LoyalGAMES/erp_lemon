@@ -112,8 +112,7 @@ return new class extends Migration
                         || $productId <= 0
                         || $salesChannelId <= 0
                         || $salesChannelId !== (int) $integration->sales_channel_id
-                        || ! str_contains($error, 'kilka wartości')
-                        || ! str_contains($error, 'globalnego atrybutu')
+                        || ! $recovery->isRetryableFailure($error)
                     ) {
                         continue;
                     }
