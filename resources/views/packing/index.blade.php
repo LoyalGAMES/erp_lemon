@@ -129,10 +129,17 @@
         .order-details-grid strong { color: var(--text); }
         .order-details-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
         .order-details-actions .button { min-height: 40px; }
-        .order-actions { display: grid; grid-template-columns: minmax(160px, .55fr) minmax(260px, 1fr) minmax(190px, .65fr); gap: 10px; align-items: stretch; }
-        .order-actions .button { min-height: 58px; width: 100%; font-size: 17px; border-radius: 8px; }
-        .order-problem-form { display: grid; grid-template-columns: minmax(120px, 1fr) auto; gap: 8px; }
-        .order-problem-form input { min-height: 58px; }
+        .order-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
+        .order-actions .button { min-height: 48px; width: 100%; font-size: 15px; border-radius: 8px; }
+        .packing-choice-form, .order-problem-form { display: grid; gap: 8px; align-content: start; border: 1px solid var(--border); border-radius: 9px; padding: 11px; background: #fffdfb; }
+        .packing-action-title { color: var(--text); font-size: 14px; font-weight: 820; }
+        .packing-action-help { min-height: 34px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.35; }
+        .manual-shipment-controls { display: grid; grid-template-columns: auto minmax(150px, 1fr) auto; gap: 7px; align-items: center; }
+        .manual-shipment-controls input { min-height: 48px; }
+        .manual-shipment-controls .button { width: auto; white-space: nowrap; }
+        .order-problem-form { grid-column: 1 / -1; grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+        .order-problem-form .packing-action-title { grid-column: 1 / -1; }
+        .order-problem-form input { min-height: 48px; }
         .courier-panel { margin-top: 2px; }
         .courier-panel-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
         .courier-panel-actions .button { min-height: 38px; }
@@ -174,6 +181,9 @@
             .packing-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
             .order-actions { grid-template-columns: 1fr; }
             .order-problem-form { grid-template-columns: 1fr; }
+            .order-problem-form, .order-problem-form .packing-action-title { grid-column: auto; }
+            .manual-shipment-controls { grid-template-columns: 1fr; }
+            .manual-shipment-controls .button { width: 100%; }
         }
         @media (max-width: 760px) {
             .main { padding-bottom: calc(104px + env(safe-area-inset-bottom, 0px)); }
@@ -664,28 +674,35 @@
                                     </div>
                                 </form>
                                 @endif
-                                <form method="POST" action="{{ route('packing.orders.pack-manual-shipment', $order) }}" data-packing-ajax>
+                                <form class="packing-choice-form" method="POST" action="{{ route('packing.orders.pack-manual-shipment', $order) }}" data-packing-ajax>
                                     @csrf
-                                    @if ($detectedShippingProvider)
-                                        <input type="hidden" name="provider" value="{{ $detectedShippingProvider }}">
-                                        <span class="status">{{ $detectedShippingProvider === 'gls' ? 'GLS' : 'InPost' }}</span>
-                                    @else
-                                    <select name="provider" required aria-label="Przewoźnik ręcznej przesyłki">
-                                        <option value="inpost">InPost</option>
-                                        <option value="gls">GLS</option>
-                                    </select>
-                                    @endif
-                                    <input name="tracking_number" maxlength="40" required placeholder="Ręczny numer przesyłki">
-                                    <button class="button secondary" type="submit">Dodaj numer i spakuj</button>
+                                    <div class="packing-action-title">Mam już numer przesyłki</div>
+                                    <p class="packing-action-help">Zapisz numer od przewoźnika i zakończ pakowanie.</p>
+                                    <div class="manual-shipment-controls">
+                                        @if ($detectedShippingProvider)
+                                            <input type="hidden" name="provider" value="{{ $detectedShippingProvider }}">
+                                            <span class="status">{{ $detectedShippingProvider === 'gls' ? 'GLS' : 'InPost' }}</span>
+                                        @else
+                                        <select name="provider" required aria-label="Przewoźnik ręcznej przesyłki">
+                                            <option value="inpost">InPost</option>
+                                            <option value="gls">GLS</option>
+                                        </select>
+                                        @endif
+                                        <input name="tracking_number" maxlength="40" required placeholder="Numer przesyłki">
+                                        <button class="button secondary" type="submit">Zapisz i spakuj</button>
+                                    </div>
                                 </form>
-                                <form method="POST" action="{{ route('packing.orders.pack', $order) }}" data-packing-ajax onsubmit="return confirm('Spakować zamówienie bez listu przewozowego?');">
+                                <form class="packing-choice-form" method="POST" action="{{ route('packing.orders.pack', $order) }}" data-packing-ajax onsubmit="return confirm('Spakować zamówienie bez listu przewozowego?');">
                                     @csrf
-                                    <button class="button secondary" type="submit">Pomiń list przewozowy i spakuj</button>
+                                    <div class="packing-action-title">Bez listu przewozowego</div>
+                                    <p class="packing-action-help">Przejdź dalej bez numeru i bez śledzenia przesyłki.</p>
+                                    <button class="button secondary" type="submit">Pomiń list i spakuj</button>
                                 </form>
                             @endif
                             <form class="order-problem-form" method="POST" action="{{ route('packing.orders.problem', $order) }}" data-packing-ajax data-packing-problem>
                                 @csrf
                                 <input type="hidden" name="restore_stock" value="1">
+                                <div class="packing-action-title">Problem z zamówieniem</div>
                                 <input name="reason" placeholder="Notatka problemu dla klienta" required maxlength="1000">
                                 <button class="button danger" type="submit">Problem</button>
                             </form>

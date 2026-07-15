@@ -38,7 +38,7 @@ class PackingShipmentAutomationTest extends TestCase
             ->assertDontSee(route('packing.orders.complete-with-label', $order), false)
             ->assertSee(route('packing.orders.pack-manual-shipment', $order), false)
             ->assertSee('<input type="hidden" name="provider" value="gls">', false)
-            ->assertSee('Pomiń list przewozowy i spakuj');
+            ->assertSee('Pomiń list i spakuj');
 
         $this->postJson(route('packing.orders.complete-with-label', $order), [
             'parcel_template' => 'small',

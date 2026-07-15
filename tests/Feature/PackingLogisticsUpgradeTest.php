@@ -21,7 +21,7 @@ class PackingLogisticsUpgradeTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_collect_view_splits_products_into_clothing_and_footwear_segments(): void
+    public function test_mixed_order_is_kept_together_in_clothing_segment(): void
     {
         $this->createMixedOrder();
 
@@ -34,13 +34,13 @@ class PackingLogisticsUpgradeTest extends TestCase
 
         $this->get(route('packing.index', ['view' => 'collect', 'segment' => 'footwear']))
             ->assertOk()
-            ->assertSee('Sneakersy VIKI')
+            ->assertDontSee('Sneakersy VIKI')
             ->assertDontSee('Sukienka LENA');
 
         $this->get(route('packing.index', ['view' => 'collect', 'segment' => 'clothing']))
             ->assertOk()
             ->assertSee('Sukienka LENA')
-            ->assertDontSee('Sneakersy VIKI');
+            ->assertSee('Sneakersy VIKI');
     }
 
     public function test_operator_can_select_station_with_printer_and_it_filters_collect_view(): void
@@ -58,8 +58,14 @@ class PackingLogisticsUpgradeTest extends TestCase
         $collect->assertOk()
             ->assertSee('Stanowisko 2')
             ->assertSee('Drukarka 2')
-            ->assertSee('Sneakersy VIKI')
+            ->assertDontSee('Sneakersy VIKI')
             ->assertDontSee('Sukienka LENA');
+
+        $this->post(route('packing.station'), ['station' => 'station-1'])->assertRedirect();
+        $this->get(route('packing.index', ['view' => 'collect']))
+            ->assertOk()
+            ->assertSee('Sneakersy VIKI')
+            ->assertSee('Sukienka LENA');
     }
 
     public function test_pack_view_explains_when_automatic_printing_has_no_active_station(): void

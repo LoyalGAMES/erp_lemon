@@ -101,14 +101,17 @@ class PackingController extends Controller
             : ($activeStation['segment'] ?? 'all');
 
         $openTasks = $tasks->where('status', 'open')->values();
+        $orderPackingSegments = $openTasks
+            ->groupBy('external_order_id')
+            ->map(fn (Collection $group): string => $segments->packingSegmentForOrder($group->first()->order));
         $collectOrdersBySegment = [
             'all' => $this->collectOrders($openTasks, $segments),
             ProductSegmentService::SEGMENT_CLOTHING => $this->collectOrders(
-                $openTasks->filter(fn (PackingTask $task): bool => $segments->segmentForTask($task) === ProductSegmentService::SEGMENT_CLOTHING)->values(),
+                $openTasks->filter(fn (PackingTask $task): bool => $orderPackingSegments->get($task->external_order_id) === ProductSegmentService::SEGMENT_CLOTHING)->values(),
                 $segments,
             ),
             ProductSegmentService::SEGMENT_FOOTWEAR => $this->collectOrders(
-                $openTasks->filter(fn (PackingTask $task): bool => $segments->segmentForTask($task) === ProductSegmentService::SEGMENT_FOOTWEAR)->values(),
+                $openTasks->filter(fn (PackingTask $task): bool => $orderPackingSegments->get($task->external_order_id) === ProductSegmentService::SEGMENT_FOOTWEAR)->values(),
                 $segments,
             ),
         ];
@@ -785,11 +788,7 @@ class PackingController extends Controller
                 }
 
                 $order->setRelation('packingTasks', $group->sortBy('product_name')->values());
-                $order->packing_segments = $group
-                    ->map(fn (PackingTask $task): string => $segments->segmentForTask($task))
-                    ->unique()
-                    ->values()
-                    ->all();
+                $order->packing_segments = [$segments->packingSegmentForOrder($order)];
                 $order->detected_shipping_provider = $providers->providerForOrder($order);
                 $label = $order->shipmentLabels?->firstWhere('status', 'generated');
                 $order->shipment_label_download_allowed = $label instanceof ShippingLabel

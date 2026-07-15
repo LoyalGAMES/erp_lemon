@@ -17,6 +17,7 @@ use App\Models\Product;
 final class ProductSegmentService
 {
     public const SEGMENT_CLOTHING = 'clothing';
+
     public const SEGMENT_FOOTWEAR = 'footwear';
 
     /** @var list<string>|null */
@@ -24,8 +25,7 @@ final class ProductSegmentService
 
     public function __construct(
         private readonly PackingSettingsService $settings,
-    ) {
-    }
+    ) {}
 
     public function segmentForTask(PackingTask $task): string
     {
@@ -55,6 +55,19 @@ final class ProductSegmentService
     public function isMixedOrder(ExternalOrder $order): bool
     {
         return count($this->segmentsForOrder($order)) > 1;
+    }
+
+    /**
+     * Zamówienie mieszane obsługuje stanowisko odzieżowe. Do obuwia trafiają
+     * wyłącznie zamówienia, których wszystkie aktywne pozycje są obuwiem.
+     */
+    public function packingSegmentForOrder(ExternalOrder $order): string
+    {
+        $segments = $this->segmentsForOrder($order);
+
+        return $segments !== [] && ! in_array(self::SEGMENT_CLOTHING, $segments, true)
+            ? self::SEGMENT_FOOTWEAR
+            : self::SEGMENT_CLOTHING;
     }
 
     public static function label(string $segment): string
