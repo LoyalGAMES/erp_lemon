@@ -144,7 +144,6 @@ final class StoreReturnIntakeService
         }
 
         $settings = $this->settings->data();
-        $refund = $this->validatedRefundDetails($order, $payload);
         $contact = trim((string) ($payload['customer_contact'] ?? ''));
         $email = trim((string) ($payload['customer_email'] ?? ''));
 
@@ -157,8 +156,8 @@ final class StoreReturnIntakeService
         try {
             $returnCase = $this->orderLock->forOrderFamily(
                 $order,
-                function () use ($payload, $order, $settings, $refund, $contact, $email, $returnReference, &$created): ReturnCase {
-                    return DB::transaction(function () use ($payload, $order, $settings, $refund, $contact, $email, $returnReference, &$created): ReturnCase {
+                function () use ($payload, $order, $settings, $contact, $email, $returnReference, &$created): ReturnCase {
+                    return DB::transaction(function () use ($payload, $order, $settings, $contact, $email, $returnReference, &$created): ReturnCase {
                         $rootOrderId = (int) ($order->split_root_order_id ?: $order->id);
                         $order = ExternalOrder::query()
                             ->lockForUpdate()
@@ -173,6 +172,7 @@ final class StoreReturnIntakeService
                         }
 
                         $this->cancellationGuard->assertReturnAllowed($order);
+                        $refund = $this->validatedRefundDetails($order, $payload);
                         $family = $this->familyOrders($order, true);
                         $state = $this->familyAvailability($order, $family);
                         $items = $this->matchItems($state, (array) ($payload['items'] ?? []));

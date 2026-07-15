@@ -175,6 +175,11 @@ final class ReturnCancellationInterlockTest extends TestCase
      */
     private function splitOrderFamily(string $suffix = 'ACTIVE', array $rawPayload = []): array
     {
+        $rawPayload += [
+            'payment_method' => 'stripe',
+            'payment_method_title' => 'Karta Stripe',
+        ];
+
         $channel = SalesChannel::query()->create([
             'code' => 'RETURN-CANCEL-'.$suffix,
             'name' => 'Return cancellation '.$suffix,
