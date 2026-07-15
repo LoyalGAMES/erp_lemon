@@ -185,6 +185,105 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
         );
     }
 
+    public function test_plugin_0_5_2_keeps_all_translated_products_pending_until_safe_gtin_support_is_installed(): void
+    {
+        Bus::fake();
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-CAPABILITY-SPLIT',
+            'name' => 'Sklep capability split',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Woo capability split',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl', 'en']]],
+        ]);
+        $simple = Product::query()->create([
+            'sku' => 'CAPABILITY-SIMPLE',
+            'name' => 'Simple',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp', 'product_type' => 'simple']],
+        ]);
+        $variable = Product::query()->create([
+            'sku' => 'CAPABILITY-VARIABLE',
+            'name' => 'Variable',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp', 'product_type' => 'variable']],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => 'CAPABILITY-VARIABLE-S',
+            'name' => 'Variable S',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp', 'product_type' => 'variation']],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $variable->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        $simpleMapping = ProductChannelMapping::query()->create([
+            'product_id' => $simple->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '9100',
+            'external_sku' => $simple->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $variableMapping = ProductChannelMapping::query()->create([
+            'product_id' => $variable->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '9200',
+            'external_sku' => $variable->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $service = app(LegacyVariantFamilyBackfillService::class);
+        $service->markPendingRevision($simple, 'capability-split');
+        $service->markPendingRevision($variable, 'capability-split');
+
+        Http::fake(fn () => Http::response([
+            'available' => true,
+            'attribute_term_translation_link_available' => true,
+            'languages' => ['pl', 'en'],
+            'plugin_version' => '0.5.2',
+        ]));
+
+        $result = $service->dispatchPending(10);
+
+        $this->assertSame(2, $result['scanned']);
+        $this->assertSame(0, $result['dispatched']);
+        $this->assertSame(2, $result['skipped_unready']);
+        Bus::assertNotDispatched(ExportWooCommerceProductDataJob::class);
+        $this->assertSame('pending', data_get(
+            $simpleMapping->refresh()->metadata,
+            'product_data_export.legacy_variant_backfill.status',
+        ));
+        $this->assertNull(data_get(
+            $simpleMapping->metadata,
+            'product_data_export.pending_token',
+        ));
+        $this->assertSame('pending', data_get(
+            $variableMapping->refresh()->metadata,
+            'product_data_export.legacy_variant_backfill.status',
+        ));
+        $this->assertNull(data_get(
+            $variableMapping->metadata,
+            'product_data_export.pending_token',
+        ));
+    }
+
     public function test_migration_queues_one_durable_family_export_that_creates_the_missing_english_family(): void
     {
         Bus::fake();
@@ -323,7 +422,9 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
                         'resource' => 'product_translation_link',
                         'languages' => ['pl', 'en'],
                         'catalog_contract' => 1,
-                        'plugin_version' => '0.5.2',
+                        'plugin_version' => '0.5.3',
+                        'variation_translation_link_available' => true,
+                        'variation_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations',
                     ])
                     : Http::response(['code' => 'rest_no_route'], 404);
             }
@@ -401,6 +502,17 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
                     'linked' => true,
                     'translations' => ['en' => 223, 'pl' => 123],
                     'translation_group' => 'product:123|223',
+                ]);
+            }
+
+            if ($request->method() === 'POST'
+                && $url === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations'
+            ) {
+                return Http::response([
+                    'linked' => true,
+                    'translations' => $request['translations'],
+                    'parents' => $request['parents'],
+                    'translation_group' => 'variation:124|224',
                 ]);
             }
 

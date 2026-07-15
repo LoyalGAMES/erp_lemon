@@ -9,7 +9,7 @@
             'ean' => $variant->ean,
             'regular_price' => data_get($variant->masterData(), 'prices.retail_price_pln'),
             'sale_price' => data_get($variant->masterData(), 'prices.sale_price_pln'),
-            'sort_order' => $variant->pivot?->sort_order ?? 100,
+            'sort_order' => max(1, (int) ($variant->pivot?->sort_order ?? 100)),
             'existing' => true,
         ])->values()->all()
         : [];
@@ -30,7 +30,9 @@
                     'ean' => $lookup['ean'] ?? null,
                     'regular_price' => null,
                     'sale_price' => null,
-                    'sort_order' => $oldVariantSortOrders[$index] ?? null,
+                    'sort_order' => isset($oldVariantSortOrders[$index])
+                        ? max(1, (int) $oldVariantSortOrders[$index])
+                        : null,
                     'existing' => $sku !== '',
                 ];
             })
@@ -215,7 +217,7 @@
                         <button class="button secondary" type="button" data-variant-order-down aria-label="Przesuń wariant w dół">↓ W dół</button>
                     </div>
                     <label class="variant-editor-order">Kolejność w sklepie
-                        <input name="variant_sort_order[{{ $index }}]" type="number" min="0" max="65535" step="1" value="{{ $row['sort_order'] }}" data-variant-sort-order>
+                        <input name="variant_sort_order[{{ $index }}]" type="number" min="1" max="65535" step="1" value="{{ $row['sort_order'] }}" data-variant-sort-order>
                     </label>
                     <input type="hidden" name="variant_remove[{{ $index }}]" value="0">
                     @if ($row['sku'] !== '')

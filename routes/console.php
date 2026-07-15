@@ -3,6 +3,7 @@
 use App\Models\AuditLog;
 use App\Models\Invoice;
 use App\Models\Product;
+use App\Models\ProductChannelMapping;
 use App\Services\Communication\UnpaidOrderReminderService;
 use App\Services\Integrations\WooCommerceImportQueueService;
 use App\Services\Inventory\StockSyncQueueService;
@@ -179,6 +180,103 @@ Artisan::command('erp:inspect-woocommerce-product-creation-recovery {--limit=20 
 
     return 0;
 })->purpose('Inspect recent duplicate-global-attribute product creation recovery without changing state.');
+
+Artisan::command('erp:inspect-woocommerce-product-export-failures {--limit=20 : Maximum number of recent root product export failures to show}', function (): int {
+    $limit = max(1, min(100, (int) $this->option('limit')));
+    $rows = [];
+    $safeError = static function (mixed $value): string {
+        $error = str((string) $value)->squish()->toString();
+
+        if ($error === '') {
+            return '-';
+        }
+
+        $error = (string) preg_replace(
+            [
+                '/\bBearer\s+\S+/iu',
+                '/\b(?:ck|cs)_[A-Za-z0-9._-]+\b/u',
+                '/\b(consumer_(?:key|secret)|authorization|password|access[_-]?token|secret|token)\s*[:=]\s*[^\s,;]+/iu',
+            ],
+            [
+                'Bearer [redacted]',
+                '[redacted]',
+                '$1=[redacted]',
+            ],
+            $error,
+        );
+
+        return str($error)->limit(180)->toString();
+    };
+
+    ProductChannelMapping::query()
+        ->where(function ($query): void {
+            $query
+                ->whereNull('external_variation_id')
+                ->orWhereIn('external_variation_id', ['', '0'])
+                ->orWhereRaw("TRIM(external_variation_id) = ''");
+        })
+        ->whereHas('salesChannel', fn ($query) => $query->where('type', 'woocommerce'))
+        ->with(['product.parentRelations', 'salesChannel'])
+        ->orderByDesc('updated_at')
+        ->orderByDesc('id')
+        ->chunk(200, function ($mappings) use (&$rows, $limit, $safeError): bool {
+            foreach ($mappings as $mapping) {
+                $product = $mapping->product;
+
+                if (! $product instanceof Product
+                    || $product->is_translation
+                    || trim((string) $product->sku) === ''
+                    || $product->masterSource() !== 'erp'
+                    || data_get($product->masterData(), 'product_type') === 'variation'
+                    || $product->parentRelations->contains(
+                        fn ($relation): bool => $relation->relation_type === 'variant',
+                    )
+                ) {
+                    continue;
+                }
+
+                $export = (array) data_get($mapping->metadata, 'product_data_export', []);
+                $backfill = (array) data_get($export, 'legacy_variant_backfill', []);
+                $backfillStatus = mb_strtolower(trim((string) ($backfill['status'] ?? '')));
+                $exportError = trim((string) ($export['error'] ?? ''));
+                $hasUnfinishedBackfill = $backfillStatus !== '' && $backfillStatus !== 'completed';
+
+                if ($exportError === '' && ! $hasUnfinishedBackfill) {
+                    continue;
+                }
+
+                $rows[] = [
+                    $mapping->updated_at?->format('Y-m-d H:i:s') ?? '-',
+                    $product->sku,
+                    $mapping->salesChannel?->code ?? (string) $mapping->sales_channel_id,
+                    trim((string) $mapping->external_product_id) ?: '-',
+                    $backfillStatus !== '' ? $backfillStatus : '-',
+                    trim((string) ($backfill['revision'] ?? '')) ?: '-',
+                    trim((string) ($backfill['next_attempt_at'] ?? '')) ?: '-',
+                    $safeError($exportError),
+                ];
+
+                if (count($rows) >= $limit) {
+                    return false;
+                }
+            }
+
+            return true;
+        });
+
+    $this->table(
+        ['updated', 'sku', 'channel', 'woo_mapping', 'backfill', 'revision', 'next_attempt', 'export_error'],
+        $rows,
+    );
+    $this->info(sprintf(
+        'Product export failure diagnostics: matching=%d, queued_jobs=%d, failed_jobs=%d.',
+        count($rows),
+        DB::table('jobs')->where('payload', 'like', '%ExportWooCommerceProductDataJob%')->count(),
+        DB::table('failed_jobs')->where('payload', 'like', '%ExportWooCommerceProductDataJob%')->count(),
+    ));
+
+    return 0;
+})->purpose('Inspect recent root WooCommerce product export failures without changing state or exposing payloads.');
 
 Artisan::command('erp:refresh-ksef-submissions {--limit=25 : Maximum number of KSeF submissions to refresh} {--minutes=2 : Refresh submissions older than this many minutes}', function (): int {
     $limit = max(1, (int) $this->option('limit'));

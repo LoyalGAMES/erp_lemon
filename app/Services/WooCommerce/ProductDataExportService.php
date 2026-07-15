@@ -64,6 +64,10 @@ final class ProductDataExportService
             $payloadProduct = $variantContext['variant'] ?? $product;
             $variantParent = $variantContext['parent'] ?? null;
             $variants = $this->variantChildren($product);
+            $this->assertProductTranslationCreationReady(
+                $integration,
+                $variantParent instanceof Product || $variants->isNotEmpty(),
+            );
             $this->ensureRemoteCategories(
                 $variantParent instanceof Product ? $variantParent : $product,
                 $integration,
@@ -241,7 +245,10 @@ final class ProductDataExportService
             throw new RuntimeException('Integracja WooCommerce nie ma przypisanego kanału sprzedaży.');
         }
 
-        $this->assertProductTranslationCreationReady($integration);
+        $this->assertProductTranslationCreationReady(
+            $integration,
+            $this->variantChildren($product)->isNotEmpty(),
+        );
 
         $existingMapping = $product->channelMappings
             ->first(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === (int) $integration->sales_channel_id);
@@ -416,8 +423,10 @@ final class ProductDataExportService
         ];
     }
 
-    private function assertProductTranslationCreationReady(WordpressIntegration $integration): void
-    {
+    private function assertProductTranslationCreationReady(
+        WordpressIntegration $integration,
+        bool $requiresVariantTranslations = false,
+    ): void {
         $languages = $integration->productExportLanguages();
         $needsTranslations = collect($languages)->contains(
             fn (mixed $language): bool => mb_strtolower(trim((string) $language)) !== 'pl',
@@ -427,6 +436,13 @@ final class ProductDataExportService
             && ! $this->client->productTranslationLinkingAvailable($integration, $languages)
         ) {
             throw WooCommerceProductTranslationNotReadyException::forRequiredLanguages();
+        }
+
+        if ($needsTranslations
+            && $requiresVariantTranslations
+            && ! $this->client->productVariationTranslationLinkingAvailable($integration, $languages)
+        ) {
+            throw WooCommerceProductTranslationNotReadyException::forRequiredVariantLanguages();
         }
     }
 
@@ -458,6 +474,11 @@ final class ProductDataExportService
             $translatedProductId = is_array($existingReference)
                 ? trim((string) ($existingReference['product_id'] ?? ''))
                 : '';
+            $translationCreationPending = $this->productTranslationCreationPending(
+                $product,
+                $salesChannelId,
+                $language,
+            );
 
             if ($translatedProductId === '') {
                 $translationCreation = $this->beginTranslationCreation(
@@ -484,12 +505,7 @@ final class ProductDataExportService
                 // Persist the allocated ID before linking. If Polylang linking
                 // fails, a retry resumes from this ID instead of duplicating EN.
                 $this->saveTranslationReference($product, $salesChannelId, $language, $translatedProductId, null, $desiredSku);
-                $this->completeTranslationCreation(
-                    $product,
-                    $salesChannelId,
-                    $language,
-                    $translatedProductId,
-                );
+                $translationCreationPending = true;
             } else {
                 $response = ['id' => $translatedProductId, 'resumed' => true];
             }
@@ -519,6 +535,20 @@ final class ProductDataExportService
                 $localizedPayload,
                 $language,
             );
+
+            // The allocated alias is only a recovery handle until both the
+            // Polylang link and the canonical full write have succeeded. Keep
+            // the durable pending marker across either crash window so the
+            // next export retries this same remote product instead of treating
+            // a half-linked draft as complete.
+            if ($translationCreationPending) {
+                $this->completeTranslationCreation(
+                    $product,
+                    $salesChannelId,
+                    $language,
+                    $translatedProductId,
+                );
+            }
             $variantResponses = [];
 
             foreach ($variants as $variant) {
@@ -624,6 +654,166 @@ final class ProductDataExportService
             $state['completed_at'] = now()->toISOString();
             $creationStates[$language] = $state;
             data_set($metadata, 'product_translation_creation', $creationStates);
+            $mapping->forceFill(['metadata' => $metadata])->save();
+        });
+    }
+
+    private function productTranslationCreationPending(
+        Product $product,
+        int $salesChannelId,
+        string $language,
+    ): bool {
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $product->id)
+            ->where('sales_channel_id', $salesChannelId)
+            ->whereNull('external_variation_id')
+            ->first();
+        $metadata = (array) $mapping?->metadata;
+
+        return data_get($metadata, "product_translation_creation.{$language}.pending") === true;
+    }
+
+    /**
+     * @return array{token:string,resume:bool,external_variation_id:string}
+     */
+    private function beginVariantTranslationCreation(
+        ProductChannelMapping $primaryMapping,
+        string $language,
+        string $translatedParentId,
+    ): array {
+        return DB::transaction(function () use ($primaryMapping, $language, $translatedParentId): array {
+            $mapping = ProductChannelMapping::query()
+                ->lockForUpdate()
+                ->findOrFail($primaryMapping->id);
+            $metadata = (array) $mapping->metadata;
+            $creationStates = (array) data_get($metadata, 'variation_translation_creation', []);
+            $state = (array) ($creationStates[$language] ?? []);
+            $token = trim((string) ($state['token'] ?? ''));
+            $resume = $token !== '';
+            $allocatedParentId = trim((string) ($state['external_product_id'] ?? ''));
+
+            if ($allocatedParentId !== '' && $allocatedParentId !== $translatedParentId) {
+                throw new RuntimeException(
+                    "Rozpoczęte tłumaczenie wariantu {$language} wskazuje inny produkt nadrzędny WooCommerce #{$allocatedParentId}.",
+                );
+            }
+
+            if (! $resume) {
+                $token = (string) Str::uuid();
+                $state['started_at'] = now()->toISOString();
+            } else {
+                $state['last_resumed_at'] = now()->toISOString();
+            }
+
+            $state['token'] = $token;
+            $state['pending'] = true;
+            $state['external_product_id'] = $translatedParentId;
+            $creationStates[$language] = $state;
+            data_set($metadata, 'variation_translation_creation', $creationStates);
+            $mapping->forceFill(['metadata' => $metadata])->save();
+
+            return [
+                'token' => $token,
+                'resume' => $resume,
+                'external_variation_id' => trim((string) ($state['external_variation_id'] ?? '')),
+            ];
+        });
+    }
+
+    private function storeVariantTranslationAllocation(
+        ProductChannelMapping $primaryMapping,
+        string $language,
+        string $token,
+        string $translatedParentId,
+        string $translatedVariationId,
+    ): void {
+        DB::transaction(function () use (
+            $primaryMapping,
+            $language,
+            $token,
+            $translatedParentId,
+            $translatedVariationId,
+        ): void {
+            $mapping = ProductChannelMapping::query()
+                ->lockForUpdate()
+                ->findOrFail($primaryMapping->id);
+            $metadata = (array) $mapping->metadata;
+            $creationStates = (array) data_get($metadata, 'variation_translation_creation', []);
+            $state = (array) ($creationStates[$language] ?? []);
+
+            if (! hash_equals(trim((string) ($state['token'] ?? '')), $token)) {
+                throw new RuntimeException(
+                    "Token rozpoczętego tłumaczenia wariantu {$language} zmienił się podczas eksportu.",
+                );
+            }
+
+            $allocatedVariationId = trim((string) ($state['external_variation_id'] ?? ''));
+
+            if ($allocatedVariationId !== '' && $allocatedVariationId !== $translatedVariationId) {
+                throw new RuntimeException(
+                    "Rozpoczęte tłumaczenie wariantu {$language} ma już inne ID WooCommerce #{$allocatedVariationId}.",
+                );
+            }
+
+            $state['pending'] = true;
+            $state['external_product_id'] = $translatedParentId;
+            $state['external_variation_id'] = $translatedVariationId;
+            $state['allocated_at'] ??= now()->toISOString();
+            $creationStates[$language] = $state;
+            data_set($metadata, 'variation_translation_creation', $creationStates);
+            $mapping->forceFill(['metadata' => $metadata])->save();
+        });
+    }
+
+    private function pendingVariantTranslationCreationToken(
+        ProductChannelMapping $primaryMapping,
+        string $language,
+    ): ?string {
+        $mapping = ProductChannelMapping::query()->find($primaryMapping->id);
+        $state = (array) data_get($mapping?->metadata, "variation_translation_creation.{$language}", []);
+        $token = trim((string) ($state['token'] ?? ''));
+
+        return ($state['pending'] ?? null) === true && $token !== '' ? $token : null;
+    }
+
+    private function completeVariantTranslationCreation(
+        ProductChannelMapping $primaryMapping,
+        string $language,
+        string $token,
+        string $translatedParentId,
+        string $translatedVariationId,
+    ): void {
+        DB::transaction(function () use (
+            $primaryMapping,
+            $language,
+            $token,
+            $translatedParentId,
+            $translatedVariationId,
+        ): void {
+            $mapping = ProductChannelMapping::query()
+                ->lockForUpdate()
+                ->find($primaryMapping->id);
+
+            if (! $mapping instanceof ProductChannelMapping) {
+                return;
+            }
+
+            $metadata = (array) $mapping->metadata;
+            $creationStates = (array) data_get($metadata, 'variation_translation_creation', []);
+            $state = (array) ($creationStates[$language] ?? []);
+
+            if (! hash_equals(trim((string) ($state['token'] ?? '')), $token)) {
+                throw new RuntimeException(
+                    "Nie można zakończyć tłumaczenia wariantu {$language}: token eksportu nie jest już aktualny.",
+                );
+            }
+
+            $state['pending'] = false;
+            $state['external_product_id'] = $translatedParentId;
+            $state['external_variation_id'] = $translatedVariationId;
+            $state['completed_at'] = now()->toISOString();
+            $creationStates[$language] = $state;
+            data_set($metadata, 'variation_translation_creation', $creationStates);
             $mapping->forceFill(['metadata' => $metadata])->save();
         });
     }
@@ -911,8 +1101,10 @@ final class ProductDataExportService
     ): array {
         $results = [];
         $exportLanguages = collect($integration->productExportLanguages())->flip();
+        $parentReferences = $this->translationReferences($parent, $salesChannelId);
+        $variantReferences = $this->translationReferences($variant, $salesChannelId);
 
-        foreach ($this->translationReferences($parent, $salesChannelId) as $language => $parentReference) {
+        foreach ($parentReferences as $language => $parentReference) {
             if (! is_array($parentReference) || ! $exportLanguages->has((string) $language)) {
                 continue;
             }
@@ -926,46 +1118,48 @@ final class ProductDataExportService
             $language = trim((string) $language) ?: 'en';
             $payload = $this->variationPayload($parent, $variant, $salesChannelId, $language);
             $payload = $this->globalizeProductAttributes($integration, $payload, $language);
-            $variantReference = $this->translationReferences($variant, $salesChannelId)[$language] ?? null;
+            $variantReference = $variantReferences[$language] ?? null;
             $translatedVariationId = is_array($variantReference)
                 ? trim((string) ($variantReference['variation_id'] ?? ''))
                 : '';
+            $creationToken = $this->pendingVariantTranslationCreationToken(
+                $primaryMapping,
+                $language,
+            );
 
             if ($translatedVariationId !== '') {
-                $response = $this->client->updateProductDataByIds(
-                    $integration,
-                    $translatedParentId,
-                    $translatedVariationId,
-                    $payload,
-                    $language,
-                );
                 $operation = 'updated';
             } else {
-                $discoveredVariation = $this->client->findProductVariation(
-                    $integration,
-                    $translatedParentId,
-                    $primaryMapping->external_variation_id,
-                    $variant->sku,
-                    (array) ($payload['attributes'] ?? []),
+                $translationCreation = $this->beginVariantTranslationCreation(
+                    $primaryMapping,
                     $language,
+                    $translatedParentId,
                 );
-                $translatedVariationId = trim((string) ($discoveredVariation['id'] ?? ''));
+                $creationToken = $translationCreation['token'];
+                $translatedVariationId = $translationCreation['external_variation_id'];
 
-                if ($translatedVariationId !== '') {
-                    $response = $this->client->updateProductDataByIds(
+                if ($translatedVariationId === '' && ! $translationCreation['resume']) {
+                    $discoveredVariation = $this->client->findProductVariation(
                         $integration,
                         $translatedParentId,
-                        $translatedVariationId,
-                        $payload,
+                        $primaryMapping->external_variation_id,
+                        $variant->sku,
+                        (array) ($payload['attributes'] ?? []),
                         $language,
                     );
+                    $translatedVariationId = trim((string) ($discoveredVariation['id'] ?? ''));
+                }
+
+                if ($translatedVariationId !== '') {
                     $operation = 'updated_discovered';
                 } else {
-                    $response = $this->client->createProductVariation(
+                    $response = $this->client->createProductVariationForLanguage(
                         $integration,
                         $translatedParentId,
                         $payload,
                         $language,
+                        $translationCreation['token'],
+                        $translationCreation['resume'],
                     );
                     $translatedVariationId = trim((string) ($response['id'] ?? ''));
                     $operation = 'created';
@@ -975,13 +1169,84 @@ final class ProductDataExportService
                     throw new RuntimeException("WooCommerce nie zwrócił ID wariantu {$variant->sku} dla tłumaczenia {$language}.");
                 }
 
-                $this->saveTranslationReference(
-                    $variant,
-                    $salesChannelId,
+                // The allocated ID is durable, but deliberately not exposed as
+                // a catalog alias yet. A retry can resume it after link/update
+                // failure without treating a half-linked variation as valid.
+                $this->storeVariantTranslationAllocation(
+                    $primaryMapping,
                     $language,
+                    $translationCreation['token'],
                     $translatedParentId,
                     $translatedVariationId,
-                    $variant->sku,
+                );
+            }
+
+            // Link before assigning the canonical SKU. Both the child and its
+            // translated parent map are verified by plugin 0.5.3, making this
+            // call safe and idempotent for existing and historical children.
+            $variationTranslationMap = [
+                'pl' => (string) $primaryMapping->external_variation_id,
+            ];
+            $parentTranslationMap = [
+                'pl' => (string) $primaryMapping->external_product_id,
+            ];
+
+            foreach ($parentReferences as $knownLanguage => $knownParentReference) {
+                $knownLanguage = trim((string) $knownLanguage);
+                $knownParentId = trim((string) data_get($knownParentReference, 'product_id', ''));
+                $knownVariationId = $knownLanguage === $language
+                    ? $translatedVariationId
+                    : trim((string) data_get($variantReferences, "{$knownLanguage}.variation_id", ''));
+
+                if ($knownLanguage === ''
+                    || $knownLanguage === 'pl'
+                    || ! $exportLanguages->has($knownLanguage)
+                    || ! ctype_digit($knownParentId)
+                    || ! ctype_digit($knownVariationId)
+                ) {
+                    continue;
+                }
+
+                $variationTranslationMap[$knownLanguage] = $knownVariationId;
+                $parentTranslationMap[$knownLanguage] = $knownParentId;
+            }
+
+            $linkResponse = $this->client->linkProductVariationTranslations(
+                $integration,
+                $variationTranslationMap,
+                $parentTranslationMap,
+            );
+            $response = $this->client->updateProductDataByIds(
+                $integration,
+                $translatedParentId,
+                $translatedVariationId,
+                $payload,
+                $language,
+            );
+
+            // Publish the local alias only after WordPress has verified the
+            // language relation and Woo accepted the complete canonical data.
+            $this->saveTranslationReference(
+                $variant,
+                $salesChannelId,
+                $language,
+                $translatedParentId,
+                $translatedVariationId,
+                $variant->sku,
+            );
+            $variantReferences[$language] = [
+                'product_id' => $translatedParentId,
+                'variation_id' => $translatedVariationId,
+                'sku' => $variant->sku,
+            ];
+
+            if ($creationToken !== null) {
+                $this->completeVariantTranslationCreation(
+                    $primaryMapping,
+                    $language,
+                    $creationToken,
+                    $translatedParentId,
+                    $translatedVariationId,
                 );
             }
 
@@ -991,6 +1256,10 @@ final class ProductDataExportService
                 'variation_id' => $translatedVariationId,
                 'operation' => $operation,
                 'response_id' => $response['id'] ?? null,
+                'translation_link' => [
+                    'linked' => true,
+                    'translation_group' => $linkResponse['translation_group'] ?? null,
+                ],
             ];
         }
 
@@ -1174,6 +1443,9 @@ final class ProductDataExportService
         }
 
         if ($isVariation) {
+            // Woo exposes variation `date_created` read-only. The canonical
+            // date remains in `_sempre_erp_publication_date`; plugin 0.5.x
+            // applies that value to the underlying variation post pre-insert.
             unset($payload['sold_individually'], $payload['date_created']);
         }
 
@@ -1262,7 +1534,10 @@ final class ProductDataExportService
         }
 
         $payload['attributes'] = $this->variationAttributes($parent, $variant, $language);
-        $payload['menu_order'] = max(0, min(65535, (int) ($variant->pivot?->sort_order ?? 100)));
+        // WooCommerce 10.9 only applies a variation menu_order when the value
+        // is truthy. Clamp legacy zeroes to 1 so a requested first position is
+        // not silently ignored by the REST controller.
+        $payload['menu_order'] = max(1, min(65535, (int) ($variant->pivot?->sort_order ?? 100)));
         $payload['status'] = $parent->is_active && $variant->is_active
             ? (string) (data_get($parentMaster, 'publication_status') ?: 'publish')
             : 'draft';
@@ -2532,9 +2807,18 @@ final class ProductDataExportService
         Collection $variants,
         ?Product $variantParent = null,
     ): array {
+        $pendingTranslationCreation = collect((array) data_get(
+            $mapping->metadata,
+            'product_translation_creation',
+            [],
+        ))->contains(
+            fn (mixed $state): bool => is_array($state)
+                && data_get($state, 'pending') === true,
+        );
         $shouldCreateOrResume = ! $isVariation && (
             data_get($mapping->metadata, 'creation_state') === 'creating'
             || data_get($mapping->metadata, 'product_translation_link.pending') === true
+            || $pendingTranslationCreation
         );
         $results = ! $shouldCreateOrResume
             ? []

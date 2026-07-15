@@ -31,7 +31,7 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
                 'resource' => 'product_translation_link',
                 'languages' => ['pl', 'en'],
                 'catalog_contract' => 1,
-                'plugin_version' => '0.5.2',
+                'plugin_version' => '0.5.3',
             ]),
         ]);
 
@@ -71,7 +71,7 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
                 'resource' => 'product_translation_link',
                 'languages' => ['pl', 'en'],
                 'catalog_contract' => 1,
-                'plugin_version' => '0.5.2',
+                'plugin_version' => '0.5.3',
             ]),
         ]);
 
@@ -81,7 +81,7 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
         ));
     }
 
-    public function test_backfill_readiness_rejects_previous_051_package_without_attribute_taxonomy_registration(): void
+    public function test_backfill_readiness_rejects_previous_052_package_without_safe_translation_gtin_support(): void
     {
         Http::fake([
             'https://shop.example.test/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities' => Http::response([
@@ -90,7 +90,7 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
                 'resource' => 'product_translation_link',
                 'languages' => ['pl', 'en'],
                 'catalog_contract' => 1,
-                'plugin_version' => '0.5.1',
+                'plugin_version' => '0.5.2',
             ]),
         ]);
 
@@ -109,7 +109,7 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
                 'resource' => 'product',
                 'translations' => ['en' => 750099, 'pl' => 700143],
                 'translation_group' => 'product:700143|750099',
-                'plugin_version' => '0.5.2',
+                'plugin_version' => '0.5.3',
             ]),
         ]);
 
@@ -160,7 +160,7 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
         ]);
 
         $this->expectException(RuntimeException::class);
-        $this->expectExceptionMessage('co najmniej 0.5.2');
+        $this->expectExceptionMessage('co najmniej 0.5.3');
 
         app(WooCommerceClient::class)->linkProductTranslations(
             $this->integration(),
@@ -185,6 +185,79 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
             $this->integration(),
             ['pl' => 700143, 'en' => 750099],
         );
+    }
+
+    public function test_variation_translation_readiness_requires_the_053_semantic_capability(): void
+    {
+        $integration = $this->integration();
+        Http::fakeSequence('https://shop.example.test/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities')
+            ->push([
+                'available' => true,
+                'attribute_term_translation_link_available' => true,
+                'variation_translation_link_available' => true,
+                'variation_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations',
+                'languages' => ['pl', 'en'],
+                'plugin_version' => '0.5.2',
+            ])
+            ->push([
+                'available' => true,
+                'attribute_term_translation_link_available' => true,
+                'variation_translation_link_available' => true,
+                'variation_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations',
+                'languages' => ['pl', 'en'],
+                'plugin_version' => '0.5.3',
+            ]);
+
+        $this->assertFalse(app(WooCommerceClient::class)->productVariationTranslationLinkingAvailable(
+            $integration,
+            ['pl', 'en'],
+        ));
+
+        $this->assertTrue(app(WooCommerceClient::class)->productVariationTranslationLinkingAvailable(
+            $integration,
+            ['pl', 'en'],
+        ));
+    }
+
+    public function test_polish_only_readiness_does_not_require_or_call_the_translation_plugin(): void
+    {
+        Http::fake();
+
+        $this->assertTrue(app(WooCommerceClient::class)->productTranslationLinkingAvailable(
+            $this->integration(),
+            ['pl'],
+        ));
+
+        Http::assertNothingSent();
+    }
+
+    public function test_it_links_variations_with_their_exact_parent_language_map(): void
+    {
+        Http::fake([
+            'https://shop.example.test/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations' => Http::response([
+                'linked' => true,
+                'changed' => true,
+                'translations' => ['en' => 750100, 'pl' => 700144],
+                'parents' => ['en' => 750099, 'pl' => 700143],
+                'translation_group' => 'variation:700144|750100',
+                'plugin_version' => '0.5.3',
+            ]),
+        ]);
+
+        $result = app(WooCommerceClient::class)->linkProductVariationTranslations(
+            $this->integration(),
+            ['pl' => '700144', 'en' => 750100],
+            ['pl' => 700143, 'en' => '750099'],
+        );
+
+        $this->assertTrue($result['linked']);
+        $this->assertSame(['en' => 750100, 'pl' => 700144], $result['translations']);
+        $this->assertSame(['en' => 750099, 'pl' => 700143], $result['parents']);
+
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.example.test/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations'
+            && $request['translations'] === ['en' => 750100, 'pl' => 700144]
+            && $request['parents'] === ['en' => 750099, 'pl' => 700143]);
     }
 
     private function integration(): WordpressIntegration

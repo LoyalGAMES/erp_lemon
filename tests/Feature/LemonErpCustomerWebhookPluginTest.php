@@ -59,7 +59,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $package = $packages->build();
         $zip = new ZipArchive;
 
-        $this->assertSame('0.5.2', $package['version']);
+        $this->assertSame('0.5.3', $package['version']);
         $this->assertTrue($zip->open($package['path']) === true);
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-customer-webhook.php'),
@@ -95,6 +95,18 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             "'attribute_term_translation_unassigned_terms_count'",
             $translationLinker,
         );
+        $this->assertStringContainsString(
+            '/catalog/products/variations/translations',
+            $translationLinker,
+        );
+        $this->assertStringContainsString(
+            "add_filter('wc_product_has_unique_sku'",
+            $translationLinker,
+        );
+        $this->assertStringContainsString(
+            "add_filter('wc_product_has_global_unique_id'",
+            $translationLinker,
+        );
         $mainFile = $zip->getFromName('lemon-erp-woocommerce/lemon-erp-woocommerce.php');
         $this->assertIsString($mainFile);
         $this->assertStringContainsString(
@@ -114,13 +126,17 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             "'product_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/translations'",
             $mainFile,
         );
+        $this->assertStringContainsString(
+            "'variation_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations'",
+            $mainFile,
+        );
         $readme = $zip->getFromName('lemon-erp-woocommerce/README.md');
         $this->assertIsString($readme);
         $this->assertStringContainsString(
             '/wp-json/wc-lemon-erp/v1/catalog/products/translations',
             $readme,
         );
-        $this->assertStringContainsString('Wersja `0.5.2`', $readme);
+        $this->assertStringContainsString('Wersja `0.5.3`', $readme);
         $zip->close();
     }
 }

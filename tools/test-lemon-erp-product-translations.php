@@ -64,6 +64,44 @@ final class WP_Term
     ) {}
 }
 
+final class TestWpdb
+{
+    public string $posts = 'wp_posts';
+
+    public string $wc_product_meta_lookup = 'wp_wc_product_meta_lookup';
+
+    /** @var array<int, mixed> */
+    private array $preparedArguments = [];
+
+    public function prepare(string $query, mixed ...$arguments): string
+    {
+        $this->preparedArguments = $arguments;
+
+        return $query;
+    }
+
+    /** @return list<int> */
+    public function get_col(string $query): array
+    {
+        global $testProductIdsByGlobalUniqueId, $testProductIdsBySku;
+
+        $identity = (string) ($this->preparedArguments[0] ?? '');
+        $excludedId = (int) ($this->preparedArguments[1] ?? 0);
+        $ids = str_contains($query, 'lookup.global_unique_id')
+            ? ($testProductIdsByGlobalUniqueId[$identity] ?? [])
+            : ($testProductIdsBySku[$identity] ?? []);
+
+        if (! str_contains($query, 'lookup.product_id <> %d')) {
+            return $ids;
+        }
+
+        return array_values(array_filter(
+            $ids,
+            static fn (int $productId): bool => $productId !== $excludedId,
+        ));
+    }
+}
+
 /** @var list<array{hook:string,callback:callable,priority:int,accepted_args:int}> */
 $testActions = [];
 /** @var list<array{hook:string,callback:callable,priority:int,accepted_args:int}> */
@@ -75,7 +113,7 @@ $testAttributeTaxonomies = ['pa_rozmiar', 'pa_kolor', 'pa_oficjalny-producent'];
 /** @var list<string> */
 $testTranslatedTaxonomies = ['pa_rozmiar', 'pa_kolor', 'pa_oficjalny-producent'];
 /** @var list<string> */
-$testLanguages = ['pl', 'en', 'pt', 'pt-br'];
+$testLanguages = ['pl', 'en', 'de', 'pt', 'pt-br'];
 $testDefaultLanguage = 'pl';
 /** @var array<int, string> */
 $testPostTypes = [
@@ -83,6 +121,11 @@ $testPostTypes = [
     102 => 'product',
     103 => 'product_variation',
     104 => 'product',
+    105 => 'product_variation',
+    106 => 'product_variation',
+    107 => 'product_variation',
+    108 => 'product',
+    109 => 'product_variation',
 ];
 /** @var array<int, string> */
 $testPostStatuses = [
@@ -90,13 +133,39 @@ $testPostStatuses = [
     102 => 'draft',
     103 => 'publish',
     104 => 'publish',
+    105 => 'publish',
+    106 => 'publish',
+    107 => 'publish',
+    108 => 'publish',
+    109 => 'publish',
 ];
 /** @var array<int, bool> */
-$testEditablePosts = [101 => true, 102 => true, 103 => true, 104 => true];
+$testEditablePosts = [
+    101 => true,
+    102 => true,
+    103 => true,
+    104 => true,
+    105 => true,
+    106 => true,
+    107 => true,
+    108 => true,
+    109 => true,
+];
+/** @var array<int, int> */
+$testPostParents = [103 => 101, 105 => 101, 106 => 102, 107 => 104, 109 => 108];
 /** @var array<int, string> */
 $testPostLanguages = [];
 /** @var array<int, array<string, int>> */
 $testTranslationGroups = [];
+$testPersistPostTranslations = true;
+$testPartialPostTranslationSaveOnce = false;
+$testThrowPostTranslationSaveOnce = false;
+/** @var array<int, string> */
+$testPostLanguageWriteOverridesOnce = [];
+/** @var array<string, list<int>> */
+$testProductIdsBySku = [];
+/** @var array<string, list<int>> */
+$testProductIdsByGlobalUniqueId = [];
 /** @var list<array<mixed>> */
 $testWrites = [];
 $testManageWooCommerce = true;
@@ -140,6 +209,7 @@ $testTermLanguageWriteOverridesOnce = [];
 $testGetTermsErrorTaxonomy = null;
 /** @var array<string, mixed> */
 $testOptions = [];
+$wpdb = new TestWpdb;
 
 function add_action(string $hook, callable $callback, int $priority = 10, int $accepted_args = 1): void
 {
@@ -210,6 +280,13 @@ function get_post_status(int $postId): string|false
     return $testPostStatuses[$postId] ?? false;
 }
 
+function wp_get_post_parent_id(int $postId): int|false
+{
+    global $testPostParents;
+
+    return $testPostParents[$postId] ?? false;
+}
+
 /** @return list<string> */
 function pll_languages_list(array $args = []): array
 {
@@ -242,18 +319,66 @@ function pll_get_post_translations(int $postId): array
 
 function pll_set_post_language(int $postId, string $language): void
 {
-    global $testPostLanguages, $testWrites;
+    global $testPostLanguages, $testPostLanguageWriteOverridesOnce, $testWrites;
 
     $testWrites[] = ['set_language', $postId, $language];
+
+    if (array_key_exists($postId, $testPostLanguageWriteOverridesOnce)) {
+        $testPostLanguages[$postId] = $testPostLanguageWriteOverridesOnce[$postId];
+        unset($testPostLanguageWriteOverridesOnce[$postId]);
+
+        return;
+    }
+
     $testPostLanguages[$postId] = $language;
 }
 
 /** @param array<string, int> $translations */
 function pll_save_post_translations(array $translations): void
 {
-    global $testTranslationGroups, $testWrites;
+    global $testPartialPostTranslationSaveOnce, $testPersistPostTranslations;
+    global $testThrowPostTranslationSaveOnce, $testTranslationGroups, $testWrites;
 
     $testWrites[] = ['save_translations', $translations];
+
+    if ($testThrowPostTranslationSaveOnce) {
+        $testThrowPostTranslationSaveOnce = false;
+
+        throw new RuntimeException('Simulated post translation save failure.');
+    }
+
+    if (! $testPersistPostTranslations) {
+        return;
+    }
+
+    $requestedPostIds = array_values($translations);
+    $relatedPostIds = $requestedPostIds;
+
+    foreach ($testTranslationGroups as $postId => $existingTranslations) {
+        if (array_intersect($requestedPostIds, array_values($existingTranslations)) !== []) {
+            $relatedPostIds[] = $postId;
+            $relatedPostIds = array_merge($relatedPostIds, array_values($existingTranslations));
+        }
+    }
+
+    foreach (array_unique($relatedPostIds) as $postId) {
+        unset($testTranslationGroups[$postId]);
+    }
+
+    if ($testPartialPostTranslationSaveOnce) {
+        $testPartialPostTranslationSaveOnce = false;
+        $firstPostId = (int) reset($translations);
+
+        if ($firstPostId > 0) {
+            $testTranslationGroups[$firstPostId] = $translations;
+        }
+
+        return;
+    }
+
+    if (count($translations) < 2) {
+        return;
+    }
 
     foreach ($translations as $postId) {
         $testTranslationGroups[$postId] = $translations;
@@ -428,12 +553,14 @@ function pll_save_term_translations(array $translations): void
 
 function wp_delete_object_term_relationships(int $termId, string $taxonomy): bool
 {
-    global $testTermLanguages, $testWrites;
+    global $testPostLanguages, $testTermLanguages, $testWrites;
 
     $testWrites[] = ['delete_object_term_relationships', $termId, $taxonomy];
 
     if ($taxonomy === 'term_language') {
         unset($testTermLanguages[$termId]);
+    } elseif ($taxonomy === 'language') {
+        unset($testPostLanguages[$termId]);
     }
 
     return true;
@@ -486,6 +613,14 @@ test_expect($settingsTaxonomies === [
 $linker = new Lemon_Erp_Product_Translation_Linker;
 $linker->hooks();
 
+test_expect(count($testFilters) === 3, 'The taxonomy and WooCommerce identity filters were not registered exactly once.');
+test_expect($testFilters[1]['hook'] === 'wc_product_has_unique_sku', 'The translated SKU exception uses an unexpected WooCommerce filter.');
+test_expect($testFilters[1]['priority'] === 10 && $testFilters[1]['accepted_args'] === 3, 'The SKU duplicate filter must accept all three WooCommerce arguments.');
+test_expect($testFilters[2]['hook'] === 'wc_product_has_global_unique_id', 'The translated GTIN/EAN exception uses an unexpected WooCommerce filter.');
+test_expect($testFilters[2]['priority'] === 10 && $testFilters[2]['accepted_args'] === 3, 'The global unique ID duplicate filter must accept all three WooCommerce arguments.');
+$skuDuplicateFilter = $testFilters[1]['callback'];
+$globalUniqueIdDuplicateFilter = $testFilters[2]['callback'];
+
 test_expect(count($testActions) === 4, 'The bootstrap, invalidation and REST hooks were not added exactly once.');
 test_expect($testActions[0]['hook'] === 'init', 'Existing attribute terms must be bootstrapped after taxonomies initialize.');
 test_expect($testActions[0]['priority'] === 100, 'The bootstrap must run after WooCommerce and Polylang initialize taxonomies.');
@@ -493,7 +628,7 @@ test_expect($testActions[1]['hook'] === 'created_term', 'New global attribute te
 test_expect($testActions[2]['hook'] === 'edited_term', 'Edited global attribute terms must invalidate the bootstrap marker.');
 test_expect($testActions[3]['hook'] === 'rest_api_init', 'The endpoint must register during rest_api_init.');
 
-// Version 0.5.2 must not advertise term-link readiness before the bootstrap.
+// Version 0.5.3 must not advertise term-link readiness before the bootstrap.
 $capabilitiesBeforeBootstrap = $linker->capabilities(new WP_REST_Request);
 test_expect(
     $capabilitiesBeforeBootstrap->data['attribute_term_translation_link_available'] === false,
@@ -650,25 +785,33 @@ test_expect(
 $testWrites = [];
 ($testActions[3]['callback'])();
 
-test_expect(count($testRoutes) === 3, 'The product and attribute-term translation routes were not registered exactly once.');
+test_expect(count($testRoutes) === 4, 'The product, variation and attribute-term translation routes were not registered exactly once.');
 test_expect($testRoutes[0]['namespace'] === 'wc-lemon-erp/v1', 'The capability endpoint must use the Woo-authenticated wc-lemon-erp/v1 namespace.');
 test_expect($testRoutes[0]['route'] === '/catalog/products/translations/capabilities', 'Unexpected product translation capability endpoint path.');
 test_expect($testRoutes[0]['args']['methods'] === WP_REST_Server::READABLE, 'The capability endpoint must accept GET requests.');
 test_expect($testRoutes[1]['namespace'] === 'wc-lemon-erp/v1', 'The link endpoint must use the Woo-authenticated wc-lemon-erp/v1 namespace.');
 test_expect($testRoutes[1]['route'] === '/catalog/products/translations', 'Unexpected product translation endpoint path.');
 test_expect($testRoutes[1]['args']['methods'] === WP_REST_Server::CREATABLE, 'The link endpoint must accept POST requests.');
-test_expect($testRoutes[2]['namespace'] === 'wc-lemon-erp/v1', 'The attribute-term endpoint must use Woo credentials.');
-test_expect($testRoutes[2]['route'] === '/catalog/products/attributes/(?P<attribute_id>\d+)/terms/translations', 'Unexpected attribute-term translation endpoint path.');
-test_expect($testRoutes[2]['args']['methods'] === WP_REST_Server::CREATABLE, 'The attribute-term endpoint must accept POST requests.');
+test_expect($testRoutes[2]['namespace'] === 'wc-lemon-erp/v1', 'The variation endpoint must use Woo credentials.');
+test_expect($testRoutes[2]['route'] === '/catalog/products/variations/translations', 'Unexpected variation translation endpoint path.');
+test_expect($testRoutes[2]['args']['methods'] === WP_REST_Server::CREATABLE, 'The variation endpoint must accept POST requests.');
+test_expect($testRoutes[3]['namespace'] === 'wc-lemon-erp/v1', 'The attribute-term endpoint must use Woo credentials.');
+test_expect($testRoutes[3]['route'] === '/catalog/products/attributes/(?P<attribute_id>\d+)/terms/translations', 'Unexpected attribute-term translation endpoint path.');
+test_expect($testRoutes[3]['args']['methods'] === WP_REST_Server::CREATABLE, 'The attribute-term endpoint must accept POST requests.');
 test_expect($linker->canLink(new WP_REST_Request), 'A WooCommerce manager should be allowed to link translations.');
 test_expect($linker->canLinkAttributeTerms(new WP_REST_Request), 'A WooCommerce term manager should be allowed to link attribute terms.');
 
 $capabilities = $linker->capabilities(new WP_REST_Request);
 test_expect($capabilities->status === 200, 'The capability endpoint must return HTTP 200.');
 test_expect($capabilities->data['available'] === true, 'The capability endpoint did not confirm Polylang readiness.');
+test_expect($capabilities->data['variation_translation_link_available'] === true, 'The capability endpoint did not confirm variation-link readiness.');
+test_expect(
+    $capabilities->data['variation_translation_link_endpoint'] === '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations',
+    'The capability endpoint returned an unexpected variation-link endpoint.',
+);
 test_expect($capabilities->data['attribute_term_translation_link_available'] === true, 'The capability endpoint did not confirm attribute term readiness.');
-test_expect($capabilities->data['plugin_version'] === '0.5.2', 'The capability endpoint returned an unexpected plugin version.');
-test_expect($capabilities->data['languages'] === ['pl', 'en', 'pt', 'pt-br'], 'The capability endpoint returned unexpected languages.');
+test_expect($capabilities->data['plugin_version'] === '0.5.3', 'The capability endpoint returned an unexpected plugin version.');
+test_expect($capabilities->data['languages'] === ['pl', 'en', 'de', 'pt', 'pt-br'], 'The capability endpoint returned unexpected languages.');
 
 $testManageWooCommerce = false;
 test_expect(! $linker->canLink(new WP_REST_Request), 'A user without manage_woocommerce must be rejected.');
@@ -730,6 +873,241 @@ $repeated = $linker->link(new WP_REST_Request([
 test_expect($repeated instanceof WP_REST_Response, 'The repeated request did not return a REST response.');
 test_expect($repeated->data['changed'] === false, 'The repeated request must report no change.');
 test_expect($testWrites === $writesAfterFirstLink, 'The repeated request performed redundant Polylang writes.');
+
+// WooCommerce reports true when it has found a duplicate SKU or global unique
+// ID. Only the exact translated sibling may turn that conflict into false.
+$testProductIdsBySku['translated-parent-sku'] = [101, 102];
+$testProductIdsByGlobalUniqueId['5900000000102'] = [102];
+test_expect($skuDuplicateFilter(true, 101, 'translated-parent-sku') === false, 'A translated product sibling did not share its SKU.');
+test_expect($globalUniqueIdDuplicateFilter(true, 101, '5900000000102') === false, 'A translated product sibling did not share its global unique ID.');
+test_expect($skuDuplicateFilter(false, 101, 'translated-parent-sku') === false, 'The SKU filter changed an already-unique WooCommerce result.');
+$testProductIdsBySku["translated-parent's\\sku"] = [101, 102];
+test_expect($skuDuplicateFilter(true, 101, "translated-parent's\\sku") === false, 'The SKU filter altered a raw identity before wpdb preparation.');
+
+$testProductIdsBySku['unlinked-parent-sku'] = [104];
+test_expect($skuDuplicateFilter(true, 101, 'unlinked-parent-sku') === true, 'An unlinked product duplicate was allowed.');
+
+$testProductIdsBySku['translated-parent-with-foreign-sku'] = [101, 102, 104];
+test_expect($skuDuplicateFilter(true, 101, 'translated-parent-with-foreign-sku') === true, 'A third foreign product duplicate was hidden by a valid sibling.');
+
+$testPostLanguages[104] = 'en';
+$testTranslationGroups[104] = ['en' => 104];
+$testProductIdsByGlobalUniqueId['5900000000104'] = [104];
+test_expect($globalUniqueIdDuplicateFilter(true, 101, '5900000000104') === true, 'A foreign product-family duplicate was allowed.');
+unset($testPostLanguages[104], $testTranslationGroups[104]);
+
+$testPostLanguages[103] = 'en';
+$testTranslationGroups[101] = ['en' => 103, 'pl' => 101];
+$testTranslationGroups[103] = ['en' => 103, 'pl' => 101];
+$testProductIdsBySku['cross-type-sku'] = [103];
+test_expect($skuDuplicateFilter(true, 101, 'cross-type-sku') === true, 'A product-to-variation duplicate was allowed.');
+$testTranslationGroups[101] = ['en' => 102, 'pl' => 101];
+$testTranslationGroups[102] = ['en' => 102, 'pl' => 101];
+unset($testPostLanguages[103], $testTranslationGroups[103]);
+
+// Variation linking is deliberately separate from product linking. Both maps
+// must describe the same languages, and every validation failure must happen
+// before the first Polylang write.
+$testWrites = [];
+$variationRequest = [
+    'parents' => ['pl' => 101, 'en' => 102],
+    'translations' => ['pl' => 105, 'en' => 106],
+];
+
+$mismatchedLanguages = $linker->linkVariations(new WP_REST_Request([
+    'parents' => ['pl' => 101, 'en' => 102],
+    'translations' => ['pl' => 105, 'pt' => 106],
+]));
+test_expect_error($mismatchedLanguages, 'lemon_erp_variation_translation_languages_mismatch', 422);
+test_expect($testWrites === [], 'Mismatched variation languages mutated Polylang state.');
+
+$inactiveLanguage = $linker->linkVariations(new WP_REST_Request([
+    'parents' => ['fr' => 104, 'pl' => 101],
+    'translations' => ['fr' => 107, 'pl' => 105],
+]));
+test_expect_error($inactiveLanguage, 'lemon_erp_variation_language_invalid', 422);
+test_expect($testWrites === [], 'An inactive variation language mutated Polylang state.');
+
+$wrongParent = $linker->linkVariations(new WP_REST_Request([
+    'parents' => ['pl' => 101, 'en' => 102],
+    'translations' => ['pl' => 106, 'en' => 105],
+]));
+test_expect_error($wrongParent, 'lemon_erp_variation_parent_mismatch', 422);
+test_expect($testWrites === [], 'A wrong variation parent mutated Polylang state.');
+
+$parentTranslationGroups = [
+    101 => $testTranslationGroups[101],
+    102 => $testTranslationGroups[102],
+];
+unset($testTranslationGroups[101], $testTranslationGroups[102]);
+$unlinkedParents = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect_error($unlinkedParents, 'lemon_erp_variation_parent_translations_mismatch', 409);
+test_expect($testWrites === [], 'Unlinked parent products caused variation writes.');
+$testTranslationGroups[101] = $parentTranslationGroups[101];
+$testTranslationGroups[102] = $parentTranslationGroups[102];
+
+$testTranslationGroups[105] = ['de' => 107, 'pl' => 105];
+$testTranslationGroups[107] = ['de' => 107, 'pl' => 105];
+$foreignVariationFamily = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect_error($foreignVariationFamily, 'lemon_erp_variation_translation_conflict', 409);
+test_expect($testWrites === [], 'A foreign variation family was overwritten.');
+unset($testTranslationGroups[105], $testTranslationGroups[107]);
+
+$testPostLanguages[105] = 'en';
+$variationLanguageConflict = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect_error($variationLanguageConflict, 'lemon_erp_variation_language_conflict', 409);
+test_expect($testWrites === [], 'A conflicting variation language was overwritten.');
+unset($testPostLanguages[105]);
+
+$testEditablePosts[106] = false;
+$forbiddenVariation = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect_error($forbiddenVariation, 'lemon_erp_variation_translation_forbidden', 403);
+test_expect($testWrites === [], 'A forbidden variation caused Polylang writes.');
+$testEditablePosts[106] = true;
+
+$testEditablePosts[102] = false;
+$forbiddenParent = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect_error($forbiddenParent, 'lemon_erp_variation_parent_forbidden', 403);
+test_expect($testWrites === [], 'A forbidden parent product caused Polylang writes.');
+$testEditablePosts[102] = true;
+
+$linkedVariations = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect($linkedVariations instanceof WP_REST_Response, 'Valid variations did not return a REST response.');
+test_expect($linkedVariations->status === 200, 'Valid variations did not return HTTP 200.');
+test_expect($linkedVariations->data['linked'] === true, 'Valid variations were not confirmed as linked.');
+test_expect($linkedVariations->data['changed'] === true, 'The first variation link must report a change.');
+test_expect($linkedVariations->data['resource'] === 'product_variation', 'The variation response returned the wrong resource.');
+test_expect($linkedVariations->data['parents'] === ['en' => 102, 'pl' => 101], 'The variation response lost the parent map.');
+test_expect($linkedVariations->data['translations'] === ['en' => 106, 'pl' => 105], 'The variation response returned an incorrect translation map.');
+test_expect($linkedVariations->data['translation_group'] === 'variation:105|106', 'The variation response contains an unstable translation group.');
+test_expect($linkedVariations->data['plugin_version'] === '0.5.3', 'The variation response returned an unexpected plugin version.');
+test_expect(count($testWrites) === 3, 'The first variation link must assign two languages and save one family.');
+test_expect($testTranslationGroups[101] === ['en' => 102, 'pl' => 101] && $testTranslationGroups[102] === ['en' => 102, 'pl' => 101], 'A successful variation link modified the parent family.');
+
+$writesAfterFirstVariationLink = $testWrites;
+$repeatedVariations = $linker->linkVariations(new WP_REST_Request([
+    'parents' => ['en' => 102, 'pl' => 101],
+    'translations' => ['en' => 106, 'pl' => 105],
+]));
+test_expect($repeatedVariations instanceof WP_REST_Response, 'Repeated variation link did not return a response.');
+test_expect($repeatedVariations->data['changed'] === false, 'Repeated variation link must be idempotent.');
+test_expect($testWrites === $writesAfterFirstVariationLink, 'Repeated variation link performed redundant writes.');
+
+$testProductIdsBySku['translated-variation-sku'] = [105, 106];
+$testProductIdsByGlobalUniqueId['5900000000106'] = [106];
+test_expect($skuDuplicateFilter(true, 105, 'translated-variation-sku') === false, 'Translated variation siblings did not share their SKU.');
+test_expect($globalUniqueIdDuplicateFilter(true, 105, '5900000000106') === false, 'Translated variation siblings did not share their global unique ID.');
+
+$testProductIdsBySku['unlinked-variation-sku'] = [103];
+test_expect($skuDuplicateFilter(true, 105, 'unlinked-variation-sku') === true, 'An unlinked variation duplicate was allowed.');
+
+$testProductIdsBySku['translated-variation-with-foreign-sku'] = [105, 106, 103];
+test_expect($skuDuplicateFilter(true, 105, 'translated-variation-with-foreign-sku') === true, 'A third foreign variation duplicate was hidden by a valid sibling.');
+
+// Even a directly linked variation pair is unsafe when its parent products are
+// not translations of one another.
+$validVariationFamily = ['en' => 106, 'pl' => 105];
+$testPostLanguages[107] = 'en';
+$testPostLanguages[104] = 'en';
+$testTranslationGroups[105] = ['en' => 107, 'pl' => 105];
+$testTranslationGroups[107] = ['en' => 107, 'pl' => 105];
+$testProductIdsByGlobalUniqueId['5900000000107'] = [107];
+test_expect($globalUniqueIdDuplicateFilter(true, 105, '5900000000107') === true, 'A variation duplicate under a foreign parent family was allowed.');
+$testTranslationGroups[105] = $validVariationFamily;
+$testTranslationGroups[106] = $validVariationFamily;
+unset($testPostLanguages[107], $testPostLanguages[104], $testTranslationGroups[107]);
+
+// If a later language assignment is not persisted, the earlier language write
+// is compensated and the exact pre-request state is restored.
+$testWrites = [];
+unset($testTranslationGroups[105], $testTranslationGroups[106]);
+$testPostLanguageWriteOverridesOnce[105] = 'en';
+$variationLanguageVerificationFailure = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect_error($variationLanguageVerificationFailure, 'lemon_erp_variation_language_verification_failed', 500);
+test_expect(
+    ($variationLanguageVerificationFailure->get_error_data()['compensated'] ?? false) === true,
+    'A failed variation-language assignment was not compensated.',
+);
+test_expect($testPostLanguages[105] === 'pl' && $testPostLanguages[106] === 'en', 'Variation language compensation did not restore the snapshot.');
+test_expect(($testTranslationGroups[105] ?? []) === [] && ($testTranslationGroups[106] ?? []) === [], 'Variation language compensation left a translation family.');
+test_expect($testTranslationGroups[101] === ['en' => 102, 'pl' => 101] && $testTranslationGroups[102] === ['en' => 102, 'pl' => 101], 'Variation compensation modified the parent family.');
+
+// A thrown family save is also compensated after both language assignments.
+$testWrites = [];
+$testThrowPostTranslationSaveOnce = true;
+$variationSaveFailure = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect_error($variationSaveFailure, 'lemon_erp_variation_translation_write_failed', 500);
+test_expect(($variationSaveFailure->get_error_data()['compensated'] ?? false) === true, 'A thrown variation-family save was not compensated.');
+test_expect($testPostLanguages[105] === 'pl' && $testPostLanguages[106] === 'en', 'Thrown-save compensation changed variation languages.');
+test_expect(($testTranslationGroups[105] ?? []) === [] && ($testTranslationGroups[106] ?? []) === [], 'Thrown-save compensation left a translation family.');
+test_expect($testTranslationGroups[101] === ['en' => 102, 'pl' => 101] && $testTranslationGroups[102] === ['en' => 102, 'pl' => 101], 'Thrown-save compensation modified the parent family.');
+
+// A partial Polylang family write must never be acknowledged as success and is
+// rolled back to the exact unlinked snapshot.
+$testWrites = [];
+$testPartialPostTranslationSaveOnce = true;
+$variationVerificationFailure = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect_error($variationVerificationFailure, 'lemon_erp_variation_translation_verification_failed', 500);
+test_expect(($variationVerificationFailure->get_error_data()['compensated'] ?? false) === true, 'A partial variation-family write was not compensated.');
+test_expect($testPostLanguages[105] === 'pl' && $testPostLanguages[106] === 'en', 'Partial-family compensation changed variation languages.');
+test_expect(($testTranslationGroups[105] ?? []) === [] && ($testTranslationGroups[106] ?? []) === [], 'Partial-family compensation did not restore the unlinked snapshot.');
+test_expect($testTranslationGroups[101] === ['en' => 102, 'pl' => 101] && $testTranslationGroups[102] === ['en' => 102, 'pl' => 101], 'Partial-family compensation modified the parent family.');
+
+// Parent families may contain more languages than one incremental variation
+// request. A PL/EN child pair must link against a PL/EN/DE parent family, and a
+// later request may safely extend that exact child family with DE.
+$fullParentFamily = ['de' => 108, 'en' => 102, 'pl' => 101];
+$testPostLanguages[108] = 'de';
+$testTranslationGroups[101] = $fullParentFamily;
+$testTranslationGroups[102] = $fullParentFamily;
+$testTranslationGroups[108] = $fullParentFamily;
+
+$testWrites = [];
+$linkedParentSubset = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect($linkedParentSubset instanceof WP_REST_Response, 'A PL/EN subset of a PL/EN/DE parent family did not link.');
+test_expect($linkedParentSubset->data['changed'] === true, 'The incremental PL/EN variation family did not report a change.');
+test_expect($linkedParentSubset->data['parents'] === ['en' => 102, 'pl' => 101], 'The subset response changed the requested parent map.');
+test_expect($testTranslationGroups[105] === ['en' => 106, 'pl' => 105] && $testTranslationGroups[106] === ['en' => 106, 'pl' => 105], 'The incremental PL/EN family was not saved exactly.');
+test_expect($testTranslationGroups[101] === $fullParentFamily && $testTranslationGroups[102] === $fullParentFamily && $testTranslationGroups[108] === $fullParentFamily, 'Subset linking modified the full parent family.');
+
+$testWrites = [];
+$fullVariationRequest = [
+    'parents' => ['pl' => 101, 'en' => 102, 'de' => 108],
+    'translations' => ['pl' => 105, 'en' => 106, 'de' => 109],
+];
+$linkedFullVariationFamily = $linker->linkVariations(new WP_REST_Request($fullVariationRequest));
+test_expect($linkedFullVariationFamily instanceof WP_REST_Response, 'The later PL/EN/DE variation family did not link.');
+test_expect($linkedFullVariationFamily->data['changed'] === true, 'Extending the variation family with DE did not report a change.');
+test_expect($linkedFullVariationFamily->data['translations'] === ['de' => 109, 'en' => 106, 'pl' => 105], 'The full variation response returned an incorrect map.');
+test_expect($linkedFullVariationFamily->data['translation_group'] === 'variation:105|106|109', 'The full variation family returned an unstable group.');
+test_expect($testTranslationGroups[105] === ['de' => 109, 'en' => 106, 'pl' => 105] && $testTranslationGroups[106] === ['de' => 109, 'en' => 106, 'pl' => 105] && $testTranslationGroups[109] === ['de' => 109, 'en' => 106, 'pl' => 105], 'The PL/EN family was not extended with DE exactly.');
+test_expect($testTranslationGroups[101] === $fullParentFamily && $testTranslationGroups[102] === $fullParentFamily && $testTranslationGroups[108] === $fullParentFamily, 'Full variation linking modified the parent family.');
+
+$testPostLanguages[104] = 'en';
+$testWrites = [];
+$mismatchedParentSubset = $linker->linkVariations(new WP_REST_Request([
+    'parents' => ['pl' => 101, 'en' => 104],
+    'translations' => ['pl' => 105, 'en' => 107],
+]));
+test_expect_error($mismatchedParentSubset, 'lemon_erp_variation_parent_translations_mismatch', 409);
+test_expect($testWrites === [], 'A mismatched parent subset mutated Polylang state.');
+
+$sameFamilyVariationSubset = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect($sameFamilyVariationSubset instanceof WP_REST_Response, 'An exact child subset of one larger family did not return a response.');
+test_expect($sameFamilyVariationSubset->data['changed'] === false, 'An exact child subset of one larger family was not treated as a no-op.');
+test_expect($sameFamilyVariationSubset->data['parents'] === ['en' => 102, 'pl' => 101], 'The child subset no-op changed the requested parent map.');
+test_expect($sameFamilyVariationSubset->data['translations'] === ['en' => 106, 'pl' => 105], 'The child subset no-op changed the requested translation map.');
+test_expect($testWrites === [], 'The child subset no-op attempted to save a smaller family.');
+test_expect($testTranslationGroups[105] === ['de' => 109, 'en' => 106, 'pl' => 105] && $testTranslationGroups[106] === ['de' => 109, 'en' => 106, 'pl' => 105] && $testTranslationGroups[109] === ['de' => 109, 'en' => 106, 'pl' => 105], 'The child subset no-op shrank the larger family.');
+
+// A subset is safe only when every requested child reports the same complete
+// family. Mixed or inconsistent existing families remain a conflict.
+$testTranslationGroups[106] = ['en' => 106];
+$testWrites = [];
+$mixedVariationSubset = $linker->linkVariations(new WP_REST_Request($variationRequest));
+test_expect_error($mixedVariationSubset, 'lemon_erp_variation_translation_conflict', 409);
+test_expect($testWrites === [], 'A mixed child-family subset mutated Polylang state.');
+$testTranslationGroups[106] = ['de' => 109, 'en' => 106, 'pl' => 105];
 
 // Attribute term linking validates the complete existing family before writes.
 $testWrites = [];

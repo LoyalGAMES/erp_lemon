@@ -12,7 +12,15 @@ final class WooCommerceProductTranslationNotReadyException extends RuntimeExcept
     {
         return new self(
             'WooCommerce nie jest gotowy do bezpiecznego utworzenia wersji językowych produktu. '
-            .'Wymagana jest wtyczka Lemon ERP WooCommerce 0.5.2 lub nowsza oraz gotowy bootstrap tłumaczeń globalnych atrybutów.',
+            .'Wymagana jest wtyczka Lemon ERP WooCommerce 0.5.3 lub nowsza oraz gotowy bootstrap tłumaczeń globalnych atrybutów i bezpiecznej unikalności GTIN.',
+        );
+    }
+
+    public static function forRequiredVariantLanguages(): self
+    {
+        return new self(
+            'WooCommerce nie jest gotowy do bezpiecznego utworzenia wersji językowych wariantów. '
+            .'Wymagana jest wtyczka Lemon ERP WooCommerce 0.5.3 lub nowsza z obsługą powiązań tłumaczeń wariantów.',
         );
     }
 }

@@ -264,7 +264,7 @@ final class FailedWooCommerceProductExportRecoveryMigrationTest extends TestCase
             ->assertRedirect()
             ->assertSessionHas('error', fn (string $message): bool => str_contains(
                 $message,
-                'Wymagana jest wtyczka Lemon ERP WooCommerce 0.5.2',
+                'Wymagana jest wtyczka Lemon ERP WooCommerce 0.5.3',
             ));
 
         $audit = AuditLog::query()
@@ -307,7 +307,7 @@ final class FailedWooCommerceProductExportRecoveryMigrationTest extends TestCase
             )) {
                 return Http::response([
                     'available' => true,
-                    'plugin_version' => $pluginReady ? '0.5.2' : '0.5.1',
+                    'plugin_version' => $pluginReady ? '0.5.3' : '0.5.1',
                     'languages' => ['pl', 'en'],
                     'attribute_term_translation_link_available' => true,
                 ]);
@@ -392,7 +392,7 @@ final class FailedWooCommerceProductExportRecoveryMigrationTest extends TestCase
             )) {
                 return Http::response([
                     'available' => true,
-                    'plugin_version' => $pluginReady ? '0.5.2' : '0.5.1',
+                    'plugin_version' => $pluginReady ? '0.5.3' : '0.5.1',
                     'languages' => ['pl', 'en'],
                     'attribute_term_translation_link_available' => true,
                 ]);

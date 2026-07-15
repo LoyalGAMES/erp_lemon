@@ -596,6 +596,15 @@ grep -Fq 'deploy.lock' "$windows_publisher" ||
     fail 'publikator instalatora nie współdzieli blokady z deployem aplikacji.'
 grep -Fq 'ln -s "${shared_root}/windows-print-listener" "$windows_dist"' "$remote_script" ||
     fail 'nowy release nie podłącza trwałego katalogu instalatora.'
+grep -Fq 'erp:inspect-woocommerce-product-creation-recovery --limit=20' "$remote_script" ||
+    fail 'deploy nie uruchamia diagnostyki odzyskiwania nowych produktów WooCommerce.'
+grep -Fq 'erp:inspect-woocommerce-product-export-failures --limit=20' "$remote_script" ||
+    fail 'deploy nie uruchamia diagnostyki błędów eksportu produktów WooCommerce.'
+
+creation_recovery_diagnostic_line="$(grep -n 'erp:inspect-woocommerce-product-creation-recovery --limit=20' "$remote_script" | cut -d: -f1)"
+product_export_diagnostic_line="$(grep -n 'erp:inspect-woocommerce-product-export-failures --limit=20' "$remote_script" | cut -d: -f1)"
+[[ "$creation_recovery_diagnostic_line" -lt "$product_export_diagnostic_line" ]] ||
+    fail 'diagnostyka eksportu produktów nie jest uruchamiana po diagnostyce tworzenia produktów.'
 
 backup_line="$(grep -n 'backup-database.php' "$remote_script" | tail -n 1 | cut -d: -f1)"
 migration_line="$(grep -n 'artisan migrate --force' "$remote_script" | cut -d: -f1)"

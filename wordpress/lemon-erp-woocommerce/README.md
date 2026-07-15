@@ -7,6 +7,8 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 - jednoznaczny kontrakt tożsamości produktów, wariantów i kategorii dla sklepów z Polylang,
 - idempotentne wiązanie polskich i angielskich kategorii utworzonych przez ERP,
 - idempotentne przypisywanie języków i wiązanie tłumaczeń produktów utworzonych przez ERP,
+- idempotentne wiązanie wariantów PL/EN po sprawdzeniu ich przetłumaczonych produktów nadrzędnych,
+- bezpieczne współdzielenie SKU i globalnego GTIN/EAN wyłącznie przez zweryfikowane rodzeństwo tłumaczeń Polylang,
 - idempotentne wiązanie osobnych terminów PL/EN globalnych atrybutów WooCommerce,
 - automatyczne wymuszenie obsługi języków Polylang dla wszystkich globalnych atrybutów WooCommerce (`pa_*`),
 - ustawianie daty publikacji na produktach i wariantach przed ich zapisem przez WooCommerce REST,
@@ -23,7 +25,7 @@ Wtyczka dodaje do WooCommerce warstwę integracyjną wymaganą przez Lemon ERP:
 5. Upewnij się, że użytkownik WordPress używany w Lemon ERP ma uprawnienia do edycji zamówień WooCommerce.
 6. W Lemon ERP w integracji WooCommerce ustaw tryb faktur na `Wtyczka Lemon ERP bez Media Library`.
 
-Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, natychmiastowa synchronizacja klientów wersji co najmniej `0.4.1`, a bezpieczne wiązanie tłumaczeń produktów i automatyczny backfill wariantów wersji co najmniej `0.5.1`. Wersja `0.5.2` rejestruje wszystkie globalne taksonomie atrybutów WooCommerce jako tłumaczone w Polylang już podczas ładowania wtyczek i ukrywa tę wymuszoną decyzję na ekranie ustawień Polylang. Przy pierwszym uruchomieniu bezpiecznie przypisuje język także istniejącym wartościom tych atrybutów: zachowuje każde wcześniejsze przypisanie, rozpoznaje deterministyczny sufiks aktywnego języka (np. `-en`), a pozostałym wartościom nadaje domyślny język sklepu. Ten wznawialny bootstrap nie łączy samodzielnie par tłumaczeń; robi to dopiero ERP, mając pewne ID obu terminów.
+Przy aktualizacji wgraj nowy ZIP i zezwól WordPressowi na zastąpienie poprzedniej wersji. Odczyt kontraktu katalogu wymaga wersji co najmniej `0.2.0`, eksport powiązanych kategorii wersji co najmniej `0.3.0`, natychmiastowa synchronizacja klientów wersji co najmniej `0.4.1`, a bezpieczne wiązanie tłumaczeń produktów i automatyczny backfill wariantów wersji co najmniej `0.5.1`. Wersja `0.5.2` rejestruje wszystkie globalne taksonomie atrybutów WooCommerce jako tłumaczone w Polylang już podczas ładowania wtyczek i ukrywa tę wymuszoną decyzję na ekranie ustawień Polylang. Przy pierwszym uruchomieniu bezpiecznie przypisuje język także istniejącym wartościom tych atrybutów: zachowuje każde wcześniejsze przypisanie, rozpoznaje deterministyczny sufiks aktywnego języka (np. `-en`), a pozostałym wartościom nadaje domyślny język sklepu. Ten wznawialny bootstrap nie łączy samodzielnie par tłumaczeń; robi to dopiero ERP, mając pewne ID obu terminów. Wersja `0.5.3` dodaje osobny endpoint wiązania tłumaczeń wariantów. Przed zapisem sprawdza on całą rodzinę PL/EN, prawa edycji, aktywne języki, dokładną relację tłumaczeń produktów nadrzędnych oraz przynależność każdego wariantu do właściwego rodzica.
 
 ## Natychmiastowa synchronizacja klientów
 
@@ -83,6 +85,16 @@ POST /wp-json/wc-lemon-erp/v1/catalog/products/translations
 ```
 
 Payload `translations` jest mapą kodu języka na ID produktu, np. `{"pl": 700143, "en": 750099}`. Klucz WooCommerce musi mieć uprawnienia odczyt/zapis, a jego użytkownik uprawnienie `manage_woocommerce` oraz prawo edycji każdego wskazanego produktu. Wtyczka przed pierwszym zapisem sprawdza całą mapę, aktywne języki, typ i status wszystkich postów, uprawnienia oraz wcześniejsze rodziny tłumaczeń. Ponowienie identycznego żądania nie wykonuje kolejnych zapisów.
+
+Warianty przetłumaczonych produktów ERP wiąże osobnym endpointem:
+
+```text
+POST /wp-json/wc-lemon-erp/v1/catalog/products/variations/translations
+```
+
+Body zawiera dwie mapy z identycznym zestawem języków, np. `{"parents":{"pl":700143,"en":750099},"translations":{"pl":700144,"en":750100}}`. Każdy element `parents` musi należeć do tej samej, już powiązanej rodziny tłumaczeń Polylang i dokładnie odpowiadać podanemu językowi. Mapa może być podzbiorem większej rodziny, np. PL/EN podczas stopniowego tworzenia wariantów produktu PL/EN/DE. Każdy element `translations` musi być wariantem odpowiadającego mu produktu nadrzędnego. Wtyczka odrzuca obce rodziny i istniejące sprzeczne przypisania języka, wykonuje zapis dopiero po pełnej walidacji i potwierdza dokładny wynik. Identyczne ponowienie nie wykonuje dodatkowych zapisów.
+
+WooCommerce sprawdza unikalność SKU oraz pola `global_unique_id` (GTIN, UPC, EAN lub ISBN). Wtyczka zachowuje wynik tej kontroli i dopuszcza wspólną wartość tylko wtedy, gdy wszystkie znalezione duplikaty są innymi językowo członkami tej samej, obustronnie potwierdzonej rodziny Polylang oraz mają dokładnie ten sam typ (`product` albo `product_variation`). Dla wariantów również ich rodzice muszą należeć do jednej rodziny tłumaczeń. Duplikaty niepowiązane, obce i mieszające produkt z wariantem pozostają zablokowane.
 
 Wartości jednego globalnego atrybutu ERP wiąże przez endpoint uwierzytelniany tym samym kluczem WooCommerce:
 

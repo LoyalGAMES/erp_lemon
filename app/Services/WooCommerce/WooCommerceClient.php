@@ -23,11 +23,17 @@ final class WooCommerceClient
 
     private const CATALOG_PLUGIN_MINIMUM_VERSION = '0.2.0';
 
-    private const PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION = '0.5.2';
+    private const PRODUCT_TRANSLATION_PLUGIN_MINIMUM_VERSION = '0.5.3';
+
+    private const PRODUCT_VARIATION_TRANSLATION_PLUGIN_MINIMUM_VERSION = '0.5.3';
 
     private const PRODUCT_TRANSLATION_CREATION_META_KEY = '_sempre_erp_translation_creation_token';
 
     private const PRODUCT_TRANSLATION_CREATION_SKU_PREFIX = 'LEMON-TR-';
+
+    private const PRODUCT_VARIATION_TRANSLATION_CREATION_META_KEY = '_sempre_erp_variation_translation_creation_token';
+
+    private const PRODUCT_VARIATION_TRANSLATION_CREATION_SKU_PREFIX = 'LEMON-VTR-';
 
     /** @var array<string, list<array<string, mixed>>> */
     private array $globalProductAttributesCache = [];
@@ -612,7 +618,15 @@ final class WooCommerceClient
 
         $payload['meta_data'] = collect((array) ($payload['meta_data'] ?? []))
             ->filter(fn (mixed $meta): bool => is_array($meta))
-            ->reject(fn (array $meta): bool => (string) ($meta['key'] ?? '') === self::PRODUCT_TRANSLATION_CREATION_META_KEY)
+            ->reject(fn (array $meta): bool => in_array(
+                (string) ($meta['key'] ?? ''),
+                [
+                    self::PRODUCT_TRANSLATION_CREATION_META_KEY,
+                    '_ean',
+                    '_sempre_erp_ean',
+                ],
+                true,
+            ))
             ->push([
                 'key' => self::PRODUCT_TRANSLATION_CREATION_META_KEY,
                 'value' => $creationToken,
@@ -620,6 +634,13 @@ final class WooCommerceClient
             ->values()
             ->all();
         $payload['sku'] = $this->productTranslationCreationSku($creationToken);
+        unset($payload['global_unique_id']);
+        $payload['status'] = 'draft';
+        $payload['catalog_visibility'] = 'hidden';
+        $payload['manage_stock'] = true;
+        $payload['stock_quantity'] = 0;
+        $payload['stock_status'] = 'outofstock';
+        $payload['backorders'] = 'no';
         $url = $this->endpoint($integration, '/products').'?lang='.rawurlencode($language);
 
         try {
@@ -694,6 +715,7 @@ final class WooCommerceClient
             [
                 'lang' => $language,
                 'sku' => $this->productTranslationCreationSku($creationToken),
+                'status' => 'any',
                 'per_page' => 100,
             ],
         );
@@ -749,6 +771,179 @@ final class WooCommerceClient
         $json = $response->json();
 
         return is_array($json) ? $json : [];
+    }
+
+    /**
+     * Create a translated variation without assigning the canonical SKU until
+     * Polylang has linked it to the primary variation. WooCommerce otherwise
+     * rejects the second post as a duplicate SKU. The deterministic temporary
+     * SKU and private token make an ambiguous POST safe to resume.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array<string, mixed>
+     */
+    public function createProductVariationForLanguage(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        array $payload,
+        string $language,
+        string $creationToken,
+        bool $resume = false,
+    ): array {
+        $creationToken = trim($creationToken);
+
+        if ($creationToken === '') {
+            throw new RuntimeException('ERP nie przygotował tokenu idempotencji tłumaczenia wariantu.');
+        }
+
+        if ($resume) {
+            $existingVariation = $this->findProductVariationForLanguageByCreationToken(
+                $integration,
+                $externalProductId,
+                $language,
+                $creationToken,
+            );
+
+            if ($existingVariation !== null) {
+                return array_merge($existingVariation, ['idempotent_recovery' => true]);
+            }
+        }
+
+        $payload['meta_data'] = collect((array) ($payload['meta_data'] ?? []))
+            ->filter(fn (mixed $meta): bool => is_array($meta))
+            ->reject(fn (array $meta): bool => in_array(
+                (string) ($meta['key'] ?? ''),
+                [
+                    self::PRODUCT_VARIATION_TRANSLATION_CREATION_META_KEY,
+                    '_ean',
+                    '_sempre_erp_ean',
+                ],
+                true,
+            ))
+            ->push([
+                'key' => self::PRODUCT_VARIATION_TRANSLATION_CREATION_META_KEY,
+                'value' => $creationToken,
+            ])
+            ->values()
+            ->all();
+        $payload['sku'] = $this->productVariationTranslationCreationSku($creationToken);
+        unset($payload['global_unique_id']);
+        $payload['status'] = 'draft';
+        $payload['manage_stock'] = true;
+        $payload['stock_quantity'] = 0;
+        $payload['stock_status'] = 'outofstock';
+        $payload['backorders'] = 'no';
+        $url = $this->endpoint($integration, "/products/{$externalProductId}/variations")
+            .'?lang='.rawurlencode($language);
+
+        try {
+            $response = $this->request($integration, retry: false)->post($url, $payload);
+        } catch (Throwable $exception) {
+            $existingVariation = $this->findProductVariationForLanguageByCreationToken(
+                $integration,
+                $externalProductId,
+                $language,
+                $creationToken,
+            );
+
+            if ($existingVariation !== null) {
+                return array_merge($existingVariation, ['idempotent_recovery' => true]);
+            }
+
+            throw $exception;
+        }
+
+        if (! $response->successful()) {
+            $existingVariation = $this->findProductVariationForLanguageByCreationToken(
+                $integration,
+                $externalProductId,
+                $language,
+                $creationToken,
+            );
+
+            if ($existingVariation !== null) {
+                return array_merge($existingVariation, ['idempotent_recovery' => true]);
+            }
+
+            $message = trim((string) data_get($response->json(), 'message', ''));
+            $details = $message !== '' ? ": {$message}" : '.';
+
+            throw new RuntimeException(
+                "Utworzenie wariantu {$language} w WooCommerce zwróciło HTTP {$response->status()}{$details}",
+            );
+        }
+
+        $json = $response->json();
+
+        if (! is_array($json) || ! filled($json['id'] ?? null)) {
+            $existingVariation = $this->findProductVariationForLanguageByCreationToken(
+                $integration,
+                $externalProductId,
+                $language,
+                $creationToken,
+            );
+
+            if ($existingVariation !== null) {
+                return array_merge($existingVariation, ['idempotent_recovery' => true]);
+            }
+        }
+
+        return is_array($json) ? $json : [];
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    public function findProductVariationForLanguageByCreationToken(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        string $language,
+        string $creationToken,
+    ): ?array {
+        $creationToken = trim($creationToken);
+
+        if ($creationToken === '') {
+            return null;
+        }
+
+        $response = $this->request($integration)->get(
+            $this->endpoint($integration, "/products/{$externalProductId}/variations"),
+            [
+                'lang' => $language,
+                'sku' => $this->productVariationTranslationCreationSku($creationToken),
+                'status' => 'any',
+                'per_page' => 100,
+            ],
+        );
+
+        if (! $response->successful()) {
+            throw new RuntimeException(
+                "Wyszukanie rozpoczętego tłumaczenia wariantu {$language} produktu #{$externalProductId} zwróciło HTTP {$response->status()}.",
+            );
+        }
+
+        $matches = collect($response->json())
+            ->filter(fn (mixed $variation): bool => is_array($variation) && filled($variation['id'] ?? null))
+            ->filter(fn (array $variation): bool => collect((array) ($variation['meta_data'] ?? []))
+                ->contains(fn (mixed $meta): bool => is_array($meta)
+                    && (string) ($meta['key'] ?? '') === self::PRODUCT_VARIATION_TRANSLATION_CREATION_META_KEY
+                    && is_scalar($meta['value'] ?? null)
+                    && hash_equals($creationToken, (string) ($meta['value'] ?? ''))))
+            ->keyBy(fn (array $variation): string => (string) $variation['id']);
+
+        if ($matches->count() > 1) {
+            throw new RuntimeException(
+                "WooCommerce zawiera więcej niż jedno tłumaczenie wariantu {$language} z tym samym tokenem ERP.",
+            );
+        }
+
+        return $matches->isEmpty() ? null : $matches->first();
+    }
+
+    private function productVariationTranslationCreationSku(string $creationToken): string
+    {
+        return self::PRODUCT_VARIATION_TRANSLATION_CREATION_SKU_PREFIX
+            .substr(hash('sha256', $creationToken), 0, 40);
     }
 
     /**
@@ -1722,6 +1917,64 @@ final class WooCommerceClient
     }
 
     /**
+     * Link language-specific WooCommerce variation posts only after their
+     * parent products are already a verified Polylang family.
+     *
+     * @param  array<string, int|string>  $translations
+     * @param  array<string, int|string>  $parents
+     * @return array<string, mixed>
+     */
+    public function linkProductVariationTranslations(
+        WordpressIntegration $integration,
+        array $translations,
+        array $parents,
+    ): array {
+        $translations = $this->validatedProductTranslationMap($translations);
+        $parents = $this->validatedProductTranslationMap($parents);
+
+        if (array_keys($translations) !== array_keys($parents)) {
+            throw new RuntimeException(
+                'Tłumaczenia wariantów i ich produktów nadrzędnych muszą obejmować te same języki.',
+            );
+        }
+
+        try {
+            $response = $this->request($integration, retry: false)
+                ->withoutRedirecting()
+                ->post(
+                    $this->wordpressRestEndpoint(
+                        $integration,
+                        '/wc-lemon-erp/v1/catalog/products/variations/translations',
+                    ),
+                    [
+                        'translations' => $translations,
+                        'parents' => $parents,
+                    ],
+                );
+        } catch (RequestException $exception) {
+            $this->throwProductVariationTranslationLinkHttpException($exception->response);
+        }
+
+        if (! $response->successful()) {
+            $this->throwProductVariationTranslationLinkHttpException($response);
+        }
+
+        $json = $response->json();
+
+        if (! is_array($json)
+            || data_get($json, 'linked') !== true
+            || $this->confirmedProductTranslationMap(data_get($json, 'translations')) !== $translations
+            || $this->confirmedProductTranslationMap(data_get($json, 'parents')) !== $parents
+        ) {
+            throw new RuntimeException(
+                'WordPress zwrócił niepełne potwierdzenie powiązania tłumaczeń wariantów.',
+            );
+        }
+
+        return $json;
+    }
+
+    /**
      * Link language-specific terms that belong to one WooCommerce global
      * product attribute. The endpoint resolves and validates the `pa_*`
      * taxonomy from the numeric Woo attribute ID.
@@ -1780,6 +2033,18 @@ final class WooCommerceClient
         WordpressIntegration $integration,
         array $requiredLanguages = ['pl', 'en'],
     ): bool {
+        $requiredLanguages = collect($requiredLanguages)
+            ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)))
+            ->filter()
+            ->unique()
+            ->values();
+
+        // A Polish-only catalog never creates duplicated translation GTINs
+        // and therefore must remain independent of the translation plugin.
+        if ($requiredLanguages->reject(fn (string $language): bool => $language === 'pl')->isEmpty()) {
+            return true;
+        }
+
         try {
             $response = $this->request($integration, retry: false)
                 ->withoutRedirecting()
@@ -1804,16 +2069,6 @@ final class WooCommerceClient
             return false;
         }
 
-        $requiredLanguages = collect($requiredLanguages)
-            ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)))
-            ->filter()
-            ->unique()
-            ->values();
-
-        if ($requiredLanguages->reject(fn (string $language): bool => $language === 'pl')->isEmpty()) {
-            return true;
-        }
-
         $availableLanguages = collect((array) ($payload['languages'] ?? []))
             ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)))
             ->filter()
@@ -1822,6 +2077,64 @@ final class WooCommerceClient
         return ($payload['available'] ?? null) === true
             && ($payload['attribute_term_translation_link_available'] ?? null) === true
             && $requiredLanguages->every(fn (string $language): bool => $availableLanguages->contains($language));
+    }
+
+    /**
+     * A translated variable family additionally needs the semantic variation
+     * linker capability exposed by the required 0.5.3 package.
+     *
+     * @param  list<string>  $requiredLanguages
+     */
+    public function productVariationTranslationLinkingAvailable(
+        WordpressIntegration $integration,
+        array $requiredLanguages = ['pl', 'en'],
+    ): bool {
+        try {
+            $response = $this->request($integration, retry: false)
+                ->withoutRedirecting()
+                ->get($this->wordpressRestEndpoint(
+                    $integration,
+                    '/wc-lemon-erp/v1/catalog/products/translations/capabilities',
+                ));
+        } catch (Throwable) {
+            return false;
+        }
+
+        if (! $response->successful()) {
+            return false;
+        }
+
+        $payload = $response->json();
+
+        if (! is_array($payload)
+            || ! is_string($payload['plugin_version'] ?? null)
+            || version_compare(
+                $payload['plugin_version'],
+                self::PRODUCT_VARIATION_TRANSLATION_PLUGIN_MINIMUM_VERSION,
+                '<',
+            )
+            || ($payload['available'] ?? null) !== true
+            || ($payload['attribute_term_translation_link_available'] ?? null) !== true
+            || ($payload['variation_translation_link_available'] ?? null) !== true
+            || ($payload['variation_translation_link_endpoint'] ?? null)
+                !== '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations'
+        ) {
+            return false;
+        }
+
+        $requiredLanguages = collect($requiredLanguages)
+            ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)))
+            ->filter()
+            ->unique()
+            ->values();
+        $availableLanguages = collect((array) ($payload['languages'] ?? []))
+            ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)))
+            ->filter()
+            ->unique();
+
+        return $requiredLanguages->every(
+            fn (string $language): bool => $availableLanguages->contains($language),
+        );
     }
 
     /**
@@ -2040,6 +2353,36 @@ final class WooCommerceClient
         }
 
         throw new RuntimeException("Powiązanie tłumaczeń produktów w WooCommerce zwróciło HTTP {$status}.");
+    }
+
+    private function throwProductVariationTranslationLinkHttpException(?Response $response): never
+    {
+        $status = $response?->status() ?? 0;
+        $payload = $response?->json();
+        $code = trim((string) data_get($payload, 'code', ''));
+        $message = trim((string) data_get($payload, 'message', ''));
+
+        if ($status === 404 && ($code === '' || $code === 'rest_no_route')) {
+            throw new RuntimeException(
+                'Powiązanie tłumaczeń wariantów wymaga wtyczki Lemon ERP for WooCommerce co najmniej '
+                .self::PRODUCT_VARIATION_TRANSLATION_PLUGIN_MINIMUM_VERSION
+                .'. Pobierz nowy ZIP z ekranu Integracje i zaktualizuj wtyczkę w WordPressie.',
+            );
+        }
+
+        if (in_array($status, [401, 403], true)) {
+            throw new RuntimeException(
+                'WordPress odrzucił powiązanie tłumaczeń wariantów. Sprawdź klucze WooCommerce REST, ich uprawnienia odczyt/zapis oraz uprawnienie manage_woocommerce użytkownika.',
+            );
+        }
+
+        if ($message !== '') {
+            throw new RuntimeException("WordPress nie powiązał tłumaczeń wariantów: {$message}");
+        }
+
+        throw new RuntimeException(
+            "Powiązanie tłumaczeń wariantów w WooCommerce zwróciło HTTP {$status}.",
+        );
     }
 
     private function throwProductAttributeTermTranslationLinkHttpException(?Response $response): never

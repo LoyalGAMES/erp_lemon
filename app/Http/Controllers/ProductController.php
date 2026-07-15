@@ -1271,7 +1271,7 @@ class ProductController extends Controller
             'variant_remove' => ['nullable', 'array'],
             'variant_remove.*' => ['nullable', 'boolean'],
             'variant_sort_order' => ['nullable', 'array'],
-            'variant_sort_order.*' => ['nullable', 'integer', 'min:0', 'max:65535'],
+            'variant_sort_order.*' => ['nullable', 'integer', 'min:1', 'max:65535'],
             'existing_media' => ['nullable', 'array'],
             'existing_media.*.src' => ['nullable', 'string', 'max:2000'],
             'existing_media.*.alt' => ['nullable', 'string', 'max:255'],
@@ -1885,7 +1885,7 @@ class ProductController extends Controller
             $submittedSortOrder = $submittedSortOrders[$index] ?? null;
             $sortOrder = $submittedSortOrder === null || $submittedSortOrder === ''
                 ? ($existing?->sort_order ?? $nextSortOrder)
-                : max(0, min(65535, (int) $submittedSortOrder));
+                : max(1, min(65535, (int) $submittedSortOrder));
             $nextSortOrder = max($nextSortOrder, (int) $sortOrder);
 
             ProductRelation::query()->updateOrCreate(

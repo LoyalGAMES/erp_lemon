@@ -1987,7 +1987,9 @@ class ProductCatalogWorkflowTest extends TestCase
             'parent_product_id' => $parent->id,
             'child_product_id' => $variantM->id,
             'relation_type' => 'variant',
-            'sort_order' => 10,
+            // Historical rows can contain 0, which Woo 10.9 ignores. The UI
+            // must present a valid repair value instead of perpetuating it.
+            'sort_order' => 0,
         ]);
         ProductRelation::query()->create([
             'parent_product_id' => $parent->id,
@@ -2004,8 +2006,8 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('↑ W górę')
             ->assertSee('↓ W dół')
             ->assertSee('Ustaw globalną kolejność rozmiarów')
-            ->assertSee('name="variant_sort_order[0]" type="number" min="0" max="65535" step="1" value="10"', false)
-            ->assertSee('name="variant_sort_order[1]" type="number" min="0" max="65535" step="1" value="20"', false);
+            ->assertSee('name="variant_sort_order[0]" type="number" min="1" max="65535" step="1" value="1"', false)
+            ->assertSee('name="variant_sort_order[1]" type="number" min="1" max="65535" step="1" value="20"', false);
 
         $payload = [
             'sku' => $parent->sku,
@@ -2021,6 +2023,11 @@ class ProductCatalogWorkflowTest extends TestCase
 
         $this->from(route('products.edit', $parent))->put(route('products.update', $parent), $payload + [
             'variant_sort_order' => [2 => 65536, 5 => 10],
+        ])->assertRedirect(route('products.edit', $parent))
+            ->assertSessionHasErrors('variant_sort_order.2');
+
+        $this->from(route('products.edit', $parent))->put(route('products.update', $parent), $payload + [
+            'variant_sort_order' => [2 => 0, 5 => 10],
         ])->assertRedirect(route('products.edit', $parent))
             ->assertSessionHasErrors('variant_sort_order.2');
 
@@ -2049,6 +2056,15 @@ class ProductCatalogWorkflowTest extends TestCase
             [$variantS->sku, $variantM->sku],
             $parent->variantChildren()->pluck('products.sku')->all(),
         );
+
+        $this->put(route('products.update', $parent), $payload + [
+            'variant_sort_order' => [2 => 1, 5 => 10],
+        ])->assertRedirect(route('products.edit', $parent))
+            ->assertSessionHasNoErrors();
+        $this->assertSame(1, (int) ProductRelation::query()
+            ->where('parent_product_id', $parent->id)
+            ->where('child_product_id', $variantM->id)
+            ->value('sort_order'));
     }
 
     public function test_inherited_variant_shows_parent_media_and_cannot_create_nested_variants(): void

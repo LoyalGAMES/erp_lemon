@@ -15,13 +15,15 @@ if (! defined('ABSPATH')) {
  */
 final class Lemon_Erp_Product_Translation_Linker
 {
-    private const PLUGIN_VERSION = '0.5.2';
+    private const PLUGIN_VERSION = '0.5.3';
 
     private const CATALOG_CONTRACT = 1;
 
     public function hooks(): void
     {
         add_action('rest_api_init', [$this, 'registerRestRoutes']);
+        add_filter('wc_product_has_unique_sku', [$this, 'translatedSkuDuplicateFound'], 10, 3);
+        add_filter('wc_product_has_global_unique_id', [$this, 'translatedGlobalUniqueIdDuplicateFound'], 10, 3);
     }
 
     public function registerRestRoutes(): void
@@ -37,6 +39,22 @@ final class Lemon_Erp_Product_Translation_Linker
             'callback' => [$this, 'link'],
             'permission_callback' => [$this, 'canLink'],
             'args' => [
+                'translations' => [
+                    'required' => true,
+                    'type' => 'object',
+                ],
+            ],
+        ]);
+
+        register_rest_route('wc-lemon-erp/v1', '/catalog/products/variations/translations', [
+            'methods' => WP_REST_Server::CREATABLE,
+            'callback' => [$this, 'linkVariations'],
+            'permission_callback' => [$this, 'canLink'],
+            'args' => [
+                'parents' => [
+                    'required' => true,
+                    'type' => 'object',
+                ],
                 'translations' => [
                     'required' => true,
                     'type' => 'object',
@@ -76,6 +94,38 @@ final class Lemon_Erp_Product_Translation_Linker
             && current_user_can('manage_product_terms');
     }
 
+    /**
+     * WooCommerce passes true when another product already has this SKU. Keep
+     * that conflict unless every exact lookup result is a verified translation
+     * sibling of the same product type.
+     */
+    public function translatedSkuDuplicateFound(mixed $duplicateFound, mixed $productId, mixed $sku): mixed
+    {
+        return $this->translatedIdentityDuplicateFound(
+            $duplicateFound,
+            (int) $productId,
+            (string) $sku,
+            'sku',
+        );
+    }
+
+    /**
+     * WooCommerce 9.1+ applies the same duplicate-found semantics to GTIN, UPC,
+     * EAN and ISBN values stored in global_unique_id.
+     */
+    public function translatedGlobalUniqueIdDuplicateFound(
+        mixed $duplicateFound,
+        mixed $productId,
+        mixed $globalUniqueId,
+    ): mixed {
+        return $this->translatedIdentityDuplicateFound(
+            $duplicateFound,
+            (int) $productId,
+            (string) $globalUniqueId,
+            'global_unique_id',
+        );
+    }
+
     public function capabilities(WP_REST_Request $request): WP_REST_Response
     {
         $polylangAvailable = $this->polylangAvailable();
@@ -105,6 +155,8 @@ final class Lemon_Erp_Product_Translation_Linker
             'available' => $polylangAvailable,
             'resource' => 'product_translation_link',
             'languages' => array_values(array_unique($languages)),
+            'variation_translation_link_available' => $polylangAvailable,
+            'variation_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations',
             'attribute_term_translation_link_available' => $attributeTermLinkAvailable,
             'attribute_term_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/{attribute_id}/terms/translations',
             'attribute_term_translation_bootstrap_revision' => $attributeBootstrap['revision'],
@@ -139,7 +191,6 @@ final class Lemon_Erp_Product_Translation_Linker
             fn (mixed $language): ?string => $this->languageSlug($language),
             (array) pll_languages_list(['fields' => 'slug']),
         )));
-
         foreach ($translations as $language => $postId) {
             if (! in_array($language, $activeLanguages, true)) {
                 return new WP_Error(
@@ -217,6 +268,225 @@ final class Lemon_Erp_Product_Translation_Linker
         }
 
         return $this->response($translations, true);
+    }
+
+    public function linkVariations(WP_REST_Request $request): WP_REST_Response|WP_Error
+    {
+        if (! $this->polylangAvailable()) {
+            return new WP_Error(
+                'lemon_erp_variation_polylang_required',
+                __('Powiązanie tłumaczeń wariantów wymaga aktywnego Polylang.', 'lemon-erp-woocommerce'),
+                ['status' => 409],
+            );
+        }
+
+        $parents = $this->validatedVariationTranslationMap(
+            $request->get_param('parents'),
+            'parents',
+        );
+
+        if ($parents instanceof WP_Error) {
+            return $parents;
+        }
+
+        $translations = $this->validatedVariationTranslationMap(
+            $request->get_param('translations'),
+            'translations',
+        );
+
+        if ($translations instanceof WP_Error) {
+            return $translations;
+        }
+
+        if (array_keys($parents) !== array_keys($translations)) {
+            return new WP_Error(
+                'lemon_erp_variation_translation_languages_mismatch',
+                __('Mapy parents i translations muszą zawierać dokładnie te same języki.', 'lemon-erp-woocommerce'),
+                ['status' => 422],
+            );
+        }
+
+        $activeLanguages = array_values(array_filter(array_map(
+            fn (mixed $language): ?string => $this->languageSlug($language),
+            (array) pll_languages_list(['fields' => 'slug']),
+        )));
+        $snapshot = [];
+
+        foreach ($translations as $language => $variationId) {
+            $parentId = $parents[$language];
+
+            if (! in_array($language, $activeLanguages, true)) {
+                return new WP_Error(
+                    'lemon_erp_variation_language_invalid',
+                    sprintf(__('Język %s nie jest aktywny w Polylang.', 'lemon-erp-woocommerce'), $language),
+                    ['status' => 422],
+                );
+            }
+
+            if (get_post_type($parentId) !== 'product') {
+                return new WP_Error(
+                    'lemon_erp_variation_parent_invalid',
+                    sprintf(__('Post %d nie jest nadrzędnym produktem WooCommerce.', 'lemon-erp-woocommerce'), $parentId),
+                    ['status' => 422],
+                );
+            }
+
+            if (! $this->postStatusAllowsTranslationLink($parentId)) {
+                return new WP_Error(
+                    'lemon_erp_variation_parent_status_invalid',
+                    sprintf(__('Produkt nadrzędny %d nie ma statusu pozwalającego na powiązanie tłumaczeń.', 'lemon-erp-woocommerce'), $parentId),
+                    ['status' => 422],
+                );
+            }
+
+            if (! current_user_can('edit_post', $parentId)) {
+                return new WP_Error(
+                    'lemon_erp_variation_parent_forbidden',
+                    sprintf(__('Brak uprawnienia do edycji produktu nadrzędnego %d.', 'lemon-erp-woocommerce'), $parentId),
+                    ['status' => 403],
+                );
+            }
+
+            if (get_post_type($variationId) !== 'product_variation') {
+                return new WP_Error(
+                    'lemon_erp_variation_translation_post_invalid',
+                    sprintf(__('Post %d nie jest wariantem WooCommerce.', 'lemon-erp-woocommerce'), $variationId),
+                    ['status' => 422],
+                );
+            }
+
+            if (! $this->postStatusAllowsTranslationLink($variationId)) {
+                return new WP_Error(
+                    'lemon_erp_variation_translation_status_invalid',
+                    sprintf(__('Wariant %d nie ma statusu pozwalającego na powiązanie tłumaczeń.', 'lemon-erp-woocommerce'), $variationId),
+                    ['status' => 422],
+                );
+            }
+
+            if (! current_user_can('edit_post', $variationId)) {
+                return new WP_Error(
+                    'lemon_erp_variation_translation_forbidden',
+                    sprintf(__('Brak uprawnienia do edycji wariantu %d.', 'lemon-erp-woocommerce'), $variationId),
+                    ['status' => 403],
+                );
+            }
+
+            if ((int) wp_get_post_parent_id($variationId) !== $parentId) {
+                return new WP_Error(
+                    'lemon_erp_variation_parent_mismatch',
+                    sprintf(
+                        __('Wariant %1$d nie należy do produktu nadrzędnego %2$d.', 'lemon-erp-woocommerce'),
+                        $variationId,
+                        $parentId,
+                    ),
+                    ['status' => 422],
+                );
+            }
+
+            $currentLanguage = $this->languageSlug(pll_get_post_language($variationId, 'slug'));
+
+            if ($currentLanguage !== null && $currentLanguage !== $language) {
+                return new WP_Error(
+                    'lemon_erp_variation_language_conflict',
+                    sprintf(
+                        __('Wariant %1$d ma już język %2$s zamiast oczekiwanego %3$s.', 'lemon-erp-woocommerce'),
+                        $variationId,
+                        $currentLanguage,
+                        $language,
+                    ),
+                    ['status' => 409],
+                );
+            }
+
+            $snapshot[$variationId] = [
+                'language' => $currentLanguage,
+                'translations' => $this->translationMap(
+                    (array) pll_get_post_translations($variationId),
+                ),
+            ];
+        }
+
+        // A variant family is meaningful only inside one already-linked parent
+        // family. ERP may supply a strict language subset while child variants
+        // are created incrementally, but every supplied mapping must match the
+        // same complete Polylang family. Never mutate that parent relation.
+        if (! $this->postsBelongToSameTranslationFamily($parents)) {
+            return new WP_Error(
+                'lemon_erp_variation_parent_translations_mismatch',
+                __('Produkty nadrzędne nie należą do tej samej wskazanej rodziny tłumaczeń Polylang.', 'lemon-erp-woocommerce'),
+                ['status' => 409],
+            );
+        }
+
+        $requestedVariationIds = array_values($translations);
+
+        // A request may be an exact language subset of one already-linked
+        // larger child family. It is already satisfied and must never be saved
+        // as the smaller map, because that would detach unrequested languages.
+        if ($this->postsBelongToSameTranslationFamily($translations)) {
+            return $this->variationResponse($parents, $translations, false);
+        }
+
+        foreach ($requestedVariationIds as $variationId) {
+            $existingVariationIds = array_values($this->translationMap(
+                (array) pll_get_post_translations($variationId),
+            ));
+            $foreignVariationIds = array_diff($existingVariationIds, $requestedVariationIds);
+
+            if ($foreignVariationIds !== []) {
+                return new WP_Error(
+                    'lemon_erp_variation_translation_conflict',
+                    sprintf(__('Wariant %d należy już do innej rodziny tłumaczeń.', 'lemon-erp-woocommerce'), $variationId),
+                    ['status' => 409],
+                );
+            }
+        }
+
+        // Every language, post, permission, parent-child and existing-family
+        // check above succeeds before the first mutating Polylang call.
+        foreach ($translations as $language => $variationId) {
+            try {
+                pll_set_post_language($variationId, $language);
+            } catch (Throwable) {
+                return $this->variationMutationFailure(
+                    'lemon_erp_variation_language_verification_failed',
+                    __('Polylang nie zapisał języka wariantu.', 'lemon-erp-woocommerce'),
+                    $snapshot,
+                );
+            }
+
+            if ($this->languageSlug(pll_get_post_language($variationId, 'slug')) !== $language) {
+                return $this->variationMutationFailure(
+                    'lemon_erp_variation_language_verification_failed',
+                    sprintf(
+                        __('Polylang nie potwierdził języka %1$s wariantu %2$d.', 'lemon-erp-woocommerce'),
+                        $language,
+                        $variationId,
+                    ),
+                    $snapshot,
+                );
+            }
+        }
+
+        try {
+            pll_save_post_translations($translations);
+        } catch (Throwable) {
+            return $this->variationMutationFailure(
+                'lemon_erp_variation_translation_write_failed',
+                __('Polylang nie zapisał powiązania tłumaczeń wariantów.', 'lemon-erp-woocommerce'),
+                $snapshot,
+            );
+        }
+
+        if (! $this->alreadyLinked($translations)) {
+            return $this->variationMutationFailure(
+                'lemon_erp_variation_translation_verification_failed',
+                __('Polylang nie potwierdził dokładnego powiązania tłumaczeń wariantów.', 'lemon-erp-woocommerce'),
+                $snapshot,
+            );
+        }
+
+        return $this->variationResponse($parents, $translations, true);
     }
 
     public function linkAttributeTerms(WP_REST_Request $request): WP_REST_Response|WP_Error
@@ -484,6 +754,85 @@ final class Lemon_Erp_Product_Translation_Linker
     /**
      * @return array<string, int>|WP_Error
      */
+    private function validatedVariationTranslationMap(mixed $input, string $field): array|WP_Error
+    {
+        if (! is_array($input) && ! is_object($input)) {
+            return new WP_Error(
+                'lemon_erp_variation_'.$field.'_invalid',
+                sprintf(__('Pole %s musi być mapą język => ID.', 'lemon-erp-woocommerce'), $field),
+                ['status' => 422],
+            );
+        }
+
+        $map = [];
+
+        foreach ((array) $input as $language => $postId) {
+            $rawLanguage = strtolower(trim((string) $language));
+            $normalizedLanguage = $this->languageSlug($rawLanguage);
+
+            if ($normalizedLanguage === null || $normalizedLanguage !== $rawLanguage) {
+                return new WP_Error(
+                    'lemon_erp_variation_'.$field.'_language_invalid',
+                    sprintf(__('Kod języka w polu %s jest niepoprawny.', 'lemon-erp-woocommerce'), $field),
+                    ['status' => 422],
+                );
+            }
+
+            if (array_key_exists($normalizedLanguage, $map)) {
+                return new WP_Error(
+                    'lemon_erp_variation_'.$field.'_language_duplicate',
+                    sprintf(__('Język %1$s występuje w polu %2$s więcej niż raz.', 'lemon-erp-woocommerce'), $normalizedLanguage, $field),
+                    ['status' => 422],
+                );
+            }
+
+            if (! is_int($postId) && ! is_string($postId)) {
+                return new WP_Error(
+                    'lemon_erp_variation_'.$field.'_id_invalid',
+                    sprintf(__('ID dla języka %1$s w polu %2$s jest niepoprawne.', 'lemon-erp-woocommerce'), $normalizedLanguage, $field),
+                    ['status' => 422],
+                );
+            }
+
+            $rawPostId = trim((string) $postId);
+
+            if (preg_match('/^[1-9]\d*$/', $rawPostId) !== 1
+                || (string) ((int) $rawPostId) !== $rawPostId
+            ) {
+                return new WP_Error(
+                    'lemon_erp_variation_'.$field.'_id_invalid',
+                    sprintf(__('ID dla języka %1$s w polu %2$s jest niepoprawne.', 'lemon-erp-woocommerce'), $normalizedLanguage, $field),
+                    ['status' => 422],
+                );
+            }
+
+            $map[$normalizedLanguage] = (int) $rawPostId;
+        }
+
+        if (count($map) < 2) {
+            return new WP_Error(
+                'lemon_erp_variation_'.$field.'_incomplete',
+                sprintf(__('Pole %s musi zawierać co najmniej dwa języki.', 'lemon-erp-woocommerce'), $field),
+                ['status' => 422],
+            );
+        }
+
+        if (count(array_unique(array_values($map))) !== count($map)) {
+            return new WP_Error(
+                'lemon_erp_variation_'.$field.'_ids_duplicate',
+                sprintf(__('Każdy język w polu %s musi wskazywać inne ID.', 'lemon-erp-woocommerce'), $field),
+                ['status' => 422],
+            );
+        }
+
+        ksort($map);
+
+        return $map;
+    }
+
+    /**
+     * @return array<string, int>|WP_Error
+     */
     private function validatedTermTranslationMap(mixed $input): array|WP_Error
     {
         if (! is_array($input) && ! is_object($input)) {
@@ -571,6 +920,240 @@ final class Lemon_Erp_Product_Translation_Linker
             }
 
             if ($this->translationMap((array) pll_get_post_translations($postId)) !== $translations) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private function postStatusAllowsTranslationLink(int $postId): bool
+    {
+        $status = get_post_status($postId);
+
+        return is_string($status) && ! in_array($status, ['trash', 'auto-draft'], true);
+    }
+
+    /**
+     * Requested posts may be a strict language subset of a larger Polylang
+     * family. Every supplied language-to-ID pair must nevertheless occur in one
+     * identical full family returned for every requested post.
+     *
+     * @param  array<string, int>  $posts
+     */
+    private function postsBelongToSameTranslationFamily(array $posts): bool
+    {
+        $fullFamily = null;
+
+        foreach ($posts as $language => $postId) {
+            if ($this->languageSlug(pll_get_post_language($postId, 'slug')) !== $language) {
+                return false;
+            }
+
+            $candidateFamily = $this->translationMap(
+                (array) pll_get_post_translations($postId),
+            );
+
+            foreach ($posts as $requestedLanguage => $requestedPostId) {
+                if (($candidateFamily[$requestedLanguage] ?? null) !== $requestedPostId) {
+                    return false;
+                }
+            }
+
+            if ($fullFamily === null) {
+                $fullFamily = $candidateFamily;
+            } elseif ($candidateFamily !== $fullFamily) {
+                return false;
+            }
+        }
+
+        return $fullFamily !== null;
+    }
+
+    private function translatedIdentityDuplicateFound(
+        mixed $duplicateFound,
+        int $productId,
+        string $identity,
+        string $lookupColumn,
+    ): mixed {
+        global $wpdb;
+
+        // Preserve WooCommerce and every earlier filter exactly unless core has
+        // positively found a duplicate which this integration can prove safe.
+        if ($duplicateFound !== true
+            || $productId <= 0
+            || $identity === ''
+            || ! $this->polylangAvailable()
+            || ! in_array($lookupColumn, ['sku', 'global_unique_id'], true)
+            || ! isset($wpdb)
+            || ! is_object($wpdb)
+            || ! isset($wpdb->posts, $wpdb->wc_product_meta_lookup)
+            || ! method_exists($wpdb, 'prepare')
+            || ! method_exists($wpdb, 'get_col')
+        ) {
+            return $duplicateFound;
+        }
+
+        $productType = get_post_type($productId);
+
+        if (! in_array($productType, ['product', 'product_variation'], true)) {
+            return $duplicateFound;
+        }
+
+        // The column is selected exclusively from the allowlist above. Query
+        // every collision, not WooCommerce's single convenience lookup, because
+        // translated siblings intentionally make more than one row possible.
+        $duplicateIds = $wpdb->get_col($wpdb->prepare(
+            "SELECT posts.ID
+            FROM {$wpdb->posts} AS posts
+            INNER JOIN {$wpdb->wc_product_meta_lookup} AS lookup
+                ON posts.ID = lookup.product_id
+            WHERE posts.post_type IN ('product', 'product_variation')
+                AND posts.post_status != 'trash'
+                AND lookup.{$lookupColumn} = %s
+                AND lookup.product_id <> %d",
+            $identity,
+            $productId,
+        ));
+
+        if (! is_array($duplicateIds)) {
+            return $duplicateFound;
+        }
+
+        $duplicateIds = array_values(array_unique(array_filter(
+            array_map('intval', $duplicateIds),
+            static fn (int $duplicateId): bool => $duplicateId > 0 && $duplicateId !== $productId,
+        )));
+
+        // Core reported a conflict, so an empty or unreadable result must remain
+        // a conflict rather than becoming a permissive fallback.
+        if ($duplicateIds === []) {
+            return $duplicateFound;
+        }
+
+        $productLanguage = $this->languageSlug(pll_get_post_language($productId, 'slug'));
+
+        if ($productLanguage === null) {
+            return $duplicateFound;
+        }
+
+        foreach ($duplicateIds as $duplicateId) {
+            $duplicateLanguage = $this->languageSlug(pll_get_post_language($duplicateId, 'slug'));
+
+            if (get_post_type($duplicateId) !== $productType
+                || $duplicateLanguage === null
+                || $productLanguage === $duplicateLanguage
+                || ! $this->postsBelongToSameTranslationFamily([
+                    $productLanguage => $productId,
+                    $duplicateLanguage => $duplicateId,
+                ])
+            ) {
+                return $duplicateFound;
+            }
+
+            if ($productType === 'product_variation') {
+                $productParentId = (int) wp_get_post_parent_id($productId);
+                $duplicateParentId = (int) wp_get_post_parent_id($duplicateId);
+
+                if ($productParentId <= 0
+                    || $duplicateParentId <= 0
+                    || get_post_type($productParentId) !== 'product'
+                    || get_post_type($duplicateParentId) !== 'product'
+                    || ! $this->postsBelongToSameTranslationFamily([
+                        $productLanguage => $productParentId,
+                        $duplicateLanguage => $duplicateParentId,
+                    ])
+                ) {
+                    return $duplicateFound;
+                }
+            }
+        }
+
+        // False means “the value is unique” to these two WooCommerce filters.
+        return false;
+    }
+
+    /**
+     * @param  array<int, array{language:?string, translations:array<string, int>}>  $snapshot
+     */
+    private function variationMutationFailure(string $code, string $message, array $snapshot): WP_Error
+    {
+        return new WP_Error($code, $message, [
+            'status' => 500,
+            'compensated' => $this->restoreVariationSnapshot($snapshot),
+        ]);
+    }
+
+    /**
+     * Best-effort compensation for a Polylang variation write interrupted
+     * halfway. Parent products are intentionally absent from this snapshot and
+     * can therefore never be mutated by the variation endpoint.
+     *
+     * @param  array<int, array{language:?string, translations:array<string, int>}>  $snapshot
+     */
+    private function restoreVariationSnapshot(array $snapshot): bool
+    {
+        try {
+            foreach ($snapshot as $variationId => $state) {
+                $currentLanguage = $this->languageSlug(pll_get_post_language($variationId, 'slug'));
+
+                if ($currentLanguage !== null) {
+                    pll_save_post_translations([$currentLanguage => $variationId]);
+                }
+            }
+
+            foreach ($snapshot as $variationId => $state) {
+                $language = $state['language'];
+
+                if ($language === null) {
+                    if (! function_exists('wp_delete_object_term_relationships')) {
+                        return false;
+                    }
+
+                    $result = wp_delete_object_term_relationships($variationId, 'language');
+
+                    if (is_wp_error($result)) {
+                        return false;
+                    }
+                } elseif ($this->languageSlug(pll_get_post_language($variationId, 'slug')) !== $language) {
+                    pll_set_post_language($variationId, $language);
+                }
+
+                if ($this->languageSlug(pll_get_post_language($variationId, 'slug')) !== $language) {
+                    return false;
+                }
+            }
+
+            $restoredFamilies = [];
+
+            foreach ($snapshot as $state) {
+                $translations = $state['translations'];
+
+                if (count($translations) < 2) {
+                    continue;
+                }
+
+                $familyKey = implode('|', array_map(
+                    static fn (string $language, int $variationId): string => $language.':'.$variationId,
+                    array_keys($translations),
+                    array_values($translations),
+                ));
+
+                if (isset($restoredFamilies[$familyKey])) {
+                    continue;
+                }
+
+                pll_save_post_translations($translations);
+                $restoredFamilies[$familyKey] = true;
+            }
+        } catch (Throwable) {
+            return false;
+        }
+
+        foreach ($snapshot as $variationId => $state) {
+            if ($this->languageSlug(pll_get_post_language($variationId, 'slug')) !== $state['language']
+                || $this->translationMap((array) pll_get_post_translations($variationId)) !== $state['translations']
+            ) {
                 return false;
             }
         }
@@ -737,6 +1320,27 @@ final class Lemon_Erp_Product_Translation_Linker
             'resource' => 'product',
             'translations' => $translations,
             'translation_group' => 'product:'.implode('|', $ids),
+            'catalog_contract' => self::CATALOG_CONTRACT,
+            'plugin_version' => self::PLUGIN_VERSION,
+        ], 200);
+    }
+
+    /**
+     * @param  array<string, int>  $parents
+     * @param  array<string, int>  $translations
+     */
+    private function variationResponse(array $parents, array $translations, bool $changed): WP_REST_Response
+    {
+        $ids = array_values($translations);
+        sort($ids, SORT_NUMERIC);
+
+        return new WP_REST_Response([
+            'linked' => true,
+            'changed' => $changed,
+            'resource' => 'product_variation',
+            'parents' => $parents,
+            'translations' => $translations,
+            'translation_group' => 'variation:'.implode('|', $ids),
             'catalog_contract' => self::CATALOG_CONTRACT,
             'plugin_version' => self::PLUGIN_VERSION,
         ], 200);

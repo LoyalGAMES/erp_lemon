@@ -31,6 +31,8 @@ final class LegacyVariantFamilyBackfillService
 
     public const PUBLICATION_DATE_AND_ATTRIBUTE_ORDER_REVISION = 'publication_date_and_attribute_order_all_size_definitions_2026_07_15_000012';
 
+    public const VARIATION_TRANSLATION_LINK_RECOVERY_REVISION = 'variation_translation_link_recovery_2026_07_15_000013';
+
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 
     /** @var array<string, bool> */
@@ -392,6 +394,10 @@ final class LegacyVariantFamilyBackfillService
 
     private function productIntegrationsReady(int $productId): bool
     {
+        $requiresVariantTranslationLink = Product::query()
+            ->whereKey($productId)
+            ->whereHas('variantChildren')
+            ->exists();
         $salesChannelIds = ProductChannelMapping::query()
             ->where('product_id', $productId)
             ->where(function ($query): void {
@@ -419,11 +425,21 @@ final class LegacyVariantFamilyBackfillService
             }
 
             $languages = $integration->productExportLanguages();
-            $readinessKey = $integration->id.'|'.implode(',', $languages);
+            $needsTranslations = collect($languages)->contains(
+                fn (mixed $language): bool => mb_strtolower(trim((string) $language)) !== 'pl',
+            );
+            $readinessKey = $integration->id.'|'.implode(',', $languages)
+                .'|variants:'.(int) ($requiresVariantTranslationLink && $needsTranslations);
 
             if (! array_key_exists($readinessKey, $this->integrationReadiness)) {
                 $this->integrationReadiness[$readinessKey] = $this->client
-                    ->productTranslationLinkingAvailable($integration, $languages);
+                    ->productTranslationLinkingAvailable($integration, $languages)
+                    && (! $requiresVariantTranslationLink
+                        || ! $needsTranslations
+                        || $this->client->productVariationTranslationLinkingAvailable(
+                            $integration,
+                            $languages,
+                        ));
             }
 
             if (! $this->integrationReadiness[$readinessKey]) {

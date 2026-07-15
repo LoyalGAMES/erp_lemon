@@ -111,6 +111,21 @@ class ProductStorefrontVisibilityTest extends TestCase
 
         Http::fake(function ($request) use ($product) {
             if (
+                $request->method() === 'GET'
+                && str_ends_with(
+                    $request->url(),
+                    '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities',
+                )
+            ) {
+                return Http::response([
+                    'available' => true,
+                    'plugin_version' => '0.5.3',
+                    'languages' => ['pl', 'en'],
+                    'attribute_term_translation_link_available' => true,
+                ]);
+            }
+
+            if (
                 $request->method() === 'PUT'
                 && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
             ) {
