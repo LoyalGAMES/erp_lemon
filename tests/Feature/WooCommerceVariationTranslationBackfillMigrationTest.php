@@ -4,16 +4,21 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Jobs\ExportStockToWooCommerceJob;
 use App\Models\Product;
 use App\Models\ProductChannelMapping;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
+use App\Models\StockBalance;
+use App\Models\StockSyncQueueItem;
+use App\Models\Warehouse;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Tests\TestCase;
 
 final class WooCommerceVariationTranslationBackfillMigrationTest extends TestCase
@@ -101,6 +106,125 @@ final class WooCommerceVariationTranslationBackfillMigrationTest extends TestCas
         Http::assertNothingSent();
     }
 
+    public function test_stock_management_migration_requeues_a_family_completed_by_the_previous_revision(): void
+    {
+        Http::fake();
+        CarbonImmutable::setTestNow('2026-07-15 15:10:00');
+
+        try {
+            $channel = $this->createIntegration('STOCK-REPAIR', ['pl', 'en']);
+            $mapping = $this->familyMapping('COMPLETED-LINK-REPAIR', $channel, '8600');
+            $mapping->forceFill(['metadata' => [
+                'mapping_role' => 'primary',
+                'language' => 'pl',
+                'product_data_export' => [
+                    'legacy_variant_backfill' => [
+                        'status' => 'completed',
+                        'reason' => LegacyVariantFamilyBackfillService::REASON,
+                        'revision' => LegacyVariantFamilyBackfillService::VARIATION_TRANSLATION_LINK_RECOVERY_REVISION,
+                        'completed_at' => now()->subMinute()->toISOString(),
+                    ],
+                ],
+            ]])->save();
+
+            $this->runStockManagementMigration();
+
+            $backfill = (array) data_get(
+                $mapping->refresh()->metadata,
+                'product_data_export.legacy_variant_backfill',
+            );
+            $this->assertSame('pending', $backfill['status'] ?? null);
+            $this->assertSame(
+                LegacyVariantFamilyBackfillService::VARIATION_STOCK_MANAGEMENT_RECOVERY_REVISION,
+                $backfill['revision'] ?? null,
+            );
+            $this->assertArrayNotHasKey('completed_at', $backfill);
+            $this->assertSame(now()->toISOString(), $backfill['requested_at'] ?? null);
+
+            $requestedAt = $backfill['requested_at'];
+            CarbonImmutable::setTestNow('2026-07-15 15:20:00');
+            $this->runStockManagementMigration();
+            $this->assertSame($requestedAt, data_get(
+                $mapping->refresh()->metadata,
+                'product_data_export.legacy_variant_backfill.requested_at',
+            ));
+
+            Http::assertNothingSent();
+        } finally {
+            CarbonImmutable::setTestNow();
+        }
+    }
+
+    public function test_stock_management_migration_immediately_queues_only_variant_stock_through_the_b2c_route(): void
+    {
+        Queue::fake();
+        Http::fake();
+
+        $channel = $this->createIntegration('STOCK-IMMEDIATE', ['pl', 'en']);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'WC_B2C',
+            'name' => 'WooCommerce B2C',
+            'type' => 'virtual',
+            'is_active' => true,
+        ]);
+        $warehouse->routes()->create([
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 1,
+            'priority' => 100,
+        ]);
+
+        $parent = $this->product('IMMEDIATE-VARIABLE', 'variable');
+        $variant = $this->product('IMMEDIATE-VARIABLE-S', 'variation');
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        $this->mapping($parent, $channel, '8700');
+        ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '8700',
+            'external_variation_id' => '8701',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+            'metadata' => ['mapping_role' => 'primary', 'language' => 'pl'],
+        ]);
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $parent->id,
+            'quantity_on_hand' => 9,
+            'quantity_reserved' => 0,
+            'quantity_available' => 9,
+        ]);
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $variant->id,
+            'quantity_on_hand' => 4,
+            'quantity_reserved' => 0,
+            'quantity_available' => 4,
+        ]);
+
+        $this->runStockManagementMigration();
+
+        Queue::assertPushed(ExportStockToWooCommerceJob::class, 1);
+        $queued = StockSyncQueueItem::query()->sole();
+        $this->assertSame($variant->id, $queued->product_id);
+        $this->assertSame($channel->id, $queued->sales_channel_id);
+        $this->assertSame('3.0000', (string) $queued->quantity_to_push);
+        $this->assertSame(
+            LegacyVariantFamilyBackfillService::VARIATION_STOCK_MANAGEMENT_RECOVERY_REVISION,
+            data_get($queued->metadata, 'reason'),
+        );
+        $this->assertDatabaseMissing('stock_sync_queue_items', [
+            'product_id' => $parent->id,
+        ]);
+        Http::assertNothingSent();
+    }
+
     /** @param list<string> $languages */
     private function createIntegration(string $suffix, array $languages, bool $active = true): SalesChannel
     {
@@ -177,6 +301,13 @@ final class WooCommerceVariationTranslationBackfillMigrationTest extends TestCas
     {
         (require database_path(
             'migrations/2026_07_15_000013_requeue_translated_variable_families_for_variation_linking.php',
+        ))->up();
+    }
+
+    private function runStockManagementMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_15_000014_requeue_translated_variable_families_for_stock_management.php',
         ))->up();
     }
 }

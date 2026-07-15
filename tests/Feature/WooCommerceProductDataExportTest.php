@@ -2196,7 +2196,6 @@ class WooCommerceProductDataExportTest extends TestCase
                 'variant_attribute' => 'Rozmiar',
                 'publication_status' => 'publish',
                 'publication_date' => '2026-07-14T12:30',
-                'prices' => ['retail_price_pln' => 699],
                 'content' => [
                     'pl' => ['name' => 'Komplet ARDEN kopia', 'description' => '<p>Opis rodzica</p>'],
                     'en' => ['name' => 'ARDEN set copy', 'description' => '<p>Parent description</p>'],
@@ -2281,6 +2280,15 @@ class WooCommerceProductDataExportTest extends TestCase
                 return Http::response([]);
             }
 
+            if ($request->method() === 'GET' && $url === 'https://shop.test/wp-json/wc/v3/products/123/variations/124') {
+                return Http::response([
+                    'id' => 124,
+                    'sku' => 'LEGACY-ARDEN-COPY-S',
+                    'regular_price' => '699.00',
+                    'sale_price' => '',
+                ]);
+            }
+
             if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc/v3/products/223/variations?lang=en') {
                 return Http::response(['id' => 224, 'sku' => $request['sku']], 201);
             }
@@ -2289,7 +2297,11 @@ class WooCommerceProductDataExportTest extends TestCase
                 'https://shop.test/wp-json/wc/v3/products/123/variations/124',
                 'https://shop.test/wp-json/wc/v3/products/223/variations/224?lang=en',
             ], true)) {
-                return Http::response(['id' => str_contains($url, '/224') ? 224 : 124, 'sku' => $request['sku']]);
+                return Http::response([
+                    'id' => str_contains($url, '/224') ? 224 : 124,
+                    'sku' => $request['sku'],
+                    'regular_price' => str_contains($url, '/124') ? '699.00' : ($request['regular_price'] ?? ''),
+                ]);
             }
 
             if ($request->method() === 'POST' && $url === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations') {
@@ -2352,7 +2364,7 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/124'
             && $request['description'] === '<p>Opis rodzica</p>'
-            && $request['regular_price'] === '699.00'
+            && ! array_key_exists('regular_price', $request->data())
             && $request['menu_order'] === 10);
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223/variations/224?lang=en'
@@ -2402,7 +2414,6 @@ class WooCommerceProductDataExportTest extends TestCase
                 'variant_attribute' => 'Rozmiar',
                 'publication_status' => 'publish',
                 'publication_date' => '2026-07-14T13:00',
-                'prices' => ['retail_price_pln' => 699],
                 'content' => [
                     'pl' => ['name' => 'Produkt główny', 'description' => '<p>Opis PL rodzica</p>'],
                     'en' => ['name' => 'Main product', 'description' => '<p>Parent EN description</p>'],
@@ -2467,7 +2478,14 @@ class WooCommerceProductDataExportTest extends TestCase
         ]);
 
         $this->fakeWooWithGlobalAttributes([
-            'https://shop.test/wp-json/wc/v3/products/123/variations/456' => Http::response(['id' => 456, 'sku' => $variant->sku]),
+            'https://shop.test/wp-json/wc/v3/products/123/variations/456' => Http::response([
+                'id' => 456,
+                'sku' => $variant->sku,
+                'regular_price' => '699.00',
+                'sale_price' => '649.00',
+                'date_on_sale_from' => '2026-07-15T08:00:00',
+                'date_on_sale_to' => '2026-07-20T22:00:00',
+            ]),
             'https://shop.test/wp-json/wc/v3/products/124/variations/457?lang=en' => Http::response(['id' => 457, 'sku' => $variant->sku]),
         ]);
 
@@ -2476,7 +2494,7 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/456'
             && $request['description'] === '<p>Opis PL rodzica</p>'
-            && $request['regular_price'] === '699.00'
+            && ! array_key_exists('regular_price', $request->data())
             && $request['menu_order'] === 7
             && $request['attributes'][0] === ['id' => 70, 'option' => 'M']
             && ! array_key_exists('date_created', $request->data())
@@ -2486,6 +2504,9 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations/457?lang=en'
             && $request['description'] === '<p>Parent EN description</p>'
             && $request['regular_price'] === '699.00'
+            && $request['sale_price'] === '649.00'
+            && $request['date_on_sale_from'] === '2026-07-15T08:00:00'
+            && $request['date_on_sale_to'] === '2026-07-20T22:00:00'
             && $request['menu_order'] === 7
             && $request['attributes'][0] === ['id' => 70, 'option' => 'M']
             && ! array_key_exists('date_created', $request->data())
@@ -3695,6 +3716,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 'source' => 'erp',
                 'product_type' => 'variable',
                 'variant_attribute' => 'Rozmiar',
+                'prices' => ['retail_price_pln' => 699],
                 'content' => [
                     'pl' => ['name' => 'Komplet legacy'],
                     'en' => ['name' => 'Legacy set'],
@@ -3823,6 +3845,7 @@ class WooCommerceProductDataExportTest extends TestCase
                     'product_type' => 'variable',
                     'variant_attribute' => 'Rozmiar',
                     'publication_date' => '2026-07-15T08:30',
+                    'prices' => ['retail_price_pln' => 699],
                     'content' => [
                         'pl' => ['name' => 'Nowy komplet'],
                         'en' => ['name' => 'New set'],

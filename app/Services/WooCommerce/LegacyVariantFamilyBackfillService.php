@@ -33,6 +33,8 @@ final class LegacyVariantFamilyBackfillService
 
     public const VARIATION_TRANSLATION_LINK_RECOVERY_REVISION = 'variation_translation_link_recovery_2026_07_15_000013';
 
+    public const VARIATION_STOCK_MANAGEMENT_RECOVERY_REVISION = 'variation_stock_management_recovery_2026_07_15_000014';
+
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 
     /** @var array<string, bool> */

@@ -11,6 +11,7 @@ use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\WordpressIntegration;
+use App\Services\Inventory\ChannelStockAvailabilityService;
 use App\Services\Products\ProductDescriptionSanitizer;
 use App\Services\Products\ProductVariantInheritanceService;
 use App\Services\Products\ProductVariantOptionNormalizer;
@@ -30,6 +31,7 @@ final class ProductDataExportService
         private readonly ProductDescriptionSanitizer $descriptionSanitizer,
         private readonly ProductVariantInheritanceService $variantInheritance,
         private readonly ProductVariantOptionNormalizer $variantOptions,
+        private readonly ChannelStockAvailabilityService $channelStock,
     ) {}
 
     /**
@@ -113,11 +115,7 @@ final class ProductDataExportService
                     $integration,
                     (int) $mapping->sales_channel_id,
                 );
-            $variantsPreparedBeforeTranslations = $creationInProgress
-                || ($missingTranslations && $this->hasMissingPrimaryVariantMappings(
-                    $variants,
-                    (int) $mapping->sales_channel_id,
-                ));
+            $variantsPreparedBeforeTranslations = $creationInProgress || $missingTranslations;
             $variantResults = $variantsPreparedBeforeTranslations
                 ? $this->exportOrCreateVariants(
                     $product,
@@ -135,6 +133,8 @@ final class ProductDataExportService
                 $isVariation,
                 $variants,
                 $variantParent,
+                $response,
+                $variantResults,
             );
 
             $missingTranslations = ! $isVariation
@@ -168,6 +168,7 @@ final class ProductDataExportService
                     $integration,
                     (int) $mapping->sales_channel_id,
                     (string) $mapping->external_product_id,
+                    $variantResults,
                 ));
                 $createdMissingTranslations = true;
             }
@@ -181,6 +182,7 @@ final class ProductDataExportService
                     $variants,
                     $integration,
                     (int) $mapping->sales_channel_id,
+                    $variantResults,
                 );
             }
 
@@ -352,6 +354,7 @@ final class ProductDataExportService
         ]);
         $variantMappings = [];
         $variantResponses = [];
+        $primaryVariantResults = [];
 
         foreach ($variants as $variant) {
             $variantPayload = $this->variationPayload($product, $variant, (int) $integration->sales_channel_id);
@@ -402,6 +405,10 @@ final class ProductDataExportService
 
             $variantMappings[] = $variantMapping;
             $variantResponses[] = $variantResponse;
+            $primaryVariantResults[] = [
+                'sku' => $variant->sku,
+                'response' => $variantResponse,
+            ];
         }
 
         $translationResponses = $this->createTranslations(
@@ -410,6 +417,7 @@ final class ProductDataExportService
             $integration,
             (int) $integration->sales_channel_id,
             (string) $externalId,
+            $primaryVariantResults,
         );
         $this->markCreationCompleted($mapping);
 
@@ -448,6 +456,7 @@ final class ProductDataExportService
 
     /**
      * @param  Collection<int, Product>  $variants
+     * @param  list<array<string, mixed>>  $primaryVariantResults
      * @return list<array<string, mixed>>
      */
     private function createTranslations(
@@ -456,6 +465,7 @@ final class ProductDataExportService
         WordpressIntegration $integration,
         int $salesChannelId,
         string $primaryExternalId,
+        array $primaryVariantResults = [],
     ): array {
         $results = [];
 
@@ -563,6 +573,10 @@ final class ProductDataExportService
                     throw new RuntimeException("Wariant {$variant->sku} nie ma polskiego mapowania WooCommerce wymaganego do utworzenia tłumaczenia {$language}.");
                 }
 
+                $primaryResponse = collect($primaryVariantResults)
+                    ->first(fn (mixed $result): bool => is_array($result)
+                        && (string) ($result['sku'] ?? '') === $variant->sku);
+
                 $variantResponses = array_merge(
                     $variantResponses,
                     $this->syncVariantTranslations(
@@ -571,6 +585,7 @@ final class ProductDataExportService
                         $integration,
                         $salesChannelId,
                         $primaryMapping,
+                        (array) data_get($primaryResponse, 'response', []),
                     ),
                 );
             }
@@ -1025,6 +1040,7 @@ final class ProductDataExportService
                     $integration,
                     $salesChannelId,
                     $mapping,
+                    $response,
                 )
                 : [];
 
@@ -1061,12 +1077,14 @@ final class ProductDataExportService
 
     /**
      * @param  Collection<int, Product>  $variants
+     * @param  list<array<string, mixed>>  $primaryVariantResults
      */
     private function syncFamilyVariantTranslations(
         Product $parent,
         Collection $variants,
         WordpressIntegration $integration,
         int $salesChannelId,
+        array $primaryVariantResults = [],
     ): void {
         foreach ($variants as $variant) {
             $mapping = ProductChannelMapping::query()
@@ -1079,12 +1097,17 @@ final class ProductDataExportService
                 continue;
             }
 
+            $primaryResponse = collect($primaryVariantResults)
+                ->first(fn (mixed $result): bool => is_array($result)
+                    && (string) ($result['sku'] ?? '') === $variant->sku);
+
             $this->syncVariantTranslations(
                 $parent,
                 $variant,
                 $integration,
                 $salesChannelId,
                 $mapping,
+                (array) data_get($primaryResponse, 'response', []),
             );
         }
     }
@@ -1098,6 +1121,7 @@ final class ProductDataExportService
         WordpressIntegration $integration,
         int $salesChannelId,
         ProductChannelMapping $primaryMapping,
+        array $primaryResponse = [],
     ): array {
         $results = [];
         $exportLanguages = collect($integration->productExportLanguages())->flip();
@@ -1117,6 +1141,13 @@ final class ProductDataExportService
 
             $language = trim((string) $language) ?: 'en';
             $payload = $this->variationPayload($parent, $variant, $salesChannelId, $language);
+            $payload = $this->inheritPrimaryVariationCommerce(
+                $payload,
+                $integration,
+                (string) $primaryMapping->external_product_id,
+                (string) $primaryMapping->external_variation_id,
+                $primaryResponse,
+            );
             $payload = $this->globalizeProductAttributes($integration, $payload, $language);
             $variantReference = $variantReferences[$language] ?? null;
             $translatedVariationId = is_array($variantReference)
@@ -1264,6 +1295,56 @@ final class ProductDataExportService
         }
 
         return $results;
+    }
+
+    /**
+     * A translated variation must never be published without the commercial
+     * data of its exact Polish counterpart. Historical copied families can
+     * have an empty inherited ERP price even though their mapped PL variation
+     * still carries the valid value. Prefer the response from the PL PUT; when
+     * this path did not perform that PUT, read the exact mapped variation.
+     *
+     * @param  array<string, mixed>  $payload
+     * @param  array<string, mixed>  $primaryResponse
+     * @return array<string, mixed>
+     */
+    private function inheritPrimaryVariationCommerce(
+        array $payload,
+        WordpressIntegration $integration,
+        string $externalProductId,
+        string $externalVariationId,
+        array $primaryResponse = [],
+    ): array {
+        if (($payload['regular_price'] ?? '') !== '') {
+            return $payload;
+        }
+
+        if (! filled($primaryResponse['regular_price'] ?? null)) {
+            $primaryResponse = $this->client->productVariation(
+                $integration,
+                $externalProductId,
+                $externalVariationId,
+            );
+        }
+
+        if (! filled($primaryResponse['regular_price'] ?? null)) {
+            throw new RuntimeException(
+                "Polski wariant WooCommerce #{$externalProductId}/{$externalVariationId} nie ma ceny regularnej; eksport tłumaczenia został przerwany.",
+            );
+        }
+
+        $payload['regular_price'] = $this->decimal($primaryResponse['regular_price'], 2);
+        $payload['sale_price'] = filled($primaryResponse['sale_price'] ?? null)
+            ? $this->decimal($primaryResponse['sale_price'], 2)
+            : '';
+        $payload['date_on_sale_from'] = filled($primaryResponse['date_on_sale_from'] ?? null)
+            ? (string) $primaryResponse['date_on_sale_from']
+            : '';
+        $payload['date_on_sale_to'] = filled($primaryResponse['date_on_sale_to'] ?? null)
+            ? (string) $primaryResponse['date_on_sale_to']
+            : '';
+
+        return $payload;
     }
 
     private function removePendingVariants(
@@ -1499,6 +1580,11 @@ final class ProductDataExportService
     {
         $parentMaster = $parent->masterData();
         $master = $this->variantInheritance->masterData($parent, $variant);
+        // Variable parents deliberately do not manage stock in WooCommerce,
+        // but every child SKU must. An inherited variant otherwise copies the
+        // parent's false flag and the final canonical PUT cannot restore the
+        // quantity after the temporary translated child was created at zero.
+        data_set($master, 'inventory.manage_stock', true);
         // A variation is published as part of its parent family. Historical
         // child records may still contain their own stale date (or none at
         // all), therefore the parent date is the only canonical value for PL
@@ -1512,6 +1598,23 @@ final class ProductDataExportService
             $this->mappingHasStockReleasePending($parent, $salesChannelId),
             $master,
         );
+        $channelAvailability = $this->channelStock->availabilityForProduct(
+            $salesChannelId,
+            (int) $variant->id,
+        );
+
+        // Match the dedicated stock-sync pipeline: only warehouses routed to
+        // this sales channel contribute, and every configured buffer is
+        // deducted. Keep the legacy aggregate only when the channel has no
+        // stock route at all (older installations/tests before route setup).
+        if (! $variant->forcesStorefrontStockZero()
+            && $channelAvailability['breakdown'] !== []
+        ) {
+            $stockQuantity = (int) floor(max(0, $channelAvailability['quantity']));
+            $payload['manage_stock'] = true;
+            $payload['stock_quantity'] = $stockQuantity;
+            $payload['stock_status'] = $stockQuantity > 0 ? 'instock' : 'outofstock';
+        }
         $parentRegularPrice = data_get($parentMaster, 'prices.retail_price_pln');
         $parentSalePrice = data_get($parentMaster, 'prices.sale_price_pln');
         $parentSaleStartsAt = data_get($parentMaster, 'prices.sale_price_starts_at');
@@ -2750,24 +2853,6 @@ final class ProductDataExportService
         return false;
     }
 
-    /**
-     * @param  Collection<int, Product>  $variants
-     */
-    private function hasMissingPrimaryVariantMappings(Collection $variants, int $salesChannelId): bool
-    {
-        if ($variants->isEmpty()) {
-            return false;
-        }
-
-        $mappedProductIds = ProductChannelMapping::query()
-            ->where('sales_channel_id', $salesChannelId)
-            ->whereIn('product_id', $variants->pluck('id'))
-            ->whereNotNull('external_variation_id')
-            ->pluck('product_id');
-
-        return $mappedProductIds->unique()->count() !== $variants->pluck('id')->unique()->count();
-    }
-
     private function setTranslationLinkPending(Product $product, int $salesChannelId, bool $pending): void
     {
         DB::transaction(function () use ($product, $salesChannelId, $pending): void {
@@ -2806,6 +2891,8 @@ final class ProductDataExportService
         bool $isVariation,
         Collection $variants,
         ?Product $variantParent = null,
+        array $primaryResponse = [],
+        array $primaryVariantResults = [],
     ): array {
         $pendingTranslationCreation = collect((array) data_get(
             $mapping->metadata,
@@ -2828,6 +2915,7 @@ final class ProductDataExportService
                 $integration,
                 (int) $mapping->sales_channel_id,
                 (string) $mapping->external_product_id,
+                $primaryVariantResults,
             );
         $createdLanguages = collect($results)->pluck('language')->filter()->map(fn (mixed $language): string => (string) $language);
         $mainProductId = (string) $mapping->external_product_id;
@@ -2864,6 +2952,16 @@ final class ProductDataExportService
                     $language,
                 )
                 : $this->payload($product, $isVariation, (int) $mapping->sales_channel_id, $language);
+
+            if ($isVariation && $variantParent instanceof Product) {
+                $payload = $this->inheritPrimaryVariationCommerce(
+                    $payload,
+                    $integration,
+                    (string) $mapping->external_product_id,
+                    (string) $mapping->external_variation_id,
+                    $primaryResponse,
+                );
+            }
             $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $product, $mapping);
 
             if (! $isVariation) {

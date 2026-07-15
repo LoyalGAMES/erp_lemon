@@ -11,6 +11,7 @@ use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
 use App\Models\Warehouse;
+use App\Models\WarehouseChannelRoute;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\ProductDataExportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -115,6 +116,7 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
 
         $temporaryCreate = $this->englishVariationCreateRequests()->sole();
         $this->assertSame('draft', $temporaryCreate['status']);
+        $this->assertSame('699.00', $temporaryCreate['regular_price']);
         $this->assertSame(0, $temporaryCreate['stock_quantity']);
         $this->assertSame('outofstock', $temporaryCreate['stock_status']);
         $this->assertArrayNotHasKey('global_unique_id', $temporaryCreate->data());
@@ -126,6 +128,8 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
         $this->assertSame($family['variant']->sku, $finalUpdate['sku']);
         $this->assertSame($family['variant']->ean, $finalUpdate['global_unique_id']);
         $this->assertSame('publish', $finalUpdate['status']);
+        $this->assertTrue($finalUpdate['manage_stock']);
+        $this->assertSame('699.00', $finalUpdate['regular_price']);
         $this->assertSame(4, $finalUpdate['stock_quantity']);
         $this->assertSame('instock', $finalUpdate['stock_status']);
         $this->assertSame(20, $finalUpdate['menu_order']);
@@ -138,6 +142,12 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
             fn (array $meta): bool => $meta['key'] === '_sempre_erp_publication_date'
                 && $meta['value'] === '2026-07-15T08:30:00',
         ));
+
+        $primaryUpdate = $this->primaryVariationUpdateRequests()->last();
+        $this->assertInstanceOf(Request::class, $primaryUpdate);
+        $this->assertTrue($primaryUpdate['manage_stock']);
+        $this->assertSame(4, $primaryUpdate['stock_quantity']);
+        $this->assertSame('instock', $primaryUpdate['stock_status']);
 
         $this->assertLinkPrecedesFinalUpdate();
     }
@@ -284,6 +294,9 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
                 'variant_attribute' => 'Rozmiar',
                 'publication_status' => 'publish',
                 'publication_date' => '2026-07-15T08:30',
+                // Variable parents intentionally do not manage stock in Woo;
+                // their sellable quantities live on the child SKUs.
+                'inventory' => ['manage_stock' => false],
                 'content' => [
                     'pl' => ['name' => 'Rodzina '.$suffix],
                     'en' => ['name' => 'Family '.$suffix],
@@ -301,6 +314,10 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
             'attributes' => ['master' => [
                 'source' => 'erp',
                 'product_type' => 'variation',
+                'inheritance' => [
+                    'mode' => 'parent',
+                    'parent_product_id' => $parent->id,
+                ],
                 'parameters' => [[
                     'name' => 'Rozmiar',
                     'name_en' => 'Size',
@@ -346,12 +363,34 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
             'allow_negative_stock' => false,
             'is_active' => true,
         ]);
+        WarehouseChannelRoute::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 10,
+        ]);
         StockBalance::query()->create([
             'warehouse_id' => $warehouse->id,
             'product_id' => $variant->id,
             'quantity_on_hand' => 4,
             'quantity_reserved' => 0,
             'quantity_available' => 4,
+        ]);
+        $unroutedWarehouse = Warehouse::query()->create([
+            'code' => 'UNROUTED-'.$suffix,
+            'name' => 'Unrouted warehouse '.$suffix,
+            'type' => 'own',
+            'allow_negative_stock' => false,
+            'is_active' => true,
+        ]);
+        StockBalance::query()->create([
+            'warehouse_id' => $unroutedWarehouse->id,
+            'product_id' => $variant->id,
+            'quantity_on_hand' => 20,
+            'quantity_reserved' => 0,
+            'quantity_available' => 20,
         ]);
 
         return compact('channel', 'integration', 'parent', 'variant') + [
@@ -436,7 +475,11 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
         return match ([$request->method(), $url]) {
             ['PUT', 'https://shop.test/wp-json/wc/v3/products/123'] => Http::response(['id' => 123, 'sku' => $request['sku']]),
             ['PUT', 'https://shop.test/wp-json/wc/v3/products/124'] => Http::response(['id' => 124, 'sku' => $request['sku']]),
-            ['PUT', 'https://shop.test/wp-json/wc/v3/products/123/variations/456'] => Http::response(['id' => 456, 'sku' => $request['sku']]),
+            ['PUT', 'https://shop.test/wp-json/wc/v3/products/123/variations/456'] => Http::response([
+                'id' => 456,
+                'sku' => $request['sku'],
+                'regular_price' => '699.00',
+            ]),
             default => throw new RuntimeException('Unexpected request: '.$request->method().' '.$url),
         };
     }
@@ -456,6 +499,15 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
             ->map(fn (array $record) => $record[0])
             ->filter(fn (Request $request): bool => $request->method() === 'PUT'
                 && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations/457?lang=en')
+            ->values();
+    }
+
+    private function primaryVariationUpdateRequests()
+    {
+        return Http::recorded()
+            ->map(fn (array $record) => $record[0])
+            ->filter(fn (Request $request): bool => $request->method() === 'PUT'
+                && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/456')
             ->values();
     }
 

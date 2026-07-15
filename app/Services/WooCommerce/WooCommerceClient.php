@@ -774,6 +774,30 @@ final class WooCommerceClient
     }
 
     /**
+     * @return array<string, mixed>
+     */
+    public function productVariation(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        string $externalVariationId,
+    ): array {
+        $response = $this->request($integration)->get($this->endpoint(
+            $integration,
+            "/products/{$externalProductId}/variations/{$externalVariationId}",
+        ));
+
+        if (! $response->successful()) {
+            throw new RuntimeException(
+                "Pobranie wariantu WooCommerce #{$externalProductId}/{$externalVariationId} zwróciło HTTP {$response->status()}.",
+            );
+        }
+
+        $json = $response->json();
+
+        return is_array($json) ? $json : [];
+    }
+
+    /**
      * Create a translated variation without assigning the canonical SKU until
      * Polylang has linked it to the primary variation. WooCommerce otherwise
      * rejects the second post as a duplicate SKU. The deterministic temporary
