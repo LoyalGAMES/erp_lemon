@@ -3,7 +3,9 @@
 namespace App\Providers;
 
 use App\Mail\Transport\GmailApiTransport;
+use App\Models\ProductParameterDefinition;
 use App\Models\WordpressIntegration;
+use App\Observers\ProductParameterDefinitionObserver;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Mail;
@@ -25,6 +27,8 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        ProductParameterDefinition::observe(ProductParameterDefinitionObserver::class);
+
         Mail::extend(
             'gmail_api',
             fn (array $config): GmailApiTransport => $this->app->make(GmailApiTransport::class),

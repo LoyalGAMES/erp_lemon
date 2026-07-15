@@ -1406,6 +1406,112 @@ final class WooCommerceClient
         );
     }
 
+    /**
+     * Switch an already existing global taxonomy to explicit term ordering.
+     * This maintenance path never creates an attribute.
+     *
+     * @param  array<string, mixed>  $attribute
+     * @return array<string, mixed>
+     */
+    public function setExistingGlobalProductAttributeMenuOrder(
+        WordpressIntegration $integration,
+        array $attribute,
+    ): array {
+        $attributeId = (int) ($attribute['id'] ?? 0);
+
+        if ($attributeId <= 0) {
+            throw new RuntimeException('Ustawienie kolejności globalnego atrybutu wymaga prawidłowego ID.');
+        }
+
+        if ((string) ($attribute['order_by'] ?? '') === 'menu_order') {
+            return $attribute;
+        }
+
+        $response = $this->request($integration)->put(
+            $this->endpoint($integration, "/products/attributes/{$attributeId}"),
+            ['order_by' => 'menu_order'],
+        );
+
+        if (! $response->successful()) {
+            throw new RuntimeException(
+                "Ustawienie własnej kolejności globalnego atrybutu #{$attributeId} zwróciło HTTP {$response->status()}.",
+            );
+        }
+
+        $updated = $response->json();
+        $attribute = array_merge(
+            $attribute,
+            is_array($updated) ? $updated : [],
+            ['order_by' => 'menu_order'],
+        );
+        $this->replaceGlobalProductAttributeCache($integration, $attribute);
+
+        return $attribute;
+    }
+
+    /**
+     * Correct only an existing term. Product creation and Polylang linking are
+     * deliberately outside this narrow maintenance operation.
+     *
+     * @param  array<string, mixed>  $term
+     * @return array<string, mixed>
+     */
+    public function updateExistingGlobalProductAttributeTerm(
+        WordpressIntegration $integration,
+        int $attributeId,
+        array $term,
+        string $name,
+        int $menuOrder,
+    ): array {
+        $termId = (int) ($term['id'] ?? 0);
+        $name = trim($name);
+        $menuOrder = max(0, min(65535, $menuOrder));
+
+        if ($attributeId <= 0 || $termId <= 0 || $name === '') {
+            throw new RuntimeException('Aktualizacja wartości globalnego atrybutu wymaga prawidłowego ID i nazwy.');
+        }
+
+        $payload = [];
+
+        if (trim((string) ($term['name'] ?? '')) !== $name) {
+            $payload['name'] = $name;
+        }
+
+        if (! array_key_exists('menu_order', $term)
+            || (int) $term['menu_order'] !== $menuOrder
+        ) {
+            $payload['menu_order'] = $menuOrder;
+        }
+
+        if ($payload === []) {
+            return $term;
+        }
+
+        $response = $this->request($integration)->put(
+            $this->endpoint(
+                $integration,
+                "/products/attributes/{$attributeId}/terms/{$termId}",
+            ),
+            $payload,
+        );
+
+        if (! $response->successful()) {
+            throw new RuntimeException(
+                "Aktualizacja wartości #{$termId} globalnego atrybutu #{$attributeId} zwróciła HTTP {$response->status()}.",
+            );
+        }
+
+        $updated = $response->json();
+        $term = array_merge(
+            $term,
+            is_array($updated) ? $updated : [],
+            $payload,
+        );
+        $this->replaceGlobalProductAttributeTermCache($integration, $attributeId, $term);
+
+        return $term;
+    }
+
     /** @param array<string, int> $translations */
     private function linkGlobalProductAttributeTermTranslations(
         WordpressIntegration $integration,
