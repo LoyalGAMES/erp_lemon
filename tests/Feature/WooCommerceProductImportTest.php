@@ -203,6 +203,189 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('4.0000', (string) $balance->quantity_available);
     }
 
+    public function test_import_only_replaces_legacy_generic_variant_metadata_with_an_unambiguous_size_axis(): void
+    {
+        Http::fake(function ($request) {
+            $url = $request->url();
+            $path = (string) parse_url($url, PHP_URL_PATH);
+            parse_str((string) parse_url($url, PHP_URL_QUERY), $query);
+
+            if (str_contains($path, '/products/categories')) {
+                return Http::response([]);
+            }
+
+            if (preg_match('#/products/(\d+)/variations$#', $path, $matches) === 1) {
+                if ((int) ($query['page'] ?? 1) !== 1 || (int) $matches[1] !== 8101) {
+                    return Http::response([]);
+                }
+
+                return Http::response([[
+                    'id' => 8111,
+                    'sku' => 'LEGACY-SIZE-MATCH-SM',
+                    'name' => 'stary wariant',
+                    'status' => 'publish',
+                    'meta_data' => [[
+                        'key' => '_sempre_erp_variant_attribute',
+                        'value' => 'variant',
+                    ]],
+                    'attributes' => [
+                        ['name' => 'wariant', 'option' => 's-m'],
+                        ['name' => 'Rozmiar', 'option' => 'S/M'],
+                        ['name' => 'Color', 'option' => 'Black'],
+                    ],
+                ]]);
+            }
+
+            if ($path === '/wp-json/wc/v3/products') {
+                if ((int) ($query['page'] ?? 1) !== 1) {
+                    return Http::response([]);
+                }
+
+                return Http::response([
+                    [
+                        'id' => 8101,
+                        'sku' => 'LEGACY-SIZE-MATCH',
+                        'name' => 'Rodzina z tymi samymi opcjami',
+                        'type' => 'variable',
+                        'status' => 'publish',
+                        'meta_data' => [[
+                            'key' => '_sempre_erp_variant_attribute',
+                            'value' => 'BLVariant',
+                        ]],
+                        'attributes' => [
+                            ['name' => 'wariant', 'variation' => true, 'options' => ['M/L', 'S/M']],
+                            ['name' => 'Rozmiar', 'variation' => true, 'options' => ['s / m', 'm / l']],
+                            ['name' => 'Color', 'variation' => true, 'options' => ['Black', 'White']],
+                        ],
+                    ],
+                    [
+                        'id' => 8102,
+                        'sku' => 'LEGACY-SOLE-SIZE',
+                        'name' => 'Rodzina z jedyną osią rozmiaru',
+                        'type' => 'variable',
+                        'status' => 'publish',
+                        'meta_data' => [[
+                            'key' => '_sempre_erp_variant_attribute',
+                            'value' => 'wariant',
+                        ]],
+                        'attributes' => [
+                            ['name' => 'Size', 'variation' => true, 'options' => ['S/M']],
+                            ['name' => 'Color', 'variation' => false, 'options' => ['Black']],
+                        ],
+                    ],
+                    [
+                        'id' => 8103,
+                        'sku' => 'LEGACY-COLOR-ONLY',
+                        'name' => 'Rodzina kolorystyczna',
+                        'type' => 'variable',
+                        'status' => 'publish',
+                        'meta_data' => [[
+                            'key' => '_sempre_erp_variant_attribute',
+                            'value' => 'variant',
+                        ]],
+                        'attributes' => [
+                            ['name' => 'Color', 'variation' => true, 'options' => ['Black', 'White']],
+                        ],
+                    ],
+                    [
+                        'id' => 8104,
+                        'sku' => 'LEGACY-AMBIGUOUS',
+                        'name' => 'Rodzina niejednoznaczna',
+                        'type' => 'variable',
+                        'status' => 'publish',
+                        'meta_data' => [[
+                            'key' => '_sempre_erp_variant_attribute',
+                            'value' => 'BLVariant',
+                        ]],
+                        'attributes' => [
+                            ['name' => 'wariant', 'variation' => true, 'options' => ['S', 'M']],
+                            ['name' => 'Rozmiar', 'variation' => true, 'options' => ['S', 'M']],
+                            ['name' => 'Color', 'variation' => true, 'options' => ['S', 'M']],
+                        ],
+                    ],
+                    [
+                        'id' => 8105,
+                        'sku' => 'LEGACY-MISMATCH',
+                        'name' => 'Rodzina z różnymi opcjami',
+                        'type' => 'variable',
+                        'status' => 'publish',
+                        'meta_data' => [[
+                            'key' => '_sempre_erp_variant_attribute',
+                            'value' => 'wariant',
+                        ]],
+                        'attributes' => [
+                            ['name' => 'wariant', 'variation' => true, 'options' => ['S', 'M']],
+                            ['name' => 'Rozmiar', 'variation' => true, 'options' => ['S/M', 'M/L']],
+                        ],
+                    ],
+                    [
+                        'id' => 8106,
+                        'sku' => 'LEGACY-GENERIC-SIZE-MATCH',
+                        'name' => 'Rodzina z jednym konkretnym odpowiednikiem',
+                        'type' => 'variable',
+                        'status' => 'publish',
+                        'meta_data' => [[
+                            'key' => '_sempre_erp_variant_attribute',
+                            'value' => 'BLVariant',
+                        ]],
+                        'attributes' => [
+                            ['name' => 'wariant', 'variation' => true, 'options' => ['M/L', 'S/M']],
+                            ['name' => 'Rozmiar', 'variation' => true, 'options' => ['s / m', 'm / l']],
+                        ],
+                    ],
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-LEGACY-AXIS',
+            'name' => 'Sklep B2C legacy axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo legacy axis',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl']]],
+        ]);
+
+        app(WooCommerceImportService::class)->importProducts($integration);
+
+        $this->assertSame('BLVariant', data_get(
+            Product::query()->where('sku', 'LEGACY-SIZE-MATCH')->firstOrFail()->masterData(),
+            'variant_attribute',
+        ));
+        $this->assertSame('variant', data_get(
+            Product::query()->where('sku', 'LEGACY-SIZE-MATCH-SM')->firstOrFail()->masterData(),
+            'variant_attribute',
+        ));
+        $this->assertSame('Size', data_get(
+            Product::query()->where('sku', 'LEGACY-SOLE-SIZE')->firstOrFail()->masterData(),
+            'variant_attribute',
+        ));
+        $this->assertSame('variant', data_get(
+            Product::query()->where('sku', 'LEGACY-COLOR-ONLY')->firstOrFail()->masterData(),
+            'variant_attribute',
+        ));
+        $this->assertSame('BLVariant', data_get(
+            Product::query()->where('sku', 'LEGACY-AMBIGUOUS')->firstOrFail()->masterData(),
+            'variant_attribute',
+        ));
+        $this->assertSame('wariant', data_get(
+            Product::query()->where('sku', 'LEGACY-MISMATCH')->firstOrFail()->masterData(),
+            'variant_attribute',
+        ));
+        $this->assertSame('Rozmiar', data_get(
+            Product::query()->where('sku', 'LEGACY-GENERIC-SIZE-MATCH')->firstOrFail()->masterData(),
+            'variant_attribute',
+        ));
+    }
+
     public function test_imported_woo_stock_is_available_quantity_and_preserves_active_reservations_in_on_hand(): void
     {
         $remoteStock = 0;

@@ -35,6 +35,8 @@ final class LegacyVariantFamilyBackfillService
 
     public const VARIATION_STOCK_MANAGEMENT_RECOVERY_REVISION = 'variation_stock_management_recovery_2026_07_15_000014';
 
+    public const LEGACY_SIZE_VARIANT_AXIS_RECOVERY_REVISION = 'legacy_size_variant_axis_recovery_2026_07_15_000015';
+
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
 
     /** @var array<string, bool> */
@@ -170,82 +172,106 @@ final class LegacyVariantFamilyBackfillService
             'failed' => 0,
         ];
 
-        // Repair the newest catalog entries first. They are the products an
-        // operator has just published and is actively checking, while the
-        // same bounded queue still works through the complete history.
-        foreach (ProductChannelMapping::query()
-            ->where(function ($query): void {
-                $query
-                    ->whereNull('external_variation_id')
-                    ->orWhereIn('external_variation_id', ['', '0'])
-                    ->orWhereRaw("TRIM(external_variation_id) = ''");
-            })
-            ->lazyByIdDesc(100) as $mapping) {
-            if ($result['dispatched'] >= max(1, $limit)) {
-                break;
-            }
+        $seenMappingIds = [];
 
-            if (! $this->isPendingBackfill($mapping)) {
-                continue;
-            }
+        // A narrow corrective migration must not wait behind an older broad
+        // catalog backfill. Dispatch its revision first, then continue the
+        // normal newest-first queue without visiting the same mapping twice.
+        foreach ([self::LEGACY_SIZE_VARIANT_AXIS_RECOVERY_REVISION, null] as $priorityRevision) {
+            foreach ($this->pendingMappingCandidates($priorityRevision) as $mapping) {
+                if ($result['dispatched'] >= max(1, $limit)) {
+                    break 2;
+                }
 
-            $result['scanned']++;
-            $localState = $this->localReservationState($mapping, max(1, $staleMinutes));
+                if (isset($seenMappingIds[$mapping->id])) {
+                    continue;
+                }
 
-            if ($localState === 'active') {
-                $result['skipped_active']++;
+                $seenMappingIds[$mapping->id] = true;
 
-                continue;
-            }
+                if (! $this->isPendingBackfill($mapping)) {
+                    continue;
+                }
 
-            if ($localState === 'backoff') {
-                $result['skipped_backoff']++;
+                $result['scanned']++;
+                $localState = $this->localReservationState($mapping, max(1, $staleMinutes));
 
-                continue;
-            }
+                if ($localState === 'active') {
+                    $result['skipped_active']++;
 
-            if (! $this->productIntegrationsReady((int) $mapping->product_id)) {
-                $result['skipped_unready']++;
+                    continue;
+                }
 
-                continue;
-            }
+                if ($localState === 'backoff') {
+                    $result['skipped_backoff']++;
 
-            $reservation = $this->reserve($mapping->id, max(1, $staleMinutes));
+                    continue;
+                }
 
-            if ($reservation['status'] === 'active') {
-                $result['skipped_active']++;
+                if (! $this->productIntegrationsReady((int) $mapping->product_id)) {
+                    $result['skipped_unready']++;
 
-                continue;
-            }
+                    continue;
+                }
 
-            if ($reservation['status'] === 'backoff') {
-                $result['skipped_backoff']++;
+                $reservation = $this->reserve($mapping->id, max(1, $staleMinutes));
 
-                continue;
-            }
+                if ($reservation['status'] === 'active') {
+                    $result['skipped_active']++;
 
-            if ($reservation['status'] !== 'reserved') {
-                continue;
-            }
+                    continue;
+                }
 
-            try {
-                ExportWooCommerceProductDataJob::dispatch(
-                    $reservation['product_id'],
-                    $reservation['token'],
-                )->onConnection('database');
-                $result['dispatched']++;
-            } catch (Throwable $exception) {
-                report($exception);
-                $this->releaseFailedReservation(
-                    $reservation['product_id'],
-                    $reservation['token'],
-                    $exception,
-                );
-                $result['failed']++;
+                if ($reservation['status'] === 'backoff') {
+                    $result['skipped_backoff']++;
+
+                    continue;
+                }
+
+                if ($reservation['status'] !== 'reserved') {
+                    continue;
+                }
+
+                try {
+                    ExportWooCommerceProductDataJob::dispatch(
+                        $reservation['product_id'],
+                        $reservation['token'],
+                    )->onConnection('database');
+                    $result['dispatched']++;
+                } catch (Throwable $exception) {
+                    report($exception);
+                    $this->releaseFailedReservation(
+                        $reservation['product_id'],
+                        $reservation['token'],
+                        $exception,
+                    );
+                    $result['failed']++;
+                }
             }
         }
 
         return $result;
+    }
+
+    /** @return iterable<int, ProductChannelMapping> */
+    private function pendingMappingCandidates(?string $revision): iterable
+    {
+        $query = ProductChannelMapping::query()
+            ->where(function ($mapping): void {
+                $mapping
+                    ->whereNull('external_variation_id')
+                    ->orWhereIn('external_variation_id', ['', '0'])
+                    ->orWhereRaw("TRIM(external_variation_id) = ''");
+            });
+
+        if ($revision !== null) {
+            $query->where(
+                'metadata->product_data_export->legacy_variant_backfill->revision',
+                $revision,
+            );
+        }
+
+        return $query->lazyByIdDesc(100);
     }
 
     /**

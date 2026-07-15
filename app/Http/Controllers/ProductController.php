@@ -21,6 +21,7 @@ use App\Services\Gs1\Gs1SettingsService;
 use App\Services\Inventory\StockSyncQueueService;
 use App\Services\Inventory\WarehouseDocumentNumberService;
 use App\Services\Inventory\WarehouseDocumentPostingService;
+use App\Services\Products\LegacySizeVariantAxisResolver;
 use App\Services\Products\ProductDescriptionSanitizer;
 use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Products\ProductIdentifierService;
@@ -426,13 +427,14 @@ class ProductController extends Controller
         ProductIdentifierService $identifiers,
         ProductVariantInheritanceService $variantInheritance,
         ProductVariantOptionNormalizer $variantOptions,
+        LegacySizeVariantAxisResolver $legacySizeAxis,
     ): RedirectResponse {
         $product->load([
             'childRelations' => fn ($query) => $query
                 ->where('relation_type', 'variant')
                 ->with('childProduct'),
         ]);
-        [$copy, $copiedVariants] = DB::transaction(function () use ($product, $identifiers, $audit, $variantInheritance, $variantOptions): array {
+        [$copy, $copiedVariants] = DB::transaction(function () use ($product, $identifiers, $audit, $variantInheritance, $variantOptions, $legacySizeAxis): array {
             $copy = $product->replicate([
                 'sku',
                 'storefront_hidden_at',
@@ -450,12 +452,46 @@ class ProductController extends Controller
             $identifiers->ensureSku($copy, true);
 
             $copiedVariants = [];
-            $variantAttribute = $this->variantAttributeForCopy($product, $copy, $variantOptions);
+            $variantAttribute = $this->variantAttributeForCopy(
+                $product,
+                $copy,
+                $variantOptions,
+                $legacySizeAxis,
+            );
 
             if ($product->childRelations->isNotEmpty()) {
                 $copyAttributes = (array) $copy->attributes;
                 data_set($copyAttributes, 'master.product_type', 'variable');
                 data_set($copyAttributes, 'master.variant_attribute', $variantAttribute);
+
+                if ($legacySizeAxis->isLegacyGeneric((string) data_get(
+                    $product->masterData(),
+                    'variant_attribute',
+                    '',
+                )) && $variantOptions->isSizeAttribute($variantAttribute)) {
+                    $parameters = collect((array) data_get(
+                        $copyAttributes,
+                        'master.parameters',
+                        [],
+                    ))
+                        ->filter(fn (mixed $parameter): bool => is_array($parameter))
+                        ->reject(fn (array $parameter): bool => $legacySizeAxis->isLegacyGeneric(
+                            (string) ($parameter['name'] ?? ''),
+                        ))
+                        ->map(function (array $parameter) use ($variantAttribute): array {
+                            if (mb_strtolower(trim((string) ($parameter['name'] ?? '')))
+                                === mb_strtolower($variantAttribute)
+                            ) {
+                                $parameter['variation'] = true;
+                            }
+
+                            return $parameter;
+                        })
+                        ->values()
+                        ->all();
+                    data_set($copyAttributes, 'master.parameters', $parameters);
+                }
+
                 $copy->forceFill(['attributes' => $copyAttributes])->save();
             }
 
@@ -470,6 +506,11 @@ class ProductController extends Controller
                 $option = $this->nullableString($optionParameter['value'] ?? null)
                     ?? $this->nullableString(data_get($sourceRelation->metadata, 'variant_option'))
                     ?? $sourceVariant->name;
+                $option = $legacySizeAxis->canonicalSizeOption(
+                    $product,
+                    $variantAttribute,
+                    $option,
+                ) ?? $option;
                 $option = $variantOptions->normalize($variantAttribute, $option);
                 $optionParameter ??= [
                     'name' => $variantAttribute,
@@ -1674,7 +1715,18 @@ class ProductController extends Controller
         Product $source,
         Product $copy,
         ProductVariantOptionNormalizer $variantOptions,
+        LegacySizeVariantAxisResolver $legacySizeAxis,
     ): string {
+        $variants = $source->childRelations
+            ->map(fn (ProductRelation $relation): ?Product => $relation->childProduct)
+            ->filter(fn (?Product $variant): bool => $variant instanceof Product)
+            ->values();
+        $recoveredSizeAxis = $legacySizeAxis->recover($source, $variants);
+
+        if ($recoveredSizeAxis !== null) {
+            return $recoveredSizeAxis;
+        }
+
         $explicit = $this->nullableString(data_get($copy->masterData(), 'variant_attribute'));
 
         if ($explicit !== null) {
@@ -1695,10 +1747,6 @@ class ProductController extends Controller
             return $relationCandidate;
         }
 
-        $variants = $source->childRelations
-            ->map(fn (ProductRelation $relation): ?Product => $relation->childProduct)
-            ->filter(fn (?Product $variant): bool => $variant instanceof Product)
-            ->values();
         $commonCandidates = $variants
             ->flatMap(function (Product $variant): array {
                 return collect((array) data_get($variant->masterData(), 'parameters', []))

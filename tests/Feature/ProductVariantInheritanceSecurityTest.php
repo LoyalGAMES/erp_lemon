@@ -114,6 +114,113 @@ final class ProductVariantInheritanceSecurityTest extends TestCase
         $this->assertSame('<p>Treść kopii</p>', data_get($copiedVariant->masterData(), 'content.pl.description'));
     }
 
+    public function test_inherited_size_axis_canonicalizes_every_localized_legacy_option(): void
+    {
+        $parent = Product::query()->create([
+            'sku' => 'LOCALIZED-SIZE-PARENT',
+            'name' => 'Produkt rozmiarowy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'parameters' => [
+                    ['name' => 'Rozmiar', 'value' => 'S/M | M/L', 'variation' => true],
+                ],
+                'content' => [
+                    'pl' => ['name' => 'Produkt rozmiarowy'],
+                    'en' => ['name' => 'Sized product'],
+                ],
+            ]],
+        ]);
+        $variantMaster = [
+            'source' => 'erp',
+            'product_type' => 'variation',
+            'variant_attribute' => 'BLVariant',
+            'parameters' => [[
+                'name' => 'BLVariant',
+                'name_en' => 'Variant',
+                'value' => 's-m',
+                'value_pl' => 's-m',
+                'value_en' => 's-m',
+                'translations' => [
+                    'pl' => ['value' => 's-m'],
+                    'en' => ['value' => 's-m'],
+                    'de' => ['value' => 's-m'],
+                ],
+                'variation' => true,
+            ]],
+            'inheritance' => [
+                'mode' => ProductVariantInheritanceService::MODE_PARENT,
+                'parent_product_id' => $parent->id,
+            ],
+        ];
+
+        $resolved = app(ProductVariantInheritanceService::class)
+            ->inheritedMasterData($parent, $variantMaster);
+        $option = collect((array) data_get($resolved, 'parameters'))
+            ->firstWhere('variation', true);
+
+        $this->assertSame('Rozmiar', data_get($resolved, 'variant_attribute'));
+        $this->assertSame('Rozmiar', data_get($option, 'name'));
+        $this->assertSame('Size', data_get($option, 'name_en'));
+        $this->assertSame('S/M', data_get($option, 'value'));
+        $this->assertSame('S/M', data_get($option, 'value_pl'));
+        $this->assertSame('S/M', data_get($option, 'value_en'));
+        $this->assertSame('S/M', data_get($option, 'translations.pl.value'));
+        $this->assertSame('S/M', data_get($option, 'translations.en.value'));
+        $this->assertSame('S/M', data_get($option, 'translations.de.value'));
+        $this->assertSame('Produkt rozmiarowy - S/M', data_get($resolved, 'content.pl.name'));
+        $this->assertSame('Sized product - S/M', data_get($resolved, 'content.en.name'));
+    }
+
+    public function test_inheritance_does_not_recover_a_generic_axis_from_one_variant_snapshot(): void
+    {
+        $parent = Product::query()->create([
+            'sku' => 'GENERIC-AXIS-PARENT',
+            'name' => 'Rodzina starej osi',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'BLVariant',
+                'parameters' => [
+                    ['name' => 'BLVariant', 'value' => 's-m | m-l', 'variation' => true],
+                    ['name' => 'Rozmiar', 'value' => 'S/M | M/L', 'variation' => false],
+                ],
+                'content' => ['pl' => ['name' => 'Rodzina starej osi']],
+            ]],
+        ]);
+        $variantMaster = [
+            'source' => 'erp',
+            'product_type' => 'variation',
+            'variant_attribute' => 'BLVariant',
+            'parameters' => [
+                ['name' => 'BLVariant', 'value' => 's-m', 'variation' => true],
+                ['name' => 'Rozmiar', 'value' => 'S/M', 'variation' => false],
+            ],
+            'inheritance' => [
+                'mode' => ProductVariantInheritanceService::MODE_PARENT,
+                'parent_product_id' => $parent->id,
+            ],
+        ];
+
+        $resolved = app(ProductVariantInheritanceService::class)
+            ->inheritedMasterData($parent, $variantMaster);
+
+        $this->assertSame('BLVariant', data_get($resolved, 'variant_attribute'));
+        $this->assertSame('s-m', data_get(
+            collect((array) data_get($resolved, 'parameters'))->firstWhere('variation', true),
+            'value',
+        ));
+    }
+
     private function parent(string $sku, string $name, string $description): Product
     {
         return Product::query()->create([

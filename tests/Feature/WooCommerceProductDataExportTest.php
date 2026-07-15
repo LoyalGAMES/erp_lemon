@@ -3948,6 +3948,200 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame('457', data_get($variant->fresh()->attributes, 'woocommerce_translations.en.variation_id'));
     }
 
+    public function test_export_replaces_legacy_blvariant_axis_with_canonical_global_size_for_pl_and_en(): void
+    {
+        $this->fakeWooWithGlobalAttributes(function ($request) {
+            $url = $request->url();
+
+            if ($request->method() === 'PUT' && in_array($url, [
+                'https://shop.test/wp-json/wc/v3/products/123',
+                'https://shop.test/wp-json/wc/v3/products/223',
+                'https://shop.test/wp-json/wc/v3/products/123/variations/124',
+                'https://shop.test/wp-json/wc/v3/products/123/variations/125',
+                'https://shop.test/wp-json/wc/v3/products/223/variations/224?lang=en',
+                'https://shop.test/wp-json/wc/v3/products/223/variations/225?lang=en',
+            ], true)) {
+                return Http::response([
+                    'id' => (int) basename((string) parse_url($url, PHP_URL_PATH)),
+                    'sku' => (string) ($request['sku'] ?? ''),
+                ]);
+            }
+
+            throw new \RuntimeException('Unexpected request: '.$request->method().' '.$url);
+        });
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-LEGACY-SIZE',
+            'name' => 'B2C legacy size',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Test Woo legacy size',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'LEGACY-BLVARIANT',
+            'name' => 'Spodnie legacy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variable',
+                    'variant_attribute' => 'BLVariant',
+                    'publication_date' => '2026-07-15T09:30',
+                    'prices' => ['retail_price_pln' => 539],
+                    'content' => [
+                        'pl' => ['name' => 'Spodnie legacy'],
+                        'en' => ['name' => 'Legacy trousers'],
+                    ],
+                    'parameters' => [
+                        ['name' => 'BLVariant', 'value' => 's-m | m-l', 'variation' => true],
+                        [
+                            'name' => 'Rozmiar',
+                            'name_en' => 'Size',
+                            'value' => 'S/M | M/L',
+                            'variation' => false,
+                        ],
+                    ],
+                ],
+                'woocommerce_translations' => [
+                    'en' => ['product_id' => '223', 'variation_id' => null, 'sku' => 'LEGACY-BLVARIANT'],
+                ],
+            ],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'LEGACY-SIZE-WH',
+            'name' => 'Legacy size warehouse',
+            'type' => 'own',
+            'allow_negative_stock' => false,
+            'is_active' => true,
+        ]);
+
+        foreach ([
+            ['option' => 's-m', 'pl_id' => '124', 'en_id' => '224', 'order' => 10, 'stock' => 2],
+            ['option' => 'm-l', 'pl_id' => '125', 'en_id' => '225', 'order' => 20, 'stock' => 3],
+        ] as $row) {
+            $variant = Product::query()->create([
+                'sku' => 'LEGACY-BLVARIANT-'.strtoupper($row['option']),
+                'name' => 'Spodnie legacy '.$row['option'],
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => [
+                    'master' => [
+                        'source' => 'erp',
+                        'product_type' => 'variation',
+                        'variant_attribute' => 'BLVariant',
+                        'prices' => ['retail_price_pln' => 539],
+                        'parameters' => [[
+                            'name' => 'BLVariant',
+                            'value' => $row['option'],
+                            'variation' => true,
+                        ]],
+                    ],
+                    'woocommerce_translations' => [
+                        'en' => [
+                            'product_id' => '223',
+                            'variation_id' => $row['en_id'],
+                            'sku' => 'LEGACY-BLVARIANT-'.strtoupper($row['option']),
+                        ],
+                    ],
+                ],
+            ]);
+            ProductRelation::query()->create([
+                'parent_product_id' => $parent->id,
+                'child_product_id' => $variant->id,
+                'relation_type' => 'variant',
+                'sort_order' => $row['order'],
+                'metadata' => [
+                    'variant_attribute' => 'BLVariant',
+                    'variant_option' => $row['option'],
+                ],
+            ]);
+            ProductChannelMapping::query()->create([
+                'product_id' => $variant->id,
+                'sales_channel_id' => $channel->id,
+                'external_product_id' => '123',
+                'external_variation_id' => $row['pl_id'],
+                'external_sku' => $variant->sku,
+                'stock_sync_enabled' => true,
+            ]);
+            StockBalance::query()->create([
+                'warehouse_id' => $warehouse->id,
+                'product_id' => $variant->id,
+                'quantity_on_hand' => $row['stock'],
+                'quantity_reserved' => 0,
+                'quantity_available' => $row['stock'],
+            ]);
+        }
+
+        app(ProductDataExportService::class)->export($parent);
+
+        $mutations = Http::recorded()
+            ->map(fn (array $record) => $record[0])
+            ->filter(fn ($request): bool => $request->method() === 'PUT'
+                && str_contains($request->url(), '/wp-json/wc/v3/products/'))
+            ->values();
+        $this->assertCount(6, $mutations);
+
+        $parents = $mutations->filter(fn ($request): bool => ! str_contains(
+            (string) parse_url($request->url(), PHP_URL_PATH),
+            '/variations/',
+        ));
+        $parents->each(function ($request): void {
+            $variationAttributes = collect($request['attributes'])
+                ->filter(fn (array $attribute): bool => (bool) $attribute['variation'])
+                ->values();
+            $this->assertCount(1, $variationAttributes);
+            $this->assertSame(['S/M', 'M/L'], $variationAttributes->first()['options']);
+            $this->assertSame('Rozmiar', collect($request['meta_data'])
+                ->firstWhere('key', '_sempre_erp_variant_attribute')['value'] ?? null);
+        });
+
+        $variations = $mutations->filter(fn ($request): bool => str_contains(
+            (string) parse_url($request->url(), PHP_URL_PATH),
+            '/variations/',
+        ));
+        $this->assertSame(
+            ['S/M', 'S/M', 'M/L', 'M/L'],
+            $variations->map(fn ($request): mixed => $request['attributes'][0]['option'])
+                ->values()
+                ->all(),
+        );
+        $this->assertSame([10, 10, 20, 20], $variations->pluck('menu_order')->values()->all());
+        $this->assertSame([2, 2, 3, 3], $variations->pluck('stock_quantity')->values()->all());
+        $variations->each(function ($request): void {
+            $this->assertTrue($request['manage_stock']);
+            $this->assertSame('instock', $request['stock_status']);
+            $this->assertSame('publish', $request['status']);
+            $this->assertSame('Rozmiar', collect($request['meta_data'])
+                ->firstWhere('key', '_sempre_erp_variant_attribute')['value'] ?? null);
+        });
+
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/attributes'
+            && $request['name'] === 'Rozmiar'
+            && $request['slug'] === 'pa_rozmiar');
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/attributes'
+            && in_array(mb_strtolower((string) $request['name']), ['wariant', 'variant', 'blvariant'], true));
+    }
+
     public function test_global_attribute_resolution_paginates_attribute_and_term_collections(): void
     {
         Http::fake(function ($request) {

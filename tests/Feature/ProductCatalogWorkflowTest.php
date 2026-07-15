@@ -1943,6 +1943,99 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame('10001352', data_get($copy->masterData(), 'gs1.gpc_code'));
     }
 
+    public function test_copy_recovers_legacy_blvariant_family_to_one_canonical_size_axis(): void
+    {
+        $source = Product::query()->create([
+            'sku' => 'LEGACY-SIZE-FAMILY',
+            'name' => 'Spodnie legacy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'BLVariant',
+                'content' => [
+                    'pl' => ['name' => 'Spodnie legacy'],
+                    'en' => ['name' => 'Legacy trousers'],
+                ],
+                'parameters' => [
+                    ['name' => 'BLVariant', 'value' => 's-m | m-l', 'variation' => true],
+                    ['name' => 'Rozmiar', 'name_en' => 'Size', 'value' => 'S/M | M/L'],
+                    ['name' => 'Kolor', 'value' => 'Czarny'],
+                ],
+            ]],
+        ]);
+
+        foreach ([['s-m', 10], ['m-l', 20]] as [$option, $sortOrder]) {
+            $variant = Product::query()->create([
+                'sku' => 'LEGACY-SIZE-'.strtoupper($option),
+                'name' => 'Spodnie legacy '.$option,
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => ['master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variation',
+                    'variant_attribute' => 'BLVariant',
+                    'parameters' => [[
+                        'name' => 'BLVariant',
+                        'value' => $option,
+                        'variation' => true,
+                    ]],
+                ]],
+            ]);
+            ProductRelation::query()->create([
+                'parent_product_id' => $source->id,
+                'child_product_id' => $variant->id,
+                'relation_type' => 'variant',
+                'sort_order' => $sortOrder,
+                'metadata' => [
+                    'variant_attribute' => 'BLVariant',
+                    'variant_option' => $option,
+                ],
+            ]);
+        }
+
+        $this->post(route('products.duplicate', $source))->assertRedirect();
+
+        $copy = Product::query()->get()->first(
+            fn (Product $candidate): bool => (int) data_get(
+                $candidate->masterData(),
+                'copy.created_from_product_id',
+            ) === $source->id,
+        );
+        $this->assertInstanceOf(Product::class, $copy);
+        $this->assertSame('Rozmiar', data_get($copy->masterData(), 'variant_attribute'));
+        $this->assertFalse(collect((array) data_get($copy->masterData(), 'parameters', []))
+            ->contains(fn (array $parameter): bool => in_array(
+                mb_strtolower((string) ($parameter['name'] ?? '')),
+                ['wariant', 'variant', 'blvariant'],
+                true,
+            )));
+
+        $sizeParameter = collect((array) data_get($copy->masterData(), 'parameters', []))
+            ->firstWhere('name', 'Rozmiar');
+        $this->assertTrue((bool) ($sizeParameter['variation'] ?? false));
+
+        $copy->load('variantChildren');
+        $this->assertSame(['S/M', 'M/L'], $copy->variantChildren
+            ->map(fn (Product $variant): mixed => data_get(
+                $variant->masterData(),
+                'parameters.1.value',
+            ))
+            ->all());
+        $this->assertSame(['Rozmiar', 'Rozmiar'], $copy->variantChildren
+            ->map(fn (Product $variant): mixed => data_get(
+                $variant->masterData(),
+                'variant_attribute',
+            ))
+            ->all());
+        $this->assertSame([10, 20], $copy->variantChildren->pluck('pivot.sort_order')->all());
+    }
+
     public function test_operator_can_set_variant_storefront_order_with_sparse_form_indices(): void
     {
         $parent = Product::query()->create([

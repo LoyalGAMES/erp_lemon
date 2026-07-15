@@ -23,6 +23,7 @@ use App\Services\Inventory\SalesChannelWarehouseResolver;
 use App\Services\Inventory\StockReservationService;
 use App\Services\Orders\OrderStatusPolicyService;
 use App\Services\Orders\OrderWzDocumentService;
+use App\Services\Products\LegacySizeVariantAxisResolver;
 use App\Services\Products\ProductCategoryTranslationMergeService;
 use App\Services\Products\ProductDescriptionSanitizer;
 use App\Services\Products\ProductParameterTranslationService;
@@ -30,6 +31,7 @@ use App\Services\Products\ProductTranslationMergeService;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Arr;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Throwable;
@@ -49,6 +51,7 @@ final class WooCommerceImportService
         private readonly ProductParameterTranslationService $parameterTranslations,
         private readonly ProductDescriptionSanitizer $descriptionSanitizer,
         private readonly ProductVariantOptionNormalizer $variantOptions,
+        private readonly LegacySizeVariantAxisResolver $legacySizeAxis,
         private readonly WooCommerceCustomerSyncService $customerSync,
         private readonly CustomerAccountClaimService $customerAccountClaims,
     ) {}
@@ -1937,11 +1940,110 @@ final class WooCommerceImportService
             '_sempre_erp_variant_attribute',
         ]));
 
-        if ($explicit !== null) {
+        if ($explicit !== null && ! $this->legacySizeAxis->isLegacyGeneric($explicit)) {
             return $explicit;
         }
 
-        $candidates = collect((array) ($item['attributes'] ?? []))
+        $candidates = $this->variantAxisCandidatesForImport($item);
+
+        if ($explicit !== null) {
+            return $this->concreteSizeAxisForLegacyImport($candidates) ?? $explicit;
+        }
+
+        $candidateNames = $candidates
+            ->pluck('name')
+            ->values();
+
+        if ($candidateNames->count() === 1) {
+            return $candidateNames->first();
+        }
+
+        $sizeCandidates = $candidateNames
+            ->filter(fn (string $name): bool => $this->variantOptions->isSizeAttribute($name))
+            ->values();
+
+        return $sizeCandidates->count() === 1 ? $sizeCandidates->first() : null;
+    }
+
+    /**
+     * Keep the old generic metadata unless the current Woo payload proves
+     * which concrete size taxonomy represents the same variation axis.
+     *
+     * @param  Collection<int, array{name:string,option_keys:list<string>,ambiguous:bool}>  $candidates
+     */
+    private function concreteSizeAxisForLegacyImport(Collection $candidates): ?string
+    {
+        if ($candidates->isEmpty()
+            || $candidates->contains(fn (array $candidate): bool => $candidate['ambiguous'])
+        ) {
+            return null;
+        }
+
+        $sizeCandidates = $candidates
+            ->filter(fn (array $candidate): bool => $this->variantOptions->isSizeAttribute($candidate['name']))
+            ->values();
+
+        if ($sizeCandidates->count() !== 1) {
+            return null;
+        }
+
+        $sizeCandidate = $sizeCandidates->first();
+
+        // A single variation axis needs no legacy alias comparison: Woo itself
+        // identifies this concrete size taxonomy as the only possible axis.
+        if ($candidates->count() === 1) {
+            return $sizeCandidate['name'];
+        }
+
+        $genericCandidates = $candidates
+            ->filter(fn (array $candidate): bool => $this->legacySizeAxis->isLegacyGeneric($candidate['name']))
+            ->values();
+
+        if ($genericCandidates->count() !== 1) {
+            return null;
+        }
+
+        $genericOptions = $genericCandidates->first()['option_keys'];
+
+        if ($genericOptions === []) {
+            return null;
+        }
+
+        $concreteCandidates = $candidates
+            ->reject(fn (array $candidate): bool => $this->legacySizeAxis->isLegacyGeneric($candidate['name']))
+            ->values();
+
+        // The legacy alias is safe to replace only when it duplicates one
+        // concrete size axis. Any second concrete variation axis (for example
+        // Color) means the payload describes a genuinely multi-axis family.
+        if ($concreteCandidates->count() !== 1
+            || ! $this->variantOptions->isSizeAttribute($concreteCandidates->first()['name'])
+        ) {
+            return null;
+        }
+
+        // Matching option sets prove identity only when the generic row maps
+        // to the sole concrete axis. Mismatched values keep legacy metadata.
+        $matchingConcreteAxes = $concreteCandidates
+            ->filter(fn (array $candidate): bool => $candidate['option_keys'] === $genericOptions)
+            ->values();
+
+        if ($matchingConcreteAxes->count() !== 1
+            || ! $this->variantOptions->isSizeAttribute($matchingConcreteAxes->first()['name'])
+        ) {
+            return null;
+        }
+
+        return $matchingConcreteAxes->first()['name'];
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     * @return Collection<int, array{name:string,option_keys:list<string>,ambiguous:bool}>
+     */
+    private function variantAxisCandidatesForImport(array $item): Collection
+    {
+        return collect((array) ($item['attributes'] ?? []))
             ->filter(fn (mixed $attribute): bool => is_array($attribute))
             ->filter(function (array $attribute) use ($item): bool {
                 if (isset($item['variation_id'])) {
@@ -1950,20 +2052,52 @@ final class WooCommerceImportService
 
                 return (bool) ($attribute['variation'] ?? false);
             })
-            ->map(fn (array $attribute): ?string => $this->nullableString($attribute['name'] ?? null))
+            ->map(function (array $attribute): ?array {
+                $name = $this->nullableString($attribute['name'] ?? null);
+
+                if ($name === null) {
+                    return null;
+                }
+
+                $options = array_key_exists('option', $attribute)
+                    ? [$attribute['option']]
+                    : (array) ($attribute['options'] ?? []);
+                $optionKeys = collect($options)
+                    ->map(function (mixed $option): string {
+                        $option = preg_replace(
+                            '/\s*(?:\/|-|–|—)\s*/u',
+                            '-',
+                            trim((string) $option),
+                        ) ?? trim((string) $option);
+
+                        return Str::slug($option);
+                    })
+                    ->filter()
+                    ->unique()
+                    ->sort()
+                    ->values()
+                    ->all();
+
+                return [
+                    'name' => $name,
+                    'option_keys' => $optionKeys,
+                ];
+            })
             ->filter()
-            ->unique(fn (string $name): string => mb_strtolower(trim($name)))
+            ->groupBy(fn (array $candidate): string => mb_strtolower(trim($candidate['name'])))
+            ->map(function ($rows): array {
+                $signatures = $rows
+                    ->map(fn (array $row): string => implode('|', $row['option_keys']))
+                    ->unique()
+                    ->values();
+
+                return [
+                    'name' => $rows->first()['name'],
+                    'option_keys' => $rows->first()['option_keys'],
+                    'ambiguous' => $signatures->count() !== 1,
+                ];
+            })
             ->values();
-
-        if ($candidates->count() === 1) {
-            return $candidates->first();
-        }
-
-        $sizeCandidates = $candidates
-            ->filter(fn (string $name): bool => $this->variantOptions->isSizeAttribute($name))
-            ->values();
-
-        return $sizeCandidates->count() === 1 ? $sizeCandidates->first() : null;
     }
 
     /**

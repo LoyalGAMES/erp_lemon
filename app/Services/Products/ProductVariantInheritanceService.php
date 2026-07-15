@@ -13,6 +13,7 @@ final class ProductVariantInheritanceService
 
     public function __construct(
         private readonly ProductVariantOptionNormalizer $variantOptions,
+        private readonly LegacySizeVariantAxisResolver $legacySizeAxis,
     ) {}
 
     public function inheritsFromParent(Product $variant, ?Product $parent = null): bool
@@ -174,38 +175,78 @@ final class ProductVariantInheritanceService
     private function resolve(Product $parent, array $variantMaster): array
     {
         $master = $parent->masterData();
-        $variantAttribute = trim((string) (
+        $parentVariantAttribute = trim((string) data_get($master, 'variant_attribute', ''));
+        $declaredVariantAttribute = trim((string) (
             data_get($variantMaster, 'variant_attribute')
-            ?: data_get($master, 'variant_attribute')
+            ?: $parentVariantAttribute
             ?: 'Rozmiar'
         ));
+
+        if ($this->legacySizeAxis->isLegacyGeneric($declaredVariantAttribute)
+            && $this->variantOptions->isSizeAttribute($parentVariantAttribute)
+        ) {
+            $declaredVariantAttribute = $parentVariantAttribute;
+        }
+
+        // Axis recovery must consider the complete family. Recovering from a
+        // single snapshot could convert only one sibling and bypass the
+        // ambiguity guards used by the family migration/export path.
+        $variantAttribute = $declaredVariantAttribute;
         $optionParameter = $this->optionParameter($variantMaster, $variantAttribute);
 
         if ($optionParameter !== null) {
+            $optionWasLegacyGeneric = $this->legacySizeAxis->isLegacyGeneric(
+                (string) ($optionParameter['name'] ?? ''),
+            );
             $optionParameter['name'] = $variantAttribute;
-            $optionParameter['value'] = $this->variantOptions->normalize(
+
+            if ($optionWasLegacyGeneric
+                && $this->variantOptions->isSizeAttribute($variantAttribute)
+                && array_key_exists('name_en', $optionParameter)
+            ) {
+                $optionParameter['name_en'] = 'Size';
+            }
+
+            $optionParameter['value'] = $this->canonicalVariantOption(
+                $parent,
                 $variantAttribute,
                 $optionParameter['value'] ?? '',
             );
 
             foreach (['value_en', 'value_pl'] as $localizedValue) {
                 if (array_key_exists($localizedValue, $optionParameter)) {
-                    $optionParameter[$localizedValue] = $this->variantOptions->normalize(
-                        $localizedValue === 'value_en' ? 'Size' : $variantAttribute,
+                    $normalizationAttribute = $localizedValue === 'value_en'
+                        && $this->variantOptions->isSizeAttribute($variantAttribute)
+                            ? 'Size'
+                            : $variantAttribute;
+                    $optionParameter[$localizedValue] = $this->canonicalVariantOption(
+                        $parent,
+                        $variantAttribute,
                         $optionParameter[$localizedValue],
+                        $normalizationAttribute,
                     );
                 }
             }
 
-            foreach (['pl', 'en'] as $language) {
-                $translationPath = "translations.{$language}.value";
-
-                if (data_get($optionParameter, $translationPath) !== null) {
-                    data_set($optionParameter, $translationPath, $this->variantOptions->normalize(
-                        $language === 'en' ? 'Size' : $variantAttribute,
-                        data_get($optionParameter, $translationPath),
-                    ));
+            foreach ((array) data_get($optionParameter, 'translations', []) as $language => $translation) {
+                if (! is_array($translation) || ! array_key_exists('value', $translation)) {
+                    continue;
                 }
+
+                $normalizationAttribute = $language === 'en'
+                    && $this->variantOptions->isSizeAttribute($variantAttribute)
+                        ? 'Size'
+                        : $variantAttribute;
+                data_set(
+                    $optionParameter,
+                    "translations.{$language}.value",
+                    $this->canonicalVariantOption(
+                        $parent,
+                        $variantAttribute,
+                        $translation['value'],
+                        $normalizationAttribute,
+                    ),
+                );
             }
 
             $optionParameter['variation'] = true;
@@ -252,6 +293,25 @@ final class ProductVariantInheritanceService
         }
 
         return $master;
+    }
+
+    private function canonicalVariantOption(
+        Product $parent,
+        string $variantAttribute,
+        mixed $value,
+        ?string $normalizationAttribute = null,
+    ): string {
+        $rawValue = $this->variantOptions->normalize('', $value);
+        $canonical = $this->legacySizeAxis->canonicalSizeOption(
+            $parent,
+            $variantAttribute,
+            $rawValue,
+        ) ?? $rawValue;
+
+        return $this->variantOptions->normalize(
+            $normalizationAttribute ?? $variantAttribute,
+            $canonical,
+        );
     }
 
     /**

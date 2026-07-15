@@ -284,6 +284,89 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
         ));
     }
 
+    public function test_latest_size_axis_repair_is_dispatched_before_a_newer_broad_backfill(): void
+    {
+        Bus::fake();
+        Http::fake(fn () => Http::response([
+            'available' => true,
+            'attribute_term_translation_link_available' => true,
+            'variation_translation_link_available' => true,
+            'languages' => ['pl', 'en'],
+            'plugin_version' => '0.5.3',
+        ]));
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-PRIORITY-AXIS',
+            'name' => 'B2C priority axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Woo priority axis',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl', 'en']]],
+        ]);
+        $createProduct = function (string $sku): Product {
+            return Product::query()->create([
+                'sku' => $sku,
+                'name' => $sku,
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => ['master' => [
+                    'source' => 'erp',
+                    'product_type' => 'simple',
+                ]],
+            ]);
+        };
+        $priorityProduct = $createProduct('PRIORITY-SIZE-AXIS');
+        $priorityMapping = ProductChannelMapping::query()->create([
+            'product_id' => $priorityProduct->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '1001',
+            'external_sku' => $priorityProduct->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $newerBroadProduct = $createProduct('NEWER-BROAD-BACKFILL');
+        $newerBroadMapping = ProductChannelMapping::query()->create([
+            'product_id' => $newerBroadProduct->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '1002',
+            'external_sku' => $newerBroadProduct->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $service = app(LegacyVariantFamilyBackfillService::class);
+        $service->markPendingRevision(
+            $priorityProduct,
+            LegacyVariantFamilyBackfillService::LEGACY_SIZE_VARIANT_AXIS_RECOVERY_REVISION,
+        );
+        $service->markPendingRevision($newerBroadProduct, 'older-broad-revision');
+
+        $result = $service->dispatchPending(1);
+
+        $this->assertSame(1, $result['dispatched']);
+        Bus::assertDispatched(ExportWooCommerceProductDataJob::class, 1);
+        $this->assertSame('queued', data_get(
+            $priorityMapping->refresh()->metadata,
+            'product_data_export.legacy_variant_backfill.status',
+        ));
+        $this->assertNotNull(data_get(
+            $priorityMapping->metadata,
+            'product_data_export.pending_token',
+        ));
+        $this->assertSame('pending', data_get(
+            $newerBroadMapping->refresh()->metadata,
+            'product_data_export.legacy_variant_backfill.status',
+        ));
+        $this->assertNull(data_get(
+            $newerBroadMapping->metadata,
+            'product_data_export.pending_token',
+        ));
+    }
+
     public function test_migration_queues_one_durable_family_export_that_creates_the_missing_english_family(): void
     {
         Bus::fake();

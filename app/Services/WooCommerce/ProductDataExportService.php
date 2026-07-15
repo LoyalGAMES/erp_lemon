@@ -12,6 +12,7 @@ use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\WordpressIntegration;
 use App\Services\Inventory\ChannelStockAvailabilityService;
+use App\Services\Products\LegacySizeVariantAxisResolver;
 use App\Services\Products\ProductDescriptionSanitizer;
 use App\Services\Products\ProductVariantInheritanceService;
 use App\Services\Products\ProductVariantOptionNormalizer;
@@ -31,6 +32,7 @@ final class ProductDataExportService
         private readonly ProductDescriptionSanitizer $descriptionSanitizer,
         private readonly ProductVariantInheritanceService $variantInheritance,
         private readonly ProductVariantOptionNormalizer $variantOptions,
+        private readonly LegacySizeVariantAxisResolver $legacySizeAxis,
         private readonly ChannelStockAvailabilityService $channelStock,
     ) {}
 
@@ -1556,6 +1558,10 @@ final class ProductDataExportService
 
         $payload['type'] = 'variable';
         $payload['attributes'] = $this->variableAttributes($product, $variants, $language);
+        $payload['meta_data'] = $this->withVariantAttributeMeta(
+            (array) ($payload['meta_data'] ?? []),
+            $this->variantAttributeName($product, $variants),
+        );
         // This ERP keeps sellable stock on child SKUs. Explicitly clearing the
         // variable parent's inventory/default selection also repairs stale Woo
         // settings left by older imports and removed variant axes.
@@ -1637,6 +1643,10 @@ final class ProductDataExportService
         }
 
         $payload['attributes'] = $this->variationAttributes($parent, $variant, $language);
+        $payload['meta_data'] = $this->withVariantAttributeMeta(
+            (array) ($payload['meta_data'] ?? []),
+            $this->variantAttributeName($parent, $this->variantChildren($parent)),
+        );
         // WooCommerce 10.9 only applies a variation menu_order when the value
         // is truthy. Clamp legacy zeroes to 1 so a requested first position is
         // not silently ignored by the REST controller.
@@ -1646,6 +1656,41 @@ final class ProductDataExportService
             : 'draft';
 
         return $payload;
+    }
+
+    /**
+     * Keep the ERP round-trip marker aligned with the concrete axis emitted
+     * in the canonical Woo attributes. Otherwise a later Woo import can
+     * resurrect the legacy generic `wariant`/`BLVariant` declaration.
+     *
+     * @param  list<array{key:string,value:mixed}>  $metaData
+     * @return list<array{key:string,value:mixed}>
+     */
+    private function withVariantAttributeMeta(array $metaData, string $variantAttribute): array
+    {
+        $found = false;
+        $metaData = collect($metaData)
+            ->filter(fn (mixed $row): bool => is_array($row))
+            ->map(function (array $row) use ($variantAttribute, &$found): array {
+                if (($row['key'] ?? null) !== '_sempre_erp_variant_attribute') {
+                    return $row;
+                }
+
+                $found = true;
+                $row['value'] = $variantAttribute;
+
+                return $row;
+            })
+            ->values();
+
+        if (! $found) {
+            $metaData->push([
+                'key' => '_sempre_erp_variant_attribute',
+                'value' => $variantAttribute,
+            ]);
+        }
+
+        return $metaData->all();
     }
 
     private function mappingHasStockReleasePending(Product $product, int $salesChannelId): bool
@@ -1862,22 +1907,31 @@ final class ProductDataExportService
         $variantAttribute = $this->translatedParameterName($translationSource, $language);
         $variantOptionPairs = $variants
             ->map(function (Product $variant) use (
+                $product,
                 $sourceVariantAttribute,
                 $variantAttribute,
                 $language,
             ): array {
                 return [
-                    'source' => $this->variationOption(
-                        $variant,
+                    'source' => $this->canonicalVariantOption(
+                        $product,
                         $sourceVariantAttribute,
-                        $sourceVariantAttribute,
-                        'pl',
+                        $this->variationOption(
+                            $variant,
+                            $sourceVariantAttribute,
+                            $sourceVariantAttribute,
+                            'pl',
+                        ),
                     ),
-                    'localized' => $this->variationOption(
-                        $variant,
+                    'localized' => $this->canonicalVariantOption(
+                        $product,
                         $sourceVariantAttribute,
-                        $variantAttribute,
-                        $language,
+                        $this->variationOption(
+                            $variant,
+                            $sourceVariantAttribute,
+                            $variantAttribute,
+                            $language,
+                        ),
                     ),
                 ];
             })
@@ -1946,11 +2000,8 @@ final class ProductDataExportService
 
     private function isLegacyGenericVariantAttribute(string $attribute, string $selectedVariantAttribute): bool
     {
-        $attribute = mb_strtolower(trim($attribute));
-        $selectedVariantAttribute = mb_strtolower(trim($selectedVariantAttribute));
-
-        return ! in_array($selectedVariantAttribute, ['wariant', 'variant'], true)
-            && in_array($attribute, ['wariant', 'variant'], true);
+        return ! $this->legacySizeAxis->isLegacyGeneric($selectedVariantAttribute)
+            && $this->legacySizeAxis->isLegacyGeneric($attribute);
     }
 
     /**
@@ -1970,11 +2021,15 @@ final class ProductDataExportService
             ?? ['name' => $sourceVariantAttribute];
         $variantAttribute = $this->translatedParameterName($translationSource, $language);
 
-        $sourceOption = $this->variationOption(
-            $variant,
+        $sourceOption = $this->canonicalVariantOption(
+            $parent,
             $sourceVariantAttribute,
-            $sourceVariantAttribute,
-            'pl',
+            $this->variationOption(
+                $variant,
+                $sourceVariantAttribute,
+                $sourceVariantAttribute,
+                'pl',
+            ),
         );
 
         return [[
@@ -1985,11 +2040,15 @@ final class ProductDataExportService
                 [$sourceOption],
             ),
             'name' => $variantAttribute,
-            'option' => $this->variationOption(
-                $variant,
+            'option' => $this->canonicalVariantOption(
+                $parent,
                 $sourceVariantAttribute,
-                $variantAttribute,
-                $language,
+                $this->variationOption(
+                    $variant,
+                    $sourceVariantAttribute,
+                    $variantAttribute,
+                    $language,
+                ),
             ),
         ]];
     }
@@ -2130,6 +2189,12 @@ final class ProductDataExportService
     private function variantAttributeName(Product $product, Collection $variants): string
     {
         $name = trim((string) data_get($product->masterData(), 'variant_attribute', ''));
+
+        $recoveredSizeAxis = $this->legacySizeAxis->recover($product, $variants);
+
+        if ($recoveredSizeAxis !== null) {
+            return $recoveredSizeAxis;
+        }
 
         if ($name !== '') {
             return $name;
@@ -2294,6 +2359,18 @@ final class ProductDataExportService
         }
 
         return $this->variantOptions->normalize($renderedVariantAttribute, trim($variant->name));
+    }
+
+    private function canonicalVariantOption(
+        Product $parent,
+        string $sourceVariantAttribute,
+        string $option,
+    ): string {
+        return $this->legacySizeAxis->canonicalSizeOption(
+            $parent,
+            $sourceVariantAttribute,
+            $option,
+        ) ?? $option;
     }
 
     private function isAggregateVariantOption(mixed $value): bool
