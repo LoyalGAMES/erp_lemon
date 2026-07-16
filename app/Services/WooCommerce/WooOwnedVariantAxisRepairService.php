@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000031';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000032';
+
+    public const PREVIOUS_CHILD_ASSIGNMENT_AUDIT_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000031';
 
     public const PREVIOUS_EXACT_DEFAULT_REPAIR_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000030';
 
@@ -57,6 +59,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_CHILD_ASSIGNMENT_AUDIT_REVISION,
             self::PREVIOUS_EXACT_DEFAULT_REPAIR_REVISION,
             self::PREVIOUS_EXACT_LEGACY_DEFAULT_SLUG_REVISION,
             self::PREVIOUS_CANONICAL_SIZE_TAXONOMY_REVISION,
@@ -2041,7 +2044,10 @@ final class WooOwnedVariantAxisRepairService
             return false;
         }
 
-        if ($optionHints === []) {
+        if ($optionHints === []
+            && ! ($this->hasParentDuplicatedGenericAndSizeAxisEvidence($product)
+                && $this->hasOnlyBlankLocalChildAxisEvidence($product))
+        ) {
             return false;
         }
 
@@ -2784,7 +2790,11 @@ final class WooOwnedVariantAxisRepairService
     {
         $declared = trim((string) data_get($product->masterData(), 'variant_attribute', ''));
 
-        if (! $this->legacySizeAxis->isLegacyGeneric($declared)) {
+        if ($declared !== '' && ! $this->legacySizeAxis->isLegacyGeneric($declared)) {
+            return null;
+        }
+
+        if ($declared === '' && ! $this->hasParentDuplicatedGenericAndSizeAxisEvidence($product)) {
             return null;
         }
 
@@ -4430,13 +4440,22 @@ final class WooOwnedVariantAxisRepairService
         /** @var WordpressIntegration $integration */
         $integration = $target['integration'];
         $language = $this->language($target['language']);
-        $defaults = collect((array) ($parent['default_attributes'] ?? []))
+        $originalDefaults = collect((array) ($parent['default_attributes'] ?? []))
             ->filter(fn (mixed $default): bool => is_array($default))
-            ->values()
+            ->values();
+        $targetDefaultCount = $originalDefaults
+            ->filter(fn (array $default): bool => $targetAxesById->has(
+                (int) ($default['id'] ?? 0),
+            ))
+            ->count();
+        $ignoredLegacyDefault = false;
+        $defaults = $originalDefaults
             ->map(function (array $default) use (
                 $integration,
                 $language,
                 $targetAxesById,
+                $targetDefaultCount,
+                &$ignoredLegacyDefault,
             ): array {
                 $attributeId = (int) ($default['id'] ?? 0);
                 $axis = $targetAxesById->get($attributeId);
@@ -4451,17 +4470,63 @@ final class WooOwnedVariantAxisRepairService
                     return $default;
                 }
 
-                $default['option'] = $this->resolveExistingTargetAxisDefaultTermName(
-                    $integration,
-                    $language,
-                    $axis,
-                    $rawOption,
-                );
+                try {
+                    $default['option'] = $this->resolveExistingTargetAxisDefaultTermName(
+                        $integration,
+                        $language,
+                        $axis,
+                        $rawOption,
+                    );
+                } catch (DomainException $exception) {
+                    // This default belongs to the legacy generic Size axis
+                    // that a successful plan removes. If its historical term
+                    // identity can no longer be proven, dropping only this
+                    // default from the planning copy is safer than blocking an
+                    // otherwise exact SKU -> Size child repair. The untouched
+                    // remote parent remains available for rollback, and every
+                    // child/target taxonomy still has to pass the full
+                    // multilingual preflight before the first PUT. Canonical
+                    // Size defaults continue to fail closed.
+                    $rawKey = $this->canonicalSizeOptionKey(
+                        ProductVariantAxisNameResolver::SIZE,
+                        $rawOption,
+                    );
+                    $matchingAxisOptions = collect((array) ($axis['options'] ?? []))
+                        ->filter(fn (mixed $option): bool => $rawKey !== ''
+                            && $this->canonicalSizeOptionKey(
+                                ProductVariantAxisNameResolver::SIZE,
+                                (string) $option,
+                            ) === $rawKey)
+                        ->values();
+
+                    if ($this->isGenericAttribute($axis)
+                        && $attributeId > 0
+                        && ! $this->isCanonicalGlobalSizeAttribute($axis)
+                        && (bool) ($axis['variation'] ?? false)
+                        && $targetDefaultCount === 1
+                        && $rawKey !== ''
+                        && $matchingAxisOptions->count() === 1
+                    ) {
+                        $ignoredLegacyDefault = true;
+
+                        return [];
+                    }
+
+                    throw $exception;
+                }
 
                 return $default;
             })
+            ->filter(fn (array $default): bool => $default !== [])
             ->all();
         $parent['default_attributes'] = $defaults;
+
+        if ($ignoredLegacyDefault) {
+            // Phase one keeps the exact preflight defaults while both the old
+            // and target axes are enabled. Only the final parent PUT removes
+            // the unresolvable default together with its legacy generic axis.
+            $parent['_lemon_transitional_default_attributes'] = $originalDefaults->all();
+        }
 
         return $parent;
     }
@@ -5659,7 +5724,11 @@ final class WooOwnedVariantAxisRepairService
 
         return [
             'attributes' => $attributes->values()->all(),
-            'default_attributes' => collect((array) ($parent['default_attributes'] ?? []))
+            'default_attributes' => collect((array) (
+                $parent['_lemon_transitional_default_attributes']
+                    ?? $parent['default_attributes']
+                    ?? []
+            ))
                 ->filter(fn (mixed $attribute): bool => is_array($attribute))
                 ->map(fn (array $attribute): array => $this->serializeDefaultAttribute($attribute))
                 ->values()

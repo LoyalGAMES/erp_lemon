@@ -45,7 +45,9 @@ final class LegacyVariantFamilyBackfillService
 
     public const ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION = 'attribute_positions_and_live_stock_2026_07_16_000023';
 
-    public const CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000031';
+    public const CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000032';
+
+    public const PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000031';
 
     public const CRITICAL_EXPORT_QUEUE = 'woocommerce-critical';
 
@@ -241,6 +243,7 @@ final class LegacyVariantFamilyBackfillService
             if (in_array($reservation['revision'], [
                 self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
                 self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+                self::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                 self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
                 self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
             ], true)) {
@@ -296,6 +299,7 @@ final class LegacyVariantFamilyBackfillService
         foreach ([
             self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
             self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            self::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
             self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
             self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
             self::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
@@ -378,6 +382,7 @@ final class LegacyVariantFamilyBackfillService
                     if (in_array($reservation['revision'], [
                         self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
                         self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+                        self::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                         self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
                         self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
                     ], true)) {

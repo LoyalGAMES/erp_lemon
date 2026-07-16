@@ -22,6 +22,51 @@ final class WooOwnedVariantAxisPostRepairCatalogSyncMigrationTest extends TestCa
 {
     use RefreshDatabase;
 
+    public function test_previous_child_assignment_catalog_sync_revision_keeps_critical_priority_after_revision_bump(): void
+    {
+        Bus::fake([ExportWooCommerceProductDataJob::class]);
+        Http::fake(fn () => Http::response([
+            'available' => true,
+            'attribute_term_translation_link_available' => true,
+            'variation_translation_link_available' => true,
+            'variation_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations',
+            'languages' => ['pl', 'en'],
+            'plugin_version' => '0.5.3',
+        ]));
+        $channel = SalesChannel::query()->create([
+            'code' => 'PREVIOUS-CHILD-SYNC',
+            'name' => 'Previous child sync',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Previous child sync Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl', 'en']]],
+        ]);
+        $mapping = $this->completedMapping($channel, 'PREVIOUS-CHILD-SYNC', 'repaired');
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, 'product_data_export.legacy_variant_backfill', [
+            'status' => 'pending',
+            'reason' => LegacyVariantFamilyBackfillService::REASON,
+            'revision' => LegacyVariantFamilyBackfillService::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            'requested_at' => '2026-07-16T20:00:00+00:00',
+        ]);
+        $mapping->update(['metadata' => $metadata]);
+
+        $dispatch = app(LegacyVariantFamilyBackfillService::class)->dispatchPending(1);
+
+        $this->assertSame(1, $dispatch['dispatched']);
+        Bus::assertDispatched(
+            ExportWooCommerceProductDataJob::class,
+            fn (ExportWooCommerceProductDataJob $job): bool => $job->queue
+                === LegacyVariantFamilyBackfillService::CRITICAL_EXPORT_QUEUE,
+        );
+    }
+
     public function test_migration_requeues_completed_repairs_and_preserves_an_unrelated_active_export(): void
     {
         Bus::fake([ExportWooCommerceProductDataJob::class]);
