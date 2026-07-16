@@ -10,6 +10,7 @@ use App\Models\ProductCategory;
 use App\Models\ProductCategoryChannelAlias;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\StockBalance;
 use App\Models\StockSyncQueueItem;
@@ -28,6 +29,7 @@ use App\Services\Products\ProductCategoryTranslationMergeService;
 use App\Services\Products\ProductDescriptionSanitizer;
 use App\Services\Products\ProductParameterTranslationService;
 use App\Services\Products\ProductTranslationMergeService;
+use App\Services\Products\ProductVariantAxisNameResolver;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use Carbon\CarbonImmutable;
 use Illuminate\Support\Arr;
@@ -38,6 +40,9 @@ use Throwable;
 
 final class WooCommerceImportService
 {
+    /** @var Collection<int, string>|null */
+    private ?Collection $knownSizeOptionsForImport = null;
+
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly SalesChannelWarehouseResolver $warehouseResolver,
@@ -50,8 +55,10 @@ final class WooCommerceImportService
         private readonly ProductCategoryTranslationMergeService $categoryTranslationMerge,
         private readonly ProductParameterTranslationService $parameterTranslations,
         private readonly ProductDescriptionSanitizer $descriptionSanitizer,
+        private readonly ProductVariantAxisNameResolver $variantAxisNames,
         private readonly ProductVariantOptionNormalizer $variantOptions,
         private readonly LegacySizeVariantAxisResolver $legacySizeAxis,
+        private readonly WooOwnedVariantAxisRepairService $variantAxisRepair,
         private readonly WooCommerceCustomerSyncService $customerSync,
         private readonly CustomerAccountClaimService $customerAccountClaims,
     ) {}
@@ -61,6 +68,10 @@ final class WooCommerceImportService
      */
     public function importProducts(WordpressIntegration $integration): array
     {
+        // Request-local memoization only. A new catalog import always reloads
+        // the dictionary and never relies on application or persistent cache.
+        $this->knownSizeOptionsForImport = null;
+
         $stats = [
             'source_items' => 0,
             'source_products' => 0,
@@ -170,6 +181,10 @@ final class WooCommerceImportService
                 $this->syncItemCategories($integration, (array) ($item['categories'] ?? []), $this->normalizeLanguage($item['erp_import_language'] ?? 'pl'));
                 $this->syncTranslationCategories($integration, $item);
                 $parameterSync = $this->parameterTranslations->syncFromWooItem($item);
+                // The translation sync can extend the canonical size
+                // dictionary. Refresh the request-local snapshot once for
+                // this item, then reuse it across every item transformation.
+                $this->knownSizeOptionsForImport = null;
                 $stats['parameter_definitions_localized'] += $parameterSync['localized'];
                 $stats['parameter_definitions_merged'] += $parameterSync['merged'];
                 [$product, $resolvedDuplicateSku] = $this->productForWooItem($integration, $item, $sku);
@@ -348,6 +363,7 @@ final class WooCommerceImportService
         }
 
         $this->syncImportedRelatedProductSkus($integration);
+        $this->markImportedLegacySizeFamiliesPending($integration);
 
         $stats['unique_skus_seen'] = count($seenSourceSkus);
         $stats['duplicate_sku_groups_count'] = count($duplicateSkuGroups);
@@ -366,6 +382,64 @@ final class WooCommerceImportService
             ->count();
 
         return $stats;
+    }
+
+    /**
+     * New imports happen after one-shot migrations have already run. Queue a
+     * remote-first axis repair only after every product, mapping and relation
+     * in the imported family has been persisted. This method performs no HTTP.
+     */
+    private function markImportedLegacySizeFamiliesPending(WordpressIntegration $integration): void
+    {
+        $rootIds = ProductChannelMapping::query()
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->where(function ($query): void {
+                $query->whereNull('external_variation_id')
+                    ->orWhereIn('external_variation_id', ['', '0'])
+                    ->orWhereRaw("TRIM(external_variation_id) = ''");
+            })
+            ->pluck('product_id');
+
+        Product::query()
+            ->whereIn('id', $rootIds)
+            ->with(['variantChildren.parentRelations', 'parentRelations'])
+            ->get()
+            ->each(function (Product $product): void {
+                $rawAxes = collect((array) data_get($product->attributes, 'woocommerce_attributes', []))
+                    ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                        && (bool) ($attribute['variation'] ?? false))
+                    ->map(fn (array $attribute): string => trim((string) (
+                        $attribute['name'] ?? $attribute['slug'] ?? ''
+                    )))
+                    ->filter();
+
+                foreach ($product->variantChildren as $variant) {
+                    $rawAxes = $rawAxes->merge(
+                        collect((array) data_get(
+                            $variant->attributes,
+                            'woocommerce_variation_attributes',
+                            data_get($variant->attributes, 'woocommerce_attributes', []),
+                        ))
+                            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+                            ->map(fn (array $attribute): string => trim((string) (
+                                $attribute['name'] ?? $attribute['slug'] ?? ''
+                            )))
+                            ->filter(),
+                    );
+                }
+                $hasLegacyRawAxis = $rawAxes->contains(
+                    fn (string $axis): bool => $this->variantAxisNames->isGenericSizeAlias($axis)
+                        || $this->variantAxisNames->isLegacyPluralSizeAlias($axis),
+                );
+
+                if (! $hasLegacyRawAxis
+                    || ! $this->variantAxisRepair->isSizeVariantRootCandidate($product)
+                ) {
+                    return;
+                }
+
+                $this->variantAxisRepair->markPending($product);
+            });
     }
 
     /**
@@ -1732,10 +1806,10 @@ final class WooCommerceImportService
      */
     private function shouldPreserveSynchronizedVariantAxis(Product $product): bool
     {
-        return data_get(
+        return WooOwnedVariantAxisRepairService::isSynchronizedRevision(data_get(
             $product->masterData(),
             WooOwnedVariantAxisRepairService::STATE_PATH.'.revision',
-        ) === WooOwnedVariantAxisRepairService::REVISION;
+        ));
     }
 
     /** @param array<string,mixed> $row */
@@ -2080,9 +2154,11 @@ final class WooCommerceImportService
      */
     private function parameterList(array $item): array
     {
+        $knownSizeOptions = $this->knownSizeOptions();
+
         return collect((array) ($item['attributes'] ?? []))
             ->filter(fn ($attribute): bool => is_array($attribute))
-            ->map(function (array $attribute): ?array {
+            ->map(function (array $attribute) use ($knownSizeOptions): ?array {
                 $name = $this->nullableString($attribute['name'] ?? null);
 
                 if ($name === null) {
@@ -2090,6 +2166,10 @@ final class WooCommerceImportService
                 }
 
                 $value = $attribute['option'] ?? null;
+                $rawOptions = array_key_exists('option', $attribute)
+                    ? [$attribute['option']]
+                    : (array) ($attribute['options'] ?? []);
+                $name = $this->variantAxisNames->resolve($name, $rawOptions, $knownSizeOptions);
 
                 if ($value === null && isset($attribute['options']) && is_array($attribute['options'])) {
                     $value = collect($attribute['options'])
@@ -2099,7 +2179,7 @@ final class WooCommerceImportService
                         ))
                         ->filter()
                         ->unique(fn (string $option): string => $this->variantOptions->identity($name, $option))
-                        ->implode(', ');
+                        ->implode(' | ');
                 }
 
                 return [
@@ -2128,14 +2208,34 @@ final class WooCommerceImportService
         $explicit = $this->nullableString($this->metaValue($item, [
             '_sempre_erp_variant_attribute',
         ]));
-
-        if ($explicit !== null && ! $this->legacySizeAxis->isLegacyGeneric($explicit)) {
-            return $explicit;
-        }
-
+        $knownSizeOptions = $this->knownSizeOptions();
         $candidates = $this->variantAxisCandidatesForImport($item);
 
         if ($explicit !== null) {
+            $explicitOptions = collect((array) ($item['attributes'] ?? []))
+                ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                    && mb_strtolower(trim((string) ($attribute['name'] ?? '')))
+                        === mb_strtolower($explicit))
+                ->flatMap(fn (array $attribute): array => array_key_exists('option', $attribute)
+                    ? [$attribute['option']]
+                    : (array) ($attribute['options'] ?? []));
+            $resolvedExplicit = $this->variantAxisNames->resolve(
+                $explicit,
+                $explicitOptions,
+                $knownSizeOptions,
+            );
+
+            if (! $this->legacySizeAxis->isLegacyGeneric($explicit)) {
+                return $resolvedExplicit;
+            }
+
+            if (! $this->legacySizeAxis->isLegacyGeneric($resolvedExplicit)
+                && $candidates->count() === 1
+                && ! $candidates->contains(fn (array $candidate): bool => $candidate['ambiguous'])
+            ) {
+                return $resolvedExplicit;
+            }
+
             return $this->concreteSizeAxisForLegacyImport($candidates) ?? $explicit;
         }
 
@@ -2158,7 +2258,7 @@ final class WooCommerceImportService
      * Keep the old generic metadata unless the current Woo payload proves
      * which concrete size taxonomy represents the same variation axis.
      *
-     * @param  Collection<int, array{name:string,option_keys:list<string>,ambiguous:bool}>  $candidates
+     * @param  Collection<int, array{name:string,option_keys:list<string>,ambiguous:bool,canonicalized_generic:bool}>  $candidates
      */
     private function concreteSizeAxisForLegacyImport(Collection $candidates): ?string
     {
@@ -2182,6 +2282,12 @@ final class WooCommerceImportService
         // identifies this concrete size taxonomy as the only possible axis.
         if ($candidates->count() === 1) {
             return $sizeCandidate['name'];
+        }
+
+        if ($sizeCandidate['canonicalized_generic']) {
+            // A generic label plus any second variation axis is still
+            // ambiguous (legacy catalogs also used BLVariant for Color).
+            return null;
         }
 
         $genericCandidates = $candidates
@@ -2228,10 +2334,12 @@ final class WooCommerceImportService
 
     /**
      * @param  array<string, mixed>  $item
-     * @return Collection<int, array{name:string,option_keys:list<string>,ambiguous:bool}>
+     * @return Collection<int, array{name:string,option_keys:list<string>,ambiguous:bool,canonicalized_generic:bool}>
      */
     private function variantAxisCandidatesForImport(array $item): Collection
     {
+        $knownSizeOptions = $this->knownSizeOptions();
+
         return collect((array) ($item['attributes'] ?? []))
             ->filter(fn (mixed $attribute): bool => is_array($attribute))
             ->filter(function (array $attribute) use ($item): bool {
@@ -2241,16 +2349,18 @@ final class WooCommerceImportService
 
                 return (bool) ($attribute['variation'] ?? false);
             })
-            ->map(function (array $attribute): ?array {
+            ->map(function (array $attribute) use ($knownSizeOptions): ?array {
                 $name = $this->nullableString($attribute['name'] ?? null);
 
                 if ($name === null) {
                     return null;
                 }
 
+                $sourceName = $name;
                 $options = array_key_exists('option', $attribute)
                     ? [$attribute['option']]
                     : (array) ($attribute['options'] ?? []);
+                $name = $this->variantAxisNames->resolve($name, $options, $knownSizeOptions);
                 $optionKeys = collect($options)
                     ->map(function (mixed $option): string {
                         $option = preg_replace(
@@ -2270,6 +2380,8 @@ final class WooCommerceImportService
                 return [
                     'name' => $name,
                     'option_keys' => $optionKeys,
+                    'canonicalized_generic' => $this->legacySizeAxis->isLegacyGeneric($sourceName)
+                        && ! $this->legacySizeAxis->isLegacyGeneric($name),
                 ];
             })
             ->filter()
@@ -2284,8 +2396,34 @@ final class WooCommerceImportService
                     'name' => $rows->first()['name'],
                     'option_keys' => $rows->first()['option_keys'],
                     'ambiguous' => $signatures->count() !== 1,
+                    'canonicalized_generic' => $rows->contains(
+                        fn (array $row): bool => (bool) ($row['canonicalized_generic'] ?? false),
+                    ),
                 ];
             })
+            ->values();
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function knownSizeOptions(): Collection
+    {
+        return $this->knownSizeOptionsForImport ??= ProductParameterDefinition::query()
+            ->get(['name', 'name_en', 'slug', 'values', 'values_en'])
+            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
+                $definition->name,
+                $definition->name_en,
+                $definition->slug,
+            ])->contains(fn (mixed $name): bool => $this->variantAxisNames
+                ->isDirectSizeAlias((string) $name)))
+            ->flatMap(fn (ProductParameterDefinition $definition): array => [
+                ...(array) $definition->values,
+                ...(array) $definition->values_en,
+            ])
+            ->map(fn (mixed $value): string => trim((string) $value))
+            ->filter()
+            ->unique(fn (string $value): string => mb_strtolower($value))
             ->values();
     }
 

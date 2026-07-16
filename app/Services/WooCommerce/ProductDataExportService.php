@@ -14,6 +14,7 @@ use App\Models\WordpressIntegration;
 use App\Services\Inventory\ChannelStockAvailabilityService;
 use App\Services\Products\LegacySizeVariantAxisResolver;
 use App\Services\Products\ProductDescriptionSanitizer;
+use App\Services\Products\ProductVariantAxisNameResolver;
 use App\Services\Products\ProductVariantInheritanceService;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use Carbon\CarbonImmutable;
@@ -28,6 +29,7 @@ final class ProductDataExportService
         private readonly WooCommerceClient $client,
         private readonly ProductDescriptionSanitizer $descriptionSanitizer,
         private readonly ProductVariantInheritanceService $variantInheritance,
+        private readonly ProductVariantAxisNameResolver $variantAxisNames,
         private readonly ProductVariantOptionNormalizer $variantOptions,
         private readonly LegacySizeVariantAxisResolver $legacySizeAxis,
         private readonly ChannelStockAvailabilityService $channelStock,
@@ -1929,7 +1931,13 @@ final class ProductDataExportService
                 ->map(fn (Product $variant): ?array => $this->parameterRowForName($variant, $sourceVariantAttribute))
                 ->first(fn (?array $parameter): bool => $parameter !== null)
             ?? ['name' => $sourceVariantAttribute];
-        $variantAttribute = $this->translatedParameterName($translationSource, $language);
+        $variantAttribute = $this->renderedVariantAttributeName(
+            $sourceVariantAttribute,
+            $translationSource,
+            $language,
+            $product,
+            $variants,
+        );
         $variantOptionPairs = $variants
             ->map(function (Product $variant) use (
                 $product,
@@ -1998,13 +2006,19 @@ final class ProductDataExportService
         $variantOptions = $variantOptionPairs->pluck('localized')->all();
         $sourceVariantOptions = $variantOptionPairs->pluck('source')->all();
         $attributes = collect($this->attributes($master, $language));
+        $knownSizeOptions = $this->knownSizeOptions();
         $isVariantAxis = fn (array $attribute): bool => in_array(
             mb_strtolower(trim((string) ($attribute['source_name'] ?? $attribute['name']))),
             [mb_strtolower($sourceVariantAttribute), mb_strtolower($variantAttribute)],
             true,
         ) || $this->isLegacyGenericVariantAttribute(
-            (string) ($attribute['source_name'] ?? $attribute['name']),
+            $attribute,
             $sourceVariantAttribute,
+            $knownSizeOptions,
+        ) || ($this->variantAxisNames->isDirectSizeAlias($sourceVariantAttribute)
+            && $this->variantAxisNames->isDirectSizeAlias(
+                (string) ($attribute['source_name'] ?? $attribute['name']),
+            )
         );
         $existingAxis = $attributes->filter($isVariantAxis);
         $configuredAxisPosition = $this->parameterAttributeSortOrder($translationSource);
@@ -2040,10 +2054,54 @@ final class ProductDataExportService
         return $this->withCanonicalAttributePositions($attributes);
     }
 
-    private function isLegacyGenericVariantAttribute(string $attribute, string $selectedVariantAttribute): bool
-    {
-        return ! $this->legacySizeAxis->isLegacyGeneric($selectedVariantAttribute)
-            && $this->legacySizeAxis->isLegacyGeneric($attribute);
+    /**
+     * A generic legacy name is an alias of the selected size axis only when
+     * its own values identify it as size data. An independent BLVariant
+     * parameter containing colours must remain a normal Woo attribute.
+     *
+     * @param  array<string, mixed>  $attribute
+     * @param  Collection<int, string>  $knownSizeOptions
+     */
+    private function isLegacyGenericVariantAttribute(
+        array $attribute,
+        string $selectedVariantAttribute,
+        Collection $knownSizeOptions,
+    ): bool {
+        if ($this->legacySizeAxis->isLegacyGeneric($selectedVariantAttribute)
+            || ! $this->variantAxisNames->isDirectSizeAlias($selectedVariantAttribute)
+        ) {
+            return false;
+        }
+
+        $attributeName = trim((string) ($attribute['source_name'] ?? $attribute['name'] ?? ''));
+
+        return $this->legacySizeAxis->isLegacyGeneric($attributeName)
+            && $this->variantAxisNames->resolve(
+                $attributeName,
+                (array) ($attribute['source_options'] ?? $attribute['options'] ?? []),
+                $knownSizeOptions,
+            ) === ProductVariantAxisNameResolver::SIZE;
+    }
+
+    /** @param array<string, mixed> $translationSource */
+    private function renderedVariantAttributeName(
+        string $sourceVariantAttribute,
+        array $translationSource,
+        string $language,
+        Product $product,
+        Collection $variants,
+    ): string {
+        if ($this->protectedMappedLegacyVariantAttribute($product, $variants) !== null) {
+            return $this->translatedParameterName($translationSource, $language);
+        }
+
+        if ($this->variantAxisNames->isDirectSizeAlias($sourceVariantAttribute)) {
+            return $language === '' || $language === 'pl'
+                ? ProductVariantAxisNameResolver::SIZE
+                : 'Size';
+        }
+
+        return $this->translatedParameterName($translationSource, $language);
     }
 
     /**
@@ -2061,7 +2119,13 @@ final class ProductDataExportService
         $translationSource = $this->parameterRowForName($parent, $sourceVariantAttribute)
             ?? $this->parameterRowForName($variant, $sourceVariantAttribute)
             ?? ['name' => $sourceVariantAttribute];
-        $variantAttribute = $this->translatedParameterName($translationSource, $language);
+        $variantAttribute = $this->renderedVariantAttributeName(
+            $sourceVariantAttribute,
+            $translationSource,
+            $language,
+            $parent,
+            $familyVariants,
+        );
 
         $sourceOption = $this->canonicalVariantOption(
             $parent,
@@ -2250,15 +2314,20 @@ final class ProductDataExportService
     private function variantAttributeName(Product $product, Collection $variants): string
     {
         $name = trim((string) data_get($product->masterData(), 'variant_attribute', ''));
+        $protectedLegacyAxis = $this->protectedMappedLegacyVariantAttribute($product, $variants);
+
+        if ($protectedLegacyAxis !== null) {
+            return $protectedLegacyAxis;
+        }
 
         $recoveredSizeAxis = $this->legacySizeAxis->recover($product, $variants);
 
         if ($recoveredSizeAxis !== null) {
-            return $recoveredSizeAxis;
+            return $this->canonicalVariantAttributeName($recoveredSizeAxis, $product, $variants);
         }
 
         if ($name !== '') {
-            return $name;
+            return $this->canonicalVariantAttributeName($name, $product, $variants);
         }
 
         $relationCandidates = $variants
@@ -2276,7 +2345,7 @@ final class ProductDataExportService
         $relationCandidate = $this->singleAttributeCandidate($relationCandidates);
 
         if ($relationCandidate !== null) {
-            return $relationCandidate;
+            return $this->canonicalVariantAttributeName($relationCandidate, $product, $variants);
         }
 
         $commonVariantCandidates = $variants
@@ -2304,7 +2373,7 @@ final class ProductDataExportService
         $commonVariantCandidate = $this->singleAttributeCandidate($commonVariantCandidates);
 
         if ($commonVariantCandidate !== null) {
-            return $commonVariantCandidate;
+            return $this->canonicalVariantAttributeName($commonVariantCandidate, $product, $variants);
         }
 
         $parentCandidates = collect((array) data_get($product->masterData(), 'parameters', []))
@@ -2315,10 +2384,169 @@ final class ProductDataExportService
         $parentCandidate = $this->singleAttributeCandidate($parentCandidates);
 
         if ($parentCandidate !== null) {
-            return $parentCandidate;
+            return $this->canonicalVariantAttributeName($parentCandidate, $product, $variants);
         }
 
-        return 'Rozmiar';
+        return ProductVariantAxisNameResolver::SIZE;
+    }
+
+    /**
+     * @param  Collection<int, Product>  $variants
+     */
+    private function canonicalVariantAttributeName(
+        string $attributeName,
+        Product $product,
+        Collection $variants,
+    ): string {
+        $genericLegacyAxis = $this->variantAxisNames->isGenericSizeAlias($attributeName);
+        $matches = fn (mixed $candidate): bool => mb_strtolower(trim((string) $candidate))
+            === mb_strtolower(trim($attributeName))
+            || ($genericLegacyAxis && (
+                $this->variantAxisNames->isGenericSizeAlias((string) $candidate)
+                || $this->variantAxisNames->isDirectSizeAlias((string) $candidate)
+            ));
+        $options = collect((array) data_get($product->masterData(), 'parameters', []))
+            ->filter(fn (mixed $parameter): bool => is_array($parameter)
+                && $matches($parameter['name'] ?? ''))
+            ->pluck('value');
+
+        foreach ($variants as $variant) {
+            $options = $options->merge(
+                collect((array) data_get($variant->masterData(), 'parameters', []))
+                    ->filter(fn (mixed $parameter): bool => is_array($parameter)
+                        && $matches($parameter['name'] ?? ''))
+                    ->pluck('value'),
+            );
+
+            foreach ($variant->wooVariationAttributes() as $attribute) {
+                if ($matches($attribute['name'] ?? '')) {
+                    $options->push($attribute['option'] ?? null);
+                }
+            }
+
+            $metadata = $variant->pivot?->getAttribute('metadata');
+
+            if (is_string($metadata)) {
+                $decoded = json_decode($metadata, true);
+                $metadata = is_array($decoded) ? $decoded : [];
+            }
+
+            if ($matches(data_get($metadata, 'variant_attribute'))) {
+                $options->push(data_get($metadata, 'variant_option'));
+            }
+        }
+
+        return $this->variantAxisNames->resolve(
+            $attributeName,
+            $options,
+            $this->knownSizeOptions(),
+        );
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function knownSizeOptions(): Collection
+    {
+        return ProductParameterDefinition::query()
+            ->get(['name', 'name_en', 'slug', 'values', 'values_en'])
+            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
+                $definition->name,
+                $definition->name_en,
+                $definition->slug,
+            ])->contains(fn (mixed $name): bool => $this->variantAxisNames
+                ->isDirectSizeAlias((string) $name)))
+            ->flatMap(fn (ProductParameterDefinition $definition): array => [
+                ...(array) $definition->values,
+                ...(array) $definition->values_en,
+            ])
+            ->map(fn (mixed $option): string => trim((string) $option))
+            ->filter()
+            ->unique()
+            ->values();
+    }
+
+    /**
+     * A normal product export must never perform the parent-first half of a
+     * remote taxonomy repair. Until the dedicated remote-first repair has
+     * persisted its synchronized marker, keep an already mapped legacy family
+     * on the axis currently represented by its Woo snapshot.
+     *
+     * @param  Collection<int, Product>  $variants
+     */
+    private function protectedMappedLegacyVariantAttribute(
+        Product $product,
+        Collection $variants,
+    ): ?string {
+        $product->loadMissing('channelMappings.salesChannel');
+        $hasParentMapping = $product->channelMappings->contains(
+            fn (ProductChannelMapping $mapping): bool => filled($mapping->external_product_id)
+                && ! filled($mapping->external_variation_id)
+                && $mapping->salesChannel?->type === 'woocommerce'
+                && (bool) $mapping->salesChannel?->is_active,
+        );
+
+        if (! $hasParentMapping) {
+            return null;
+        }
+
+        $localState = (array) data_get(
+            $product->masterData(),
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+
+        if (WooOwnedVariantAxisRepairService::isSynchronizedRevision(
+            $localState['revision'] ?? null,
+        )) {
+            return null;
+        }
+
+        $isLegacyAxis = function (mixed $name): bool {
+            $name = trim((string) $name);
+
+            return $name !== '' && (
+                $this->legacySizeAxis->isLegacyGeneric($name)
+                || $this->variantAxisNames->isLegacyPluralSizeAlias($name)
+            );
+        };
+        $rawAxisNames = collect((array) data_get($product->attributes, 'woocommerce_attributes', []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                && (bool) ($attribute['variation'] ?? false))
+            ->map(fn (array $attribute): string => trim((string) (
+                $attribute['name'] ?? $attribute['slug'] ?? ''
+            )))
+            ->filter();
+
+        foreach ($variants as $variant) {
+            $rawAxisNames = $rawAxisNames->merge(
+                collect($variant->wooVariationAttributes())
+                    ->filter(fn (mixed $attribute): bool => is_array($attribute))
+                    ->map(fn (array $attribute): string => trim((string) (
+                        $attribute['name'] ?? $attribute['slug'] ?? ''
+                    )))
+                    ->filter(),
+            );
+        }
+
+        $rawAxisNames = $rawAxisNames
+            ->unique(fn (string $axis): string => mb_strtolower($axis))
+            ->values();
+        $legacyRawAxis = $rawAxisNames->first($isLegacyAxis);
+
+        if (is_string($legacyRawAxis) && $legacyRawAxis !== '') {
+            return $legacyRawAxis;
+        }
+
+        // A concrete raw snapshot proves Woo is already canonical. Fall back
+        // to local metadata only when no remote-axis snapshot is available.
+        if ($rawAxisNames->isNotEmpty()) {
+            return null;
+        }
+
+        $declared = trim((string) data_get($product->masterData(), 'variant_attribute', ''));
+
+        return $isLegacyAxis($declared) ? $declared : null;
     }
 
     /**
@@ -2380,6 +2608,17 @@ final class ProductDataExportService
         }
 
         if (is_array($parameter)) {
+            if (mb_strtolower(trim($sourceVariantAttribute))
+                    === mb_strtolower(ProductVariantAxisNameResolver::SIZE)
+                && $this->variantAxisNames->resolve(
+                    (string) ($parameter['name'] ?? ''),
+                    [$parameter['value'] ?? null],
+                    $this->knownSizeOptions(),
+                ) === ProductVariantAxisNameResolver::SIZE
+            ) {
+                $parameter = $this->canonicalSizeParameterRow($parameter);
+            }
+
             return $this->variantOptions->normalize(
                 $renderedVariantAttribute,
                 $this->translatedParameterValue($parameter, $language),
@@ -2445,18 +2684,60 @@ final class ProductDataExportService
     private function parameterRowForName(Product $product, string $name): ?array
     {
         $normalizedName = mb_strtolower(trim($name));
+        $parameters = collect((array) data_get($product->masterData(), 'parameters', []))
+            ->filter(fn (mixed $parameter): bool => is_array($parameter))
+            ->values();
+        $exact = $parameters->first(
+            fn (array $parameter): bool => mb_strtolower(trim((string) ($parameter['name'] ?? '')))
+                === $normalizedName,
+        );
+        $canonicalSizeRequested = $normalizedName
+            === mb_strtolower(ProductVariantAxisNameResolver::SIZE);
 
-        foreach ((array) data_get($product->masterData(), 'parameters', []) as $parameter) {
-            if (! is_array($parameter)) {
-                continue;
+        if (is_array($exact)) {
+            return $canonicalSizeRequested
+                ? $this->canonicalSizeParameterRow($exact)
+                : $exact;
+        }
+
+        foreach ($parameters as $parameter) {
+            if ($this->variantAxisNames->isDirectSizeAlias($name)
+                && $this->variantAxisNames->isDirectSizeAlias(
+                    (string) ($parameter['name'] ?? ''),
+                )
+            ) {
+                return $canonicalSizeRequested
+                    ? $this->canonicalSizeParameterRow($parameter)
+                    : $parameter;
             }
+        }
 
-            if (mb_strtolower(trim((string) ($parameter['name'] ?? ''))) === $normalizedName) {
-                return $parameter;
+        if ($canonicalSizeRequested) {
+            $knownSizeOptions = $this->knownSizeOptions();
+
+            foreach ($parameters as $parameter) {
+                if ($this->variantAxisNames->resolve(
+                    (string) ($parameter['name'] ?? ''),
+                    [$parameter['value'] ?? null],
+                    $knownSizeOptions,
+                ) === ProductVariantAxisNameResolver::SIZE) {
+                    return $this->canonicalSizeParameterRow($parameter);
+                }
             }
         }
 
         return null;
+    }
+
+    /** @param array<string, mixed> $parameter */
+    private function canonicalSizeParameterRow(array $parameter): array
+    {
+        $parameter['name'] = ProductVariantAxisNameResolver::SIZE;
+        $parameter['name_en'] = 'Size';
+        $parameter['slug'] = 'rozmiar';
+        $parameter['_prefer_canonical_size_definition'] = true;
+
+        return $parameter;
     }
 
     /**
@@ -2497,6 +2778,17 @@ final class ProductDataExportService
     {
         $sourceValue = trim((string) ($parameter['value'] ?? ''));
 
+        if ((bool) ($parameter['_prefer_canonical_size_definition'] ?? false)) {
+            $canonicalValue = $this->canonicalSizeDictionaryValue(
+                $parameter,
+                $language,
+            );
+
+            if ($canonicalValue !== null) {
+                return $canonicalValue;
+            }
+        }
+
         if ($language === '' || $language === 'pl') {
             return $sourceValue;
         }
@@ -2536,6 +2828,81 @@ final class ProductDataExportService
         return $translatedValue !== '' ? $translatedValue : $sourceValue;
     }
 
+    /** @param array<string, mixed> $parameter */
+    private function canonicalSizeDictionaryValue(array $parameter, string $language): ?string
+    {
+        $definition = $this->parameterDefinition($parameter);
+
+        if (! $definition instanceof ProductParameterDefinition
+            || mb_strtolower(trim((string) $definition->name))
+                !== mb_strtolower(ProductVariantAxisNameResolver::SIZE)
+        ) {
+            return null;
+        }
+
+        $language = trim($language) ?: 'pl';
+        $sourceValues = collect((array) $definition->values)->values();
+        $localizedValues = $language === 'pl'
+            ? $sourceValues
+            : collect((array) (
+                $definition->getAttribute("values_{$language}")
+                ?? data_get($definition->metadata, "translations.{$language}.values")
+                ?? []
+            ))->values();
+        $inlineValue = trim((string) (
+            $parameter["value_{$language}"]
+            ?? data_get($parameter, "translations.{$language}.value")
+            ?? ''
+        ));
+        $candidateIdentities = collect([
+            $parameter['value'] ?? null,
+            $inlineValue,
+        ])
+            ->map(fn (mixed $value): string => $this->canonicalSizeDictionaryIdentity($value))
+            ->filter()
+            ->unique()
+            ->flip();
+
+        if ($candidateIdentities->isEmpty()) {
+            return null;
+        }
+
+        foreach ($sourceValues as $index => $sourceValue) {
+            $sourceValue = trim((string) $sourceValue);
+            $localizedValue = trim((string) $localizedValues->get($index, ''));
+            $matches = collect([$sourceValue, $localizedValue])
+                ->map(fn (mixed $value): string => $this->canonicalSizeDictionaryIdentity($value))
+                ->filter()
+                ->contains(fn (string $identity): bool => $candidateIdentities->has($identity));
+
+            if (! $matches) {
+                continue;
+            }
+
+            if ($language === 'pl') {
+                return $sourceValue !== '' ? $sourceValue : null;
+            }
+
+            return $localizedValue !== ''
+                ? $localizedValue
+                : ($sourceValue !== '' ? $sourceValue : null);
+        }
+
+        return null;
+    }
+
+    private function canonicalSizeDictionaryIdentity(mixed $value): string
+    {
+        if (! is_scalar($value) && ! $value instanceof \Stringable) {
+            return '';
+        }
+
+        $value = (string) preg_replace('/\s*(?:\/|-)\s*/u', '/', trim((string) $value));
+        $value = (string) preg_replace('/\s+/u', ' ', $value);
+
+        return mb_strtolower($value, 'UTF-8');
+    }
+
     /**
      * @param  array<string, mixed>  $parameter
      */
@@ -2552,6 +2919,18 @@ final class ProductDataExportService
         // read the current rows so a long-running export cannot reuse an old
         // order after the dictionary was edited.
         $definitions = ProductParameterDefinition::query()->get();
+
+        if ((bool) ($parameter['_prefer_canonical_size_definition'] ?? false)) {
+            $canonicalSize = $definitions->first(
+                fn (ProductParameterDefinition $definition): bool => mb_strtolower(trim(
+                    (string) $definition->name,
+                )) === mb_strtolower(ProductVariantAxisNameResolver::SIZE),
+            );
+
+            if ($canonicalSize instanceof ProductParameterDefinition) {
+                return $canonicalSize;
+            }
+        }
 
         return $definitions->first(function (ProductParameterDefinition $definition) use ($name, $slug): bool {
             if ($slug !== '' && mb_strtolower(trim((string) $definition->slug)) === $slug) {

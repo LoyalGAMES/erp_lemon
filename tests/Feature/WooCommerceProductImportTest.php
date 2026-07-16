@@ -166,7 +166,7 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('Koszula VIVIEN Biala', $parent->name);
         $this->assertSame('variable', data_get($parent->attributes, 'woocommerce_type'));
         $this->assertSame('Rozmiar', data_get($parent->attributes, 'master.variant_attribute'));
-        $this->assertSame('S, M', collect(data_get($parent->attributes, 'master.parameters'))
+        $this->assertSame('S | M', collect(data_get($parent->attributes, 'master.parameters'))
             ->firstWhere('name', 'Rozmiar')['value']);
         $this->assertSame('2026-07-08T14:20', data_get($parent->attributes, 'master.publication_date'));
         $this->assertSame(2, Product::query()->count());
@@ -364,7 +364,7 @@ class WooCommerceProductImportTest extends TestCase
             Product::query()->where('sku', 'LEGACY-SIZE-MATCH-SM')->firstOrFail()->masterData(),
             'variant_attribute',
         ));
-        $this->assertSame('Size', data_get(
+        $this->assertSame('Rozmiar', data_get(
             Product::query()->where('sku', 'LEGACY-SOLE-SIZE')->firstOrFail()->masterData(),
             'variant_attribute',
         ));

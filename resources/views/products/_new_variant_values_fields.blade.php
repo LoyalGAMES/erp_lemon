@@ -1,23 +1,47 @@
 @php
     $variantProduct = $variantProduct ?? null;
     $selectedVariantAttribute = (string) old('variant_attribute', $selectedVariantAttribute ?? data_get($variantProduct?->masterData() ?? [], 'variant_attribute', ''));
-    $variantValueDefinitions = collect($parameterOptions ?? [])
+    $variantAttributeRows = collect($parameterOptions ?? [])
         ->filter(fn ($parameter): bool => is_array($parameter) && filled($parameter['name'] ?? null))
-        ->mapWithKeys(fn (array $parameter): array => [
-            (string) $parameter['name'] => collect((array) ($parameter['values'] ?? []))
+        ->values();
+    $canonicalSelection = $variantAttributeRows->first(function (array $parameter) use ($selectedVariantAttribute): bool {
+        return collect((array) ($parameter['canonicalized_aliases'] ?? []))
+            ->contains(fn ($alias): bool => mb_strtolower(trim((string) $alias)) === mb_strtolower(trim($selectedVariantAttribute)));
+    });
+
+    if (is_array($canonicalSelection) && filled($canonicalSelection['name'] ?? null)) {
+        $selectedVariantAttribute = (string) $canonicalSelection['name'];
+    }
+
+    $selectedVariantAttributeAliases = $variantAttributeRows
+        ->first(fn (array $parameter): bool => mb_strtolower(trim((string) $parameter['name'])) === mb_strtolower(trim($selectedVariantAttribute)));
+    $selectedVariantAttributeAliases = collect((array) ($selectedVariantAttributeAliases['aliases'] ?? []))
+        ->push($selectedVariantAttribute)
+        ->map(fn ($name): string => mb_strtolower(trim((string) $name)))
+        ->filter()
+        ->unique()
+        ->values()
+        ->all();
+    $variantValueDefinitions = $variantAttributeRows
+        ->groupBy(fn (array $parameter): string => (string) $parameter['name'])
+        ->map(fn ($parameters) => $parameters
+            ->flatMap(fn (array $parameter): array => (array) ($parameter['values'] ?? []))
                 ->map(fn ($value): string => trim((string) $value))
                 ->filter()
                 ->unique(fn (string $value): string => mb_strtolower($value))
                 ->values()
-                ->all(),
-        ])
+                ->all())
         ->all();
     $existingVariantValues = $variantProduct && $variantProduct->relationLoaded('variantChildren')
         ? $variantProduct->variantChildren
-            ->flatMap(function ($variant) use ($selectedVariantAttribute): array {
+            ->flatMap(function ($variant) use ($selectedVariantAttributeAliases): array {
                 return collect((array) data_get($variant->masterData(), 'parameters', []))
                     ->filter(fn ($parameter): bool => is_array($parameter))
-                    ->filter(fn (array $parameter): bool => mb_strtolower(trim((string) ($parameter['name'] ?? ''))) === mb_strtolower($selectedVariantAttribute))
+                    ->filter(fn (array $parameter): bool => in_array(
+                        mb_strtolower(trim((string) ($parameter['name'] ?? ''))),
+                        $selectedVariantAttributeAliases,
+                        true,
+                    ))
                     ->pluck('value')
                     ->map(fn ($value): string => trim((string) $value))
                     ->filter()

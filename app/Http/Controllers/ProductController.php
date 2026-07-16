@@ -28,6 +28,7 @@ use App\Services\Products\ProductEditFieldSettingsService;
 use App\Services\Products\ProductIdentifierService;
 use App\Services\Products\ProductImportIssueService;
 use App\Services\Products\ProductStorefrontVisibilityService;
+use App\Services\Products\ProductVariantAxisNameResolver;
 use App\Services\Products\ProductVariantInheritanceService;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use App\Services\WooCommerce\ProductDataExportService;
@@ -142,7 +143,7 @@ class ProductController extends Controller
             'product' => $product,
             'categoryOptions' => $this->categoryOptions(),
             'catalogOptions' => $this->catalogOptions(),
-            'parameterOptions' => $this->parameterOptions(),
+            'parameterOptions' => $this->parameterOptions($product),
             'productLookupOptions' => $this->productLookupOptions($product),
             'visibleProductEditFields' => $productEditFields->visibleFields(),
             'catalogVisibilityUsesParent' => $catalogVisibilityUsesParent,
@@ -169,6 +170,7 @@ class ProductController extends Controller
     ): RedirectResponse {
         $validated = $request->validate($this->productValidationRules());
         $validated = $this->sanitizeProductDescriptions($validated, $descriptionSanitizer);
+        $validated = $this->normalizeVariantAxisInput($validated, $request);
         $this->validateProductTypeSelection($request, $validated);
         $requestedSku = $this->nullableString($validated['sku'] ?? null);
         $uploadedMedia = [];
@@ -284,6 +286,7 @@ class ProductController extends Controller
 
         $validated = $request->validate($this->productValidationRules($product));
         $validated = $this->sanitizeProductDescriptions($validated, $descriptionSanitizer);
+        $validated = $this->normalizeVariantAxisInput($validated, $request, $product);
         $this->validateProductTypeSelection($request, $validated);
 
         $before = [
@@ -467,31 +470,18 @@ class ProductController extends Controller
                 data_set($copyAttributes, 'master.product_type', 'variable');
                 data_set($copyAttributes, 'master.variant_attribute', $variantAttribute);
 
-                if ($legacySizeAxis->isLegacyGeneric((string) data_get(
-                    $product->masterData(),
-                    'variant_attribute',
-                    '',
-                )) && $variantOptions->isSizeAttribute($variantAttribute)) {
-                    $parameters = collect((array) data_get(
-                        $copyAttributes,
-                        'master.parameters',
-                        [],
-                    ))
-                        ->filter(fn (mixed $parameter): bool => is_array($parameter))
-                        ->reject(fn (array $parameter): bool => $legacySizeAxis->isLegacyGeneric(
-                            (string) ($parameter['name'] ?? ''),
-                        ))
-                        ->map(function (array $parameter) use ($variantAttribute): array {
-                            if (mb_strtolower(trim((string) ($parameter['name'] ?? '')))
-                                === mb_strtolower($variantAttribute)
-                            ) {
-                                $parameter['variation'] = true;
-                            }
-
-                            return $parameter;
-                        })
-                        ->values()
-                        ->all();
+                if ($variantAttribute === ProductVariantAxisNameResolver::SIZE) {
+                    $sourceVariantAttribute = $this->nullableString(data_get(
+                        $product->masterData(),
+                        'variant_attribute',
+                    ));
+                    $parameters = $this->canonicalizeCopiedSizeParameters(
+                        (array) data_get($copyAttributes, 'master.parameters', []),
+                        $sourceVariantAttribute,
+                        $sourceVariantAttribute === null
+                            ? []
+                            : $this->copyVariantAxisEvidence($product, $sourceVariantAttribute),
+                    );
                     data_set($copyAttributes, 'master.parameters', $parameters);
                 }
 
@@ -604,6 +594,48 @@ class ProductController extends Controller
             return back()->withInput()->with('error', 'Produkt nie może być swoim własnym wariantem.');
         }
 
+        $variantAttribute = $this->nullableString($validated['variant_attribute'] ?? null)
+            ?? $this->nullableString(data_get($product->masterData(), 'variant_attribute'))
+            ?? ProductVariantAxisNameResolver::SIZE;
+        $protectedLegacyAxis = $this->legacyVariantAxisProtectedUntilWooRepair($product);
+        $variantAttribute = $protectedLegacyAxis
+            ?? app(ProductVariantAxisNameResolver::class)->resolve(
+                $variantAttribute,
+                $this->variantAxisEvidence($request, $variantAttribute, $product)
+                    ->merge($this->productVariantAxisValues($child, $variantAttribute)),
+                $this->knownSizeOptions(),
+            );
+        $childSourceAttribute = $this->nullableString(data_get($child->masterData(), 'variant_attribute'))
+            ?? collect((array) data_get($child->masterData(), 'parameters', []))
+                ->filter(fn (mixed $parameter): bool => is_array($parameter)
+                    && (bool) ($parameter['variation'] ?? false))
+                ->map(fn (array $parameter): ?string => $this->nullableString($parameter['name'] ?? null))
+                ->filter()
+                ->first()
+            ?? $this->nullableString($validated['variant_attribute'] ?? null)
+            ?? $variantAttribute;
+
+        if ($protectedLegacyAxis !== null
+            && ! $this->variantAxisNamesMatch($childSourceAttribute, $protectedLegacyAxis)
+        ) {
+            return back()->withInput()->with(
+                'error',
+                'Najpierw wykonaj naprawę osi wariantów WooCommerce. Do istniejącej rodziny nie można teraz dołączyć wariantu z inną osią.',
+            );
+        }
+
+        if (! $this->variantChildAxisIsCompatible(
+            $product,
+            $child,
+            $childSourceAttribute,
+            $variantAttribute,
+        )) {
+            return back()->withInput()->with(
+                'error',
+                'Nie można dołączyć wariantu: jego oś i wartości nie odpowiadają osi wariantów produktu głównego.',
+            );
+        }
+
         $relation = ProductRelation::query()->updateOrCreate(
             [
                 'parent_product_id' => $product->id,
@@ -617,14 +649,19 @@ class ProductController extends Controller
                     ->max('sort_order') ?? 0) + 10,
                 'metadata' => [
                     'created_from' => 'product_card',
-                    'variant_attribute' => $this->nullableString($validated['variant_attribute'] ?? null)
-                        ?? $this->nullableString(data_get($product->masterData(), 'variant_attribute'))
-                        ?? 'Rozmiar',
+                    'variant_attribute' => $variantAttribute,
                 ],
             ],
         );
 
-        $this->markAsVariableParent($product, (string) data_get($relation->metadata, 'variant_attribute', 'Rozmiar'));
+        $this->markAsVariableParent($product, $variantAttribute);
+        if ($protectedLegacyAxis === null) {
+            $this->canonicalizeUnmappedVariantChild(
+                $child,
+                $childSourceAttribute,
+                $variantAttribute,
+            );
+        }
         $this->markAsVariantChild($child);
 
         $audit->record('product.variant_attached', $product, null, [
@@ -1590,6 +1627,8 @@ class ProductController extends Controller
 
     private function markAsVariableParent(Product $product, string $variantAttribute): void
     {
+        $variantAttribute = $this->legacyVariantAxisProtectedUntilWooRepair($product)
+            ?? $variantAttribute;
         $attributes = (array) $product->attributes;
         $master = (array) data_get($attributes, 'master', []);
         $master['source'] = 'erp';
@@ -1597,6 +1636,48 @@ class ProductController extends Controller
         $master['variant_attribute'] = $variantAttribute;
         data_set($attributes, 'master', $master);
         $product->forceFill(['attributes' => $attributes])->save();
+    }
+
+    /**
+     * A regular editor save cannot perform the local half of a remote axis
+     * migration first. Keep the current local legacy declaration until the
+     * dedicated Woo repair has synchronized parent and children remotely.
+     */
+    private function legacyVariantAxisProtectedUntilWooRepair(Product $product): ?string
+    {
+        $variantAttribute = $this->nullableString(data_get(
+            $product->masterData(),
+            'variant_attribute',
+        ));
+
+        if ($variantAttribute === null
+            || (! app(LegacySizeVariantAxisResolver::class)->isLegacyGeneric($variantAttribute)
+                && ! app(ProductVariantAxisNameResolver::class)
+                    ->isLegacyPluralSizeAlias($variantAttribute))
+        ) {
+            return null;
+        }
+
+        $state = (array) data_get(
+            $product->masterData(),
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+
+        if (WooOwnedVariantAxisRepairService::isSynchronizedRevision(
+            $state['revision'] ?? null,
+        )) {
+            return null;
+        }
+
+        $product->loadMissing('channelMappings.salesChannel');
+        $hasActiveWooMapping = $product->channelMappings->contains(
+            fn (ProductChannelMapping $mapping): bool => filled($mapping->external_product_id)
+                && $mapping->salesChannel?->type === 'woocommerce'
+                && (bool) $mapping->salesChannel?->is_active,
+        );
+
+        return $hasActiveWooMapping ? $variantAttribute : null;
     }
 
     private function markAsVariantChild(Product $product): void
@@ -1607,6 +1688,119 @@ class ProductController extends Controller
         $master['product_type'] = 'variation';
         data_set($attributes, 'master', $master);
         $product->forceFill(['attributes' => $attributes])->save();
+    }
+
+    private function variantChildAxisIsCompatible(
+        Product $parent,
+        Product $child,
+        string $childSourceAttribute,
+        string $parentAttribute,
+    ): bool {
+        $resolver = app(ProductVariantAxisNameResolver::class);
+        $knownSizeOptions = $this->knownSizeOptions();
+        $resolvedParentAttribute = $resolver->resolve(
+            $parentAttribute,
+            $this->storedVariantFamilyAxisEvidence($parent, $parentAttribute),
+            $knownSizeOptions,
+        );
+        $resolvedChildAttribute = $resolver->resolve(
+            $childSourceAttribute,
+            $this->productVariantAxisValues($child, $childSourceAttribute),
+            $knownSizeOptions,
+        );
+
+        return $this->variantAxisNamesMatch(
+            $resolvedChildAttribute,
+            $resolvedParentAttribute,
+        );
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function storedVariantFamilyAxisEvidence(
+        Product $product,
+        string $variantAttribute,
+    ): Collection {
+        $values = $this->productVariantAxisValues($product, $variantAttribute);
+        $product->loadMissing('variantChildren');
+
+        foreach ($product->variantChildren as $variant) {
+            $values = $values->merge($this->productVariantAxisValues(
+                $variant,
+                $variantAttribute,
+            ));
+            $metadataAttribute = trim((string) data_get(
+                $variant->pivot?->metadata,
+                'variant_attribute',
+                '',
+            ));
+
+            if ($this->variantAxisNamesMatch($metadataAttribute, $variantAttribute)) {
+                $values->push(data_get($variant->pivot?->metadata, 'variant_option'));
+            }
+        }
+
+        return app(ProductVariantAxisNameResolver::class)->optionTokens($values);
+    }
+
+    private function canonicalizeUnmappedVariantChild(
+        Product $child,
+        string $sourceAttribute,
+        string $resolvedAttribute,
+    ): void {
+        if ($sourceAttribute === $resolvedAttribute) {
+            return;
+        }
+
+        $resolver = app(ProductVariantAxisNameResolver::class);
+        $childResolvedAttribute = $resolver->resolve(
+            $sourceAttribute,
+            $this->productVariantAxisValues($child, $sourceAttribute),
+            $this->knownSizeOptions(),
+        );
+
+        if (! $this->variantAxisNamesMatch($childResolvedAttribute, $resolvedAttribute)) {
+            return;
+        }
+
+        $child->loadMissing('channelMappings.salesChannel');
+
+        // Only an active Woo mapping participates in the remote-first guard.
+        // Marketplace/BaseLinker identities do not own the Woo variant axis
+        // and must not keep legacy aliases alive in the ERP copy.
+        if ($child->channelMappings->contains(
+            fn (ProductChannelMapping $mapping): bool => filled($mapping->external_product_id)
+                && $mapping->salesChannel?->type === 'woocommerce'
+                && (bool) $mapping->salesChannel?->is_active,
+        )) {
+            return;
+        }
+
+        $attributes = (array) $child->attributes;
+        $master = (array) data_get($attributes, 'master', []);
+        $master['variant_attribute'] = $resolvedAttribute;
+        $master['parameters'] = collect((array) ($master['parameters'] ?? []))
+            ->map(function (mixed $parameter) use ($sourceAttribute, $resolvedAttribute): mixed {
+                if (! is_array($parameter) || ! $this->variantAxisNamesMatch(
+                    (string) ($parameter['name'] ?? ''),
+                    $sourceAttribute,
+                )) {
+                    return $parameter;
+                }
+
+                $parameter['name'] = $resolvedAttribute;
+                $parameter['value'] = app(ProductVariantOptionNormalizer::class)->normalize(
+                    $resolvedAttribute,
+                    $parameter['value'] ?? '',
+                );
+
+                return $parameter;
+            })
+            ->values()
+            ->all();
+        $attributes['master'] = $master;
+        $child->forceFill(['attributes' => $attributes])->save();
     }
 
     /**
@@ -1801,13 +1995,13 @@ class ProductController extends Controller
         $recoveredSizeAxis = $legacySizeAxis->recover($source, $variants);
 
         if ($recoveredSizeAxis !== null) {
-            return $recoveredSizeAxis;
+            return $this->resolvedVariantAttributeForCopy($source, $recoveredSizeAxis);
         }
 
         $explicit = $this->nullableString(data_get($copy->masterData(), 'variant_attribute'));
 
         if ($explicit !== null) {
-            return $explicit;
+            return $this->resolvedVariantAttributeForCopy($source, $explicit);
         }
 
         $relationCandidate = $this->singleVariantAttributeCandidate(
@@ -1816,7 +2010,11 @@ class ProductController extends Controller
                     $relation->metadata,
                     'variant_attribute',
                     '',
-                ))),
+                )))
+                ->map(fn (string $candidate): string => $this->resolvedVariantAttributeForCopy(
+                    $source,
+                    $candidate,
+                )),
             $variantOptions,
         );
 
@@ -1845,6 +2043,10 @@ class ProductController extends Controller
                 ->unique()
                 ->count() === $variants->count())
             ->map(fn (Collection $candidates): string => (string) $candidates->first()['name'])
+            ->map(fn (string $candidate): string => $this->resolvedVariantAttributeForCopy(
+                $source,
+                $candidate,
+            ))
             ->values();
         $commonCandidate = $this->singleVariantAttributeCandidate($commonCandidates, $variantOptions);
 
@@ -1856,11 +2058,52 @@ class ProductController extends Controller
             collect((array) data_get($source->masterData(), 'parameters', []))
                 ->filter(fn (mixed $parameter): bool => is_array($parameter)
                     && (bool) ($parameter['variation'] ?? false))
-                ->map(fn (array $parameter): string => trim((string) ($parameter['name'] ?? ''))),
+                ->map(fn (array $parameter): string => trim((string) ($parameter['name'] ?? '')))
+                ->map(fn (string $candidate): string => $this->resolvedVariantAttributeForCopy(
+                    $source,
+                    $candidate,
+                )),
             $variantOptions,
         );
 
-        return $parentCandidate ?? 'Rozmiar';
+        return $parentCandidate ?? ProductVariantAxisNameResolver::SIZE;
+    }
+
+    private function resolvedVariantAttributeForCopy(Product $source, string $candidate): string
+    {
+        return app(ProductVariantAxisNameResolver::class)->resolve(
+            $candidate,
+            $this->copyVariantAxisEvidence($source, $candidate),
+            $this->knownSizeOptions(),
+        );
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function copyVariantAxisEvidence(Product $source, string $candidate): Collection
+    {
+        $values = $this->productVariantAxisValues($source, $candidate);
+
+        foreach ($source->childRelations as $relation) {
+            $variant = $relation->childProduct;
+
+            if ($variant instanceof Product) {
+                $values = $values->merge($this->productVariantAxisValues($variant, $candidate));
+            }
+
+            $relationAttribute = trim((string) data_get(
+                $relation->metadata,
+                'variant_attribute',
+                '',
+            ));
+
+            if ($this->variantAxisNamesMatch($relationAttribute, $candidate)) {
+                $values->push(data_get($relation->metadata, 'variant_option'));
+            }
+        }
+
+        return app(ProductVariantAxisNameResolver::class)->optionTokens($values);
     }
 
     /**
@@ -1912,8 +2155,21 @@ class ProductController extends Controller
      */
     private function syncVariantParameterDefinition(string $variantAttribute, array $options): void
     {
-        $definition = ProductParameterDefinition::query()->firstOrNew(['name' => $variantAttribute]);
+        $variantAttribute = app(ProductVariantAxisNameResolver::class)->resolve(
+            $variantAttribute,
+            $options,
+            $this->knownSizeOptions(),
+        );
+        $options = collect($options)
+            ->map(fn (mixed $option): string => app(ProductVariantOptionNormalizer::class)
+                ->normalize($variantAttribute, $option))
+            ->all();
+        $definition = ProductParameterDefinition::query()
+            ->whereRaw('LOWER(name) = ?', [mb_strtolower($variantAttribute)])
+            ->first()
+            ?? ProductParameterDefinition::query()->make(['name' => $variantAttribute]);
         $definition->fill([
+            'name' => $variantAttribute,
             'slug' => $definition->slug ?: Str::slug($variantAttribute),
             'input_type' => 'select',
             'values' => collect((array) $definition->values)
@@ -1956,6 +2212,8 @@ class ProductController extends Controller
         $variantAttribute = $this->nullableString($variantAttribute)
             ?? $this->nullableString(data_get($product->masterData(), 'variant_attribute'))
             ?? 'Rozmiar';
+        $protectedLegacyAxis = $this->legacyVariantAxisProtectedUntilWooRepair($product);
+        $variantAttribute = $protectedLegacyAxis ?? $variantAttribute;
         $currentRelations = ProductRelation::query()
             ->with('childProduct')
             ->where('parent_product_id', $product->id)
@@ -2004,6 +2262,34 @@ class ProductController extends Controller
             }
 
             $existing = $currentRelationBySku->get(mb_strtolower($sku));
+            $childSourceAttribute = $this->nullableString(data_get($child->masterData(), 'variant_attribute'))
+                ?? collect((array) data_get($child->masterData(), 'parameters', []))
+                    ->filter(fn (mixed $parameter): bool => is_array($parameter)
+                        && (bool) ($parameter['variation'] ?? false))
+                    ->map(fn (array $parameter): ?string => $this->nullableString($parameter['name'] ?? null))
+                    ->filter()
+                    ->first()
+                ?? $variantAttribute;
+
+            if ($protectedLegacyAxis !== null
+                && ! $this->variantAxisNamesMatch($childSourceAttribute, $protectedLegacyAxis)
+            ) {
+                throw ValidationException::withMessages([
+                    'variant_skus' => 'Najpierw wykonaj naprawę osi wariantów WooCommerce. Do istniejącej rodziny nie można teraz dołączyć wariantu z inną osią.',
+                ]);
+            }
+
+            if (! $this->variantChildAxisIsCompatible(
+                $product,
+                $child,
+                $childSourceAttribute,
+                $variantAttribute,
+            )) {
+                throw ValidationException::withMessages([
+                    'variant_skus' => 'Nie można dołączyć wariantu: jego oś i wartości nie odpowiadają osi wariantów produktu głównego.',
+                ]);
+            }
+
             $nextSortOrder = $existing instanceof ProductRelation
                 ? $nextSortOrder
                 : min(65535, $nextSortOrder + 10);
@@ -2028,6 +2314,13 @@ class ProductController extends Controller
                 ],
             );
 
+            if ($protectedLegacyAxis === null) {
+                $this->canonicalizeUnmappedVariantChild(
+                    $child,
+                    $childSourceAttribute,
+                    $variantAttribute,
+                );
+            }
             $this->markAsVariantChild($child);
         }
 
@@ -2407,21 +2700,24 @@ class ProductController extends Controller
     }
 
     /**
-     * @return Collection<int, array{name:string,values:list<string>,is_variant:bool,is_required:bool,input_type:string}>
+     * @return Collection<int, array{name:string,values:list<string>,is_variant:bool,is_required:bool,input_type:string,aliases:list<string>,canonicalized_aliases:list<string>}>
      */
     private function productListParameterOptions(): Collection
     {
-        return ProductParameterDefinition::query()
+        $options = ProductParameterDefinition::query()
             ->orderBy('sort_order')
             ->orderBy('name')
             ->get()
             ->map(fn (ProductParameterDefinition $definition): array => [
                 'name' => $definition->name,
+                '_definition_slug' => $definition->slug,
                 'values' => (array) $definition->values,
                 'is_variant' => (bool) $definition->is_variant,
                 'is_required' => (bool) $definition->is_required,
                 'input_type' => $definition->input_type,
             ]);
+
+        return $this->canonicalizeVariantAxisParameterOptions($options);
     }
 
     /**
@@ -2526,6 +2822,247 @@ class ProductController extends Controller
     }
 
     /**
+     * Canonicalize only the axis selected in an ERP size-family operation.
+     * Generic names stay untouched unless the submitted/current option values
+     * prove that they represent sizes.
+     *
+     * @param  array<string, mixed>  $validated
+     * @return array<string, mixed>
+     */
+    private function normalizeVariantAxisInput(
+        array $validated,
+        Request $request,
+        ?Product $product = null,
+    ): array {
+        $sourceAttribute = $this->nullableString($validated['variant_attribute'] ?? null);
+
+        if ($product instanceof Product
+            && ($protectedLegacyAxis = $this->legacyVariantAxisProtectedUntilWooRepair($product)) !== null
+        ) {
+            $submittedAttribute = $sourceAttribute ?? $protectedLegacyAxis;
+            $validated['variant_attribute'] = $protectedLegacyAxis;
+            $request->merge(['variant_attribute' => $protectedLegacyAxis]);
+            $parameters = (array) $request->input('parameters', []);
+            $names = (array) ($parameters['name'] ?? []);
+            $variations = (array) ($parameters['variation'] ?? []);
+
+            foreach ($names as $index => $name) {
+                if ($this->variantAxisNamesMatch((string) $name, $protectedLegacyAxis)) {
+                    $names[$index] = $protectedLegacyAxis;
+
+                    continue;
+                }
+
+                // The editor may render the selected legacy size axis as its
+                // canonical label. Rewrite that selected variation row only;
+                // an informational Rozmiar row next to `wariant` must survive
+                // unchanged until the remote-first repair merges the axes.
+                if ($this->variantAxisNamesMatch((string) $name, $submittedAttribute)
+                    && filter_var(
+                        $variations[$index] ?? false,
+                        FILTER_VALIDATE_BOOLEAN,
+                    )
+                ) {
+                    $names[$index] = $protectedLegacyAxis;
+                }
+            }
+
+            if ($names !== []) {
+                $parameters['name'] = $names;
+                $request->merge(['parameters' => $parameters]);
+            }
+
+            return $validated;
+        }
+
+        if ($sourceAttribute === null) {
+            return $validated;
+        }
+
+        $resolvedAttribute = app(ProductVariantAxisNameResolver::class)->resolve(
+            $sourceAttribute,
+            $this->variantAxisEvidence($request, $sourceAttribute, $product),
+            $this->knownSizeOptions(),
+        );
+
+        if ($resolvedAttribute === $sourceAttribute
+            && $resolvedAttribute !== ProductVariantAxisNameResolver::SIZE
+        ) {
+            return $validated;
+        }
+
+        $validated['variant_attribute'] = $resolvedAttribute;
+        $request->merge(['variant_attribute' => $resolvedAttribute]);
+        $parameters = (array) $request->input('parameters', []);
+        $names = (array) ($parameters['name'] ?? []);
+        $values = (array) ($parameters['value'] ?? []);
+        $knownSizeOptions = $this->knownSizeOptions();
+
+        foreach ($names as $index => $name) {
+            $name = trim((string) $name);
+
+            if ($resolvedAttribute === ProductVariantAxisNameResolver::SIZE
+                && app(ProductVariantAxisNameResolver::class)->resolve(
+                    $name,
+                    $this->submittedParameterAxisEvidence(
+                        $name,
+                        $values[$index] ?? null,
+                        $product,
+                    ),
+                    $knownSizeOptions,
+                ) === ProductVariantAxisNameResolver::SIZE
+            ) {
+                $names[$index] = ProductVariantAxisNameResolver::SIZE;
+
+                continue;
+            }
+
+            if ($resolvedAttribute !== $sourceAttribute
+                && $this->variantAxisNamesMatch($name, $sourceAttribute)
+            ) {
+                $names[$index] = $resolvedAttribute;
+            }
+        }
+
+        if ($names !== []) {
+            $parameters['name'] = $names;
+            $request->merge(['parameters' => $parameters]);
+        }
+
+        return $validated;
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function submittedParameterAxisEvidence(
+        string $attribute,
+        mixed $submittedValue,
+        ?Product $product,
+    ): Collection {
+        $values = collect([$submittedValue]);
+
+        if ($product instanceof Product) {
+            $values = $values->merge($this->productVariantAxisValues($product, $attribute));
+            $product->loadMissing('variantChildren');
+
+            foreach ($product->variantChildren as $variant) {
+                $values = $values->merge($this->productVariantAxisValues($variant, $attribute));
+                $metadataAttribute = trim((string) data_get(
+                    $variant->pivot?->metadata,
+                    'variant_attribute',
+                    '',
+                ));
+
+                if ($this->variantAxisNamesMatch($metadataAttribute, $attribute)) {
+                    $values->push(data_get($variant->pivot?->metadata, 'variant_option'));
+                }
+            }
+        }
+
+        return app(ProductVariantAxisNameResolver::class)->optionTokens($values);
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function variantAxisEvidence(
+        Request $request,
+        string $variantAttribute,
+        ?Product $product = null,
+    ): Collection {
+        $values = collect((array) $request->input('new_variant_values', []))
+            ->push((string) $request->input('new_variant_values_custom', ''));
+        $parameters = (array) $request->input('parameters', []);
+        $names = (array) ($parameters['name'] ?? []);
+        $parameterValues = (array) ($parameters['value'] ?? []);
+
+        foreach ($names as $index => $name) {
+            if ($this->variantAxisNamesMatch((string) $name, $variantAttribute)) {
+                $values->push($parameterValues[$index] ?? null);
+            }
+        }
+
+        if ($product instanceof Product) {
+            $values = $values->merge($this->productVariantAxisValues($product, $variantAttribute));
+            $product->loadMissing('variantChildren');
+
+            foreach ($product->variantChildren as $variant) {
+                $values = $values->merge($this->productVariantAxisValues($variant, $variantAttribute));
+                $metadataAttribute = trim((string) data_get($variant->pivot?->metadata, 'variant_attribute', ''));
+
+                if ($this->variantAxisNamesMatch($metadataAttribute, $variantAttribute)) {
+                    $values->push(data_get($variant->pivot?->metadata, 'variant_option'));
+                }
+            }
+        }
+
+        return app(ProductVariantAxisNameResolver::class)->optionTokens($values);
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function productVariantAxisValues(Product $product, string $variantAttribute): Collection
+    {
+        $values = collect((array) data_get($product->masterData(), 'parameters', []))
+            ->filter(fn (mixed $parameter): bool => is_array($parameter)
+                && $this->variantAxisNamesMatch(
+                    (string) ($parameter['name'] ?? ''),
+                    $variantAttribute,
+                ))
+            ->pluck('value');
+
+        foreach ($product->wooVariationAttributes() as $attribute) {
+            if ($this->variantAxisNamesMatch(
+                (string) ($attribute['name'] ?? ''),
+                $variantAttribute,
+            )) {
+                $values->push($attribute['option'] ?? null);
+            }
+        }
+
+        return app(ProductVariantAxisNameResolver::class)->optionTokens($values);
+    }
+
+    /**
+     * @return Collection<int, string>
+     */
+    private function knownSizeOptions(): Collection
+    {
+        $resolver = app(ProductVariantAxisNameResolver::class);
+
+        return ProductParameterDefinition::query()
+            ->get(['name', 'name_en', 'slug', 'values', 'values_en'])
+            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
+                $definition->name,
+                $definition->name_en,
+                $definition->slug,
+            ])->contains(fn (mixed $name): bool => $resolver
+                ->isDirectSizeAlias((string) $name)))
+            ->flatMap(fn (ProductParameterDefinition $definition): array => [
+                ...(array) $definition->values,
+                ...(array) $definition->values_en,
+            ])
+            ->map(fn (mixed $value): string => trim((string) $value))
+            ->filter()
+            ->unique(fn (string $value): string => mb_strtolower($value))
+            ->values();
+    }
+
+    private function variantAxisNamesMatch(string $candidate, string $selected): bool
+    {
+        if (mb_strtolower(trim($candidate)) === mb_strtolower(trim($selected))) {
+            return true;
+        }
+
+        $resolver = app(ProductVariantAxisNameResolver::class);
+
+        return $resolver->isDirectSizeAlias($candidate)
+            && $resolver->isDirectSizeAlias($selected);
+    }
+
+    /**
      * @param  array<string, mixed>  $input
      * @param  list<array<string, mixed>>  $existing
      * @return list<array<string, mixed>>
@@ -2551,6 +3088,28 @@ class ProductController extends Controller
                 'value' => $value ?? '',
                 'variation' => filter_var($variations[$index] ?? false, FILTER_VALIDATE_BOOLEAN),
             ]);
+        }
+
+        $sizeRows = collect($rows)
+            ->keys()
+            ->filter(fn (int $index): bool => mb_strtolower(trim((string) ($rows[$index]['name'] ?? '')))
+                === mb_strtolower(ProductVariantAxisNameResolver::SIZE))
+            ->values();
+
+        if ($sizeRows->count() > 1) {
+            $firstIndex = $sizeRows->first();
+            $mergedValues = app(ProductVariantAxisNameResolver::class)->optionTokens(
+                $sizeRows->map(fn (int $index): mixed => $rows[$index]['value'] ?? null),
+            );
+            $rows[$firstIndex]['value'] = $mergedValues->implode(' | ');
+            $rows[$firstIndex]['variation'] = $sizeRows->contains(
+                fn (int $index): bool => (bool) ($rows[$index]['variation'] ?? false),
+            );
+            $rows = collect($rows)
+                ->reject(fn (array $row, int $index): bool => $index !== $firstIndex
+                    && $sizeRows->contains($index))
+                ->values()
+                ->all();
         }
 
         return $rows;
@@ -2644,9 +3203,9 @@ class ProductController extends Controller
     }
 
     /**
-     * @return Collection<int, array{name:string,values:list<string>,is_variant:bool,is_required:bool,input_type:string}>
+     * @return Collection<int, array{name:string,values:list<string>,is_variant:bool,is_required:bool,input_type:string,aliases:list<string>,canonicalized_aliases:list<string>}>
      */
-    private function parameterOptions(): Collection
+    private function parameterOptions(?Product $contextProduct = null): Collection
     {
         $defined = ProductParameterDefinition::query()
             ->orderBy('sort_order')
@@ -2654,6 +3213,7 @@ class ProductController extends Controller
             ->get()
             ->map(fn (ProductParameterDefinition $definition): array => [
                 'name' => $definition->name,
+                '_definition_slug' => $definition->slug,
                 'values' => (array) $definition->values,
                 'is_variant' => (bool) $definition->is_variant,
                 'is_required' => (bool) $definition->is_required,
@@ -2668,6 +3228,7 @@ class ProductController extends Controller
                     ->filter(fn ($row): bool => is_array($row))
                     ->map(fn (array $row): array => [
                         'name' => $this->nullableString($row['name'] ?? null),
+                        '_definition_slug' => null,
                         'value' => $this->nullableString($row['value'] ?? null),
                         'variation' => (bool) ($row['variation'] ?? false),
                     ])
@@ -2678,6 +3239,7 @@ class ProductController extends Controller
             ->groupBy(fn (array $row): string => mb_strtolower((string) $row['name']))
             ->map(fn (Collection $rows): array => [
                 'name' => (string) $rows->first()['name'],
+                '_definition_slug' => null,
                 'values' => $rows->pluck('value')->filter()->unique()->sort()->values()->all(),
                 'is_variant' => $rows->contains(fn (array $row): bool => (bool) $row['variation']),
                 'is_required' => false,
@@ -2685,11 +3247,206 @@ class ProductController extends Controller
             ])
             ->values();
 
-        return $defined
+        $options = $defined
             ->concat($discovered)
             ->unique(fn (array $row): string => mb_strtolower($row['name']))
             ->sortBy('name')
             ->values();
+
+        return $this->canonicalizeVariantAxisParameterOptions($options, $contextProduct);
+    }
+
+    /**
+     * Fold size-only legacy dictionary rows into the canonical ERP option.
+     * A context product may declare a legacy generic axis even when the global
+     * dictionary also contains non-size BLVariant values; in that case only an
+     * alias is added to the canonical size row and the color row is preserved.
+     *
+     * @param  Collection<int, array<string, mixed>>  $options
+     * @return Collection<int, array{name:string,values:list<string>,is_variant:bool,is_required:bool,input_type:string,aliases:list<string>,canonicalized_aliases:list<string>}>
+     */
+    private function canonicalizeVariantAxisParameterOptions(
+        Collection $options,
+        ?Product $contextProduct = null,
+    ): Collection {
+        $resolver = app(ProductVariantAxisNameResolver::class);
+        $variantOptions = app(ProductVariantOptionNormalizer::class);
+        $knownSizeOptions = $this->knownSizeOptions()
+            ->merge($options
+                ->filter(fn (array $row): bool => $resolver->isDirectSizeAlias((string) ($row['name'] ?? '')))
+                ->flatMap(fn (array $row): array => (array) ($row['values'] ?? [])))
+            ->map(fn (mixed $value): string => trim((string) $value))
+            ->filter()
+            ->values();
+
+        $options = $options
+            ->map(function (array $row, int $sourceIndex) use ($resolver, $variantOptions, $knownSizeOptions): array {
+                $originalName = trim((string) ($row['name'] ?? ''));
+                $resolvedName = $resolver->resolve(
+                    $originalName,
+                    (array) ($row['values'] ?? []),
+                    $knownSizeOptions,
+                );
+                $row['name'] = $resolvedName;
+                $row['values'] = collect((array) ($row['values'] ?? []))
+                    ->map(fn (mixed $value): string => $variantOptions->normalize($resolvedName, $value))
+                    ->filter()
+                    ->values()
+                    ->all();
+                $row['aliases'] = collect((array) ($row['aliases'] ?? []))
+                    ->push($originalName)
+                    ->filter()
+                    ->unique(fn (string $name): string => mb_strtolower($name))
+                    ->values()
+                    ->all();
+                $row['canonicalized_aliases'] = collect((array) ($row['canonicalized_aliases'] ?? []))
+                    ->when(
+                        mb_strtolower($originalName) !== mb_strtolower($resolvedName),
+                        fn (Collection $aliases): Collection => $aliases->push($originalName),
+                    )
+                    ->filter()
+                    ->unique(fn (string $name): string => mb_strtolower($name))
+                    ->values()
+                    ->all();
+                $definitionSlug = Str::slug(trim((string) ($row['_definition_slug'] ?? '')));
+                $definitionSlug = str_starts_with($definitionSlug, 'pa-')
+                    ? substr($definitionSlug, 3)
+                    : $definitionSlug;
+                $isExactCanonicalDefinition = mb_strtolower($originalName)
+                        === mb_strtolower(ProductVariantAxisNameResolver::SIZE)
+                    && $definitionSlug === 'rozmiar';
+                $row['_variant_axis_source_priority'] = match (true) {
+                    $isExactCanonicalDefinition => 0,
+                    mb_strtolower($originalName) === mb_strtolower(ProductVariantAxisNameResolver::SIZE) => 1,
+                    $resolver->isDirectSizeAlias($originalName)
+                        && ! $resolver->isLegacyPluralSizeAlias($originalName) => 10,
+                    $resolver->isLegacyPluralSizeAlias($originalName) => 20,
+                    $resolver->isGenericSizeAlias($originalName) => 30,
+                    default => 40,
+                };
+                $row['_variant_axis_source_index'] = $sourceIndex;
+
+                return $row;
+            })
+            ->groupBy(fn (array $row): string => mb_strtolower((string) $row['name']))
+            ->map(function (Collection $rows): array {
+                $rows = $rows
+                    ->sort(function (array $left, array $right): int {
+                        $priority = ((int) ($left['_variant_axis_source_priority'] ?? 40))
+                            <=> ((int) ($right['_variant_axis_source_priority'] ?? 40));
+
+                        return $priority !== 0
+                            ? $priority
+                            : ((int) ($left['_variant_axis_source_index'] ?? 0))
+                                <=> ((int) ($right['_variant_axis_source_index'] ?? 0));
+                    })
+                    ->values();
+                $row = $rows->first();
+                $row['values'] = $rows
+                    ->flatMap(fn (array $candidate): array => (array) ($candidate['values'] ?? []))
+                    ->filter()
+                    ->unique(fn (string $value): string => mb_strtolower($value))
+                    ->values()
+                    ->all();
+                $row['aliases'] = $rows
+                    ->flatMap(fn (array $candidate): array => (array) ($candidate['aliases'] ?? []))
+                    ->filter()
+                    ->unique(fn (string $name): string => mb_strtolower($name))
+                    ->values()
+                    ->all();
+                $row['canonicalized_aliases'] = $rows
+                    ->flatMap(fn (array $candidate): array => (array) ($candidate['canonicalized_aliases'] ?? []))
+                    ->filter()
+                    ->unique(fn (string $name): string => mb_strtolower($name))
+                    ->values()
+                    ->all();
+                $row['is_variant'] = $rows->contains(
+                    fn (array $candidate): bool => (bool) ($candidate['is_variant'] ?? false),
+                );
+                $row['is_required'] = $rows->contains(
+                    fn (array $candidate): bool => (bool) ($candidate['is_required'] ?? false),
+                );
+                $row['input_type'] = $rows->contains(
+                    fn (array $candidate): bool => ($candidate['input_type'] ?? null) === 'select',
+                ) ? 'select' : (string) ($row['input_type'] ?? 'text');
+                unset(
+                    $row['_definition_slug'],
+                    $row['_variant_axis_source_priority'],
+                    $row['_variant_axis_source_index'],
+                );
+
+                return $row;
+            })
+            ->values();
+
+        if (! $contextProduct instanceof Product) {
+            return $options->sortBy('name')->values();
+        }
+
+        $sourceAttribute = trim((string) data_get($contextProduct->masterData(), 'variant_attribute', ''));
+
+        if ($sourceAttribute === '') {
+            return $options->sortBy('name')->values();
+        }
+
+        $contextValues = $this->productVariantAxisValues($contextProduct, $sourceAttribute);
+        $contextProduct->loadMissing('variantChildren');
+
+        foreach ($contextProduct->variantChildren as $variant) {
+            $contextValues = $contextValues->merge(
+                $this->productVariantAxisValues($variant, $sourceAttribute),
+            );
+        }
+
+        $resolvedAttribute = $resolver->resolve(
+            $sourceAttribute,
+            $contextValues,
+            $knownSizeOptions,
+        );
+
+        if (mb_strtolower($resolvedAttribute) === mb_strtolower($sourceAttribute)) {
+            return $options->sortBy('name')->values();
+        }
+
+        $canonicalIndex = $options->search(
+            fn (array $row): bool => mb_strtolower((string) ($row['name'] ?? ''))
+                === mb_strtolower($resolvedAttribute),
+        );
+        $canonicalRow = $canonicalIndex === false ? [
+            'name' => $resolvedAttribute,
+            'values' => [],
+            'is_variant' => true,
+            'is_required' => false,
+            'input_type' => 'select',
+            'aliases' => [$resolvedAttribute],
+            'canonicalized_aliases' => [],
+        ] : $options->get($canonicalIndex);
+        $canonicalRow['values'] = collect((array) ($canonicalRow['values'] ?? []))
+            ->merge($contextValues->map(
+                fn (string $value): string => $variantOptions->normalize($resolvedAttribute, $value),
+            ))
+            ->filter()
+            ->unique(fn (string $value): string => mb_strtolower($value))
+            ->values()
+            ->all();
+        $canonicalRow['aliases'] = collect((array) ($canonicalRow['aliases'] ?? []))
+            ->push($sourceAttribute)
+            ->unique(fn (string $name): string => mb_strtolower($name))
+            ->values()
+            ->all();
+        $canonicalRow['canonicalized_aliases'] = collect((array) ($canonicalRow['canonicalized_aliases'] ?? []))
+            ->push($sourceAttribute)
+            ->unique(fn (string $name): string => mb_strtolower($name))
+            ->values()
+            ->all();
+
+        if ($canonicalIndex === false) {
+            $options->push($canonicalRow);
+        } else {
+            $options->put($canonicalIndex, $canonicalRow);
+        }
+
+        return $options->sortBy('name')->values();
     }
 
     /**
@@ -2754,6 +3511,44 @@ class ProductController extends Controller
             }
         }
 
+        $sourceVariantAttribute = $this->nullableString(data_get(
+            $attributes,
+            'master.variant_attribute',
+        ));
+
+        if ($sourceVariantAttribute !== null) {
+            $parameters = collect((array) data_get($attributes, 'master.parameters', []))
+                ->filter(fn (mixed $parameter): bool => is_array($parameter));
+            $evidence = $parameters
+                ->filter(fn (array $parameter): bool => $this->variantAxisNamesMatch(
+                    (string) ($parameter['name'] ?? ''),
+                    $sourceVariantAttribute,
+                ))
+                ->pluck('value');
+            $resolvedVariantAttribute = app(ProductVariantAxisNameResolver::class)->resolve(
+                $sourceVariantAttribute,
+                $evidence,
+                $this->knownSizeOptions(),
+            );
+
+            if ($resolvedVariantAttribute === ProductVariantAxisNameResolver::SIZE) {
+                data_set(
+                    $attributes,
+                    'master.variant_attribute',
+                    ProductVariantAxisNameResolver::SIZE,
+                );
+                data_set(
+                    $attributes,
+                    'master.parameters',
+                    $this->canonicalizeCopiedSizeParameters(
+                        $parameters->values()->all(),
+                        $sourceVariantAttribute,
+                        $evidence,
+                    ),
+                );
+            }
+        }
+
         foreach (['pl', 'en'] as $language) {
             $name = $this->nullableString(data_get($attributes, "master.content.{$language}.name"));
 
@@ -2775,6 +3570,122 @@ class ProductController extends Controller
         data_forget($attributes, 'master.inheritance');
 
         return $attributes;
+    }
+
+    /**
+     * Fold direct aliases and independently proven generic size rows into one
+     * canonical parameter without consuming a generic colour row.
+     *
+     * @param  list<mixed>  $parameters
+     * @param  iterable<mixed>  $selectedEvidence
+     * @return list<array<string, mixed>>
+     */
+    private function canonicalizeCopiedSizeParameters(
+        array $parameters,
+        ?string $selectedSourceAttribute = null,
+        iterable $selectedEvidence = [],
+    ): array {
+        $resolver = app(ProductVariantAxisNameResolver::class);
+        $variantOptions = app(ProductVariantOptionNormalizer::class);
+        $knownSizeOptions = $this->knownSizeOptions();
+        $selectedEvidence = $resolver->optionTokens($selectedEvidence);
+        $rows = collect($parameters)
+            ->filter(fn (mixed $parameter): bool => is_array($parameter))
+            ->values()
+            ->map(function (array $parameter, int $index) use (
+                $resolver,
+                $variantOptions,
+                $knownSizeOptions,
+                $selectedSourceAttribute,
+                $selectedEvidence,
+            ): array {
+                $originalName = trim((string) ($parameter['name'] ?? ''));
+                $evidence = $resolver->optionTokens([$parameter['value'] ?? null]);
+
+                if ($selectedSourceAttribute !== null
+                    && $this->variantAxisNamesMatch($originalName, $selectedSourceAttribute)
+                ) {
+                    $evidence = $evidence->merge($selectedEvidence);
+                }
+
+                $isSize = $resolver->resolve(
+                    $originalName,
+                    $evidence,
+                    $knownSizeOptions,
+                ) === ProductVariantAxisNameResolver::SIZE;
+
+                if ($isSize) {
+                    $parameter['name'] = ProductVariantAxisNameResolver::SIZE;
+                    $parameter['name_en'] = 'Size';
+                    $parameter['value'] = $resolver->optionTokens([$parameter['value'] ?? null])
+                        ->map(fn (string $value): string => $variantOptions->normalize(
+                            ProductVariantAxisNameResolver::SIZE,
+                            $value,
+                        ))
+                        ->filter()
+                        ->implode(' | ');
+                }
+
+                return [
+                    'index' => $index,
+                    'row' => $parameter,
+                    'is_size' => $isSize,
+                    'priority' => match (true) {
+                        mb_strtolower($originalName) === mb_strtolower(ProductVariantAxisNameResolver::SIZE) => 0,
+                        $resolver->isDirectSizeAlias($originalName)
+                            && ! $resolver->isLegacyPluralSizeAlias($originalName) => 10,
+                        $resolver->isLegacyPluralSizeAlias($originalName) => 20,
+                        $resolver->isGenericSizeAlias($originalName) => 30,
+                        default => 40,
+                    },
+                ];
+            });
+        $sizeRows = $rows->filter(fn (array $row): bool => $row['is_size'])->values();
+
+        if ($sizeRows->isEmpty()) {
+            return $rows->pluck('row')->all();
+        }
+
+        $orderedSizeRows = $sizeRows
+            ->sort(function (array $left, array $right): int {
+                $priority = $left['priority'] <=> $right['priority'];
+
+                return $priority !== 0 ? $priority : $left['index'] <=> $right['index'];
+            })
+            ->values();
+        $canonical = $orderedSizeRows->first()['row'];
+        $canonical['name'] = ProductVariantAxisNameResolver::SIZE;
+        $canonical['name_en'] = 'Size';
+        $canonical['value'] = $resolver->optionTokens(
+            $orderedSizeRows->pluck('row.value'),
+        )
+            ->map(fn (string $value): string => $variantOptions->normalize(
+                ProductVariantAxisNameResolver::SIZE,
+                $value,
+            ))
+            ->filter()
+            ->unique(fn (string $value): string => $variantOptions->identity(
+                ProductVariantAxisNameResolver::SIZE,
+                $value,
+            ))
+            ->implode(' | ');
+        $canonical['variation'] = $sizeRows->contains(
+            fn (array $row): bool => (bool) ($row['row']['variation'] ?? false),
+        );
+        $insertAt = (int) $sizeRows->min('index');
+        $result = [];
+
+        foreach ($rows as $row) {
+            if ($row['index'] === $insertAt) {
+                $result[] = $canonical;
+            }
+
+            if (! $row['is_size']) {
+                $result[] = $row['row'];
+            }
+        }
+
+        return $result;
     }
 
     private function markVariantForWooRemoval(Product $parent, ?Product $variant): void

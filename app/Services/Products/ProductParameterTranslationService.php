@@ -14,6 +14,7 @@ final class ProductParameterTranslationService
     private ?Collection $definitions = null;
 
     public function __construct(
+        private readonly ProductVariantAxisNameResolver $variantAxisNames,
         private readonly ProductVariantOptionNormalizer $variantOptions,
     ) {}
 
@@ -26,11 +27,23 @@ final class ProductParameterTranslationService
      */
     public function syncFromWooItem(array $item): array
     {
-        $primary = $this->attributes($item);
-        $englishItem = collect((array) ($item['erp_translations'] ?? []))
-            ->first(fn (mixed $translation, mixed $language): bool => is_array($translation)
-                && mb_strtolower(trim((string) $language)) === 'en');
-        $english = is_array($englishItem) ? $this->attributes($englishItem) : [];
+        $primaryLanguage = mb_strtolower(trim((string) ($item['erp_import_language'] ?? 'pl')));
+        $translations = collect((array) ($item['erp_translations'] ?? []));
+        $translation = fn (string $wanted): mixed => $translations
+            ->first(fn (mixed $candidate, mixed $language): bool => is_array($candidate)
+                && mb_strtolower(trim((string) $language)) === $wanted);
+        $polishItem = $primaryLanguage === 'pl' ? $item : $translation('pl');
+        $englishItem = $primaryLanguage === 'en' ? $item : $translation('en');
+
+        // The shared ERP dictionary is Polish-first regardless of which
+        // language happens to own the channel's primary Woo mapping. When the
+        // verified family contains PL, always use it as the canonical side.
+        $canonicalItem = is_array($polishItem) ? $polishItem : $item;
+        $canonicalLanguage = is_array($polishItem)
+            ? 'pl'
+            : ($primaryLanguage === 'en' ? 'en' : 'pl');
+        $primary = $this->attributes($canonicalItem, $canonicalLanguage);
+        $english = is_array($englishItem) ? $this->attributes($englishItem, 'en') : [];
         $localized = 0;
         $merged = 0;
 
@@ -46,28 +59,47 @@ final class ProductParameterTranslationService
 
     /**
      * @param  array<string, mixed>  $item
-     * @return list<array{id:?string,name:string,values:list<string>,variation:bool}>
+     * @return list<array{id:?string,name:string,localized_name:string,language:string,values:list<string>,variation:bool}>
      */
-    private function attributes(array $item): array
+    private function attributes(array $item, string $language): array
     {
+        $knownSizeOptions = $this->allDefinitions()
+            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
+                $definition->name,
+                $definition->name_en,
+                $definition->slug,
+            ])->contains(fn (mixed $name): bool => $this->variantAxisNames
+                ->isDirectSizeAlias((string) $name)))
+            ->flatMap(fn (ProductParameterDefinition $definition): array => [
+                ...(array) $definition->values,
+                ...(array) $definition->values_en,
+            ])
+            ->values();
+
         return collect((array) ($item['attributes'] ?? []))
             ->filter(fn (mixed $attribute): bool => is_array($attribute))
-            ->map(function (array $attribute): ?array {
-                $name = trim((string) ($attribute['name'] ?? ''));
+            ->map(function (array $attribute) use ($knownSizeOptions, $language): ?array {
+                $sourceName = trim((string) ($attribute['name'] ?? ''));
 
-                if ($name === '') {
+                if ($sourceName === '') {
                     return null;
                 }
 
                 $values = isset($attribute['options']) && is_array($attribute['options'])
                     ? $attribute['options']
                     : [$attribute['option'] ?? null];
+                $name = $this->variantAxisNames->resolve($sourceName, $values, $knownSizeOptions);
+                $localizedName = $name === ProductVariantAxisNameResolver::SIZE
+                    ? ($language === 'en' ? 'Size' : ProductVariantAxisNameResolver::SIZE)
+                    : $sourceName;
 
                 return [
                     'id' => filled($attribute['id'] ?? null) && (string) $attribute['id'] !== '0'
                         ? trim((string) $attribute['id'])
                         : null,
                     'name' => $name,
+                    'localized_name' => $localizedName,
+                    'language' => $language,
                     'values' => collect($values)
                         ->map(fn (mixed $value): string => $this->variantOptions->normalize(
                             $name,
@@ -85,9 +117,9 @@ final class ProductParameterTranslationService
     }
 
     /**
-     * @param  array{id:?string,name:string,values:list<string>,variation:bool}  $primary
-     * @param  list<array{id:?string,name:string,values:list<string>,variation:bool}>  $translated
-     * @return array{id:?string,name:string,values:list<string>,variation:bool}|null
+     * @param  array{id:?string,name:string,localized_name:string,language:string,values:list<string>,variation:bool}  $primary
+     * @param  list<array{id:?string,name:string,localized_name:string,language:string,values:list<string>,variation:bool}>  $translated
+     * @return array{id:?string,name:string,localized_name:string,language:string,values:list<string>,variation:bool}|null
      */
     private function matchingAttribute(
         array $primary,
@@ -124,8 +156,8 @@ final class ProductParameterTranslationService
     }
 
     /**
-     * @param  array{id:?string,name:string,values:list<string>,variation:bool}  $primary
-     * @param  array{id:?string,name:string,values:list<string>,variation:bool}|null  $english
+     * @param  array{id:?string,name:string,localized_name:string,language:string,values:list<string>,variation:bool}  $primary
+     * @param  array{id:?string,name:string,localized_name:string,language:string,values:list<string>,variation:bool}|null  $english
      * @return array{localized:int,merged:int}
      */
     private function syncDefinition(array $primary, ?array $english): array
@@ -139,7 +171,7 @@ final class ProductParameterTranslationService
             $englishDefinition = null;
             $definition->forceFill([
                 'name' => $primary['name'],
-                'name_en' => $english['name'] ?? $definition->name,
+                'name_en' => $english['localized_name'] ?? $definition->name,
                 // The legacy row contained English values in the PL column.
                 // Rebuild both aligned lists from the verified product pair.
                 'values' => [],
@@ -176,7 +208,7 @@ final class ProductParameterTranslationService
 
         $beforeName = trim((string) ($definition->name_en ?? ''));
         $beforeValues = (array) $definition->values_en;
-        $englishAttributeName = trim((string) ($english['name'] ?? $definition->name_en ?? ''));
+        $englishAttributeName = trim((string) ($english['localized_name'] ?? $definition->name_en ?? ''));
         $rawValuesEn = array_values((array) $definition->values_en);
         $values = [];
         $valuesEn = [];
@@ -232,7 +264,7 @@ final class ProductParameterTranslationService
             }
         }
 
-        $englishName = trim((string) ($english['name'] ?? ''));
+        $englishName = trim((string) ($english['localized_name'] ?? ''));
 
         $definition->fill([
             'name' => $primary['name'],

@@ -32,13 +32,13 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
 
         try {
             $channel = $this->wooChannel('MISSING-EN-REQUEUE');
-            $queuedRevision = WooOwnedVariantAxisRepairService::REVISION
+            $queuedRevision = WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION
                 .':missing-translation:axis-token-manual';
             $manualReview = $this->mapping($channel, 'MISSING-EN-MANUAL', [
                 'operator_note' => 'preserve manual note',
                 'maintenance' => [
                     'woo_owned_variant_axis_repair' => [
-                        'revision' => WooOwnedVariantAxisRepairService::REVISION,
+                        'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION,
                         'status' => 'manual_review',
                         'pending_token' => 'stale-axis-token',
                         'queued_at' => '2026-07-15T18:00:00+00:00',
@@ -80,12 +80,12 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
                     ],
                 ],
             );
-            $pendingRevision = WooOwnedVariantAxisRepairService::REVISION
+            $pendingRevision = WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION
                 .':missing-translation:axis-token-pending';
             $pending = $this->mapping($channel, 'MISSING-EN-PENDING', [
                 'maintenance' => [
                     'woo_owned_variant_axis_repair' => [
-                        'revision' => WooOwnedVariantAxisRepairService::REVISION,
+                        'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION,
                         'status' => 'pending',
                         'requested_at' => '2026-07-15T18:10:00+00:00',
                         'result' => [
@@ -136,7 +136,7 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
                     $metadata,
                     WooOwnedVariantAxisRepairService::STATE_PATH,
                 );
-                $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $repair['revision'] ?? null);
+                $this->assertSame(WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION, $repair['revision'] ?? null);
                 $this->assertSame('pending', $repair['status'] ?? null);
                 $this->assertSame(now()->toISOString(), $repair['requested_at'] ?? null);
                 $this->assertArrayNotHasKey('result', $repair);
@@ -213,12 +213,8 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
 
             $dispatch = app(WooOwnedVariantAxisRepairService::class)
                 ->dispatchPending(1, 120);
-            $this->assertSame(1, $dispatch['dispatched']);
-            Bus::assertDispatched(
-                RepairWooOwnedVariantAxisJob::class,
-                fn (RepairWooOwnedVariantAxisJob $job): bool => $job->queue
-                    === WooOwnedVariantAxisRepairService::REPAIR_QUEUE,
-            );
+            $this->assertSame(0, $dispatch['dispatched']);
+            Bus::assertNotDispatched(RepairWooOwnedVariantAxisJob::class);
 
             $requestedAt = data_get(
                 $manualMetadata,
@@ -304,7 +300,7 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
             $completedBefore = $completedMapping->metadata;
 
             $layered = $this->candidateMetadata('pending');
-            $layeredRevision = WooOwnedVariantAxisRepairService::REVISION
+            $layeredRevision = WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION
                 .':missing-translation:layered-request';
             data_set($layered, 'product_data_export', [
                 'pending_token' => 'older-unrelated-token',
@@ -320,7 +316,7 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
             $layeredMapping = $this->mapping($channel, 'LAYERED-TOKEN', $layered);
 
             $newerRequested = $this->candidateMetadata('pending');
-            $oldQueuedRevision = WooOwnedVariantAxisRepairService::REVISION
+            $oldQueuedRevision = WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION
                 .':missing-translation:older-queued-request';
             data_set($newerRequested, 'product_data_export', [
                 'pending_token' => 'older-missing-translation-token',
@@ -345,7 +341,7 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
                 'legacy_variant_backfill' => [
                     'status' => 'pending',
                     'reason' => LegacyVariantFamilyBackfillService::REASON,
-                    'revision' => WooOwnedVariantAxisRepairService::REVISION
+                    'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION
                         .':missing-translation:obsolete-layer',
                     'requested_at' => '2026-07-15T19:20:00+00:00',
                 ],
@@ -523,7 +519,7 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
                     $mapping->refresh()->metadata,
                     WooOwnedVariantAxisRepairService::STATE_PATH,
                 );
-                $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $repair['revision'] ?? null);
+                $this->assertSame(WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION, $repair['revision'] ?? null);
                 $this->assertSame('pending', $repair['status'] ?? null);
                 $this->assertSame(now()->toISOString(), $repair['requested_at'] ?? null);
                 $this->assertArrayNotHasKey('completed_at', $repair);
@@ -532,8 +528,8 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
 
             $dispatch = app(WooOwnedVariantAxisRepairService::class)
                 ->dispatchPending(10, 120);
-            $this->assertSame(2, $dispatch['dispatched']);
-            Bus::assertDispatchedTimes(RepairWooOwnedVariantAxisJob::class, 2);
+            $this->assertSame(0, $dispatch['dispatched']);
+            Bus::assertNotDispatched(RepairWooOwnedVariantAxisJob::class);
             $requestedAt = $mappings->mapWithKeys(fn (ProductChannelMapping $mapping): array => [
                 $mapping->id => data_get(
                     $mapping->refresh()->metadata,
@@ -561,7 +557,7 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
         return [
             'maintenance' => [
                 'woo_owned_variant_axis_repair' => [
-                    'revision' => WooOwnedVariantAxisRepairService::REVISION,
+                    'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION,
                     'status' => $status,
                     'requested_at' => '2026-07-15T19:00:00+00:00',
                     'result' => [
@@ -580,7 +576,7 @@ final class WooOwnedVariantAxisMissingEnglishRequeueMigrationTest extends TestCa
      */
     private function withTargetBackfill(array $metadata, string $token): array
     {
-        $revision = WooOwnedVariantAxisRepairService::REVISION
+        $revision = WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONIZED_REVISION
             .':missing-translation:'.$token;
         data_set($metadata, 'product_data_export', [
             'pending_token' => $token,

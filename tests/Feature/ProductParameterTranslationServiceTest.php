@@ -121,4 +121,63 @@ class ProductParameterTranslationServiceTest extends TestCase
         $this->assertSame(['Polska'], $definition->values);
         $this->assertNull($definition->values_en);
     }
+
+    public function test_plural_size_names_create_one_canonical_polish_and_english_definition(): void
+    {
+        app(ProductParameterTranslationService::class)->syncFromWooItem([
+            'attributes' => [[
+                'id' => 19,
+                'name' => 'Rozmiary',
+                'options' => ['S', 'M/L'],
+                'variation' => true,
+            ]],
+            'erp_translations' => [
+                'en' => [
+                    'attributes' => [[
+                        'id' => 19,
+                        'name' => 'Sizes',
+                        'options' => ['S', 'M/L'],
+                        'variation' => true,
+                    ]],
+                ],
+            ],
+        ]);
+
+        $definition = ProductParameterDefinition::query()->sole();
+        $this->assertSame('Rozmiar', $definition->name);
+        $this->assertSame('Size', $definition->name_en);
+        $this->assertSame(['S', 'M/L'], $definition->values);
+        $this->assertSame(['S', 'M/L'], $definition->values_en);
+        $this->assertTrue($definition->is_variant);
+    }
+
+    public function test_english_primary_family_still_uses_the_verified_polish_dictionary_side(): void
+    {
+        app(ProductParameterTranslationService::class)->syncFromWooItem([
+            'erp_import_language' => 'en',
+            'attributes' => [[
+                'id' => 19,
+                'name' => 'Sizes',
+                'options' => ['Small', 'Large'],
+                'variation' => true,
+            ]],
+            'erp_translations' => [
+                'pl' => [
+                    'attributes' => [[
+                        'id' => 19,
+                        'name' => 'Rozmiary',
+                        'options' => ['Mały', 'Duży'],
+                        'variation' => true,
+                    ]],
+                ],
+            ],
+        ]);
+
+        $definition = ProductParameterDefinition::query()->sole();
+        $this->assertSame('Rozmiar', $definition->name);
+        $this->assertSame('Size', $definition->name_en);
+        $this->assertSame(['Mały', 'Duży'], $definition->values);
+        $this->assertSame(['Small', 'Large'], $definition->values_en);
+        $this->assertTrue($definition->is_variant);
+    }
 }

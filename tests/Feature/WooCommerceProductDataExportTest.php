@@ -21,6 +21,7 @@ use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceClient;
 use App\Services\WooCommerce\WooCommerceProductTranslationNotReadyException;
+use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Queue\Jobs\SyncJob;
@@ -2960,7 +2961,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && $pair[0]['sku'] === 'RETRY-FAMILY-M')->count());
     }
 
-    public function test_erp_variable_product_creates_parent_and_variants_in_woocommerce(): void
+    public function test_erp_variable_product_with_only_non_woo_mapping_creates_canonical_parent_and_variants_in_woocommerce(): void
     {
         $this->fakeWooWithGlobalAttributes(function ($request) {
             if ($request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products') {
@@ -2989,6 +2990,12 @@ class WooCommerceProductDataExportTest extends TestCase
             'type' => 'woocommerce',
             'is_active' => true,
         ]);
+        $marketplaceChannel = SalesChannel::query()->create([
+            'code' => 'BL-NON-WOO',
+            'name' => 'BaseLinker marketplace',
+            'type' => 'marketplace',
+            'is_active' => true,
+        ]);
 
         $integration = WordpressIntegration::query()->create([
             'sales_channel_id' => $channel->id,
@@ -3010,6 +3017,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 'master' => [
                     'source' => 'erp',
                     'product_type' => 'variable',
+                    'variant_attribute' => 'BLVariant',
                     'prices' => ['retail_price_pln' => 819.00],
                     'content' => [
                         'pl' => [
@@ -3043,6 +3051,13 @@ class WooCommerceProductDataExportTest extends TestCase
             'sort_order' => 20,
             'metadata' => ['variant_attribute' => 'Size'],
         ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $marketplaceChannel->id,
+            'external_product_id' => 'BL-SET-AMORA',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+        ]);
 
         $this->post(route('products.woocommerce.create', [$parent, $integration]))
             ->assertRedirect()
@@ -3057,10 +3072,16 @@ class WooCommerceProductDataExportTest extends TestCase
             ->filter(fn (array $attribute): bool => (bool) $attribute['variation'])
             ->values();
         $this->assertCount(1, $variantAttributes);
-        $this->assertSame(70, $variantAttributes[0]['id']);
+        $variantAttributeId = $variantAttributes[0]['id'];
+        $this->assertIsInt($variantAttributeId);
+        $this->assertSame(
+            0,
+            $variantAttributes[0]['position'],
+            json_encode($parentRequest['attributes'], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        );
         $this->assertSame(['S', 'M'], $variantAttributes[0]['options']);
         $this->assertTrue(collect($parentRequest['attributes'])
-            ->reject(fn (array $attribute): bool => $attribute['id'] === 70)
+            ->reject(fn (array $attribute): bool => $attribute['id'] === $variantAttributeId)
             ->every(fn (array $attribute): bool => $attribute['variation'] === false));
         $this->assertTrue(collect($parentRequest['attributes'])->every(
             fn (array $attribute): bool => ! array_key_exists('name', $attribute)
@@ -3075,19 +3096,23 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame(2, $variationRequests->count());
         $this->assertSame('SET-AMORA-S', $variationRequests[0]['sku']);
         $this->assertCount(1, $variationRequests[0]['attributes']);
-        $this->assertSame(70, $variationRequests[0]['attributes'][0]['id']);
+        $this->assertSame($variantAttributeId, $variationRequests[0]['attributes'][0]['id']);
         $this->assertSame('S', $variationRequests[0]['attributes'][0]['option']);
         $this->assertSame(10, $variationRequests[0]['menu_order']);
         $this->assertSame('819.00', $variationRequests[0]['regular_price']);
         $this->assertSame('SET-AMORA-M', $variationRequests[1]['sku']);
         $this->assertCount(1, $variationRequests[1]['attributes']);
-        $this->assertSame(70, $variationRequests[1]['attributes'][0]['id']);
+        $this->assertSame($variantAttributeId, $variationRequests[1]['attributes'][0]['id']);
         $this->assertSame('M', $variationRequests[1]['attributes'][0]['option']);
         $this->assertSame(20, $variationRequests[1]['menu_order']);
         $this->assertSame('829.00', $variationRequests[1]['regular_price']);
 
-        $this->assertSame(3, ProductChannelMapping::query()->count());
-        $this->assertSame('700', ProductChannelMapping::query()->where('product_id', $parent->id)->firstOrFail()->external_product_id);
+        $this->assertSame(4, ProductChannelMapping::query()->count());
+        $this->assertSame('700', ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->where('sales_channel_id', $channel->id)
+            ->firstOrFail()
+            ->external_product_id);
         $this->assertSame('701', ProductChannelMapping::query()->where('product_id', $variantS->id)->firstOrFail()->external_variation_id);
         $this->assertSame('702', ProductChannelMapping::query()->where('product_id', $variantM->id)->firstOrFail()->external_variation_id);
         $this->assertSame(1, IntegrationSyncLog::query()->where('operation', 'create_product')->count());
@@ -4048,7 +4073,7 @@ class WooCommerceProductDataExportTest extends TestCase
             )
             && $request['menu_order'] === 10
             && $request['attributes'][0]['id'] === 70
-            && $request['attributes'][0]['option'] === 'Petite'
+            && $request['attributes'][0]['option'] === 'Small'
             && str_ends_with($request['image']['src'], '/uploads/products/shared-variant-pl-en.jpg'));
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations/457?lang=en'
@@ -4060,7 +4085,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request['stock_status'] === 'outofstock'
             && $request['backorders'] === 'no'
             && $request['menu_order'] === 10
-            && $request['attributes'][0]['option'] === 'Petite'
+            && $request['attributes'][0]['option'] === 'Small'
             && ! array_key_exists('date_created', $request->data())
             && collect((array) $request['meta_data'])->contains(
                 fn (array $meta): bool => ($meta['key'] ?? null) === '_ean'
@@ -4081,6 +4106,259 @@ class WooCommerceProductDataExportTest extends TestCase
         ]);
         $this->assertSame('124', data_get($variant->fresh()->attributes, 'woocommerce_translations.en.product_id'));
         $this->assertSame('457', data_get($variant->fresh()->attributes, 'woocommerce_translations.en.variation_id'));
+    }
+
+    public function test_marketplace_only_plural_axis_uses_canonical_spelling_translation_and_order_with_unknown_fallback(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiary',
+            'name_en' => 'Sizes',
+            'slug' => 'rozmiary',
+            'input_type' => 'select',
+            'values' => ['S-M', 'M-L', 'Niestandardowy'],
+            'values_en' => ['Legacy Small/Medium', 'Legacy Medium/Large', 'Legacy custom'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 1,
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['M/L', 'S/M'],
+            'values_en' => ['Medium/Large', 'Small/Medium'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 999,
+        ]);
+        $channel = SalesChannel::query()->create([
+            'code' => 'MARKETPLACE-ORDER',
+            'name' => 'Marketplace order',
+            'type' => 'marketplace',
+            'is_active' => true,
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'MARKETPLACE-PLURAL-ORDER',
+            'name' => 'Marketplace plural order',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiary',
+                'content' => [
+                    'pl' => ['name' => 'Marketplace plural order'],
+                    'en' => ['name' => 'Marketplace plural order EN'],
+                ],
+                'parameters' => [[
+                    'name' => 'Rozmiary',
+                    'name_en' => 'Sizes',
+                    'value' => 's-m | m-l | Niestandardowy',
+                    'value_en' => 'Legacy Small/Medium | Legacy Medium/Large | Legacy custom',
+                    'variation' => true,
+                ]],
+            ]],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => 'BL-MARKETPLACE-ORDER',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        foreach ([
+            ['option' => 'm-l', 'value_en' => 'Legacy Medium/Large', 'sort_order' => 80],
+            ['option' => 's-m', 'value_en' => 'Legacy Small/Medium', 'sort_order' => 90],
+            ['option' => 'Niestandardowy', 'value_en' => 'Bespoke legacy', 'sort_order' => 70],
+        ] as $row) {
+            $option = $row['option'];
+            $variant = Product::query()->create([
+                'sku' => 'MARKETPLACE-PLURAL-'.strtoupper($option),
+                'name' => 'Marketplace plural '.$option,
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => ['master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variation',
+                    'variant_attribute' => 'Rozmiary',
+                    'parameters' => [[
+                        'name' => 'Rozmiary',
+                        'name_en' => 'Sizes',
+                        'value' => $option,
+                        'value_en' => $row['value_en'],
+                        'variation' => true,
+                    ]],
+                ]],
+            ]);
+            ProductRelation::query()->create([
+                'parent_product_id' => $parent->id,
+                'child_product_id' => $variant->id,
+                'relation_type' => 'variant',
+                'sort_order' => $row['sort_order'],
+                'metadata' => [
+                    'variant_attribute' => 'Rozmiary',
+                    'variant_option' => $option,
+                ],
+            ]);
+        }
+
+        $service = app(ProductDataExportService::class);
+        $variants = $parent->variantChildren()->get();
+        $prepareVariablePayload = new \ReflectionMethod($service, 'prepareVariablePayload');
+
+        foreach ([
+            'pl' => ['name' => 'Rozmiar', 'options' => ['M/L', 'S/M', 'Niestandardowy']],
+            'en' => ['name' => 'Size', 'options' => ['Medium/Large', 'Small/Medium', 'Bespoke legacy']],
+        ] as $language => $expected) {
+            $payload = $prepareVariablePayload->invoke(
+                $service,
+                $parent,
+                $variants,
+                ['meta_data' => []],
+                $language,
+            );
+            $axis = collect($payload['attributes'])->firstWhere('variation', true);
+            $this->assertSame('Rozmiar', $axis['source_name'] ?? null);
+            $this->assertSame($expected['name'], $axis['name'] ?? null);
+            $this->assertSame(['M/L', 'S/M', 'Niestandardowy'], $axis['source_options'] ?? null);
+            $this->assertSame($expected['options'], $axis['options'] ?? null);
+            $this->assertSame([10, 20, null], $axis['source_option_orders'] ?? null);
+            $this->assertSame('Rozmiar', collect($payload['meta_data'])
+                ->firstWhere('key', '_sempre_erp_variant_attribute')['value'] ?? null);
+        }
+
+        $variationPayload = new \ReflectionMethod($service, 'variationPayload');
+        $menuOrders = $variants->mapWithKeys(fn (Product $variant): array => [
+            $variant->sku => $variationPayload->invoke(
+                $service,
+                $parent,
+                $variant,
+                $channel->id,
+                'pl',
+            )['menu_order'],
+        ]);
+        $this->assertSame(10, $menuOrders->get('MARKETPLACE-PLURAL-M-L'));
+        $this->assertSame(20, $menuOrders->get('MARKETPLACE-PLURAL-S-M'));
+        $this->assertSame(70, $menuOrders->get('MARKETPLACE-PLURAL-NIESTANDARDOWY'));
+    }
+
+    public function test_proven_generic_size_axis_uses_canonical_dictionary_spelling_translation_and_order(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            'values_en' => ['Small/Medium', 'Medium/Large'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
+        $channel = SalesChannel::query()->create([
+            'code' => 'GENERIC-SIZE-ORDER',
+            'name' => 'Generic size order',
+            'type' => 'marketplace',
+            'is_active' => true,
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'GENERIC-SIZE-PARENT',
+            'name' => 'Generic size parent',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'BLVariant',
+                'parameters' => [[
+                    'name' => 'BLVariant',
+                    'value' => 'm-l | s-m',
+                    'value_en' => 'Legacy Medium/Large | Legacy Small/Medium',
+                    'variation' => true,
+                ]],
+            ]],
+        ]);
+
+        foreach ([
+            ['option' => 'm-l', 'value_en' => 'Legacy Medium/Large', 'sort_order' => 80],
+            ['option' => 's-m', 'value_en' => 'Legacy Small/Medium', 'sort_order' => 90],
+        ] as $row) {
+            $variant = Product::query()->create([
+                'sku' => 'GENERIC-SIZE-'.strtoupper($row['option']),
+                'name' => 'Generic size '.$row['option'],
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => ['master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variation',
+                    'variant_attribute' => 'BLVariant',
+                    'parameters' => [[
+                        'name' => 'BLVariant',
+                        'value' => $row['option'],
+                        'value_en' => $row['value_en'],
+                        'variation' => true,
+                    ]],
+                ]],
+            ]);
+            ProductRelation::query()->create([
+                'parent_product_id' => $parent->id,
+                'child_product_id' => $variant->id,
+                'relation_type' => 'variant',
+                'sort_order' => $row['sort_order'],
+                'metadata' => [
+                    'variant_attribute' => 'BLVariant',
+                    'variant_option' => $row['option'],
+                ],
+            ]);
+        }
+
+        $service = app(ProductDataExportService::class);
+        $variants = $parent->variantChildren()->get();
+        $prepareVariablePayload = new \ReflectionMethod($service, 'prepareVariablePayload');
+
+        foreach ([
+            'pl' => ['name' => 'Rozmiar', 'options' => ['S/M', 'M/L']],
+            'en' => ['name' => 'Size', 'options' => ['Small/Medium', 'Medium/Large']],
+        ] as $language => $expected) {
+            $payload = $prepareVariablePayload->invoke(
+                $service,
+                $parent,
+                $variants,
+                ['meta_data' => []],
+                $language,
+            );
+            $axis = collect($payload['attributes'])->firstWhere('variation', true);
+            $this->assertSame('Rozmiar', $axis['source_name'] ?? null);
+            $this->assertSame($expected['name'], $axis['name'] ?? null);
+            $this->assertSame(['S/M', 'M/L'], $axis['source_options'] ?? null);
+            $this->assertSame($expected['options'], $axis['options'] ?? null);
+            $this->assertSame([10, 20], $axis['source_option_orders'] ?? null);
+        }
+
+        $variationPayload = new \ReflectionMethod($service, 'variationPayload');
+        $english = $variants->mapWithKeys(fn (Product $variant): array => [
+            $variant->sku => $variationPayload->invoke(
+                $service,
+                $parent,
+                $variant,
+                $channel->id,
+                'en',
+            ),
+        ]);
+        $this->assertSame('Small/Medium', data_get($english, 'GENERIC-SIZE-S-M.attributes.0.option'));
+        $this->assertSame(10, data_get($english, 'GENERIC-SIZE-S-M.menu_order'));
+        $this->assertSame('Medium/Large', data_get($english, 'GENERIC-SIZE-M-L.attributes.0.option'));
+        $this->assertSame(20, data_get($english, 'GENERIC-SIZE-M-L.menu_order'));
     }
 
     public function test_export_replaces_legacy_blvariant_axis_with_canonical_global_size_for_pl_and_en(): void
@@ -4244,7 +4522,48 @@ class WooCommerceProductDataExportTest extends TestCase
             ]);
         }
 
-        app(ProductDataExportService::class)->export($parent);
+        $service = app(ProductDataExportService::class);
+        $variants = $parent->variantChildren()->get();
+        $prepareVariablePayload = new \ReflectionMethod($service, 'prepareVariablePayload');
+        $legacyPayload = $prepareVariablePayload->invoke(
+            $service,
+            $parent,
+            $variants,
+            ['meta_data' => []],
+            'pl',
+        );
+        $legacyAxis = collect($legacyPayload['attributes'])
+            ->firstWhere('variation', true);
+        $this->assertSame('BLVariant', $legacyAxis['source_name'] ?? null);
+        $this->assertSame('BLVariant', $legacyAxis['name'] ?? null);
+        $this->assertSame('BLVariant', collect($legacyPayload['meta_data'])
+            ->firstWhere('key', '_sempre_erp_variant_attribute')['value'] ?? null);
+
+        $attributes = (array) $parent->attributes;
+        data_set($attributes, 'master.'.WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::REVISION,
+            'synchronized_at' => now()->toISOString(),
+        ]);
+        $parent->forceFill(['attributes' => $attributes])->save();
+
+        foreach (['pl' => 'Rozmiar', 'en' => 'Size'] as $language => $renderedName) {
+            $canonicalPayload = $prepareVariablePayload->invoke(
+                $service,
+                $parent,
+                $variants,
+                ['meta_data' => []],
+                $language,
+            );
+            $canonicalAxis = collect($canonicalPayload['attributes'])
+                ->firstWhere('variation', true);
+            $this->assertSame('Rozmiar', $canonicalAxis['source_name'] ?? null);
+            $this->assertSame($renderedName, $canonicalAxis['name'] ?? null);
+            $this->assertSame(['S/M', 'M/L'], $canonicalAxis['options'] ?? null);
+            $this->assertSame('Rozmiar', collect($canonicalPayload['meta_data'])
+                ->firstWhere('key', '_sempre_erp_variant_attribute')['value'] ?? null);
+        }
+
+        $service->export($parent);
 
         $mutations = Http::recorded()
             ->map(fn (array $record) => $record[0])
@@ -4303,6 +4622,93 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/attributes'
             && in_array(mb_strtolower((string) $request['name']), ['wariant', 'variant', 'blvariant'], true));
+    }
+
+    public function test_independent_blvariant_color_is_preserved_as_non_variation_next_to_size_axis(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S', 'M'],
+            'values_en' => ['S', 'M'],
+            'is_variant' => true,
+            'sort_order' => 10,
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'SIZE-WITH-BLVARIANT-COLOR',
+            'name' => 'Rozmiar z kolorem legacy',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'parameters' => [
+                    ['name' => 'Rozmiar', 'value' => 'S | M', 'variation' => true],
+                    ['name' => 'BLVariant', 'value' => 'Czarny | Biały', 'variation' => true],
+                ],
+            ]],
+        ]);
+
+        foreach (['S', 'M'] as $sortOrder => $option) {
+            $variant = Product::query()->create([
+                'sku' => 'SIZE-WITH-BLVARIANT-COLOR-'.$option,
+                'name' => 'Rozmiar z kolorem legacy '.$option,
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => ['master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variation',
+                    'variant_attribute' => 'Rozmiar',
+                    'parameters' => [[
+                        'name' => 'Rozmiar',
+                        'value' => $option,
+                        'variation' => true,
+                    ]],
+                ]],
+            ]);
+            ProductRelation::query()->create([
+                'parent_product_id' => $parent->id,
+                'child_product_id' => $variant->id,
+                'relation_type' => 'variant',
+                'sort_order' => $sortOrder,
+                'metadata' => [
+                    'variant_attribute' => 'Rozmiar',
+                    'variant_option' => $option,
+                ],
+            ]);
+        }
+
+        $service = app(ProductDataExportService::class);
+        $prepareVariablePayload = new \ReflectionMethod($service, 'prepareVariablePayload');
+        $payload = $prepareVariablePayload->invoke(
+            $service,
+            $parent,
+            $parent->variantChildren()->get(),
+            ['meta_data' => []],
+            'pl',
+        );
+        $attributes = collect($payload['attributes']);
+        $variationAttributes = $attributes
+            ->filter(fn (array $attribute): bool => (bool) ($attribute['variation'] ?? false))
+            ->values();
+
+        $this->assertCount(2, $attributes);
+        $this->assertCount(1, $variationAttributes);
+        $this->assertSame('Rozmiar', $variationAttributes->first()['source_name'] ?? null);
+        $this->assertSame(['S', 'M'], $variationAttributes->first()['options'] ?? null);
+
+        $color = $attributes->firstWhere('source_name', 'BLVariant');
+        $this->assertIsArray($color);
+        $this->assertFalse($color['variation'] ?? true);
+        $this->assertSame(['Czarny | Biały'], $color['source_options'] ?? null);
+        $this->assertSame(['Czarny | Biały'], $color['options'] ?? null);
     }
 
     public function test_global_attribute_resolution_paginates_attribute_and_term_collections(): void
