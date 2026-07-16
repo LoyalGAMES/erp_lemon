@@ -6274,10 +6274,19 @@ final class WooOwnedVariantAxisRepairService
      */
     private function protectedSnapshotData(array $parent, array $variations): array
     {
-        $select = fn (array $payload): array => collect(self::PROTECTED_PRODUCT_FIELDS)
+        $select = fn (array $payload, array $fields = self::PROTECTED_PRODUCT_FIELDS): array => collect($fields)
             ->mapWithKeys(fn (string $field): array => [
                 $field => array_key_exists($field, $payload) ? $payload[$field] : null,
             ])
+            ->all();
+        // WooCommerce derives a variation's display name from the parent and
+        // its attribute options. Replacing the legacy axis therefore refreshes
+        // that response-only value even though no name is submitted. Keep the
+        // parent name protected and continue protecting every editable and
+        // commercial variation field.
+        $variationProtectedFields = collect(self::PROTECTED_PRODUCT_FIELDS)
+            ->reject(fn (string $field): bool => $field === 'name')
+            ->values()
             ->all();
         $targetAttributeIds = collect((array) ($parent['attributes'] ?? []))
             ->filter(fn (mixed $attribute): bool => is_array($attribute)
@@ -6314,7 +6323,10 @@ final class WooOwnedVariantAxisRepairService
                 ->all(),
             'variations' => collect($variations)
                 ->mapWithKeys(fn (array $variation): array => [
-                    (string) ($variation['id'] ?? '') => $select($variation),
+                    (string) ($variation['id'] ?? '') => $select(
+                        $variation,
+                        $variationProtectedFields,
+                    ),
                 ])
                 ->sortKeys()
                 ->all(),

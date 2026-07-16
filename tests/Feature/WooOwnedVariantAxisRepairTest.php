@@ -168,6 +168,57 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
     }
 
+    public function test_it_accepts_only_the_variation_names_woocommerce_regenerates_from_the_repaired_axis(): void
+    {
+        [$parent, $catalog] = $this->family();
+
+        foreach ($catalog->variations as $parentId => $variations) {
+            foreach ($variations as $variationId => $variation) {
+                $catalog->variations[$parentId][$variationId]['name'] = "Legacy variation {$variationId}";
+            }
+        }
+
+        $parentNames = collect($catalog->products)->mapWithKeys(
+            fn (array $product, int $id): array => [$id => $product['name']],
+        )->all();
+        $this->fakeCatalog($catalog, static function (Request $request, object $liveCatalog): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() !== 'PUT'
+                || preg_match('#/wc/v3/products/(\d+)/variations/(\d+)$#', $path, $matches) !== 1
+                || (int) data_get($request->data(), 'attributes.0.id', 0) !== 1
+            ) {
+                return null;
+            }
+
+            $parentId = (int) $matches[1];
+            $variationId = (int) $matches[2];
+            $liveCatalog->variations[$parentId][$variationId]['name'] =
+                $liveCatalog->products[$parentId]['name'].' - Woo generated size';
+
+            return null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('repaired', $result['status']);
+        $this->assertSame($parentNames, collect($catalog->products)->mapWithKeys(
+            fn (array $product, int $id): array => [$id => $product['name']],
+        )->all());
+
+        foreach ($catalog->variations as $parentId => $variations) {
+            foreach ($variations as $variation) {
+                $this->assertSame(
+                    $catalog->products[$parentId]['name'].' - Woo generated size',
+                    $variation['name'],
+                );
+                $this->assertSame(3, $variation['stock_quantity']);
+                $this->assertSame('instock', $variation['stock_status']);
+                $this->assertSame('539.00', $variation['price']);
+            }
+        }
+    }
+
     public function test_it_creates_and_links_only_the_missing_english_size_term_before_repairing_existing_ids(): void
     {
         Bus::fake([ImportWooCommerceProductsJob::class]);
@@ -1612,6 +1663,8 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $beforeVariations = unserialize(serialize($afterVariations));
         $afterParent['name'] = 'SECRET PRODUCT NAME';
         $afterParent['attributes'][0]['options'][0] = 'SECRET COMPOSITION';
+        $beforeVariations[0]['name'] = 'OLD GENERATED NAME';
+        $afterVariations[0]['name'] = 'NEW GENERATED NAME';
         $afterVariations[0]['stock_quantity'] = 987654;
 
         $delta = $method->invoke(
@@ -1625,6 +1678,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertStringContainsString('parent.name', $delta);
         $this->assertStringContainsString('non_target_attributes.0.options.0', $delta);
         $this->assertStringContainsString('variations.124.stock_quantity', $delta);
+        $this->assertStringNotContainsString('variations.124.name', $delta);
         $this->assertStringNotContainsString('SECRET', $delta);
         $this->assertStringNotContainsString('987654', $delta);
     }
