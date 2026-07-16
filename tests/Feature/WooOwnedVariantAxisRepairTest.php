@@ -20,6 +20,7 @@ use App\Services\WooCommerce\WooCommerceImportService;
 use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
@@ -2285,6 +2286,237 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             data_get($mapping->fresh()->metadata, WooOwnedVariantAxisRepairService::STATE_PATH.'.status'),
         );
         $this->assertFalse($repair->blocksFullExport($parent));
+    }
+
+    public function test_deployment_gate_synchronously_finishes_a_current_repair_despite_an_old_token_and_backoff(): void
+    {
+        Bus::fake([ExportWooCommerceProductDataJob::class]);
+        [$parent, $catalog] = $this->family();
+        $this->fakeCatalog($catalog, function (Request $request): mixed {
+            if ($request->method() === 'GET'
+                && str_ends_with(
+                    $request->url(),
+                    '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities',
+                )
+            ) {
+                return Http::response([
+                    'available' => true,
+                    'attribute_term_translation_link_available' => true,
+                    'variation_translation_link_available' => true,
+                    'variation_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/variations/translations',
+                    'languages' => ['pl', 'en'],
+                    'plugin_version' => '0.5.6',
+                ]);
+            }
+
+            return null;
+        });
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::REVISION,
+            'status' => 'queued',
+            'pending_token' => 'token-owned-by-the-stopped-release',
+            'queued_at' => now()->toISOString(),
+            'next_attempt_at' => now()->addDay()->toISOString(),
+            'attempts' => 2,
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+        Artisan::call('down', ['--retry' => 60]);
+
+        try {
+            $exitCode = Artisan::call('erp:repair-woo-owned-variant-axes-during-maintenance');
+            $output = Artisan::output();
+        } finally {
+            Artisan::call('up');
+        }
+
+        $this->assertSame(0, $exitCode, $output);
+        $this->assertStringContainsString(
+            'candidates=1, processed=1, skipped=0, exceptions=0',
+            $output,
+        );
+        $this->assertStringContainsString('statuses=completed=1, unresolved=0', $output);
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame('completed', $state['status'] ?? null);
+        $this->assertSame('repaired', data_get($state, 'result.status'));
+        $this->assertSame(3, $state['attempts'] ?? null);
+        $this->assertArrayNotHasKey('pending_token', $state);
+        $this->assertArrayNotHasKey('next_attempt_at', $state);
+        $this->assertSame('dispatched', data_get($state, 'result.full_export_queue'));
+        Bus::assertDispatchedTimes(ExportWooCommerceProductDataJob::class, 1);
+
+        $this->assertSame(0, Artisan::call('erp:verify-woo-owned-variant-axis-repair'));
+        $this->assertStringContainsString(
+            'statuses=completed=1, unresolved=0, unresolved_families=-',
+            Artisan::output(),
+        );
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'PUT');
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
+    }
+
+    public function test_deployment_gate_refuses_to_take_a_reservation_outside_maintenance(): void
+    {
+        [$parent] = $this->family();
+        app(WooOwnedVariantAxisRepairService::class)->markPending($parent);
+        Http::fake();
+
+        $exitCode = Artisan::call('erp:repair-woo-owned-variant-axes-during-maintenance');
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString(
+            'allowed only while the application is in maintenance mode',
+            Artisan::output(),
+        );
+        $this->assertSame('pending', data_get(
+            ProductChannelMapping::query()
+                ->where('product_id', $parent->id)
+                ->firstOrFail()
+                ->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.status',
+        ));
+        Http::assertNothingSent();
+    }
+
+    public function test_deployment_gate_fails_closed_when_the_job_requires_manual_review(): void
+    {
+        [$parent] = $this->family();
+        app(WooOwnedVariantAxisRepairService::class)->markPending($parent);
+        $parent->forceFill([
+            'attributes' => [
+                'master' => [
+                    'source' => 'manual',
+                    'product_type' => 'simple',
+                    'parameters' => [],
+                ],
+            ],
+        ])->save();
+        Http::fake();
+        Artisan::call('down', ['--retry' => 60]);
+
+        try {
+            $exitCode = Artisan::call('erp:repair-woo-owned-variant-axes-during-maintenance');
+            $output = Artisan::output();
+        } finally {
+            Artisan::call('up');
+        }
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString('statuses=manual_review=1, unresolved=1', $output);
+        $this->assertStringContainsString("families: {$parent->id}", $output);
+        $state = (array) data_get(
+            ProductChannelMapping::query()
+                ->where('product_id', $parent->id)
+                ->firstOrFail()
+                ->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame('manual_review', $state['status'] ?? null);
+        $this->assertSame('manual_review', data_get($state, 'result.status'));
+        $this->assertArrayNotHasKey('pending_token', $state);
+        $this->assertSame(1, Artisan::call('erp:verify-woo-owned-variant-axis-repair'));
+        Http::assertNothingSent();
+    }
+
+    public function test_deployment_gate_and_inspector_surface_the_exact_repair_exception(): void
+    {
+        [$parent, $catalog] = $this->family();
+        app(WooOwnedVariantAxisRepairService::class)->markPending($parent);
+        $this->fakeCatalog($catalog, function (Request $request): mixed {
+            if ($request->method() === 'PUT') {
+                return Http::response(['message' => 'production axis failure #3932'], 503);
+            }
+
+            return null;
+        });
+        Artisan::call('down', ['--retry' => 60]);
+
+        try {
+            $exitCode = Artisan::call('erp:repair-woo-owned-variant-axes-during-maintenance');
+            $output = Artisan::output();
+        } finally {
+            Artisan::call('up');
+        }
+
+        $this->assertSame(1, $exitCode, $output);
+        $this->assertStringContainsString('status code 503', $output);
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $this->assertSame('pending', data_get(
+            $mapping->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.status',
+        ));
+        $this->assertStringContainsString('status code 503', (string) data_get(
+            $mapping->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.error',
+        ));
+
+        $this->assertSame(0, Artisan::call('erp:inspect-woo-owned-variant-axis-repair'));
+        $this->assertStringContainsString('status code 503', Artisan::output());
+        $this->assertSame(1, Artisan::call('erp:verify-woo-owned-variant-axis-repair'));
+    }
+
+    public function test_deployment_postcondition_rejects_every_unresolved_or_dirty_current_state_and_ignores_old_revisions(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+
+        foreach (['pending', 'queued', 'failed', 'manual_review'] as $status) {
+            $metadata = (array) $mapping->fresh()->metadata;
+            data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+                'revision' => WooOwnedVariantAxisRepairService::REVISION,
+                'status' => $status,
+            ]);
+            $mapping->forceFill(['metadata' => $metadata])->save();
+
+            $this->assertSame(1, Artisan::call('erp:verify-woo-owned-variant-axis-repair'));
+            $this->assertStringContainsString("statuses={$status}=1, unresolved=1", Artisan::output());
+        }
+
+        foreach ([
+            ['pending_token' => 'stale-token'],
+            ['failed_at' => now()->toISOString()],
+            ['error' => 'stale failure'],
+        ] as $dirtyState) {
+            $metadata = (array) $mapping->fresh()->metadata;
+            data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, array_merge([
+                'revision' => WooOwnedVariantAxisRepairService::REVISION,
+                'status' => 'completed',
+                'result' => ['status' => 'repaired'],
+            ], $dirtyState));
+            $mapping->forceFill(['metadata' => $metadata])->save();
+
+            $this->assertSame(1, Artisan::call('erp:verify-woo-owned-variant-axis-repair'));
+            $this->assertStringContainsString('statuses=completed=1, unresolved=1', Artisan::output());
+        }
+
+        $metadata = (array) $mapping->fresh()->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::REVISION,
+            'status' => 'completed',
+            'result' => ['status' => 'already_canonical'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+        $this->assertSame(0, Artisan::call('erp:verify-woo-owned-variant-axis-repair'));
+
+        $metadata = (array) $mapping->fresh()->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_ERP_SYNCHRONIZED_REVISION,
+            'status' => 'pending',
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+        $this->assertSame(0, Artisan::call('erp:verify-woo-owned-variant-axis-repair'));
+        $this->assertStringContainsString('mappings=0, families=0, statuses=-, unresolved=0', Artisan::output());
     }
 
     public function test_manual_full_export_is_blocked_while_a_historical_family_is_pending_or_requires_review(): void

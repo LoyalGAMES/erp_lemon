@@ -142,7 +142,7 @@ Artisan::command('erp:inspect-woo-owned-variant-axis-repair {--limit=30 : Maximu
         ? 'no matching families'
         : $statusCounts->map(fn (int $count, string $status): string => "{$status}={$count}")->implode(', ')));
     $this->table(
-        ['product', 'sku', 'woo', 'status', 'queue', 'next_attempt', 'reason'],
+        ['product', 'sku', 'woo', 'status', 'queue', 'next_attempt', 'error/reason'],
         $mappings
             ->take($limit)
             ->map(function (ProductChannelMapping $mapping) use ($statePath): array {
@@ -155,10 +155,9 @@ Artisan::command('erp:inspect-woo-owned-variant-axis-repair {--limit=30 : Maximu
                     (string) ($state['status'] ?? '-'),
                     (string) data_get($state, 'result.full_export_queue', '-'),
                     (string) ($state['next_attempt_at'] ?? '-'),
-                    str((string) data_get($state, 'result.reason', '-'))
-                        ->squish()
-                        ->limit(180)
-                        ->toString(),
+                    filled($state['error'] ?? null)
+                        ? (string) $state['error']
+                        : (string) data_get($state, 'result.reason', '-'),
                 ];
             })
             ->values()

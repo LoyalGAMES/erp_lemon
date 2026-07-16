@@ -211,6 +211,66 @@ final class WooOwnedVariantAxisRepairService
     }
 
     /**
+     * Claim every current-revision mapping for one family while deployment
+     * maintenance has stopped all queue workers. This deliberately supersedes
+     * a queued token and retry backoff left by the previous release: that old
+     * database job becomes a harmless no-op because it no longer owns the
+     * reservation. Ordinary runtime dispatch must continue to use reserve().
+     *
+     * @return array{status:string,product_id?:int,token?:string}
+     */
+    public function reserveForIsolatedSynchronousRepair(int $productId): array
+    {
+        if (! app()->isDownForMaintenance()) {
+            throw new RuntimeException(
+                'An isolated synchronous variant-axis repair requires maintenance mode.',
+            );
+        }
+
+        return DB::transaction(function () use ($productId): array {
+            $mappings = $this->parentMappingsQuery($productId)
+                ->lockForUpdate()
+                ->get();
+            $repairableMappings = $mappings->filter(
+                fn (ProductChannelMapping $mapping): bool => data_get(
+                    $mapping->metadata,
+                    self::STATE_PATH.'.revision',
+                ) === self::REVISION
+                    && in_array(data_get(
+                        $mapping->metadata,
+                        self::STATE_PATH.'.status',
+                    ), ['pending', 'queued'], true),
+            );
+
+            if ($repairableMappings->isEmpty()) {
+                return ['status' => 'missing'];
+            }
+
+            $token = (string) Str::uuid();
+
+            foreach ($repairableMappings as $mapping) {
+                $metadata = (array) $mapping->metadata;
+                data_set($metadata, self::STATE_PATH.'.status', 'queued');
+                data_set($metadata, self::STATE_PATH.'.pending_token', $token);
+                data_set($metadata, self::STATE_PATH.'.queued_at', now()->toISOString());
+                data_set(
+                    $metadata,
+                    self::STATE_PATH.'.attempts',
+                    max(0, (int) data_get($metadata, self::STATE_PATH.'.attempts', 0)) + 1,
+                );
+                data_forget($metadata, self::STATE_PATH.'.next_attempt_at');
+                $mapping->forceFill(['metadata' => $metadata])->save();
+            }
+
+            return [
+                'status' => 'reserved',
+                'product_id' => $productId,
+                'token' => $token,
+            ];
+        });
+    }
+
+    /**
      * @return array{status:string,targets:int,mutations:int,reason?:string,languages?:list<string>}
      */
     public function repair(Product $product): array

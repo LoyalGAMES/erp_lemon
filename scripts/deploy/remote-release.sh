@@ -274,6 +274,7 @@ migration_started=0
 migration_completed=0
 bootstrap_moved=0
 size_order_sync_verified=0
+variant_axis_repair_verified=0
 previous_release=''
 rollback_release=''
 legacy_release=''
@@ -443,6 +444,32 @@ migration_completed=1
     "$php_bin" artisan erp:preflight
 )
 
+# Migrations may mark historical Woo product families for an axis-only repair.
+# All old workers have exited and maintenance prevents every web catalog
+# writer, so finish the exact current revision now instead of waiting for the
+# scheduler after the release has already been reported as successful. The
+# existing repair job still only queues its broad follow-up catalog export; it
+# is never executed synchronously here.
+variant_axis_repair_succeeded=0
+if (
+    cd "$release_path"
+    "$php_bin" artisan erp:repair-woo-owned-variant-axes-during-maintenance
+); then
+    variant_axis_repair_succeeded=1
+else
+    echo 'Błąd: synchroniczna naprawa osi wariantów WooCommerce nie zakończyła się czystym stanem.' >&2
+fi
+if (
+    cd "$release_path"
+    "$php_bin" artisan erp:verify-woo-owned-variant-axis-repair
+); then
+    if [[ "$variant_axis_repair_succeeded" -eq 1 ]]; then
+        variant_axis_repair_verified=1
+    fi
+else
+    echo 'Błąd: bieżąca rewizja naprawy osi wariantów WooCommerce ma nierozwiązane rodziny.' >&2
+fi
+
 # Every release performs a fresh existing-term-only WooCommerce repair. The
 # normal asynchronous job must share the full catalog lock with product
 # exports, because an overlapping export can overwrite term menu_order. During
@@ -512,6 +539,9 @@ fi
 "$php_bin" "$deploy_path/artisan" erp:inspect-woo-owned-variant-axis-repair --limit=30
 
 completed=1
+if [[ "$variant_axis_repair_verified" -ne 1 ]]; then
+    fail 'Kod został aktywowany, ale naprawa osi wariantów WooCommerce nie zakończyła się sukcesem; sprawdź stan bieżącej rewizji powyżej.'
+fi
 if [[ "$size_order_sync_verified" -ne 1 ]]; then
     fail 'Kod został aktywowany, ale naprawa globalnej kolejności rozmiarów WooCommerce nie zakończyła się sukcesem; sprawdź log joba powyżej.'
 fi
