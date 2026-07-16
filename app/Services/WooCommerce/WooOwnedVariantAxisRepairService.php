@@ -922,7 +922,16 @@ final class WooOwnedVariantAxisRepairService
                     $this->protectedSnapshot($parent, $variations),
                 )) {
                     throw new RuntimeException(
-                        "Naprawa osi produktu #{$target['external_product_id']} zmieniła chronione dane handlowe lub treści.",
+                        sprintf(
+                            'Naprawa osi produktu #%s zmieniła chronione dane handlowe lub treści (protected_delta=%s).',
+                            $target['external_product_id'],
+                            $this->protectedSnapshotDelta(
+                                $entry['parent'],
+                                $entry['variations'],
+                                $parent,
+                                $variations,
+                            ),
+                        ),
                     );
                 }
 
@@ -6252,6 +6261,19 @@ final class WooOwnedVariantAxisRepairService
      */
     private function protectedSnapshot(array $parent, array $variations): string
     {
+        return hash('sha256', (string) json_encode(
+            $this->protectedSnapshotData($parent, $variations),
+            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION,
+        ));
+    }
+
+    /**
+     * @param  array<string,mixed>  $parent
+     * @param  list<array<string,mixed>>  $variations
+     * @return array<string,mixed>
+     */
+    private function protectedSnapshotData(array $parent, array $variations): array
+    {
         $select = fn (array $payload): array => collect(self::PROTECTED_PRODUCT_FIELDS)
             ->mapWithKeys(fn (string $field): array => [
                 $field => array_key_exists($field, $payload) ? $payload[$field] : null,
@@ -6267,7 +6289,8 @@ final class WooOwnedVariantAxisRepairService
         $isTargetAttribute = fn (array $attribute): bool => $this->isGenericAttribute($attribute)
             || $this->isSizeAttribute($attribute)
             || in_array((int) ($attribute['id'] ?? 0), $targetAttributeIds, true);
-        $snapshot = [
+
+        return [
             'parent' => $select($parent),
             'non_target_attributes' => collect((array) ($parent['attributes'] ?? []))
                 ->filter(fn (mixed $attribute): bool => is_array($attribute))
@@ -6296,11 +6319,57 @@ final class WooOwnedVariantAxisRepairService
                 ->sortKeys()
                 ->all(),
         ];
+    }
 
-        return hash('sha256', (string) json_encode(
-            $snapshot,
-            JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_PRESERVE_ZERO_FRACTION,
-        ));
+    /**
+     * Report paths only; values can contain commercial data or editorial
+     * content and must never enter deployment logs.
+     *
+     * @param  array<string,mixed>  $beforeParent
+     * @param  list<array<string,mixed>>  $beforeVariations
+     * @param  array<string,mixed>  $afterParent
+     * @param  list<array<string,mixed>>  $afterVariations
+     */
+    private function protectedSnapshotDelta(
+        array $beforeParent,
+        array $beforeVariations,
+        array $afterParent,
+        array $afterVariations,
+    ): string {
+        $before = $this->protectedSnapshotData($beforeParent, $beforeVariations);
+        $after = $this->protectedSnapshotData($afterParent, $afterVariations);
+        $paths = collect();
+
+        $compare = function (mixed $left, mixed $right, string $path) use (&$compare, $paths): void {
+            if (is_array($left) && is_array($right)) {
+                $keys = collect([...array_keys($left), ...array_keys($right)])->unique();
+
+                foreach ($keys as $key) {
+                    $childPath = $path === '' ? (string) $key : $path.'.'.$key;
+
+                    if (! array_key_exists($key, $left) || ! array_key_exists($key, $right)) {
+                        $paths->push($childPath);
+
+                        continue;
+                    }
+
+                    $compare($left[$key], $right[$key], $childPath);
+                }
+
+                return;
+            }
+
+            if ($left !== $right) {
+                $paths->push($path !== '' ? $path : 'root');
+            }
+        };
+        $compare($before, $after, '');
+
+        return Str::limit(
+            $paths->filter()->unique()->take(12)->implode('|') ?: 'unknown',
+            512,
+            '...',
+        );
     }
 
     private function language(mixed $language): string

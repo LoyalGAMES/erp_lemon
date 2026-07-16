@@ -1599,6 +1599,36 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
     }
 
+    public function test_protected_delta_logs_only_field_paths_without_commercial_values(): void
+    {
+        [, $catalog] = $this->family();
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'protectedSnapshotDelta',
+        );
+        $service = app(WooOwnedVariantAxisRepairService::class);
+        $afterParent = unserialize(serialize($catalog->products[123]));
+        $afterVariations = unserialize(serialize(array_values($catalog->variations[123])));
+        $beforeVariations = unserialize(serialize($afterVariations));
+        $afterParent['name'] = 'SECRET PRODUCT NAME';
+        $afterParent['attributes'][0]['options'][0] = 'SECRET COMPOSITION';
+        $afterVariations[0]['stock_quantity'] = 987654;
+
+        $delta = $method->invoke(
+            $service,
+            $catalog->products[123],
+            $beforeVariations,
+            $afterParent,
+            $afterVariations,
+        );
+
+        $this->assertStringContainsString('parent.name', $delta);
+        $this->assertStringContainsString('non_target_attributes.0.options.0', $delta);
+        $this->assertStringContainsString('variations.124.stock_quantity', $delta);
+        $this->assertStringNotContainsString('SECRET', $delta);
+        $this->assertStringNotContainsString('987654', $delta);
+    }
+
     #[DataProvider('nonOrderParentDriftProvider')]
     public function test_final_verification_rejects_every_parent_drift_except_response_array_order(
         string $drift,
