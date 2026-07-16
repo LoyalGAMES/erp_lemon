@@ -93,6 +93,82 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $this->assertSame($requestCount, Http::recorded()->count());
     }
 
+    public function test_it_uses_the_definition_matching_the_existing_taxonomy_when_a_historical_size_dictionary_also_exists(): void
+    {
+        $this->createSizeDefinition();
+        ProductParameterDefinition::query()->create([
+            'name' => 'Size',
+            'slug' => 'size',
+            'input_type' => 'select',
+            // Deliberately conflicting: this historical English-only row must
+            // not override the dictionary behind Woo's pa_rozmiar taxonomy.
+            'values' => ['M/L', 'S/M'],
+            'is_variant' => false,
+            'is_required' => false,
+            'sort_order' => 1,
+        ]);
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-DUPLICATE-DICTIONARY');
+        $attribute = $this->sizeAttribute();
+        $terms = $this->allLanguageTerms();
+        $mutations = [];
+        $this->fakeWooCatalog($attribute, $terms, $mutations);
+
+        $result = app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
+
+        $this->assertSame('synchronized', $result['status']);
+        $this->assertSame(1, $result['attribute_id']);
+        $this->assertSame('S/M', $terms[58]['name']);
+        $this->assertSame(10, $terms[58]['menu_order']);
+        $this->assertSame('M/L', $terms[57]['name']);
+        $this->assertSame(20, $terms[57]['menu_order']);
+        $this->assertSame('menu_order', $attribute['order_by']);
+    }
+
+    public function test_competing_direct_dictionary_matches_abort_before_the_first_remote_mutation(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar-odziezy',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            'is_variant' => false,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Sizes',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            'is_variant' => false,
+            'is_required' => false,
+            'sort_order' => 20,
+        ]);
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-DIRECT-DICTIONARY-AMBIGUITY');
+        $attribute = $this->sizeAttribute();
+        $terms = $this->allLanguageTerms();
+        $mutations = [];
+        $this->fakeWooCatalog($attribute, $terms, $mutations);
+
+        try {
+            app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
+            $this->fail('Dwa bezpośrednie dopasowania słownika powinny przerwać synchronizację.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'kilka słowników bezpośrednio pasujących',
+                $exception->getMessage(),
+            );
+        }
+
+        $this->assertSame([], $mutations);
+        Http::assertNotSent(fn (Request $request): bool => in_array(
+            $request->method(),
+            ['POST', 'PUT', 'PATCH', 'DELETE'],
+            true,
+        ));
+    }
+
     public function test_an_ambiguous_existing_term_aborts_before_the_first_mutation(): void
     {
         $this->createSizeDefinition();

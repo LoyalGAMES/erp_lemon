@@ -27,9 +27,9 @@ final class WooCommerceGlobalSizeOrderSyncService
      */
     public function sync(WordpressIntegration $integration): array
     {
-        $definition = $this->sizeDefinition();
+        $definitions = $this->sizeDefinitions();
 
-        if (! $definition instanceof ProductParameterDefinition) {
+        if ($definitions->isEmpty()) {
             return [
                 'status' => 'skipped_no_size_definition',
                 'languages' => 0,
@@ -39,7 +39,8 @@ final class WooCommerceGlobalSizeOrderSyncService
             ];
         }
 
-        $attribute = $this->existingSizeAttribute($integration, $definition);
+        $attribute = $this->existingSizeAttribute($integration, $definitions);
+        $definition = $this->sizeDefinitionForAttribute($definitions, $attribute);
         $attributeId = (int) $attribute['id'];
         $languages = collect($integration->productExportLanguages())
             ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)) ?: 'pl')
@@ -119,9 +120,10 @@ final class WooCommerceGlobalSizeOrderSyncService
         ];
     }
 
-    private function sizeDefinition(): ?ProductParameterDefinition
+    /** @return Collection<int, ProductParameterDefinition> */
+    private function sizeDefinitions(): Collection
     {
-        $definitions = ProductParameterDefinition::query()
+        return ProductParameterDefinition::query()
             ->orderBy('sort_order')
             ->orderBy('id')
             ->get()
@@ -134,28 +136,88 @@ final class WooCommerceGlobalSizeOrderSyncService
             ->filter(fn (ProductParameterDefinition $definition): bool => collect($definition->values)
                 ->contains(fn (mixed $value): bool => trim((string) $value) !== ''))
             ->values();
-
-        if ($definitions->count() > 1) {
-            throw new RuntimeException(
-                'ERP zawiera kilka słowników Rozmiar/Size; globalna kolejność WooCommerce jest niejednoznaczna.',
-            );
-        }
-
-        return $definitions->first();
     }
 
-    /** @return array<string, mixed> */
+    /**
+     * Historical Woo imports can leave a separate `Size` dictionary next to
+     * the canonical Polish `Rozmiar` row. The Woo taxonomy is still singular,
+     * so select the ERP row whose source name/slug identifies that concrete
+     * taxonomy. A localized name is only a fallback; genuinely competing
+     * direct matches remain a hard stop before any remote mutation.
+     *
+     * @param  Collection<int, ProductParameterDefinition>  $definitions
+     * @param  array<string, mixed>  $attribute
+     */
+    private function sizeDefinitionForAttribute(
+        Collection $definitions,
+        array $attribute,
+    ): ProductParameterDefinition {
+        $attributeKeys = collect([
+            $attribute['name'] ?? null,
+            $attribute['slug'] ?? null,
+        ])
+            ->map(fn (mixed $value): string => $this->attributeKey((string) $value))
+            ->filter()
+            ->unique()
+            ->values();
+        $directMatches = $definitions
+            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
+                $definition->name,
+                $definition->slug,
+            ])
+                ->map(fn (mixed $value): string => $this->attributeKey((string) $value))
+                ->filter()
+                ->intersect($attributeKeys)
+                ->isNotEmpty())
+            ->values();
+
+        if ($directMatches->count() === 1) {
+            return $directMatches->first();
+        }
+
+        if ($directMatches->count() > 1) {
+            throw new RuntimeException(sprintf(
+                'ERP zawiera kilka słowników bezpośrednio pasujących do globalnego atrybutu Rozmiar/Size #%d.',
+                (int) ($attribute['id'] ?? 0),
+            ));
+        }
+
+        $localizedMatches = $definitions
+            ->filter(fn (ProductParameterDefinition $definition): bool => $attributeKeys->contains(
+                $this->attributeKey((string) $definition->name_en),
+            ))
+            ->values();
+
+        if ($localizedMatches->count() === 1) {
+            return $localizedMatches->first();
+        }
+
+        if ($definitions->count() === 1) {
+            return $definitions->first();
+        }
+
+        throw new RuntimeException(sprintf(
+            'ERP zawiera kilka słowników Rozmiar/Size, ale żaden nie odpowiada jednoznacznie globalnemu atrybutowi #%d.',
+            (int) ($attribute['id'] ?? 0),
+        ));
+    }
+
+    /**
+     * @param  Collection<int, ProductParameterDefinition>  $definitions
+     * @return array<string, mixed>
+     */
     private function existingSizeAttribute(
         WordpressIntegration $integration,
-        ProductParameterDefinition $definition,
+        Collection $definitions,
     ): array {
-        $attributes = collect([
-            (string) $definition->name,
-            (string) $definition->name_en,
-            (string) $definition->slug,
-            'Rozmiar',
-            'Size',
-        ])
+        $names = $definitions
+            ->flatMap(fn (ProductParameterDefinition $definition): array => [
+                (string) $definition->name,
+                (string) $definition->name_en,
+                (string) $definition->slug,
+            ])
+            ->push('Rozmiar', 'Size');
+        $attributes = $names
             ->map(fn (string $name): string => trim($name))
             ->filter()
             ->unique(fn (string $name): string => mb_strtolower($name))
@@ -173,6 +235,13 @@ final class WooCommerceGlobalSizeOrderSyncService
         }
 
         return $attributes->first();
+    }
+
+    private function attributeKey(string $value): string
+    {
+        $key = Str::slug(trim($value));
+
+        return str_starts_with($key, 'pa-') ? substr($key, 3) : $key;
     }
 
     /**
