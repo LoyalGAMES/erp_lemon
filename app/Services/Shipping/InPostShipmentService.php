@@ -45,8 +45,9 @@ final class InPostShipmentService
         ExternalOrder $order,
         CourierAccount $account,
         ?string $parcelTemplate = null,
+        bool $forceNew = false,
     ): array {
-        $shipment = $this->findExistingShipment($order, $account);
+        $shipment = $forceNew ? null : $this->findExistingShipment($order, $account);
         $reused = $shipment !== null;
 
         if ($shipment === null) {

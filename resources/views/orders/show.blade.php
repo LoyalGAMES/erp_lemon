@@ -604,6 +604,13 @@
                                 @if ($trackingUrl)
                                     <a class="button" href="{{ $trackingUrl }}" target="_blank" rel="noopener noreferrer" aria-label="Śledź przesyłkę {{ $label->trackingIdentifier() }}">Śledź paczkę</a>
                                 @endif
+                                @if ($label->purpose === 'shipment' && ! $orderOperationsLocked && ! in_array(mb_strtolower((string) $label->status), ['picked_up', 'delivered'], true) && ! $label->picked_up_at)
+                                    <form method="POST" action="{{ route('orders.labels.destroy', [$order, $label]) }}" onsubmit="return confirm('Anulować przesyłkę u przewoźnika i usunąć tę etykietę?');">
+                                        @csrf
+                                        @method('DELETE')
+                                        <button class="button danger" type="submit">Usuń etykietę</button>
+                                    </form>
+                                @endif
                             </div>
                         </article>
                     @empty
@@ -611,7 +618,7 @@
                     @endforelse
                 </div>
 
-                @if ($shipmentLabels->isEmpty() && ! $orderOperationsLocked)
+                @if (! $orderOperationsLocked)
                     <form class="order-label-form" method="POST" action="{{ route('orders.label.generate', $order) }}">
                         @csrf
                         <select name="courier_account_id" aria-label="Konto nadawcze">

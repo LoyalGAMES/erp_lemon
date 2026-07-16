@@ -272,6 +272,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/orders/{order}/split', [ExternalOrderController::class, 'split'])->name('orders.split');
         Route::post('/orders/{order}/shipping-decision', [ExternalOrderController::class, 'shippingDecision'])->name('orders.shipping-decision');
         Route::post('/orders/{order}/label', [ExternalOrderController::class, 'generateLabel'])->name('orders.label.generate');
+        Route::delete('/orders/{order}/labels/{label}', [ExternalOrderController::class, 'destroyLabel'])->name('orders.labels.destroy');
         Route::post('/orders/{order}/message', [ExternalOrderController::class, 'sendMessage'])->name('orders.message.send');
         Route::post('/orders/{order}/notes', [ExternalOrderController::class, 'storeNote'])->name('orders.notes.store');
         Route::post('/orders/{order}/payments', [ExternalOrderController::class, 'storePayment'])->name('orders.payments.store');

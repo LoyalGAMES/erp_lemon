@@ -35,6 +35,7 @@ final class ShippingLabelService
         ExternalOrder $order,
         ?CourierAccount $courierAccount = null,
         ?string $parcelTemplate = null,
+        bool $forceNew = false,
     ): ShippingLabel {
         if ($parcelTemplate !== null && ! in_array($parcelTemplate, ['small', 'medium', 'large'], true)) {
             throw new RuntimeException('Nieprawidłowy gabaryt paczki. Wybierz A, B albo C.');
@@ -42,7 +43,7 @@ final class ShippingLabelService
 
         try {
             return Cache::lock('shipping-label-order-'.$order->id, self::GENERATION_LOCK_SECONDS)
-                ->block(15, fn (): ShippingLabel => $this->generateForOrderWhileLocked($order, $courierAccount, $parcelTemplate));
+                ->block(15, fn (): ShippingLabel => $this->generateForOrderWhileLocked($order, $courierAccount, $parcelTemplate, $forceNew));
         } catch (LockTimeoutException $exception) {
             throw new RuntimeException(
                 'Generowanie etykiety dla tego zamówienia już trwa. Spróbuj ponownie za chwilę.',
@@ -101,6 +102,7 @@ final class ShippingLabelService
         ExternalOrder $order,
         ?CourierAccount $courierAccount = null,
         ?string $parcelTemplate = null,
+        bool $forceNew = false,
     ): ShippingLabel {
         $order = ExternalOrder::query()->findOrFail($order->id);
 
@@ -114,7 +116,7 @@ final class ShippingLabelService
             ->where('idempotency_key', $idempotencyKey)
             ->first();
 
-        if ($existing instanceof ShippingLabel) {
+        if (! $forceNew && $existing instanceof ShippingLabel) {
             return $existing;
         }
 
@@ -127,21 +129,21 @@ final class ShippingLabelService
             ->latest('id')
             ->first();
 
-        if ($existing instanceof ShippingLabel) {
+        if (! $forceNew && $existing instanceof ShippingLabel) {
             return $existing;
         }
 
         if ($courierAccount instanceof CourierAccount) {
             return $courierAccount->provider === 'blpaczka'
-                ? $this->generateViaBLPaczka($order, $courierAccount)
-                : $this->generateViaInPost($order, $courierAccount, $parcelTemplate);
+                ? $this->generateViaBLPaczka($order, $courierAccount, $forceNew)
+                : $this->generateViaInPost($order, $courierAccount, $parcelTemplate, $forceNew);
         }
 
         $order = ExternalOrder::query()
             ->with('salesChannel')
             ->findOrFail($order->id);
 
-        $blpaczkaLabel = $this->fetchBLPaczkaLabelIfAvailable($order);
+        $blpaczkaLabel = $forceNew ? null : $this->fetchBLPaczkaLabelIfAvailable($order);
 
         if ($blpaczkaLabel instanceof ShippingLabel) {
             return $blpaczkaLabel;
@@ -154,13 +156,13 @@ final class ShippingLabelService
                 $inpostAccount = CourierAccount::defaultFor('inpost');
 
                 if ($inpostAccount instanceof CourierAccount) {
-                    return $this->generateViaInPost($order, $inpostAccount, $parcelTemplate);
+                    return $this->generateViaInPost($order, $inpostAccount, $parcelTemplate, $forceNew);
                 }
             } else {
                 $blpaczkaAccount = CourierAccount::defaultFor('blpaczka');
 
                 if ($blpaczkaAccount instanceof CourierAccount) {
-                    return $this->generateViaBLPaczka($order, $blpaczkaAccount);
+                    return $this->generateViaBLPaczka($order, $blpaczkaAccount, $forceNew);
                 }
             }
 
@@ -197,7 +199,7 @@ final class ShippingLabelService
                 'external_order_id' => $order->id,
                 'wordpress_integration_id' => $integration->id,
                 'purpose' => 'shipment',
-                'idempotency_key' => 'shipment:order:'.$order->id,
+                'idempotency_key' => $this->shipmentIdempotencyKey($order, $forceNew),
                 'status' => 'generated',
                 'provider' => $this->stringFromPayload($labelData, ['provider', 'carrier', 'shipping_provider'])
                     ?: $orderShipmentData['provider'],
@@ -371,13 +373,14 @@ final class ShippingLabelService
         ExternalOrder $order,
         CourierAccount $account,
         ?string $parcelTemplate = null,
+        bool $forceNew = false,
     ): ShippingLabel {
         $order = ExternalOrder::query()
             ->with('salesChannel')
             ->findOrFail($order->id);
 
         try {
-            $labelData = $this->inpost->createShipmentWithLabel($order, $account, $parcelTemplate);
+            $labelData = $this->inpost->createShipmentWithLabel($order, $account, $parcelTemplate, $forceNew);
 
             $contents = $labelData['contents'];
             $shipmentPayload = (array) $labelData['response_payload'];
@@ -402,7 +405,7 @@ final class ShippingLabelService
                 'external_order_id' => $order->id,
                 'courier_account_id' => $account->id,
                 'purpose' => 'shipment',
-                'idempotency_key' => 'shipment:order:'.$order->id,
+                'idempotency_key' => $this->shipmentIdempotencyKey($order, $forceNew),
                 'status' => 'generated',
                 'provider' => 'inpost',
                 'label_number' => $labelData['shipment_id'],
@@ -448,13 +451,13 @@ final class ShippingLabelService
      * Tworzy nową przesyłkę BLPaczka (wycena + automatyczny dobór kuriera)
      * i zapisuje jej etykietę.
      */
-    private function generateViaBLPaczka(ExternalOrder $order, CourierAccount $account): ShippingLabel
+    private function generateViaBLPaczka(ExternalOrder $order, CourierAccount $account, bool $forceNew = false): ShippingLabel
     {
         $order = ExternalOrder::query()
             ->with('salesChannel')
             ->findOrFail($order->id);
 
-        $existing = $this->fetchBLPaczkaLabelIfAvailable($order);
+        $existing = $forceNew ? null : $this->fetchBLPaczkaLabelIfAvailable($order);
 
         if ($existing instanceof ShippingLabel) {
             return $existing;
@@ -463,7 +466,7 @@ final class ShippingLabelService
         try {
             $labelData = $this->blpaczka->createShipmentWithLabel($order, $account);
 
-            return $this->storeBLPaczkaLabel($order, $account, $labelData, reused: false);
+            return $this->storeBLPaczkaLabel($order, $account, $labelData, reused: false, forceNew: $forceNew);
         } catch (Throwable $exception) {
             $this->audit->record('shipping_label.failed', $order, null, null, [
                 'sales_channel' => $order->salesChannel?->code,
@@ -484,6 +487,7 @@ final class ShippingLabelService
         CourierAccount $account,
         array $labelData,
         bool $reused,
+        bool $forceNew = false,
     ): ShippingLabel {
         $extension = str_contains(mb_strtolower($labelData['mime_type']), 'pdf') ? 'pdf' : 'bin';
         $filename = 'blpaczka-'.preg_replace('/[^A-Za-z0-9._-]+/', '-', (string) ($order->external_number ?: $order->external_id))
@@ -497,7 +501,7 @@ final class ShippingLabelService
             'external_order_id' => $order->id,
             'courier_account_id' => $account->id,
             'purpose' => 'shipment',
-            'idempotency_key' => 'shipment:order:'.$order->id,
+            'idempotency_key' => $this->shipmentIdempotencyKey($order, $forceNew),
             'status' => 'generated',
             'provider' => 'blpaczka',
             'label_number' => $labelData['shipment_id'],
@@ -751,6 +755,13 @@ final class ShippingLabelService
 
             return $existing;
         }
+    }
+
+    private function shipmentIdempotencyKey(ExternalOrder $order, bool $forceNew): string
+    {
+        return $forceNew
+            ? 'shipment:order:'.$order->id.':'.Str::lower((string) Str::ulid())
+            : 'shipment:order:'.$order->id;
     }
 
     /**

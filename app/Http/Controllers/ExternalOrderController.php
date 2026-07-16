@@ -12,6 +12,7 @@ use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
 use App\Models\InternalNote;
 use App\Models\ProductChannelMapping;
+use App\Models\ShippingLabel;
 use App\Models\StockReservation;
 use App\Models\User;
 use App\Services\Audit\AuditLogService;
@@ -28,6 +29,7 @@ use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
 use App\Services\Payments\OrderSettlementService;
 use App\Services\Payments\PaymentMethodClassifier;
+use App\Services\Shipping\ShippingCancellationService;
 use App\Services\Shipping\ShippingLabelService;
 use App\Services\Shipping\ShippingProviderResolver;
 use App\Services\WooCommerce\WooCommerceOrderStatusService;
@@ -793,7 +795,7 @@ class ExternalOrderController extends Controller
             : null;
 
         try {
-            $label = $shippingLabels->generateForOrder($order, $account);
+            $label = $shippingLabels->generateForOrder($order, $account, forceNew: true);
         } catch (RuntimeException $exception) {
             return back()->with('error', 'Nie udało się wygenerować przesyłki: '.$exception->getMessage());
         }
@@ -805,6 +807,28 @@ class ExternalOrderController extends Controller
         }
 
         return back()->with('status', $message);
+    }
+
+    public function destroyLabel(
+        ExternalOrder $order,
+        ShippingLabel $label,
+        ShippingCancellationService $cancellations,
+    ): RedirectResponse {
+        if ((int) $label->external_order_id !== (int) $order->id || $label->purpose !== 'shipment') {
+            abort(404);
+        }
+
+        try {
+            $result = $cancellations->deleteLabel($label);
+        } catch (RuntimeException $exception) {
+            return back()->with('error', $exception->getMessage());
+        }
+
+        if (! $result['deleted']) {
+            return back()->with('error', implode(' ', array_column($result['manual_required'], 'message')));
+        }
+
+        return back()->with('status', 'Etykieta została anulowana u przewoźnika i usunięta z zamówienia.');
     }
 
     public function split(

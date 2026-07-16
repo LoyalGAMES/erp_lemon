@@ -14,6 +14,7 @@ use App\Models\Warehouse;
 use App\Services\Shipping\ShippingLabelService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class ShipmentGenerationTest extends TestCase
@@ -63,7 +64,56 @@ class ShipmentGenerationTest extends TestCase
         $this->get(route('orders.show', $order))
             ->assertOk()
             ->assertSee('Pobierz etykietę')
-            ->assertDontSee('Generuj przesyłkę</button>', false);
+            ->assertSee('Generuj przesyłkę</button>', false)
+            ->assertSee('Usuń etykietę');
+
+        $this->post(route('orders.label.generate', $order), [
+            'courier_account_id' => $account->id,
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $this->assertSame(2, ShippingLabel::query()->where('external_order_id', $order->id)->count());
+        $this->assertSame(2, ShippingLabel::query()->where('external_order_id', $order->id)->distinct()->count('idempotency_key'));
+    }
+
+    public function test_generated_blpaczka_label_can_be_cancelled_and_deleted_from_order(): void
+    {
+        Storage::fake('local');
+        Http::fake([
+            '*/api/cancelOrder.json' => Http::response(['success' => true, 'message' => 'Anulowano']),
+        ]);
+        $order = $this->createOrder();
+        $account = new CourierAccount([
+            'provider' => 'blpaczka',
+            'code' => 'blp-delete',
+            'name' => 'BLP delete',
+            'organization_id' => 'login',
+            'is_active' => true,
+        ]);
+        $account->setApiToken('token');
+        $account->save();
+        Storage::disk('local')->put('shipping-labels/delete-me.pdf', 'label');
+        $label = ShippingLabel::query()->create([
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_order_id' => $order->id,
+            'courier_account_id' => $account->id,
+            'purpose' => 'shipment',
+            'idempotency_key' => 'shipment:delete-test:'.$order->id,
+            'status' => 'generated',
+            'provider' => 'blpaczka',
+            'label_number' => '445566',
+            'disk' => 'local',
+            'path' => 'shipping-labels/delete-me.pdf',
+            'generated_at' => now(),
+        ]);
+
+        $this->delete(route('orders.labels.destroy', [$order, $label]))
+            ->assertRedirect()
+            ->assertSessionHas('status');
+
+        $this->assertDatabaseMissing('shipping_labels', ['id' => $label->id]);
+        Storage::disk('local')->assertMissing('shipping-labels/delete-me.pdf');
+        Http::assertSent(fn ($request): bool => str_contains($request->url(), 'cancelOrder.json')
+            && data_get($request->data(), 'Order.id') === 445566);
     }
 
     public function test_return_label_is_generated_with_reversed_direction_to_warehouse(): void

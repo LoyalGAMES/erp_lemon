@@ -12,6 +12,7 @@ use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
 use RuntimeException;
 use Throwable;
 
@@ -65,6 +66,67 @@ final class ShippingCancellationService
         } catch (LockTimeoutException $exception) {
             throw new RuntimeException(
                 'Etykieta dla tego zamówienia jest właśnie generowana lub anulowana. Spróbuj ponownie za chwilę.',
+                previous: $exception,
+            );
+        }
+    }
+
+    /**
+     * Anuluje pojedynczą przesyłkę i usuwa jej lokalny rekord oraz plik.
+     * Gdy przewoźnik wymaga ręcznej interwencji, etykieta pozostaje zapisana
+     * jako anulowana, aby nie utracić informacji potrzebnych do wyjaśnienia.
+     *
+     * @return array{deleted:bool,manual_required:list<array{label_id:int,order_id:int,provider:?string,shipment_id:?string,code:string,message:string}>}
+     */
+    public function deleteLabel(ShippingLabel $label): array
+    {
+        if ($label->purpose !== 'shipment' || ! $label->external_order_id) {
+            throw new RuntimeException('Można usunąć wyłącznie etykietę przesyłki powiązanej z zamówieniem.');
+        }
+
+        try {
+            return Cache::lock('shipping-label-order-'.$label->external_order_id, self::LOCK_SECONDS)
+                ->block(self::WAIT_SECONDS, function () use ($label): array {
+                    $label = ShippingLabel::query()->with('courierAccount')->findOrFail($label->id);
+                    $this->assertNotDispatched($label);
+                    $printResult = $this->cancelPrintJobs(
+                        new Collection([$label]),
+                        null,
+                        'Usunięcie etykiety z zamówienia',
+                    );
+                    $remoteResult = $label->status === 'cancelled'
+                        ? $this->alreadyCancelledResult($label)
+                        : $this->cancelRemoteShipment($label);
+                    $manualRequired = $printResult['manual_required'];
+
+                    if (($remoteResult['warning'] ?? null) !== null) {
+                        $manualRequired[] = $remoteResult['warning'];
+                    }
+
+                    $this->persistLocalCancellation(
+                        $label,
+                        (array) $remoteResult['audit'],
+                        null,
+                        'Usunięcie etykiety z zamówienia',
+                    );
+
+                    if ($manualRequired !== []) {
+                        return ['deleted' => false, 'manual_required' => $manualRequired];
+                    }
+
+                    $disk = filled($label->disk) ? (string) $label->disk : 'local';
+                    $path = (string) $label->path;
+                    $label->delete();
+
+                    if ($path !== '') {
+                        Storage::disk($disk)->delete($path);
+                    }
+
+                    return ['deleted' => true, 'manual_required' => []];
+                });
+        } catch (LockTimeoutException $exception) {
+            throw new RuntimeException(
+                'Etykieta jest właśnie generowana lub anulowana. Spróbuj ponownie za chwilę.',
                 previous: $exception,
             );
         }
