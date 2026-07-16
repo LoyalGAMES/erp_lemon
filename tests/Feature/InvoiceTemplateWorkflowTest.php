@@ -4,15 +4,21 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Mail\InvoiceEppExportMail;
+use App\Models\AppSetting;
 use App\Models\Invoice;
 use App\Models\InvoiceFile;
 use App\Models\InvoiceTemplate;
+use App\Services\Invoices\InvoiceEppDeliveryService;
+use App\Services\Invoices\InvoiceEppDeliverySettingsService;
 use App\Services\Invoices\InvoiceNumberService;
 use App\Services\Invoices\InvoiceSettingsService;
 use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Invoices\InvoiceValidationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Mail;
 use Tests\TestCase;
 
 class InvoiceTemplateWorkflowTest extends TestCase
@@ -273,6 +279,7 @@ BLADE,
             'sale_date' => '2026-06-14',
             'payment_due_date' => '2026-06-22',
             'payment_method' => 'Przelew',
+            'metadata' => ['external_order_number' => 'WC-10042'],
         ]);
 
         $outsideMonth = $this->createInvoice('FV/FIRMA/2026/000011');
@@ -292,6 +299,40 @@ BLADE,
         $this->assertIsString($content);
 
         $this->assertStringContainsString('[INFO]', $content);
+        $infoLines = preg_split('/\r\n|\r|\n/', $content);
+        $this->assertIsArray($infoLines);
+        $this->assertCount(24, str_getcsv($infoLines[1], ',', '"', ''));
+        $this->assertStringStartsWith('"1.11",0,1250,"Sempre ERP"', $infoLines[1]);
+        $this->assertStringContainsString('"Sempre Love sp. z o.o."', $infoLines[1]);
+        $this->assertStringContainsString('20260601000000', $infoLines[1]);
+        $this->assertStringContainsString('20260630000000', $infoLines[1]);
+        $document = str_getcsv($infoLines[3], ',', '"', '');
+        $this->assertCount(62, $document);
+        $this->assertSame('FS', $document[0]);
+        $this->assertSame('1', $document[1]);
+        $this->assertSame('FS FV/FIRMA/2026/000010', $document[6]);
+        $this->assertSame('WC-10042', $document[9]);
+        $this->assertSame('NIP1111111111', $document[11]);
+        $this->assertSame('20260615000000', $document[21]);
+        $this->assertSame('20260614000000', $document[22]);
+        $this->assertSame('20260622000000', $document[34]);
+        $this->assertSame('PLN', $document[46]);
+        $this->assertSame('1.0000', $document[47]);
+        $this->assertSame('0', $document[54]);
+        $this->assertSame('Polska', $document[59]);
+        $this->assertSame('PL', $document[60]);
+        $this->assertSame('1', $document[61]);
+        $this->assertCount(18, str_getcsv($infoLines[5], ',', '"', ''));
+        $contractorsHeader = array_search('"KONTRAHENCI"', $infoLines, true);
+        $this->assertIsInt($contractorsHeader);
+        $contractor = str_getcsv($infoLines[$contractorsHeader + 2], ',', '"', '');
+        $this->assertCount(31, $contractor);
+        $this->assertSame('Klient testowy', $contractor[2]);
+        $this->assertSame('Warszawa', $contractor[4]);
+        $this->assertSame('Polska', $contractor[27]);
+        $this->assertSame('PL', $contractor[28]);
+        $this->assertSame('1', $contractor[29]);
+        $this->assertSame('PL', $contractor[30]);
         $this->assertStringContainsString('[NAGLOWEK]', $content);
         $this->assertStringContainsString('[ZAWARTOSC]', $content);
         $this->assertStringContainsString('"FS FV/FIRMA/2026/000010"', $content);
@@ -324,7 +365,11 @@ BLADE,
             'net_total' => 100,
             'vat_total' => 19,
             'gross_total' => 119,
+            'currency' => 'EUR',
         ]);
+        $invoice->update(['metadata' => array_merge($invoice->metadata ?? [], [
+            'currency_conversion' => ['currency' => 'EUR', 'rate' => 4.25],
+        ])]);
         $invoice->lines()->firstOrFail()->update([
             'vat_rate' => 19,
             'vat_total' => 19,
@@ -337,10 +382,245 @@ BLADE,
         $this->assertIsString($content);
         $this->assertStringContainsString('"SPRZEDAZ_OSS_DE"', $content);
         $this->assertStringContainsString('"INFORMACJEWSTO"', $content);
+        $this->assertStringContainsString('"SPECYFIKACJATOWAROWAWSTO"', $content);
         $this->assertStringContainsString('"STAWKIVATZAGRANICZNE"', $content);
         $this->assertStringContainsString('"Niemcy"', $content);
         $this->assertStringContainsString('"DE"', $content);
         $this->assertStringContainsString('"19%"', $content);
+        $lines = preg_split('/\r\n|\r|\n/', $content);
+        $this->assertIsArray($lines);
+        $document = str_getcsv($lines[3], ',', '"', '');
+        $this->assertCount(62, $document);
+        $this->assertSame('EUR', $document[46]);
+        $this->assertSame('4.2500', $document[47]);
+        $this->assertSame('23', $document[54]);
+        $this->assertSame('Niemcy', $document[59]);
+        $this->assertSame('DE', $document[60]);
+        $this->assertSame('1', $document[61]);
+
+        $jpkHeader = array_search('"DOKUMENTYZNACZNIKIJPKVAT"', $lines, true);
+        $this->assertIsInt($jpkHeader);
+        $jpk = str_getcsv($lines[$jpkHeader + 2], ',', '"', '');
+        $this->assertCount(31, $jpk);
+        $this->assertSame('1', $jpk[29]);
+
+        $specificationHeader = array_search('"SPECYFIKACJATOWAROWAWSTO"', $lines, true);
+        $this->assertIsInt($specificationHeader);
+        $this->assertSame(
+            ['FS FV/OSS/1/06/2026', 'Produkt fakturowany', '1.0000', 'szt'],
+            str_getcsv($lines[$specificationHeader + 2], ',', '"', ''),
+        );
+    }
+
+    public function test_epp_export_maps_correction_reference_and_reason(): void
+    {
+        $original = $this->createInvoice('FV/FIRMA/2026/000020');
+        $correction = $this->createInvoice('FK/FIRMA/2026/000001');
+        $correction->update([
+            'type' => 'correction',
+            'issue_date' => '2026-06-20',
+            'metadata' => [
+                'corrected_invoice_number' => $original->number,
+                'corrected_invoice_issue_date' => '2026-06-01',
+                'correction_reason' => 'Zwrot towaru',
+            ],
+        ]);
+
+        $response = $this->get(route('invoices.epp.export', ['month' => '2026-06']));
+        $content = iconv('WINDOWS-1250', 'UTF-8//IGNORE', (string) $response->getContent());
+        $this->assertIsString($content);
+        $lines = preg_split('/\r\n|\r|\n/', $content);
+        $this->assertIsArray($lines);
+
+        $document = collect($lines)
+            ->map(fn (string $line): array => str_getcsv($line, ',', '"', ''))
+            ->first(fn (array $row): bool => ($row[6] ?? null) === 'KFS FK/FIRMA/2026/000001');
+        $this->assertIsArray($document);
+        $this->assertCount(62, $document);
+        $this->assertSame('FS FV/FIRMA/2026/000020', $document[7]);
+        $this->assertSame('20260601000000', $document[8]);
+
+        $reasonHeader = array_search('"PRZYCZYNYKOREKT"', $lines, true);
+        $this->assertIsInt($reasonHeader);
+        $this->assertSame(
+            ['KFS FK/FIRMA/2026/000001', '1', 'Zwrot towaru'],
+            str_getcsv($lines[$reasonHeader + 2], ',', '"', ''),
+        );
+        $this->assertStringContainsString('"DATYUJECIAKOREKT"', $content);
+    }
+
+    public function test_epp_export_rejects_foreign_currency_invoice_without_exchange_rate(): void
+    {
+        $invoice = $this->createInvoice('FV/EUR/2026/000001');
+        $invoice->update(['currency' => 'EUR']);
+
+        $this->get(route('invoices.epp.export', ['month' => '2026-06']))
+            ->assertRedirect()
+            ->assertSessionHasErrors('month');
+    }
+
+    public function test_operator_can_configure_daily_and_interval_epp_delivery(): void
+    {
+        $this->travelTo('2026-06-15 18:00:00');
+
+        $this->put(route('invoices.epp-delivery-settings.update'), [
+            'enabled' => '1',
+            'recipient_emails' => "ksiegowosc@example.test\nbiuro@example.test; KSIEGOWOSC@example.test",
+            'frequency' => 'interval',
+            'interval_days' => 7,
+            'send_time' => '19:00',
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $settings = app(InvoiceEppDeliverySettingsService::class)->data();
+        $this->assertTrue($settings['enabled']);
+        $this->assertSame('ksiegowosc@example.test', $settings['recipient_email']);
+        $this->assertSame(['ksiegowosc@example.test', 'biuro@example.test'], $settings['recipient_emails']);
+        $this->assertSame('interval', $settings['frequency']);
+        $this->assertSame(7, $settings['interval_days']);
+        $this->assertSame('19:00', $settings['send_time']);
+        $this->assertSame('2026-06-15T19:00:00+02:00', $settings['next_send_at']);
+
+        $this->put(route('invoices.epp-delivery-settings.update'), [
+            'enabled' => '1',
+            'recipient_emails' => "poprawny@example.test\nnie-email",
+            'frequency' => 'daily',
+            'send_time' => '20:00',
+        ])->assertSessionHasErrors('recipient_emails_list.1');
+    }
+
+    public function test_due_epp_schedule_sends_one_attachment_for_unsent_period(): void
+    {
+        Mail::fake();
+        $this->travelTo('2026-06-15 18:00:00');
+
+        $invoice = $this->createInvoice('FV/FIRMA/2026/000030');
+        $invoice->update(['issue_date' => '2026-06-15']);
+        $oldInvoice = $this->createInvoice('FV/FIRMA/2026/000029');
+        $oldInvoice->update(['issue_date' => '2026-06-07']);
+
+        app(InvoiceEppDeliverySettingsService::class)->update([
+            'enabled' => true,
+            'recipient_emails' => ['ksiegowosc@example.test', 'biuro@example.test'],
+            'frequency' => 'interval',
+            'interval_days' => 7,
+            'send_time' => '19:00',
+        ]);
+
+        AppSetting::query()->create([
+            'key' => 'mail_settings',
+            'value' => [
+                'delivery_enabled' => true,
+                'delivery_method' => 'smtp',
+                'host' => 'smtp.example.test',
+                'port' => 587,
+                'encryption' => 'tls',
+                'from_address' => 'erp@example.test',
+                'from_name' => 'Sempre ERP',
+            ],
+        ]);
+
+        $delivery = app(InvoiceEppDeliveryService::class);
+        $this->assertSame('not_due', $delivery->sendIfDue(now()));
+
+        $this->travelTo('2026-06-15 19:00:00');
+        $this->assertSame('sent', $delivery->sendIfDue(now()));
+        $this->assertSame('not_due', $delivery->sendIfDue(now()));
+
+        $sentMail = null;
+        Mail::assertSent(InvoiceEppExportMail::class, function (InvoiceEppExportMail $mail) use (&$sentMail): bool {
+            $sentMail = $mail;
+
+            return true;
+        });
+        Mail::assertSentCount(1);
+        $this->assertInstanceOf(InvoiceEppExportMail::class, $sentMail);
+        $sentMail->build();
+        $attachment = $sentMail->rawAttachments[0] ?? [];
+        $decoded = iconv('WINDOWS-1250', 'UTF-8//IGNORE', (string) ($attachment['data'] ?? ''));
+        $this->assertTrue($sentMail->hasTo('ksiegowosc@example.test'));
+        $this->assertTrue($sentMail->hasTo('biuro@example.test'));
+        $this->assertSame('faktury-epp-2026-06-09-2026-06-15.epp', $attachment['name'] ?? null);
+        $this->assertIsString($decoded);
+        $this->assertStringContainsString('FV/FIRMA/2026/000030', $decoded);
+        $this->assertStringNotContainsString('FV/FIRMA/2026/000029', $decoded);
+
+        $settings = app(InvoiceEppDeliverySettingsService::class)->data();
+        $this->assertSame('2026-06-15', $settings['last_period_end']);
+        $this->assertSame('2026-06-22T19:00:00+02:00', $settings['next_send_at']);
+        $this->assertNull($settings['last_error']);
+    }
+
+    public function test_monthly_epp_schedules_use_first_or_last_day_of_month(): void
+    {
+        $this->travelTo('2026-06-15 12:00:00');
+        $settingsService = app(InvoiceEppDeliverySettingsService::class);
+
+        $firstDay = $settingsService->update([
+            'enabled' => true,
+            'recipient_emails' => ['ksiegowosc@example.test'],
+            'frequency' => 'monthly_first',
+            'send_time' => '19:00',
+        ]);
+        $this->assertSame('2026-07-01T19:00:00+02:00', $firstDay['next_send_at']);
+
+        $lastDay = $settingsService->update([
+            'enabled' => true,
+            'recipient_emails' => ['ksiegowosc@example.test'],
+            'frequency' => 'monthly_last',
+            'send_time' => '19:00',
+        ]);
+        $this->assertSame('2026-06-30T19:00:00+02:00', $lastDay['next_send_at']);
+
+        $settingsService->markSent(Carbon::parse('2027-01-31 19:00:00'), Carbon::parse('2027-01-31'));
+        $this->assertSame('2027-02-28T19:00:00+01:00', $settingsService->data()['next_send_at']);
+    }
+
+    public function test_first_day_monthly_delivery_attaches_previous_full_month(): void
+    {
+        Mail::fake();
+        $this->travelTo('2026-06-30 18:00:00');
+
+        $juneInvoice = $this->createInvoice('FV/FIRMA/2026/000040');
+        $juneInvoice->update(['issue_date' => '2026-06-30']);
+        $julyInvoice = $this->createInvoice('FV/FIRMA/2026/000041');
+        $julyInvoice->update(['issue_date' => '2026-07-01']);
+
+        app(InvoiceEppDeliverySettingsService::class)->update([
+            'enabled' => true,
+            'recipient_emails' => ['ksiegowosc@example.test'],
+            'frequency' => 'monthly_first',
+            'send_time' => '19:00',
+        ]);
+        AppSetting::query()->create([
+            'key' => 'mail_settings',
+            'value' => [
+                'delivery_enabled' => true,
+                'delivery_method' => 'smtp',
+                'host' => 'smtp.example.test',
+                'port' => 587,
+                'encryption' => 'tls',
+                'from_address' => 'erp@example.test',
+                'from_name' => 'Sempre ERP',
+            ],
+        ]);
+
+        $this->travelTo('2026-07-01 19:00:00');
+        $this->assertSame('sent', app(InvoiceEppDeliveryService::class)->sendIfDue(now()));
+
+        $sentMail = null;
+        Mail::assertSent(InvoiceEppExportMail::class, function (InvoiceEppExportMail $mail) use (&$sentMail): bool {
+            $sentMail = $mail;
+
+            return true;
+        });
+        $this->assertInstanceOf(InvoiceEppExportMail::class, $sentMail);
+        $sentMail->build();
+        $attachment = $sentMail->rawAttachments[0] ?? [];
+        $decoded = iconv('WINDOWS-1250', 'UTF-8//IGNORE', (string) ($attachment['data'] ?? ''));
+        $this->assertSame('faktury-epp-2026-06-01-2026-06-30.epp', $attachment['name'] ?? null);
+        $this->assertIsString($decoded);
+        $this->assertStringContainsString('FV/FIRMA/2026/000040', $decoded);
+        $this->assertStringNotContainsString('FV/FIRMA/2026/000041', $decoded);
     }
 
     public function test_generated_invoice_pdf_uses_unicode_renderer_for_polish_text(): void

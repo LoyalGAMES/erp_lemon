@@ -7,6 +7,7 @@ use App\Models\ProductChannelMapping;
 use App\Services\Communication\UnpaidOrderReminderService;
 use App\Services\Integrations\WooCommerceImportQueueService;
 use App\Services\Inventory\StockSyncQueueService;
+use App\Services\Invoices\InvoiceEppDeliveryService;
 use App\Services\Invoices\InvoiceSettingsService;
 use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Invoices\OrderInvoiceService;
@@ -27,6 +28,13 @@ use Illuminate\Support\Facades\Schedule;
 Artisan::command('inspire', function (): void {
     $this->comment(Inspiring::quote());
 })->purpose('Display an inspiring quote');
+
+Artisan::command('erp:send-scheduled-invoice-epp', function (InvoiceEppDeliveryService $delivery): int {
+    $result = $delivery->sendIfDue();
+    $this->info('Scheduled EPP delivery: '.$result);
+
+    return 0;
+})->purpose('Send the scheduled invoice EPP export when it is due.');
 
 Artisan::command('erp:queue-woocommerce-imports {--products : Queue product imports} {--orders : Queue order imports} {--customers : Queue customer imports} {--all : Queue products, orders and customers}', function (): int {
     $all = (bool) $this->option('all');
@@ -703,6 +711,11 @@ Schedule::command('erp:refresh-payu-refunds --limit=25')
 
 Schedule::command('erp:send-unpaid-order-reminders --limit=100')
     ->cron('*/5 * * * *')
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:send-scheduled-invoice-epp')
+    ->everyMinute()
     ->withoutOverlapping(10)
     ->runInBackground();
 

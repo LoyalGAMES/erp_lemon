@@ -204,6 +204,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::put('/invoices/template', [InvoiceController::class, 'updateTemplate'])->name('invoices.template.update');
         Route::put('/invoices/seller', [InvoiceController::class, 'updateSeller'])->name('invoices.seller.update');
         Route::put('/invoices/settings', [InvoiceController::class, 'updateSettings'])->name('invoices.settings.update');
+        Route::put('/invoices/epp-delivery-settings', [InvoiceController::class, 'updateEppDeliverySettings'])->name('invoices.epp-delivery-settings.update');
         Route::post('/invoices/apply-seller-settings', [InvoiceController::class, 'applySellerSettingsBatch'])->name('invoices.seller.apply-batch');
         Route::post('/invoices/upload-pending-woocommerce', [InvoiceController::class, 'uploadPendingToWooCommerce'])->name('invoices.woocommerce.upload-pending');
         Route::get('/invoices/{invoice}/edit', [InvoiceController::class, 'edit'])->name('invoices.edit');

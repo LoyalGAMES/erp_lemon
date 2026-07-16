@@ -129,6 +129,50 @@
                 <p class="muted">To ustawienie działa jako domyślne dla nowych i istniejących faktur bez ręcznej decyzji KSeF. Ustawienie na konkretnej fakturze ma pierwszeństwo.</p>
                 <button class="button" type="submit">Zapisz ustawienia</button>
             </form>
+            <hr>
+            <form class="form-grid" method="POST" action="{{ route('invoices.epp-delivery-settings.update') }}">
+                @csrf
+                @method('PUT')
+                <h3>Automatyczna wysyłka EPP</h3>
+                <label class="checkbox-row">
+                    <input type="hidden" name="enabled" value="0">
+                    <input type="checkbox" name="enabled" value="1" @checked(old('enabled', $eppDelivery['enabled']))>
+                    <span>Wysyłaj pliki EPP automatycznie</span>
+                </label>
+                <label>Adresy odbiorców
+                    <textarea name="recipient_emails" rows="4" placeholder="ksiegowosc@example.com&#10;biuro@example.com">{{ old('recipient_emails', implode("\n", $eppDelivery['recipient_emails'])) }}</textarea>
+                    <span class="muted">Maksymalnie 20 adresów. Rozdziel je przecinkiem, średnikiem lub nową linią.</span>
+                </label>
+                <label>Częstotliwość
+                    @php
+                        $selectedEppFrequency = old('frequency', $eppDelivery['frequency']);
+                    @endphp
+                    <select name="frequency" required>
+                        <option value="daily" @selected($selectedEppFrequency === 'daily')>Codziennie</option>
+                        <option value="interval" @selected($selectedEppFrequency === 'interval')>Co określoną liczbę dni</option>
+                        <option value="monthly_first" @selected($selectedEppFrequency === 'monthly_first')>Pierwszego dnia miesiąca — za poprzedni miesiąc</option>
+                        <option value="monthly_last" @selected($selectedEppFrequency === 'monthly_last')>Ostatniego dnia miesiąca — za bieżący miesiąc</option>
+                    </select>
+                </label>
+                <label>Odstęp w dniach
+                    <input name="interval_days" type="number" min="2" max="365" value="{{ old('interval_days', $eppDelivery['interval_days'] === 1 ? 7 : $eppDelivery['interval_days']) }}">
+                    <span class="muted">Używany dla częstotliwości „co określoną liczbę dni”, np. 7.</span>
+                </label>
+                <label>Godzina wysyłki
+                    <input name="send_time" type="time" value="{{ old('send_time', $eppDelivery['send_time']) }}" required>
+                </label>
+                <p class="muted">Każda wiadomość obejmuje tylko kolejny, jeszcze niewysłany okres. Harmonogram działa w strefie {{ config('app.timezone') }}.</p>
+                @if ($eppDelivery['next_send_at'])
+                    <p class="muted">Następna wysyłka: {{ \Illuminate\Support\Carbon::parse($eppDelivery['next_send_at'])->format('d.m.Y H:i') }}.</p>
+                @endif
+                @if ($eppDelivery['last_sent_at'])
+                    <p class="muted">Ostatnia udana wysyłka: {{ \Illuminate\Support\Carbon::parse($eppDelivery['last_sent_at'])->format('d.m.Y H:i') }}.</p>
+                @endif
+                @if ($eppDelivery['last_error'])
+                    <p class="error">Ostatni błąd: {{ $eppDelivery['last_error'] }}</p>
+                @endif
+                <button class="button" type="submit">Zapisz harmonogram EPP</button>
+            </form>
         </aside>
     </div>
 

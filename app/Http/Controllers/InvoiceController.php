@@ -6,8 +6,9 @@ namespace App\Http\Controllers;
 
 use App\Models\Invoice;
 use App\Models\InvoiceFile;
-use App\Services\Invoices\InvoiceEppExportService;
 use App\Services\Audit\AuditLogService;
+use App\Services\Invoices\InvoiceEppDeliverySettingsService;
+use App\Services\Invoices\InvoiceEppExportService;
 use App\Services\Invoices\InvoiceSettingsService;
 use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Invoices\InvoiceValidationService;
@@ -32,6 +33,7 @@ class InvoiceController extends Controller
         InvoiceSettingsService $settings,
         InvoiceValidationService $validation,
         KsefEligibilityService $eligibility,
+        InvoiceEppDeliverySettingsService $eppDeliverySettings,
     ): View {
         $invoices = Invoice::query()
             ->with(['lines', 'files', 'ksefSubmissions', 'invoiceTemplate', 'externalOrder'])
@@ -82,6 +84,7 @@ class InvoiceController extends Controller
             'woocommercePendingCount' => $woocommercePendingCount,
             'numbering' => $settings->numberingData(),
             'invoiceKsef' => $settings->ksefData(),
+            'eppDelivery' => $eppDeliverySettings->data(),
         ]);
     }
 
@@ -159,6 +162,38 @@ class InvoiceController extends Controller
         $settings->updateKsefData($validated);
 
         return back()->with('status', 'Ustawienia numeracji, płatności i KSeF faktur zostały zapisane.');
+    }
+
+    public function updateEppDeliverySettings(
+        Request $request,
+        InvoiceEppDeliverySettingsService $settings,
+    ): RedirectResponse {
+        $recipientEmails = preg_split(
+            '/[\s,;]+/',
+            trim((string) $request->input('recipient_emails', '')),
+            -1,
+            PREG_SPLIT_NO_EMPTY,
+        ) ?: [];
+        $request->merge(['recipient_emails_list' => array_values(array_unique($recipientEmails))]);
+
+        $validated = $request->validate([
+            'enabled' => ['nullable', 'boolean'],
+            'recipient_emails' => ['required_if:enabled,1', 'nullable', 'string', 'max:5000'],
+            'recipient_emails_list' => ['required_if:enabled,1', 'array', 'max:20'],
+            'recipient_emails_list.*' => ['required', 'email:rfc', 'max:255'],
+            'frequency' => ['required', 'string', 'in:daily,interval,monthly_first,monthly_last'],
+            'interval_days' => ['required_if:frequency,interval', 'nullable', 'integer', 'min:2', 'max:365'],
+            'send_time' => ['required', 'date_format:H:i'],
+        ]);
+
+        $settings->update(array_merge($validated, [
+            'enabled' => $request->boolean('enabled'),
+            'recipient_emails' => $validated['recipient_emails_list'] ?? [],
+        ]));
+
+        return back()->with('status', $request->boolean('enabled')
+            ? 'Automatyczna wysyłka EPP została zaplanowana.'
+            : 'Automatyczna wysyłka EPP została wyłączona.');
     }
 
     public function exportEpp(Request $request, InvoiceEppExportService $exporter): Response

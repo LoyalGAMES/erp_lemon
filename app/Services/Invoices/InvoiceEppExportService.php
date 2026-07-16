@@ -8,6 +8,7 @@ use App\Models\Invoice;
 use App\Models\InvoiceLine;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
+use Illuminate\Validation\ValidationException;
 
 final class InvoiceEppExportService
 {
@@ -15,26 +16,33 @@ final class InvoiceEppExportService
     {
         $from = $month->copy()->startOfMonth();
         $to = $month->copy()->endOfMonth();
+
+        return $this->exportRange($from, $to);
+    }
+
+    public function exportRange(Carbon $from, Carbon $to): string
+    {
         $invoices = Invoice::query()
             ->with(['lines', 'externalOrder.salesChannel'])
             ->where('status', 'issued')
             ->where('type', '!=', 'proforma')
-            ->whereBetween('issue_date', [$from->toDateString(), $to->toDateString()])
+            ->whereDate('issue_date', '>=', $from->toDateString())
+            ->whereDate('issue_date', '<=', $to->toDateString())
             ->orderBy('issue_date')
             ->orderBy('number')
             ->get();
 
-        return $this->encode($this->render($invoices, $month));
+        return $this->encode($this->render($invoices, $from, $to));
     }
 
     /**
-     * @param Collection<int, Invoice> $invoices
+     * @param  Collection<int, Invoice>  $invoices
      */
-    private function render(Collection $invoices, Carbon $month): string
+    private function render(Collection $invoices, Carbon $from, Carbon $to): string
     {
         $lines = [
             '[INFO]',
-            $this->row(['1.12', 3, 1250, 'Sempre ERP', 'EDI', 'Eksport faktur '.$month->format('Y-m')]),
+            $this->row($this->fileHeader($invoices, $from, $to)),
         ];
 
         foreach ($invoices as $invoice) {
@@ -52,6 +60,7 @@ final class InvoiceEppExportService
                 $lines,
                 $this->contractorSections($invoices),
                 $this->completionDateSections($invoices),
+                $this->correctionSections($invoices),
                 $this->jpkMarkerSections($invoices),
                 $this->ossSections($invoices),
             );
@@ -61,81 +70,131 @@ final class InvoiceEppExportService
     }
 
     /**
+     * The EDI++ [INFO] record always consists of the 24 fields from table 2 of
+     * the specification. Importers reject abbreviated, otherwise plausible
+     * looking headers before attempting to read any document sections.
+     *
+     * @param  Collection<int, Invoice>  $invoices
+     * @return list<mixed>
+     */
+    private function fileHeader(Collection $invoices, Carbon $from, Carbon $to): array
+    {
+        $seller = $this->party($invoices->first()?->seller_data ?? []);
+        $country = $seller['country'] ?: 'PL';
+        $name = $seller['name'] ?: 'Sempre ERP';
+        $taxId = preg_replace('/[^A-Za-z0-9]+/', '', $seller['tax_id']) ?? '';
+
+        return [
+            '1.11',
+            0, // communication intended for an accounting office
+            1250,
+            'Sempre ERP',
+            mb_substr($taxId !== '' ? $taxId : 'SEMPRE', 0, 20),
+            mb_substr($name, 0, 40),
+            mb_substr($name, 0, 80),
+            mb_substr($seller['city'], 0, 30),
+            mb_substr($seller['postcode'], 0, 6),
+            mb_substr(trim($seller['address_1'].' '.$seller['address_2']), 0, 50),
+            mb_substr($taxId, 0, 13),
+            '',
+            '',
+            'Eksport faktur '.$from->toDateString().' - '.$to->toDateString(),
+            '',
+            1,
+            $this->dateTime($from),
+            $this->dateTime($to),
+            'Sempre ERP',
+            $this->dateTime(now()),
+            $this->countryName($country),
+            $country,
+            mb_substr($taxId, 0, 20),
+            $this->isEuCountry($country) ? 1 : 0,
+        ];
+    }
+
+    /**
      * @return list<mixed>
      */
     private function documentHeader(Invoice $invoice): array
     {
         $buyer = $this->party($invoice->buyer_data ?? []);
+        $seller = $this->party($invoice->seller_data ?? []);
         $type = $invoice->type === 'correction' ? 'KFS' : 'FS';
         $issueDate = $this->dateTime($invoice->issue_date ?? now());
         $saleDate = $this->dateTime($invoice->sale_date ?? $invoice->issue_date ?? now());
         $paymentDueDate = $this->dateTime($invoice->payment_due_date ?? $invoice->issue_date ?? now());
         $country = $buyer['country'] ?: 'PL';
+        $correctedNumber = $invoice->type === 'correction'
+            ? (string) data_get($invoice->metadata, 'corrected_invoice_number', '')
+            : '';
+        $correctedDate = $invoice->type === 'correction'
+            && filled(data_get($invoice->metadata, 'corrected_invoice_issue_date'))
+                ? $this->dateTime(data_get($invoice->metadata, 'corrected_invoice_issue_date'))
+                : '';
 
         return [
             $type,
-            (int) $invoice->id,
+            1,
             0,
             (int) $invoice->id,
             '',
             '',
-            $type.' '.$invoice->number,
+            $this->documentSymbol($invoice),
+            $correctedNumber !== '' ? 'FS '.$correctedNumber : '',
+            $correctedDate,
+            mb_substr($this->orderReference($invoice), 0, 30),
             '',
-            $issueDate,
             $this->contractorCode($invoice),
-            '',
-            $this->contractorCode($invoice),
-            $buyer['name'],
-            $buyer['tax_id'],
+            mb_substr($buyer['name'], 0, 40),
+            mb_substr($buyer['name'], 0, 255),
+            mb_substr($buyer['city'], 0, 30),
             $buyer['postcode'],
-            $buyer['city'],
-            $buyer['address_1'],
-            $buyer['address_2'],
+            mb_substr(trim($buyer['address_1'].' '.$buyer['address_2']), 0, 50),
+            mb_substr($buyer['tax_id'], 0, 20),
             $this->category($invoice),
             '',
-            'Eksport Sempre ERP '.$invoice->number,
+            mb_substr($seller['city'], 0, 30),
             $issueDate,
             $saleDate,
-            $paymentDueDate,
-            2,
-            0,
+            $issueDate,
+            $invoice->lines->count(),
+            1,
             'Detaliczna',
             $this->amount($invoice->net_total),
             $this->amount($invoice->vat_total),
             $this->amount($invoice->gross_total),
-            $this->amount($invoice->gross_total),
-            '',
             $this->amount(0),
             '',
-            $issueDate,
+            $this->amount(0),
+            mb_substr((string) ($invoice->payment_method ?: 'Przelew'), 0, 30),
+            $paymentDueDate,
+            $this->amount(0),
             $this->amount($invoice->gross_total),
-            $this->amount($invoice->gross_total),
             0,
             0,
-            1,
             0,
-            $this->orderReference($invoice),
+            0,
+            '',
             '',
             '',
             $this->amount(0),
             $this->amount(0),
             $invoice->currency ?: 'PLN',
-            $this->amount(1),
-            $invoice->ksef_number ?? '',
+            $this->amount($this->currencyRate($invoice)),
+            $this->documentNotes($invoice),
+            mb_substr($invoice->externalOrder?->salesChannel?->name ?? 'Sempre ERP', 0, 50),
             '',
             '',
             '',
             0,
-            0,
-            (int) round($this->dominantVatRate($invoice)),
-            $invoice->externalOrder?->salesChannel?->name ?? 'Sempre ERP',
-            $this->amount($invoice->gross_total),
-            $invoice->payment_method ?: 'Przelew',
+            $this->transactionType($invoice),
+            '',
+            $this->amount(0),
+            '',
             $this->amount(0),
             $this->countryName($country),
-            $country,
-            $buyer['tax_id'],
-            $invoice->ksef_number ?? '',
+            $this->isEuCountry($country) ? $country : '',
+            $this->isEuCountry($country) ? 1 : 0,
         ];
     }
 
@@ -177,7 +236,7 @@ final class InvoiceEppExportService
     }
 
     /**
-     * @param Collection<int, Invoice> $invoices
+     * @param  Collection<int, Invoice>  $invoices
      * @return list<string>
      */
     private function contractorSections(Collection $invoices): array
@@ -203,10 +262,11 @@ final class InvoiceEppExportService
                     $buyer['postcode'],
                     trim($buyer['address_1'].' '.$buyer['address_2']),
                     $buyer['tax_id'],
-                    $buyer['email'],
+                    $buyer['regon'],
                     $buyer['phone'],
                     '',
                     '',
+                    $buyer['email'],
                     '',
                     '',
                     '',
@@ -222,8 +282,8 @@ final class InvoiceEppExportService
                     '',
                     '',
                     $this->countryName($country),
-                    '',
-                    filled($buyer['tax_id']) ? 1 : 0,
+                    $this->isEuCountry($country) ? $country : '',
+                    $this->isEuCountry($country) ? 1 : 0,
                     $country,
                 ]);
             });
@@ -232,7 +292,7 @@ final class InvoiceEppExportService
     }
 
     /**
-     * @param Collection<int, Invoice> $invoices
+     * @param  Collection<int, Invoice>  $invoices
      * @return list<string>
      */
     private function completionDateSections(Collection $invoices): array
@@ -254,7 +314,48 @@ final class InvoiceEppExportService
     }
 
     /**
-     * @param Collection<int, Invoice> $invoices
+     * @param  Collection<int, Invoice>  $invoices
+     * @return list<string>
+     */
+    private function correctionSections(Collection $invoices): array
+    {
+        $corrections = $invoices->filter(fn (Invoice $invoice): bool => $invoice->type === 'correction');
+
+        if ($corrections->isEmpty()) {
+            return [];
+        }
+
+        $rows = [
+            '[NAGLOWEK]',
+            $this->row(['PRZYCZYNYKOREKT']),
+            '[ZAWARTOSC]',
+        ];
+
+        foreach ($corrections as $invoice) {
+            $rows[] = $this->row([
+                $this->documentSymbol($invoice),
+                1,
+                mb_substr((string) data_get($invoice->metadata, 'correction_reason', 'Korekta faktury'), 0, 255),
+            ]);
+        }
+
+        $rows[] = '[NAGLOWEK]';
+        $rows[] = $this->row(['DATYUJECIAKOREKT']);
+        $rows[] = '[ZAWARTOSC]';
+
+        foreach ($corrections as $invoice) {
+            $rows[] = $this->row([
+                $this->documentSymbol($invoice),
+                2,
+                $this->dateTime($invoice->issue_date ?? now()),
+            ]);
+        }
+
+        return $rows;
+    }
+
+    /**
+     * @param  Collection<int, Invoice>  $invoices
      * @return list<string>
      */
     private function jpkMarkerSections(Collection $invoices): array
@@ -266,14 +367,20 @@ final class InvoiceEppExportService
         ];
 
         foreach ($invoices as $invoice) {
-            $rows[] = $this->row(array_merge([$this->documentSymbol($invoice)], array_fill(0, 29, 0)));
+            $markers = array_fill(0, 30, 0);
+
+            if (is_array(data_get($invoice->metadata, 'oss'))) {
+                $markers[28] = 1; // WSTO_EE in the 1.11 layout
+            }
+
+            $rows[] = $this->row(array_merge([$this->documentSymbol($invoice)], $markers));
         }
 
         return $rows;
     }
 
     /**
-     * @param Collection<int, Invoice> $invoices
+     * @param  Collection<int, Invoice>  $invoices
      * @return list<string>
      */
     private function ossSections(Collection $invoices): array
@@ -306,6 +413,21 @@ final class InvoiceEppExportService
         }
 
         $rows[] = '[NAGLOWEK]';
+        $rows[] = $this->row(['SPECYFIKACJATOWAROWAWSTO']);
+        $rows[] = '[ZAWARTOSC]';
+
+        foreach ($ossInvoices as $invoice) {
+            foreach ($invoice->lines as $line) {
+                $rows[] = $this->row([
+                    $this->documentSymbol($invoice),
+                    mb_substr($line->name, 0, 50),
+                    $this->amount($line->quantity),
+                    mb_substr($line->unit, 0, 10),
+                ]);
+            }
+        }
+
+        $rows[] = '[NAGLOWEK]';
         $rows[] = $this->row(['STAWKIVATZAGRANICZNE']);
         $rows[] = '[ZAWARTOSC]';
 
@@ -332,14 +454,15 @@ final class InvoiceEppExportService
     }
 
     /**
-     * @param array<string, mixed> $party
-     * @return array{name:string,tax_id:string,email:string,phone:string,address_1:string,address_2:string,postcode:string,city:string,country:string}
+     * @param  array<string, mixed>  $party
+     * @return array{name:string,tax_id:string,regon:string,email:string,phone:string,address_1:string,address_2:string,postcode:string,city:string,country:string}
      */
     private function party(array $party): array
     {
         return [
             'name' => trim((string) ($party['name'] ?? '')),
             'tax_id' => trim((string) ($party['tax_id'] ?? '')),
+            'regon' => trim((string) ($party['regon'] ?? '')),
             'email' => trim((string) ($party['email'] ?? '')),
             'phone' => trim((string) ($party['phone'] ?? '')),
             'address_1' => trim((string) ($party['address_1'] ?? '')),
@@ -356,15 +479,15 @@ final class InvoiceEppExportService
         $taxId = preg_replace('/[^A-Za-z0-9]+/', '', $buyer['tax_id']) ?? '';
 
         if ($taxId !== '') {
-            return mb_substr('NIP'.$taxId, 0, 40);
+            return mb_substr('NIP'.$taxId, 0, 20);
         }
 
-        return mb_substr('OS'.$invoice->id, 0, 40);
+        return mb_substr('OS'.$invoice->id, 0, 20);
     }
 
     private function documentSymbol(Invoice $invoice): string
     {
-        return ($invoice->type === 'correction' ? 'KFS ' : 'FS ').$invoice->number;
+        return mb_substr(($invoice->type === 'correction' ? 'KFS ' : 'FS ').$invoice->number, 0, 30);
     }
 
     private function category(Invoice $invoice): string
@@ -381,6 +504,57 @@ final class InvoiceEppExportService
     private function orderReference(Invoice $invoice): string
     {
         return (string) (data_get($invoice->metadata, 'external_order_number') ?: $invoice->externalOrder?->external_number ?: '');
+    }
+
+    private function currencyRate(Invoice $invoice): float
+    {
+        if (strtoupper((string) $invoice->currency) === 'PLN') {
+            return 1.0;
+        }
+
+        $rate = data_get($invoice->metadata, 'currency_conversion.rate');
+
+        if (! is_numeric($rate) || (float) $rate <= 0) {
+            throw ValidationException::withMessages([
+                'month' => 'Faktura '.$invoice->number.' w walucie '.$invoice->currency.' nie ma zapisanego kursu waluty. Eksport EPP został przerwany, aby nie przekazać błędnych kwot do księgowości.',
+            ]);
+        }
+
+        return (float) $rate;
+    }
+
+    private function documentNotes(Invoice $invoice): string
+    {
+        $notes = array_filter([
+            filled($invoice->ksef_number) ? 'KSeF: '.$invoice->ksef_number : null,
+            filled($this->orderReference($invoice)) ? 'Zamówienie: '.$this->orderReference($invoice) : null,
+        ]);
+
+        return mb_substr(implode('; ', $notes), 0, 255);
+    }
+
+    private function transactionType(Invoice $invoice): int
+    {
+        if (is_array(data_get($invoice->metadata, 'oss'))) {
+            return 23;
+        }
+
+        $buyer = $this->party($invoice->buyer_data ?? []);
+
+        if ($buyer['country'] === 'PL') {
+            return 0;
+        }
+
+        return $this->isEuCountry($buyer['country']) ? 2 : 1;
+    }
+
+    private function isEuCountry(string $country): bool
+    {
+        return in_array(strtoupper($country), [
+            'AT', 'BE', 'BG', 'CY', 'CZ', 'DE', 'DK', 'EE', 'EL', 'ES', 'FI', 'FR', 'GR',
+            'HR', 'HU', 'IE', 'IT', 'LT', 'LU', 'LV', 'MT', 'NL', 'PL', 'PT', 'RO', 'SE',
+            'SI', 'SK',
+        ], true);
     }
 
     private function dominantVatRate(Invoice $invoice): float
@@ -403,7 +577,7 @@ final class InvoiceEppExportService
     }
 
     /**
-     * @param list<mixed> $fields
+     * @param  list<mixed>  $fields
      */
     private function row(array $fields): string
     {
