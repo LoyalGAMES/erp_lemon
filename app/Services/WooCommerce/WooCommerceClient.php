@@ -802,10 +802,10 @@ final class WooCommerceClient
         WordpressIntegration $integration,
         string $externalProductId,
     ): array {
-        $response = $this->request($integration)->get($this->endpoint(
-            $integration,
-            "/products/{$externalProductId}",
-        ));
+        $response = $this->freshReadRequest($integration)->get(
+            $this->endpoint($integration, "/products/{$externalProductId}"),
+            $this->freshReadQuery(),
+        );
 
         if (! $response->successful()) {
             throw new RuntimeException(
@@ -839,14 +839,14 @@ final class WooCommerceClient
 
         foreach ($ids->chunk(100) as $chunk) {
             $requestedIds = $chunk->map(fn (int $id): int => $id)->values();
-            $response = $this->request($integration)->get(
+            $response = $this->freshReadRequest($integration)->get(
                 $this->endpoint($integration, '/products'),
-                [
+                $this->freshReadQuery([
                     'include' => $requestedIds->implode(','),
                     'per_page' => 100,
                     'status' => 'any',
                     '_fields' => 'id,type,attributes',
-                ],
+                ]),
             );
 
             if (! $response->successful()) {
@@ -897,9 +897,9 @@ final class WooCommerceClient
                 $query['lang'] = mb_strtolower(trim((string) $language));
             }
 
-            $response = $this->request($integration)->get(
+            $response = $this->freshReadRequest($integration)->get(
                 $this->endpoint($integration, "/products/{$externalProductId}/variations"),
-                $query,
+                $this->freshReadQuery($query),
             );
 
             if (! $response->successful()) {
@@ -1418,6 +1418,125 @@ final class WooCommerceClient
     }
 
     /**
+     * Add only missing localized terms to one already proven global taxonomy.
+     * Corrective maintenance uses this narrower path when a translated product
+     * lost one Size assignment but its sibling language still proves the exact
+     * SKU-to-size bijection. It can never create or select another attribute.
+     *
+     * @param  list<string>  $options
+     * @param  list<string>  $sourceOptions
+     * @param  list<int|null>  $menuOrders
+     * @return array{id:int,name:string,options:list<string>,term_ids:list<int>}
+     */
+    public function ensureExistingGlobalProductAttributeOptions(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $sourceName,
+        array $options,
+        ?string $language = null,
+        array $sourceOptions = [],
+        array $menuOrders = [],
+    ): array {
+        $sourceName = trim($sourceName);
+
+        if ($attributeId <= 0 || $sourceName === '') {
+            throw new RuntimeException(
+                'Uzupełnienie wartości istniejącego globalnego atrybutu wymaga prawidłowego ID i nazwy.',
+            );
+        }
+
+        $attribute = collect($this->globalProductAttributes($integration))
+            ->first(fn (array $candidate): bool => (int) ($candidate['id'] ?? 0) === $attributeId);
+
+        if (! is_array($attribute)) {
+            throw new RuntimeException(
+                "WooCommerce nie potwierdził istniejącego globalnego atrybutu #{$attributeId}.",
+            );
+        }
+
+        $optionPairs = collect($options)
+            ->map(function (mixed $option, int $index) use ($sourceOptions, $menuOrders): array {
+                $localized = trim((string) $option);
+                $source = trim((string) ($sourceOptions[$index] ?? $localized));
+                $menuOrder = $menuOrders[$index] ?? null;
+
+                return [
+                    'localized' => $localized,
+                    'source' => $source !== '' ? $source : $localized,
+                    'menu_order' => is_numeric($menuOrder)
+                        ? max(0, min(65535, (int) $menuOrder))
+                        : null,
+                ];
+            })
+            ->filter(fn (array $pair): bool => $pair['localized'] !== '')
+            ->unique(fn (array $pair): string => mb_strtolower($pair['localized']))
+            ->values();
+
+        $requiresMenuOrder = $optionPairs->contains(
+            fn (array $pair): bool => $pair['menu_order'] !== null,
+        );
+
+        $language = filled($language) ? mb_strtolower(trim((string) $language)) : null;
+        $resolvedOptions = [];
+        $resolvedTermIds = [];
+
+        foreach ($optionPairs as $pair) {
+            $sourceTerm = null;
+            $excludedTargetTermIds = [];
+
+            if ($language !== null && $language !== 'pl') {
+                $sourceTerm = $this->findGlobalProductAttributeTerm(
+                    $integration,
+                    $attributeId,
+                    $pair['source'],
+                    'pl',
+                    [],
+                );
+
+                if (! is_array($sourceTerm)) {
+                    throw new RuntimeException(
+                        "WooCommerce nie zawiera źródłowej polskiej wartości {$pair['source']} globalnego atrybutu #{$attributeId}.",
+                    );
+                }
+
+                $excludedTargetTermIds[] = (int) $sourceTerm['id'];
+            }
+
+            $term = $this->ensureGlobalProductAttributeTerm(
+                $integration,
+                $attributeId,
+                $pair['localized'],
+                $language,
+                $excludedTargetTermIds,
+                $pair['menu_order'],
+            );
+            $resolvedOptions[] = trim((string) ($term['name'] ?? $pair['localized']))
+                ?: $pair['localized'];
+            $resolvedTermIds[] = (int) $term['id'];
+
+            if (is_array($sourceTerm)) {
+                $this->linkGlobalProductAttributeTermTranslations($integration, $attributeId, [
+                    'pl' => (int) $sourceTerm['id'],
+                    $language => (int) $term['id'],
+                ]);
+            }
+        }
+
+        // Make menu_order authoritative only after every term write and
+        // translation link succeeded, so a partial attempt stays invisible.
+        if ($requiresMenuOrder) {
+            $attribute = $this->setExistingGlobalProductAttributeMenuOrder($integration, $attribute);
+        }
+
+        return [
+            'id' => $attributeId,
+            'name' => trim((string) ($attribute['name'] ?? $sourceName)) ?: $sourceName,
+            'options' => $resolvedOptions,
+            'term_ids' => $resolvedTermIds,
+        ];
+    }
+
+    /**
      * Resolve an already existing global product attribute without creating or
      * changing anything in WooCommerce. Maintenance repairs use this read-only
      * path so a custom-text legacy attribute can never create a second taxonomy.
@@ -1653,9 +1772,9 @@ final class WooCommerceClient
         $attributes = [];
 
         for ($page = 1; $page <= 100; $page++) {
-            $response = $this->request($integration)->get(
+            $response = $this->freshReadRequest($integration)->get(
                 $this->endpoint($integration, '/products/attributes'),
-                ['per_page' => 100, 'page' => $page],
+                $this->freshReadQuery(['per_page' => 100, 'page' => $page]),
             );
 
             if (! $response->successful()) {
@@ -2007,9 +2126,9 @@ final class WooCommerceClient
                 $query['lang'] = $language;
             }
 
-            $response = $this->request($integration)->get(
+            $response = $this->freshReadRequest($integration)->get(
                 $this->endpoint($integration, "/products/attributes/{$attributeId}/terms"),
-                $query,
+                $this->freshReadQuery($query),
             );
 
             if (! $response->successful()) {
@@ -3568,6 +3687,27 @@ final class WooCommerceClient
             );
 
         return $retry ? $request->retry(2, 300) : $request;
+    }
+
+    /**
+     * Maintenance reads must always cross the network. A stale reverse-proxy
+     * or persistent object-cache response after a successful PUT used to make
+     * the axis repair roll back a correct write.
+     */
+    private function freshReadRequest(WordpressIntegration $integration): PendingRequest
+    {
+        return $this->request($integration)->withHeaders([
+            'Cache-Control' => 'no-cache, no-store, max-age=0',
+            'Pragma' => 'no-cache',
+        ]);
+    }
+
+    /** @param array<string,mixed> $query */
+    private function freshReadQuery(array $query = []): array
+    {
+        $query['_lemon_erp_no_cache'] = (string) Str::uuid();
+
+        return $query;
     }
 
     private function orderNotesRequest(WordpressIntegration $integration): PendingRequest

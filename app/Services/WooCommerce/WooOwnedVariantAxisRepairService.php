@@ -30,7 +30,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000025';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000026';
+
+    public const PREVIOUS_COMPLEMENTARY_LANGUAGE_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000025';
 
     public const PREVIOUS_ERP_SYNCHRONIZED_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000024';
 
@@ -44,6 +46,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_COMPLEMENTARY_LANGUAGE_REVISION,
             self::PREVIOUS_ERP_SYNCHRONIZED_REVISION,
             self::PREVIOUS_SYNCHRONIZED_REVISION,
         ], true);
@@ -607,6 +610,43 @@ final class WooOwnedVariantAxisRepairService
             }
         }
 
+        // A missing translated term must never be created before WordPress
+        // proves that it can atomically link that term to its Polish source.
+        // Run every capability check up front so a later integration cannot
+        // fail after an earlier plan has already performed its first POST.
+        $supplementalTranslationTargets = collect($plans)
+            ->filter(fn (array $entry): bool => (array) data_get(
+                $entry,
+                'plan.supplemental_canonical_options',
+                [],
+            ) !== [] && $this->language((string) $entry['target']['language']) !== 'pl')
+            ->unique(fn (array $entry): string => (string) $entry['target']['integration']->id
+                .'|'.$this->language((string) $entry['target']['language']))
+            ->values();
+
+        foreach ($supplementalTranslationTargets as $entry) {
+            $targetLanguage = $this->language((string) $entry['target']['language']);
+
+            if ($this->client->productTranslationLinkingAvailable(
+                $entry['target']['integration'],
+                ['pl', $targetLanguage],
+            )) {
+                continue;
+            }
+
+            return [
+                'status' => 'deferred',
+                'targets' => count($plans),
+                'mutations' => 0,
+                'reason' => sprintf(
+                    'WooCommerce %s #%s: WordPress nie potwierdził bezpiecznego powiązania tłumaczeń wartości globalnego atrybutu; brakująca wartość nie została utworzona.',
+                    mb_strtoupper($targetLanguage),
+                    $entry['target']['external_product_id'],
+                ),
+                'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
+            ];
+        }
+
         try {
             $discoveredAliases = $identity['contract']
                 ? $this->preflightDiscoveredAliases($product, $plans)
@@ -635,6 +675,64 @@ final class WooOwnedVariantAxisRepairService
                 'reason' => $exception->getMessage(),
                 'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
             ];
+        }
+
+        // The English side of two historical families retained S/M on the
+        // informational global Size attribute while its existing children and
+        // Polish sibling still proved S/M/L. Every product, language, identity
+        // and alias preflight above has now passed. Create and link only the
+        // missing translated term on the already selected taxonomy before the
+        // first product/variation PUT.
+        foreach ($plans as $entry) {
+            $supplemental = array_values((array) data_get(
+                $entry,
+                'plan.supplemental_canonical_options',
+                [],
+            ));
+
+            if ($supplemental === []) {
+                continue;
+            }
+
+            $sizeName = ProductVariantAxisNameResolver::SIZE;
+            $targetLanguage = $this->language((string) $entry['target']['language']);
+            $localized = collect($supplemental)
+                ->map(fn (mixed $option): string => $this->localizedSizeOption(
+                    $sizeName,
+                    (string) $option,
+                    $targetLanguage,
+                ))
+                ->all();
+            $dictionaryOrder = $this->sizeDictionaryOrder($sizeName);
+            $menuOrders = collect($supplemental)
+                ->map(fn (mixed $option): ?int => $dictionaryOrder[$this->optionKey((string) $option)]
+                    ?? $this->canonicalSizeRank((string) $option))
+                ->all();
+
+            try {
+                $this->client->ensureExistingGlobalProductAttributeOptions(
+                    $entry['target']['integration'],
+                    (int) $entry['plan']['size_id'],
+                    $sizeName,
+                    $localized,
+                    $targetLanguage,
+                    $supplemental,
+                    $menuOrders,
+                );
+            } catch (Throwable $exception) {
+                return [
+                    'status' => 'manual_review',
+                    'targets' => count($plans),
+                    'mutations' => 0,
+                    'reason' => sprintf(
+                        'WooCommerce %s #%s: %s',
+                        mb_strtoupper($targetLanguage),
+                        $entry['target']['external_product_id'],
+                        $exception->getMessage(),
+                    ),
+                    'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
+                ];
+            }
         }
 
         $mutations = 0;
@@ -709,29 +807,53 @@ final class WooOwnedVariantAxisRepairService
                     $mutations++;
                 }
 
-                $parent = $this->client->productById(
-                    $target['integration'],
-                    $target['external_product_id'],
-                );
-                $variations = $this->client->productVariationsByParent(
-                    $target['integration'],
-                    $target['external_product_id'],
-                    $this->apiLanguage($target['language']),
-                );
-                $verified = $this->familyPlan(
-                    $parent,
-                    $variations,
-                    null,
-                    [],
-                    $target['language'],
-                );
+                $verified = $this->unsafePlan('Nie wykonano końcowego odczytu WooCommerce.');
+                $parent = [];
+                $variations = [];
+
+                // A proxy/object-cache layer can briefly serve the pre-PUT
+                // representation. Every read carries a unique cache buster;
+                // retry only the idempotent GET before deciding to roll back.
+                for ($verificationAttempt = 1; $verificationAttempt <= 3; $verificationAttempt++) {
+                    $parent = $this->client->productById(
+                        $target['integration'],
+                        $target['external_product_id'],
+                    );
+                    $variations = $this->client->productVariationsByParent(
+                        $target['integration'],
+                        $target['external_product_id'],
+                        $this->apiLanguage($target['language']),
+                    );
+                    $verified = $this->familyPlan(
+                        $parent,
+                        $variations,
+                        null,
+                        [],
+                        $target['language'],
+                    );
+
+                    if ($verified['status'] === 'canonical'
+                        && $verified['parent_payload'] === null
+                        && $verified['variation_payloads'] === []
+                    ) {
+                        break;
+                    }
+
+                    if ($verificationAttempt < 3) {
+                        usleep($verificationAttempt * 200_000);
+                    }
+                }
 
                 if ($verified['status'] !== 'canonical'
                     || $verified['parent_payload'] !== null
                     || $verified['variation_payloads'] !== []
                 ) {
                     throw new RuntimeException(
-                        "WooCommerce nie potwierdził kanonicznej osi rozmiaru produktu #{$target['external_product_id']} po naprawie.",
+                        sprintf(
+                            'WooCommerce nie potwierdził kanonicznej osi rozmiaru produktu #%s po naprawie (%s).',
+                            $target['external_product_id'],
+                            $this->verificationResidual($verified),
+                        ),
                     );
                 }
 
@@ -4065,6 +4187,7 @@ final class WooOwnedVariantAxisRepairService
      *   option_keys:list<string>,
      *   ordered_options:list<string>,
      *   canonical_options:list<string>,
+     *   supplemental_canonical_options:list<string>,
      *   sku_option_keys:array<string,string>,
      *   variation_option_keys:array<string,string>,
      *   size_id:int,
@@ -4161,9 +4284,20 @@ final class WooOwnedVariantAxisRepairService
         $sizeName = is_array($sourceSize)
             ? ($this->attributeName($sourceSize) ?: 'Rozmiar')
             : 'Rozmiar';
+        $supplementalCanonicalOptions = $this->supplementalCanonicalOptionsFromCompleteHints(
+            $sourceSize,
+            $generic,
+            $variations,
+            $variationOptionHints,
+            $sizeName,
+            $language,
+        );
         $canonicalOptions = $this->orderedSizeOptions(
             $sizeName,
-            (array) ($sourceAxis['options'] ?? []),
+            [
+                ...(array) ($sourceAxis['options'] ?? []),
+                ...$supplementalCanonicalOptions,
+            ],
         );
         $canonicalByKey = collect($canonicalOptions)
             ->mapWithKeys(fn (string $option): array => [$this->optionKey($option) => $option]);
@@ -4355,6 +4489,7 @@ final class WooOwnedVariantAxisRepairService
                 'option_keys' => $canonicalByKey->keys()->sort()->values()->all(),
                 'ordered_options' => $orderedOptions,
                 'canonical_options' => $canonicalOptions,
+                'supplemental_canonical_options' => $supplementalCanonicalOptions,
                 'sku_option_keys' => $skuOptionKeys,
                 'variation_option_keys' => $variationOptionKeys,
                 'size_id' => 0,
@@ -4507,6 +4642,7 @@ final class WooOwnedVariantAxisRepairService
             'option_keys' => $canonicalByKey->keys()->sort()->values()->all(),
             'ordered_options' => $orderedOptions,
             'canonical_options' => $canonicalOptions,
+            'supplemental_canonical_options' => $supplementalCanonicalOptions,
             'sku_option_keys' => $skuOptionKeys,
             'variation_option_keys' => $variationOptionKeys,
             'size_id' => $sizeId,
@@ -4514,6 +4650,90 @@ final class WooOwnedVariantAxisRepairService
             'transitional_parent_payload' => $transitionalParentPayload,
             'variation_payloads' => $variationPayloads,
         ];
+    }
+
+    /**
+     * A damaged translated parent can retain only a subset of its informational
+     * global Size terms while every existing generic child and the complete
+     * Polish sibling still prove the full SKU bijection. Supplement only that
+     * exact English shape; a non-empty conflict or incomplete hint set remains
+     * a hard stop in the normal family-plan validation below.
+     *
+     * @param  array<string,mixed>|null  $sourceSize
+     * @param  array<string,mixed>|null  $generic
+     * @param  list<array<string,mixed>>  $variations
+     * @param  array<string,string>  $variationOptionHints
+     * @return list<string>
+     */
+    private function supplementalCanonicalOptionsFromCompleteHints(
+        ?array $sourceSize,
+        ?array $generic,
+        array $variations,
+        array $variationOptionHints,
+        string $sizeName,
+        string $language,
+    ): array {
+        if ($this->language($language) !== 'en'
+            || ! is_array($sourceSize)
+            || ! is_array($generic)
+            || ! $this->isCanonicalGlobalSizeAttribute($sourceSize)
+            || (bool) ($sourceSize['variation'] ?? false)
+            || ! (bool) ($generic['variation'] ?? false)
+            || $variations === []
+        ) {
+            return [];
+        }
+
+        $skus = collect($variations)
+            ->map(fn (array $variation): string => mb_strtoupper(trim((string) ($variation['sku'] ?? ''))))
+            ->values();
+
+        if ($skus->contains('') || $skus->unique()->count() !== $skus->count()) {
+            return [];
+        }
+
+        $hintKeys = $skus
+            ->map(fn (string $sku): string => trim((string) ($variationOptionHints[$sku] ?? '')))
+            ->filter()
+            ->values();
+
+        if ($hintKeys->count() !== count($variations)
+            || $hintKeys->unique()->count() !== $hintKeys->count()
+        ) {
+            return [];
+        }
+
+        $existingKeys = collect((array) ($sourceSize['options'] ?? []))
+            ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey($sizeName, (string) $option))
+            ->filter()
+            ->unique()
+            ->values();
+        $genericKeys = collect((array) ($generic['options'] ?? []))
+            ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey($sizeName, (string) $option))
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ($existingKeys->diff($hintKeys)->isNotEmpty()
+            || $genericKeys->diff($hintKeys)->isNotEmpty()
+        ) {
+            return [];
+        }
+
+        $supplemental = $hintKeys
+            ->diff($existingKeys)
+            ->map(fn (string $key): string => $this->canonicalSizeOption($sizeName, $key))
+            ->filter()
+            ->unique(fn (string $option): string => $this->optionKey($option))
+            ->values();
+
+        if ($supplemental->contains(
+            fn (string $option): bool => ! $hintKeys->contains($this->optionKey($option)),
+        )) {
+            return [];
+        }
+
+        return $this->orderedSizeOptions($sizeName, $supplemental->all());
     }
 
     /**
@@ -4746,7 +4966,7 @@ final class WooOwnedVariantAxisRepairService
     }
 
     /**
-     * @return array{status:'unsafe',reason:string,option_keys:list<string>,ordered_options:list<string>,canonical_options:list<string>,sku_option_keys:array{},variation_option_keys:array{},size_id:int,parent_payload:null,transitional_parent_payload:null,variation_payloads:array{}}
+     * @return array{status:'unsafe',reason:string,option_keys:list<string>,ordered_options:list<string>,canonical_options:list<string>,supplemental_canonical_options:list<string>,sku_option_keys:array{},variation_option_keys:array{},size_id:int,parent_payload:null,transitional_parent_payload:null,variation_payloads:array{}}
      */
     private function unsafePlan(string $reason): array
     {
@@ -4756,6 +4976,7 @@ final class WooOwnedVariantAxisRepairService
             'option_keys' => [],
             'ordered_options' => [],
             'canonical_options' => [],
+            'supplemental_canonical_options' => [],
             'sku_option_keys' => [],
             'variation_option_keys' => [],
             'size_id' => 0,
@@ -4763,6 +4984,25 @@ final class WooOwnedVariantAxisRepairService
             'transitional_parent_payload' => null,
             'variation_payloads' => [],
         ];
+    }
+
+    /** @param array<string,mixed> $plan */
+    private function verificationResidual(array $plan): string
+    {
+        $variationIds = collect(array_keys((array) ($plan['variation_payloads'] ?? [])))
+            ->map(fn (mixed $id): string => trim((string) $id))
+            ->filter()
+            ->values()
+            ->implode(',');
+
+        return sprintf(
+            'status=%s, reason=%s, parent=%s, transition=%s, variations=%s',
+            trim((string) ($plan['status'] ?? 'unknown')) ?: 'unknown',
+            trim((string) ($plan['reason'] ?? '')) ?: '-',
+            ($plan['parent_payload'] ?? null) === null ? 'ok' : 'pending',
+            ($plan['transitional_parent_payload'] ?? null) === null ? 'ok' : 'pending',
+            $variationIds !== '' ? $variationIds : '-',
+        );
     }
 
     /** @param array<string, mixed> $attribute */

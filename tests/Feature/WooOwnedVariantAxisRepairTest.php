@@ -167,6 +167,176 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
     }
 
+    public function test_it_creates_and_links_only_the_missing_english_size_term_before_repairing_existing_ids(): void
+    {
+        Bus::fake([ImportWooCommerceProductsJob::class]);
+        [$parent, $catalog] = $this->family();
+        $catalog->products[223]['attributes'][1]['options'] = [];
+        $catalog->products[223]['attributes'][2]['options'] = ['S/M'];
+        $originalParentIds = array_keys($catalog->products);
+        $originalVariationIds = collect($catalog->variations)
+            ->map(fn (array $variations): array => array_keys($variations))
+            ->all();
+        $originalStock = collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)
+                ->map(fn (array $variation): array => [
+                    'stock_quantity' => $variation['stock_quantity'],
+                    'stock_status' => $variation['stock_status'],
+                    'price' => $variation['price'],
+                ])
+                ->all())
+            ->all();
+        $englishTerms = [
+            ['id' => 21, 'name' => 'S/M', 'slug' => 's-m-en', 'menu_order' => 10, 'lang' => 'en'],
+        ];
+        $termPosts = [];
+        $termLinks = [];
+        $this->fakeCatalog($catalog, static function (Request $request) use (
+            &$englishTerms,
+            &$termPosts,
+            &$termLinks,
+        ): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities'
+            ) {
+                return Http::response([
+                    'available' => true,
+                    'plugin_version' => '0.5.6',
+                    'languages' => ['pl', 'en'],
+                    'attribute_term_translation_link_available' => true,
+                ]);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+            ) {
+                if (($query['lang'] ?? null) === 'en') {
+                    return Http::response($englishTerms);
+                }
+
+                if (($query['lang'] ?? null) === 'pl') {
+                    return Http::response([
+                        ['id' => 11, 'name' => 'S/M', 'slug' => 's-m', 'menu_order' => 10, 'lang' => 'pl'],
+                        ['id' => 12, 'name' => 'M/L', 'slug' => 'm-l', 'menu_order' => 20, 'lang' => 'pl'],
+                    ]);
+                }
+            }
+
+            if ($request->method() === 'POST'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+                && ($query['lang'] ?? null) === 'en'
+            ) {
+                $termPosts[] = $request->data();
+                $created = array_merge([
+                    'id' => 22,
+                    'lang' => 'en',
+                ], $request->data());
+                $englishTerms[] = $created;
+
+                return Http::response($created, 201);
+            }
+
+            if ($request->method() === 'POST'
+                && $path === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/1/terms/translations'
+            ) {
+                $termLinks[] = $request->data();
+
+                return Http::response([
+                    'linked' => true,
+                    'attribute_id' => 1,
+                    'translations' => $request->data()['translations'] ?? [],
+                ]);
+            }
+
+            return null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('repaired', $result['status']);
+        $this->assertSame([[
+            'name' => 'M/L',
+            'slug' => 'ml-en',
+            'menu_order' => 60,
+        ]], $termPosts);
+        $this->assertSame([[
+            'translations' => ['en' => 22, 'pl' => 12],
+        ]], $termLinks);
+        $this->assertSame($originalParentIds, array_keys($catalog->products));
+        $this->assertSame($originalVariationIds, collect($catalog->variations)
+            ->map(fn (array $variations): array => array_keys($variations))
+            ->all());
+        $this->assertSame($originalStock, collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)
+                ->map(fn (array $variation): array => [
+                    'stock_quantity' => $variation['stock_quantity'],
+                    'stock_status' => $variation['stock_status'],
+                    'price' => $variation['price'],
+                ])
+                ->all())
+            ->all());
+        $this->assertSame(['S/M', 'M/L'], collect($catalog->products[223]['attributes'])
+            ->firstWhere('id', 1)['options']);
+        $this->assertSame(
+            [224 => 'S/M', 225 => 'M/L'],
+            collect($catalog->variations[223])
+                ->map(fn (array $variation): string => $variation['attributes'][0]['option'])
+                ->all(),
+        );
+        $this->assertFalse(Http::recorded()->contains(function (array $record): bool {
+            /** @var Request $request */
+            $request = $record[0];
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            return in_array($request->method(), ['POST', 'DELETE'], true)
+                && preg_match('#/wc/v3/products/\d+(?:/variations(?:/\d+)?)?$#', $path) === 1;
+        }));
+    }
+
+    public function test_it_does_not_create_a_missing_english_term_without_linking_capability(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $catalog->products[223]['attributes'][1]['options'] = [];
+        $catalog->products[223]['attributes'][2]['options'] = ['S/M'];
+        $original = unserialize(serialize([
+            'products' => $catalog->products,
+            'variations' => $catalog->variations,
+        ]));
+        $this->fakeCatalog($catalog, static function (Request $request): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities'
+            ) {
+                return Http::response([
+                    'available' => true,
+                    'plugin_version' => '0.5.6',
+                    'languages' => ['pl', 'en'],
+                    'attribute_term_translation_link_available' => false,
+                ]);
+            }
+
+            return null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('deferred', $result['status']);
+        $this->assertSame(0, $result['mutations']);
+        $this->assertStringContainsString('brakująca wartość nie została utworzona', $result['reason']);
+        $this->assertSame($original['products'], $catalog->products);
+        $this->assertSame($original['variations'], $catalog->variations);
+        $this->assertFalse(Http::recorded()->contains(function (array $record): bool {
+            /** @var Request $request */
+            $request = $record[0];
+
+            return in_array($request->method(), ['POST', 'PUT', 'PATCH', 'DELETE'], true);
+        }));
+    }
+
     public function test_local_snapshot_keeps_an_independent_blvariant_colour_parameter(): void
     {
         [$parent, $catalog] = $this->family();
@@ -1087,10 +1257,10 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             'variations' => $catalog->variations,
         ]));
         $polishParentPuts = 0;
-        $corruptNextRead = false;
+        $corruptReadsRemaining = 0;
         $this->fakeCatalog($catalog, static function (Request $request, object $liveCatalog) use (
             &$polishParentPuts,
-            &$corruptNextRead,
+            &$corruptReadsRemaining,
         ): mixed {
             $path = (string) parse_url($request->url(), PHP_URL_PATH);
 
@@ -1098,17 +1268,17 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 $polishParentPuts++;
 
                 if ($polishParentPuts === 2) {
-                    $corruptNextRead = true;
+                    $corruptReadsRemaining = 3;
                 }
 
                 return null;
             }
 
-            if ($corruptNextRead
+            if ($corruptReadsRemaining > 0
                 && $request->method() === 'GET'
                 && $path === '/wp-json/wc/v3/products/123'
             ) {
-                $corruptNextRead = false;
+                $corruptReadsRemaining--;
                 $response = unserialize(serialize($liveCatalog->products[123]));
                 $response['attributes'][1]['variation'] = false;
 
@@ -1128,6 +1298,81 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame(4, $polishParentPuts);
         $this->assertSame($original['products'], $catalog->products);
         $this->assertSame($original['variations'], $catalog->variations);
+    }
+
+    public function test_a_single_stale_final_read_is_retried_without_rolling_back_a_correct_axis(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $polishParentPuts = 0;
+        $corruptReadsRemaining = 0;
+        $recordFreshReads = false;
+        $freshReads = [];
+        $this->fakeCatalog($catalog, static function (Request $request, object $liveCatalog) use (
+            &$polishParentPuts,
+            &$corruptReadsRemaining,
+            &$recordFreshReads,
+            &$freshReads,
+        ): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'PUT' && $path === '/wp-json/wc/v3/products/123') {
+                $polishParentPuts++;
+
+                if ($polishParentPuts === 2) {
+                    $corruptReadsRemaining = 1;
+                    $recordFreshReads = true;
+                }
+
+                return null;
+            }
+
+            if ($recordFreshReads
+                && $request->method() === 'GET'
+                && in_array($path, [
+                    '/wp-json/wc/v3/products/123',
+                    '/wp-json/wc/v3/products/123/variations',
+                ], true)
+            ) {
+                parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+                $freshReads[] = [
+                    'cache_buster' => filled($query['_lemon_erp_no_cache'] ?? null),
+                    'cache_control' => $request->hasHeader(
+                        'Cache-Control',
+                        'no-cache, no-store, max-age=0',
+                    ),
+                    'pragma' => $request->hasHeader('Pragma', 'no-cache'),
+                ];
+            }
+
+            if ($corruptReadsRemaining > 0
+                && $request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/123'
+            ) {
+                $corruptReadsRemaining--;
+                $response = unserialize(serialize($liveCatalog->products[123]));
+                $response['attributes'][1]['variation'] = false;
+
+                return Http::response($response);
+            }
+
+            return null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('repaired', $result['status']);
+        $this->assertSame(2, $polishParentPuts);
+        $this->assertSame(0, $corruptReadsRemaining);
+        $this->assertGreaterThanOrEqual(4, count($freshReads));
+        $this->assertTrue(collect($freshReads)->every(
+            fn (array $read): bool => $read['cache_buster']
+                && $read['cache_control']
+                && $read['pragma'],
+        ));
+        $this->assertTrue((bool) collect($catalog->products[123]['attributes'])
+            ->firstWhere('id', 1)['variation']);
+        $this->assertSame(['S/M', 'M/L'], collect($catalog->products[123]['attributes'])
+            ->firstWhere('id', 1)['options']);
     }
 
     public function test_it_aborts_the_whole_pl_en_family_before_any_write_when_one_language_has_color_axis(): void

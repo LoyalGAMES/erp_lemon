@@ -444,38 +444,14 @@ migration_completed=1
     "$php_bin" artisan erp:preflight
 )
 
-# Migrations may mark historical Woo product families for an axis-only repair.
-# All old workers have exited and maintenance prevents every web catalog
-# writer, so finish the exact current revision now instead of waiting for the
-# scheduler after the release has already been reported as successful. The
-# existing repair job still only queues its broad follow-up catalog export; it
-# is never executed synchronously here.
-variant_axis_repair_succeeded=0
-if (
-    cd "$release_path"
-    "$php_bin" artisan erp:repair-woo-owned-variant-axes-during-maintenance
-); then
-    variant_axis_repair_succeeded=1
-else
-    echo 'Błąd: synchroniczna naprawa osi wariantów WooCommerce nie zakończyła się czystym stanem.' >&2
-fi
-if (
-    cd "$release_path"
-    "$php_bin" artisan erp:verify-woo-owned-variant-axis-repair
-); then
-    if [[ "$variant_axis_repair_succeeded" -eq 1 ]]; then
-        variant_axis_repair_verified=1
-    fi
-else
-    echo 'Błąd: bieżąca rewizja naprawy osi wariantów WooCommerce ma nierozwiązane rodziny.' >&2
-fi
-
 # Every release performs a fresh existing-term-only WooCommerce repair. The
 # normal asynchronous job must share the full catalog lock with product
 # exports, because an overlapping export can overwrite term menu_order. During
 # deploy the application is in maintenance and all old queue workers have
 # exited, so this one guarded synchronous command can safely bypass a stale
-# cache lock left by a terminated worker.
+# cache lock left by a terminated worker. This must precede product-axis repair:
+# Woo materializes a global attribute's product option order from these term
+# ranks, and an axis written first would otherwise read back in the old order.
 size_order_sync_since="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 if (
     cd "$release_path"
@@ -494,6 +470,35 @@ if (
     fi
 else
     echo 'Błąd: synchroniczna naprawa kolejności rozmiarów WooCommerce zakończyła się błędem.' >&2
+fi
+
+# Migrations may mark historical Woo product families for an axis-only repair.
+# All old workers have exited, global Size order is now authoritative and
+# maintenance prevents every web catalog writer, so finish the exact current
+# revision before reporting the release as successful. The repair job only
+# queues its broad follow-up catalog export; it is not executed synchronously.
+if [[ "$size_order_sync_verified" -eq 1 ]]; then
+    variant_axis_repair_succeeded=0
+    if (
+        cd "$release_path"
+        "$php_bin" artisan erp:repair-woo-owned-variant-axes-during-maintenance
+    ); then
+        variant_axis_repair_succeeded=1
+    else
+        echo 'Błąd: synchroniczna naprawa osi wariantów WooCommerce nie zakończyła się czystym stanem.' >&2
+    fi
+    if (
+        cd "$release_path"
+        "$php_bin" artisan erp:verify-woo-owned-variant-axis-repair
+    ); then
+        if [[ "$variant_axis_repair_succeeded" -eq 1 ]]; then
+            variant_axis_repair_verified=1
+        fi
+    else
+        echo 'Błąd: bieżąca rewizja naprawy osi wariantów WooCommerce ma nierozwiązane rodziny.' >&2
+    fi
+else
+    echo 'Błąd: pominięto naprawę osi wariantów, ponieważ globalna kolejność rozmiarów nie została potwierdzona.' >&2
 fi
 
 if [[ "$bootstrap_mode" == 'legacy-directory' ]]; then

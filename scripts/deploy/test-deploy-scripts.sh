@@ -543,8 +543,8 @@ SLEEP
     size_order_verify_line="$(grep -nF ' erp:verify-woocommerce-global-size-order-sync ' "$deploy_log" | head -n 1 | cut -d: -f1)"
     [[ -n "$maintenance_line" && -n "$queue_restart_line" && -n "$worker_wait_line" && -n "$migration_line" && -n "$variant_axis_repair_line" && -n "$variant_axis_verify_line" && -n "$size_order_sync_line" && -n "$size_order_verify_line" ]] ||
         fail 'deploy nie zarejestrował pełnej sekwencji restart-worker-migracja.'
-    (( maintenance_line < queue_restart_line && queue_restart_line < worker_wait_line && worker_wait_line < migration_line && migration_line < variant_axis_repair_line && variant_axis_repair_line < variant_axis_verify_line && variant_axis_verify_line < size_order_sync_line && size_order_sync_line < size_order_verify_line )) ||
-        fail 'warunek końcowy kolejności rozmiarów ruszył przed migracją, workerem albo zakończeniem starych workerów.'
+    (( maintenance_line < queue_restart_line && queue_restart_line < worker_wait_line && worker_wait_line < migration_line && migration_line < size_order_sync_line && size_order_sync_line < size_order_verify_line && size_order_verify_line < variant_axis_repair_line && variant_axis_repair_line < variant_axis_verify_line )) ||
+        fail 'naprawa osi wariantów ruszyła przed migracją, workerem albo potwierdzeniem globalnej kolejności rozmiarów.'
     [[ "$(grep -Fc ' erp:repair-woo-owned-variant-axes-during-maintenance' "$deploy_log")" -eq 1 && "$(grep -Fc ' erp:verify-woo-owned-variant-axis-repair' "$deploy_log")" -eq 1 ]] ||
         fail 'deploy nie wykonał dokładnie jednej synchronicznej naprawy osi wariantów i jej warunku końcowego.'
     [[ "$(grep -Fc ' erp:sync-woocommerce-global-size-order-during-maintenance ' "$deploy_log")" -eq 1 && "$(grep -Fc ' erp:verify-woocommerce-global-size-order-sync ' "$deploy_log")" -eq 1 ]] ||
@@ -692,8 +692,8 @@ activation_line="$(grep -n 'atomic_link \"\$release_path\" \"\$current_link\"' "
     fail 'kolejność backup -> migracja -> preflight -> aktywacja została naruszona.'
 [[ "$preflight_line" -lt "$size_order_sync_line" && "$size_order_sync_line" -lt "$activation_line" ]] ||
     fail 'synchroniczna naprawa kolejności rozmiarów nie działa po preflight i przed aktywacją/schedulerem.'
-[[ "$preflight_line" -lt "$variant_axis_repair_line" && "$variant_axis_repair_line" -lt "$variant_axis_verify_line" && "$variant_axis_verify_line" -lt "$size_order_sync_line" ]] ||
-    fail 'migracyjne naprawy osi wariantów nie kończą się synchronicznie przed naprawą kolejności rozmiarów.'
+[[ "$size_order_verify_line" -lt "$variant_axis_repair_line" && "$variant_axis_repair_line" -lt "$variant_axis_verify_line" && "$variant_axis_verify_line" -lt "$activation_line" ]] ||
+    fail 'migracyjne naprawy osi wariantów nie działają po potwierdzeniu globalnej kolejności i przed aktywacją.'
 [[ "$size_order_sync_line" -lt "$size_order_verify_line" && "$size_order_verify_line" -lt "$activation_line" ]] ||
     fail 'warunek końcowy kolejności rozmiarów nie działa po synchronicznej naprawie i przed aktywacją.'
 
