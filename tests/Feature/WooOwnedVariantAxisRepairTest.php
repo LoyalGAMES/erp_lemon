@@ -1643,10 +1643,12 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         ));
     }
 
-    public function test_english_legacy_default_collision_slug_is_resolved_by_its_exact_target_language_term(): void
-    {
+    #[DataProvider('englishLegacyDefaultSlugProvider')]
+    public function test_english_legacy_default_slug_is_resolved_without_changing_commercial_data(
+        string $defaultOption,
+    ): void {
         [$parent, $catalog] = $this->family();
-        $catalog->products[223]['default_attributes'][0]['option'] = 'm-l-2-en';
+        $catalog->products[223]['default_attributes'][0]['option'] = $defaultOption;
         $protectedBefore = collect($catalog->products)
             ->map(fn (array $product): array => collect($product)->only([
                 'name',
@@ -1689,6 +1691,14 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             return Http::response([
                 ['id' => 71, 'name' => 'm-l', 'slug' => 'm-l', 'menu_order' => 20],
                 ['id' => 72, 'name' => 's-m', 'slug' => 's-m', 'menu_order' => 10],
+                [
+                    'id' => 79,
+                    'name' => 'm-l',
+                    'slug' => 'm-l-2',
+                    'menu_order' => 20,
+                    'language' => 'pl',
+                    'translations' => ['pl' => 79],
+                ],
                 ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en', 'menu_order' => 20],
                 ['id' => 82, 'name' => 's-m', 'slug' => 's-m-2-en', 'menu_order' => 10],
             ]);
@@ -1759,6 +1769,14 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
 
         $this->assertSame('already_canonical', $second['status']);
         $this->assertSame(0, $second['mutations']);
+    }
+
+    public static function englishLegacyDefaultSlugProvider(): array
+    {
+        return [
+            'target language collision slug' => ['m-l-2-en'],
+            'exact Polish source slug retained on English parent' => ['m-l-2'],
+        ];
     }
 
     public function test_partially_repaired_english_family_uses_fresh_unfiltered_collision_term_when_lang_filter_hides_it(): void
@@ -1920,6 +1938,168 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         });
     }
 
+    public function test_english_generic_default_resolves_one_exact_polish_source_slug_before_axis_removal(): void
+    {
+        $this->family();
+        $integration = WordpressIntegration::query()->firstOrFail();
+        $scopedReads = 0;
+        $unfilteredReads = 0;
+
+        Http::fake(function (Request $request) use (&$scopedReads, &$unfilteredReads): mixed {
+            if ($request->method() !== 'GET'
+                || parse_url($request->url(), PHP_URL_PATH)
+                    !== '/wp-json/wc/v3/products/attributes/8/terms'
+            ) {
+                return Http::response([], 404);
+            }
+
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if (($query['lang'] ?? null) === 'en') {
+                $scopedReads++;
+
+                return Http::response([[
+                    'id' => 81,
+                    'name' => 'm-l',
+                    'slug' => 'm-l-2-en',
+                    'language' => 'pl',
+                    'translations' => ['pl' => 81],
+                ]]);
+            }
+
+            $unfilteredReads++;
+
+            return Http::response([
+                [
+                    'id' => 71,
+                    'name' => 'm-l',
+                    'slug' => 'm-l-2',
+                    'language' => 'pl',
+                    'translations' => ['pl' => 71],
+                ],
+                [
+                    'id' => 81,
+                    'name' => 'm-l',
+                    'slug' => 'm-l-2-en',
+                    'language' => 'pl',
+                    'translations' => ['pl' => 81],
+                ],
+            ]);
+        });
+
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'resolveExistingTargetAxisDefaultTermName',
+        );
+        $resolved = $method->invoke(
+            app(WooOwnedVariantAxisRepairService::class),
+            $integration,
+            'en',
+            [
+                'id' => 8,
+                'name' => 'wariant',
+                'slug' => 'pa_wariant',
+                'options' => ['m-l', 's-m'],
+            ],
+            'm-l-2',
+        );
+
+        $this->assertSame('m-l', $resolved);
+        $this->assertGreaterThan(0, $scopedReads);
+        $this->assertGreaterThan(0, $unfilteredReads);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() !== 'GET');
+    }
+
+    #[DataProvider('unprovenExactLegacyDefaultTermProvider')]
+    public function test_exact_legacy_default_slug_without_safe_source_semantics_stays_blocked(
+        array $term,
+    ): void {
+        $this->family();
+        $integration = WordpressIntegration::query()->firstOrFail();
+
+        Http::fake(fn (Request $request) => Http::response([$term]));
+
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'resolveExistingTargetAxisDefaultTermName',
+        );
+
+        $this->expectException(\DomainException::class);
+        $this->expectExceptionMessage('nie wskazuje jednego terminu rozmiaru');
+        $method->invoke(
+            app(WooOwnedVariantAxisRepairService::class),
+            $integration,
+            'en',
+            [
+                'id' => 8,
+                'name' => 'wariant',
+                'slug' => 'pa_wariant',
+                'options' => ['m-l', 's-m'],
+            ],
+            'm-l-2',
+        );
+    }
+
+    public static function unprovenExactLegacyDefaultTermProvider(): array
+    {
+        return [
+            'non-size term' => [[
+                'id' => 71,
+                'name' => 'red',
+                'slug' => 'm-l-2',
+                'language' => 'pl',
+                'translations' => ['pl' => 71],
+            ]],
+            'foreign-language term' => [[
+                'id' => 71,
+                'name' => 'm-l',
+                'slug' => 'm-l-2',
+                'language' => 'de',
+                'translations' => ['de' => 71],
+            ]],
+            'conflicting language fields' => [[
+                'id' => 71,
+                'name' => 'm-l',
+                'slug' => 'm-l-2',
+                'lang' => 'pl',
+                'language' => 'en',
+            ]],
+        ];
+    }
+
+    public function test_wrong_language_exact_slug_on_canonical_size_axis_stays_blocked(): void
+    {
+        $this->family();
+        $integration = WordpressIntegration::query()->firstOrFail();
+
+        Http::fake(fn (Request $request) => Http::response([[
+            'id' => 71,
+            'name' => 'M/L',
+            'slug' => 'm-l-2',
+            'language' => 'pl',
+            'translations' => ['pl' => 71],
+        ]]));
+
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'resolveExistingTargetAxisDefaultTermName',
+        );
+
+        $this->expectException(\DomainException::class);
+        $method->invoke(
+            app(WooOwnedVariantAxisRepairService::class),
+            $integration,
+            'en',
+            [
+                'id' => 1,
+                'name' => 'Rozmiar',
+                'slug' => 'pa_rozmiar',
+                'options' => ['M/L', 'S/M'],
+            ],
+            'm-l-2',
+        );
+    }
+
     #[DataProvider('unprovenLegacyDefaultTermProvider')]
     public function test_legacy_default_slug_without_one_exact_language_term_stops_before_every_write(
         array $terms,
@@ -1962,7 +2142,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
     }
 
     #[DataProvider('unprovenUnfilteredLegacyNameTermProvider')]
-    public function test_unfiltered_legacy_name_fallback_rejects_base_malformed_duplicate_and_conflicting_terms_before_every_write(
+    public function test_unfiltered_legacy_name_fallback_rejects_malformed_duplicate_and_conflicting_terms_before_every_write(
         array $terms,
     ): void {
         [$parent, $catalog] = $this->family();
@@ -1998,9 +2178,6 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
     public static function unprovenUnfilteredLegacyNameTermProvider(): array
     {
         return [
-            'only Polish base term' => [[
-                ['id' => 71, 'name' => 'm-l', 'slug' => 'm-l'],
-            ]],
             'collision term belongs to a non-source foreign language' => [[
                 [
                     'id' => 81,

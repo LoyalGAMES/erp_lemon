@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000029';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000030';
+
+    public const PREVIOUS_EXACT_LEGACY_DEFAULT_SLUG_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000029';
 
     public const PREVIOUS_CANONICAL_SIZE_TAXONOMY_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000028';
 
@@ -53,6 +55,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_EXACT_LEGACY_DEFAULT_SLUG_REVISION,
             self::PREVIOUS_CANONICAL_SIZE_TAXONOMY_REVISION,
             self::PREVIOUS_LEGACY_DEFAULT_TERM_LANGUAGE_REVISION,
             self::PREVIOUS_DEFAULT_TERM_SLUG_REVISION,
@@ -4511,10 +4514,10 @@ final class WooOwnedVariantAxisRepairService
         // Some WooCommerce/Polylang installations hide collision-suffixed
         // legacy terms from `?lang=en`, even though the English product still
         // references them. Retry one fresh, unfiltered read only when the
-        // language-aware proof found nothing. The fallback accepts either an
-        // explicit target-language identity or the strict historical
-        // collision slug (`m-l-2-en`), and therefore cannot select the Polish
-        // base term (`m-l`).
+        // language-aware proof found nothing. The fallback accepts either the
+        // one exact term slug already stored in this removable generic-axis
+        // default, an explicit target-language identity, or the strict
+        // historical collision slug (`m-l-2-en`).
         if ($proven->isEmpty()) {
             $unfilteredMatches = collect($this->client->globalProductAttributeTermsById(
                 $integration,
@@ -4541,39 +4544,7 @@ final class WooOwnedVariantAxisRepairService
                 );
             }
 
-            $proven = $unfilteredMatches
-                ->filter(function (array $term) use ($axis, $language): bool {
-                    $legacyPolishLanguageCollision = $this->isGenericAttribute($axis)
-                        && $this->isTargetLanguageCollisionTermSlug(
-                            (string) ($term['name'] ?? ''),
-                            (string) ($term['slug'] ?? ''),
-                            $language,
-                        )
-                        && $this->termHasLanguageIdentity($term)
-                        && $this->termMatchesLanguage($term, 'pl');
-
-                    // This taxonomy is the legacy source axis being removed,
-                    // not the target Size taxonomy. Historical Polylang data
-                    // can consistently label its `*-2-en` term as PL even
-                    // while the verified EN product and its children use it.
-                    // The deterministic EN collision slug may therefore prove
-                    // only the source option's semantics. The exact target EN
-                    // term on canonical Size is still proved separately before
-                    // the first PUT, and contradictory identities stay blocked.
-                    if ($legacyPolishLanguageCollision) {
-                        return true;
-                    }
-
-                    if ($this->termHasLanguageIdentity($term)) {
-                        return $this->termMatchesLanguage($term, $language);
-                    }
-
-                    return $this->isTargetLanguageCollisionTermSlug(
-                        (string) ($term['name'] ?? ''),
-                        (string) ($term['slug'] ?? ''),
-                        $language,
-                    );
-                })
+            $semanticMatches = $unfilteredMatches
                 ->filter(function (array $term) use ($axisOptions): bool {
                     $name = trim((string) ($term['name'] ?? ''));
                     $slug = trim((string) ($term['slug'] ?? ''));
@@ -4593,8 +4564,87 @@ final class WooOwnedVariantAxisRepairService
                         && $canonicalKey !== ''
                         && ($axisOptions->isEmpty() || $matchingOptions->count() === 1);
                 })
-                ->unique(fn (array $term): int => (int) $term['id'])
                 ->values();
+
+            // Woo stores a global default as a term slug. A few historical EN
+            // suits kept the exact Polish slug (`m-l` or `m-l-2`) on the old
+            // generic axis while their EN children correctly referenced the
+            // `*-en` terms. The one exact slug on the axis being removed is
+            // authoritative only for the selected size's semantics. It is
+            // never reused as the target term: the canonical Size taxonomy,
+            // target-language term and every child SKU mapping are still
+            // proved independently before the first PUT.
+            $exactRawLegacyTerms = $this->isGenericAttribute($axis)
+                ? $unfilteredMatches
+                    ->filter(fn (array $term): bool => trim((string) ($term['slug'] ?? ''))
+                        === trim($rawOption))
+                    ->values()
+                : collect();
+            $exactReferencedLegacyTerms = $semanticMatches
+                ->filter(fn (array $term): bool => trim((string) ($term['slug'] ?? ''))
+                    === trim($rawOption))
+                ->filter(function (array $term) use ($axisOptions): bool {
+                    $canonicalKey = $this->canonicalSizeOptionKey(
+                        ProductVariantAxisNameResolver::SIZE,
+                        (string) ($term['name'] ?? ''),
+                    );
+
+                    return $canonicalKey !== '' && $axisOptions
+                        ->filter(fn (string $option): bool => $this->canonicalSizeOptionKey(
+                            ProductVariantAxisNameResolver::SIZE,
+                            $option,
+                        ) === $canonicalKey)
+                        ->count() === 1;
+                })
+                ->filter(fn (array $term): bool => ! $this->termHasLanguageIdentity($term)
+                    || $this->termMatchesLanguage($term, $language)
+                    || $this->termMatchesLanguage($term, 'pl'))
+                ->values();
+
+            if ($exactRawLegacyTerms->isNotEmpty()) {
+                // An explicitly referenced but malformed, ambiguous or
+                // foreign-language term must fail closed; do not replace it
+                // with a looser same-name candidate.
+                $proven = $exactReferencedLegacyTerms->count() === 1
+                    ? $exactReferencedLegacyTerms
+                    : collect();
+            } else {
+                $proven = $semanticMatches
+                    ->filter(function (array $term) use ($axis, $language): bool {
+                        $legacyPolishLanguageCollision = $this->isGenericAttribute($axis)
+                            && $this->isTargetLanguageCollisionTermSlug(
+                                (string) ($term['name'] ?? ''),
+                                (string) ($term['slug'] ?? ''),
+                                $language,
+                            )
+                            && $this->termHasLanguageIdentity($term)
+                            && $this->termMatchesLanguage($term, 'pl');
+
+                        // This taxonomy is the legacy source axis being removed,
+                        // not the target Size taxonomy. Historical Polylang data
+                        // can consistently label its `*-2-en` term as PL even
+                        // while the verified EN product and its children use it.
+                        // The deterministic EN collision slug may therefore prove
+                        // only the source option's semantics. The exact target EN
+                        // term on canonical Size is still proved separately before
+                        // the first PUT, and contradictory identities stay blocked.
+                        if ($legacyPolishLanguageCollision) {
+                            return true;
+                        }
+
+                        if ($this->termHasLanguageIdentity($term)) {
+                            return $this->termMatchesLanguage($term, $language);
+                        }
+
+                        return $this->isTargetLanguageCollisionTermSlug(
+                            (string) ($term['name'] ?? ''),
+                            (string) ($term['slug'] ?? ''),
+                            $language,
+                        );
+                    })
+                    ->unique(fn (array $term): int => (int) $term['id'])
+                    ->values();
+            }
         }
 
         if ($proven->count() !== 1) {
