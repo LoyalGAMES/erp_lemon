@@ -362,6 +362,16 @@ final class WooOwnedVariantAxisRepairService
                 $target['external_product_id'],
                 $this->apiLanguage($target['language']),
             );
+            $inertParentAttributeIds = $this->inertTranslatedGlobalAttributePlaceholderIds(
+                $target,
+                $parent,
+                $variations,
+            );
+            $parent = $this->withoutProvenInertGlobalAttributePlaceholders(
+                $parent,
+                $variations,
+                $inertParentAttributeIds,
+            );
             try {
                 $planningParent = $this->normalizeExistingParentSizeAxisForPlan(
                     $target,
@@ -393,6 +403,7 @@ final class WooOwnedVariantAxisRepairService
                 'planning_parent' => $planningParent,
                 'variations' => $variations,
                 'protected' => $this->protectedSnapshot($parent, $variations),
+                'inert_parent_attribute_ids' => $inertParentAttributeIds,
             ];
         }
 
@@ -859,6 +870,11 @@ final class WooOwnedVariantAxisRepairService
                         $transition,
                         $this->apiLanguage($target['language']),
                     );
+                    $transitionalParent = $this->withoutProvenInertGlobalAttributePlaceholders(
+                        $transitionalParent,
+                        $entry['variations'],
+                        (array) ($entry['inert_parent_attribute_ids'] ?? []),
+                    );
 
                     if (! $this->parentAxisPayloadMatches($transitionalParent, $transition)) {
                         throw new RuntimeException(
@@ -899,6 +915,11 @@ final class WooOwnedVariantAxisRepairService
                         $payload,
                         $this->apiLanguage($target['language']),
                     );
+                    $updatedParent = $this->withoutProvenInertGlobalAttributePlaceholders(
+                        $updatedParent,
+                        $entry['variations'],
+                        (array) ($entry['inert_parent_attribute_ids'] ?? []),
+                    );
 
                     if (! $this->parentAxisPayloadMatches($updatedParent, $payload)) {
                         throw new RuntimeException(
@@ -927,6 +948,11 @@ final class WooOwnedVariantAxisRepairService
                         $target['integration'],
                         $target['external_product_id'],
                         $this->apiLanguage($target['language']),
+                    );
+                    $parent = $this->withoutProvenInertGlobalAttributePlaceholders(
+                        $parent,
+                        $variations,
+                        (array) ($entry['inert_parent_attribute_ids'] ?? []),
                     );
                     $planningParent = $this->normalizeVerifiedSizeDefaultAliasesForPlan(
                         $parent,
@@ -1340,6 +1366,7 @@ final class WooOwnedVariantAxisRepairService
         $rollbackErrors = [];
         $transition = $entry['plan']['transitional_parent_payload'] ?? null;
         $applySafeTransition = function () use (
+            $entry,
             $target,
             $transition,
             &$rollbackErrors,
@@ -1362,6 +1389,11 @@ final class WooOwnedVariantAxisRepairService
                         $transition,
                         $this->apiLanguage($target['language']),
                     );
+                    $transitionalParent = $this->withoutProvenInertGlobalAttributePlaceholders(
+                        $transitionalParent,
+                        $entry['variations'],
+                        (array) ($entry['inert_parent_attribute_ids'] ?? []),
+                    );
 
                     if ($this->parentAxisPayloadMatches($transitionalParent, $transition)) {
                         return true;
@@ -1377,18 +1409,23 @@ final class WooOwnedVariantAxisRepairService
 
             return false;
         };
-        $readLiveState = function () use ($target): array {
-            return [
-                $this->client->productById(
-                    $target['integration'],
-                    $target['external_product_id'],
-                ),
-                $this->client->productVariationsByParent(
-                    $target['integration'],
-                    $target['external_product_id'],
-                    $this->apiLanguage($target['language']),
-                ),
-            ];
+        $readLiveState = function () use ($entry, $target): array {
+            $parent = $this->client->productById(
+                $target['integration'],
+                $target['external_product_id'],
+            );
+            $variations = $this->client->productVariationsByParent(
+                $target['integration'],
+                $target['external_product_id'],
+                $this->apiLanguage($target['language']),
+            );
+            $parent = $this->withoutProvenInertGlobalAttributePlaceholders(
+                $parent,
+                $variations,
+                (array) ($entry['inert_parent_attribute_ids'] ?? []),
+            );
+
+            return [$parent, $variations];
         };
 
         if (! $applySafeTransition()) {
@@ -4561,6 +4598,247 @@ final class WooOwnedVariantAxisRepairService
         }
 
         return $parent;
+    }
+
+    /**
+     * Woo/Polylang removes an empty global informational attribute when a
+     * translated parent is saved. Such a row carries no selected term and is
+     * not visible through the Store API, but keeping it in the preflight
+     * snapshot makes both final verification and rollback impossible. Remove
+     * only placeholders that are provably inert before planning: a unique
+     * positive global ID, no options, not a variation/Size axis and no parent
+     * default or child reference. Primary-language rows remain byte-for-byte
+     * protected because Woo preserves them differently.
+     *
+     * @param  array{language:string}  $target
+     * @param  array<string,mixed>  $parent
+     * @param  list<array<string,mixed>>  $variations
+     * @return array<string,mixed>
+     */
+    private function withoutInertTranslatedGlobalAttributePlaceholders(
+        array $target,
+        array $parent,
+        array $variations,
+    ): array {
+        return $this->withoutProvenInertGlobalAttributePlaceholders(
+            $parent,
+            $variations,
+            $this->inertTranslatedGlobalAttributePlaceholderIds(
+                $target,
+                $parent,
+                $variations,
+            ),
+        );
+    }
+
+    /**
+     * @param  array{language:string}  $target
+     * @param  array<string,mixed>  $parent
+     * @param  list<array<string,mixed>>  $variations
+     * @return list<int>
+     */
+    private function inertTranslatedGlobalAttributePlaceholderIds(
+        array $target,
+        array $parent,
+        array $variations,
+    ): array {
+        return $this->language($target['language']) === 'pl'
+            ? []
+            : $this->inertGlobalAttributePlaceholderIds($parent, $variations);
+    }
+
+    /**
+     * Recheck the preflight allowlist against each live response. This accepts
+     * an eligible row whether Woo retained it or removed it, but never masks a
+     * nonempty/reference change or a newly empty attribute that was not inert
+     * in the original preflight.
+     *
+     * @param  array<string,mixed>  $parent
+     * @param  list<array<string,mixed>>  $variations
+     * @param  list<int>  $provenIds
+     * @return array<string,mixed>
+     */
+    private function withoutProvenInertGlobalAttributePlaceholders(
+        array $parent,
+        array $variations,
+        array $provenIds,
+    ): array {
+        $provenIds = collect($provenIds)
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->unique()
+            ->values()
+            ->all();
+
+        if ($provenIds === []) {
+            return $parent;
+        }
+
+        $stillInertIds = array_values(array_intersect(
+            $provenIds,
+            $this->inertGlobalAttributePlaceholderIds($parent, $variations),
+        ));
+
+        if ($stillInertIds === []) {
+            return $parent;
+        }
+
+        $attributes = collect((array) ($parent['attributes'] ?? []))->values();
+
+        if ($attributes->contains(fn (mixed $attribute): bool => ! is_array($attribute))) {
+            return $parent;
+        }
+
+        $parent['attributes'] = $attributes
+            ->reject(fn (mixed $attribute): bool => is_array($attribute)
+                && in_array(
+                    (int) ($attribute['id'] ?? 0),
+                    $stillInertIds,
+                    true,
+                ))
+            ->values()
+            ->all();
+
+        return $parent;
+    }
+
+    /**
+     * @param  array<string,mixed>  $parent
+     * @param  list<array<string,mixed>>  $variations
+     * @return list<int>
+     */
+    private function inertGlobalAttributePlaceholderIds(array $parent, array $variations): array
+    {
+        if (! array_key_exists('attributes', $parent)
+            || ! is_array($parent['attributes'])
+            || ! array_is_list($parent['attributes'])
+            || ! array_key_exists('default_attributes', $parent)
+            || ! is_array($parent['default_attributes'])
+            || ! array_is_list($parent['default_attributes'])
+            || ! array_is_list($variations)
+        ) {
+            return [];
+        }
+
+        $attributes = collect($parent['attributes'])->values();
+        $defaults = collect($parent['default_attributes'])->values();
+        $variationRows = collect($variations)->values();
+
+        if (! $attributes->every(fn (mixed $attribute): bool => is_array($attribute)
+                && $this->isStrictWooParentAttributeRow($attribute))
+            || ! $defaults->every(fn (mixed $default): bool => is_array($default)
+                && $this->isStrictWooAttributeReferenceRow($default))
+            || ! $variationRows->every(fn (mixed $variation): bool => is_array($variation)
+                && array_key_exists('attributes', $variation)
+                && is_array($variation['attributes'])
+                && array_is_list($variation['attributes']))
+        ) {
+            return [];
+        }
+
+        $childAttributes = $variationRows
+            ->flatMap(fn (array $variation): Collection => collect(
+                (array) ($variation['attributes'] ?? []),
+            )->values())
+            ->values();
+
+        if (! $childAttributes->every(fn (mixed $attribute): bool => is_array($attribute)
+            && $this->isStrictWooAttributeReferenceRow($attribute))) {
+            return [];
+        }
+
+        $idCounts = $attributes
+            ->map(fn (array $attribute): int => (int) ($attribute['id'] ?? 0))
+            ->filter(fn (int $id): bool => $id > 0)
+            ->countBy();
+        $inertIds = $attributes
+            ->filter(function (array $attribute) use (
+                $idCounts,
+                $defaults,
+                $childAttributes,
+            ): bool {
+                $id = (int) ($attribute['id'] ?? 0);
+                $knownKeys = [
+                    'id', 'name', 'slug', 'position', 'visible', 'variation', 'options',
+                ];
+
+                if (array_diff(array_keys($attribute), $knownKeys) !== []
+                    || ! is_string($attribute['name'] ?? null)
+                    || trim($attribute['name']) === ''
+                    || ! is_string($attribute['slug'] ?? null)
+                    || trim($attribute['slug']) === ''
+                    || ! is_int($attribute['position'] ?? null)
+                    || ! is_bool($attribute['visible'] ?? null)
+                    || $attribute['variation'] !== false
+                ) {
+                    return false;
+                }
+
+                $options = collect($attribute['options'])
+                    ->map(fn (mixed $option): string => trim((string) $option))
+                    ->filter(fn (string $option): bool => $option !== '');
+
+                return $id > 0
+                    && (int) $idCounts->get($id, 0) === 1
+                    && ! $this->isGenericAttribute($attribute)
+                    && ! $this->isSizeAttribute($attribute)
+                    && $options->isEmpty()
+                    && ! $defaults->contains(fn (array $default): bool => $this->sameAttribute(
+                        $attribute,
+                        $default,
+                    ))
+                    && ! $childAttributes->contains(fn (array $child): bool => $this->sameAttribute(
+                        $attribute,
+                        $child,
+                    ));
+            })
+            ->map(fn (array $attribute): int => (int) $attribute['id'])
+            ->all();
+
+        return array_values($inertIds);
+    }
+
+    /** @param array<string,mixed> $attribute */
+    private function isStrictWooParentAttributeRow(array $attribute): bool
+    {
+        return $this->hasStrictWooAttributeIdentity($attribute)
+            && array_key_exists('variation', $attribute)
+            && is_bool($attribute['variation'])
+            && array_key_exists('options', $attribute)
+            && is_array($attribute['options'])
+            && array_is_list($attribute['options'])
+            && collect($attribute['options'])
+                ->every(fn (mixed $option): bool => is_string($option));
+    }
+
+    /** @param array<string,mixed> $attribute */
+    private function isStrictWooAttributeReferenceRow(array $attribute): bool
+    {
+        return $this->hasStrictWooAttributeIdentity($attribute)
+            && array_key_exists('option', $attribute)
+            && is_string($attribute['option']);
+    }
+
+    /** @param array<string,mixed> $attribute */
+    private function hasStrictWooAttributeIdentity(array $attribute): bool
+    {
+        if (! array_key_exists('id', $attribute)
+            || ! is_int($attribute['id'])
+            || $attribute['id'] < 0
+        ) {
+            return false;
+        }
+
+        foreach (['name', 'slug'] as $key) {
+            if (array_key_exists($key, $attribute) && ! is_string($attribute[$key])) {
+                return false;
+            }
+        }
+
+        return $attribute['id'] > 0
+            || collect([$attribute['name'] ?? null, $attribute['slug'] ?? null])
+                ->filter(fn (mixed $identity): bool => is_string($identity))
+                ->contains(fn (string $identity): bool => trim($identity) !== '');
     }
 
     /**

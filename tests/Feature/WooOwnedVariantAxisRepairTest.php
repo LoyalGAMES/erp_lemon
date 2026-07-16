@@ -1261,6 +1261,77 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame($original['variations'], $catalog->variations);
     }
 
+    public function test_translated_rollback_accepts_only_the_preflight_inert_placeholder_disappearance(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $catalog->products[223]['attributes'][] = [
+            'id' => 2,
+            'name' => 'Skład',
+            'slug' => 'pa_sklad',
+            'position' => 4,
+            'visible' => true,
+            'variation' => false,
+            'options' => [],
+        ];
+        $originalParent = unserialize(serialize($catalog->products[223]));
+        $originalVariations = unserialize(serialize($catalog->variations[223]));
+        $englishFinalFailures = 0;
+        $this->fakeCatalog($catalog, static function (Request $request) use (
+            &$englishFinalFailures,
+        ): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            $variationIds = collect((array) data_get($request->data(), 'attributes', []))
+                ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                    && (bool) ($attribute['variation'] ?? false))
+                ->pluck('id')
+                ->map(fn (mixed $id): int => (int) $id)
+                ->sort()
+                ->values()
+                ->all();
+
+            if ($request->method() === 'PUT'
+                && $path === '/wp-json/wc/v3/products/223'
+                && $variationIds === [1]
+            ) {
+                $englishFinalFailures++;
+
+                return Http::response(['message' => 'forced translated final failure'], 500);
+            }
+
+            return null;
+        });
+
+        try {
+            app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+            $this->fail('Końcowy PUT tłumaczenia powinien zgłosić wymuszony błąd.');
+        } catch (\Throwable $exception) {
+            $this->assertStringContainsString('status code 500', $exception->getMessage());
+            $this->assertStringNotContainsString('pełnego rollbacku', $exception->getMessage());
+        }
+
+        $this->assertGreaterThan(0, $englishFinalFailures);
+        $this->assertFalse(collect($catalog->products[223]['attributes'])->contains(
+            fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) === 2,
+        ));
+        $this->assertSame(
+            collect($originalParent)->except(['attributes', 'default_attributes'])->all(),
+            collect($catalog->products[223])->except(['attributes', 'default_attributes'])->all(),
+        );
+        $this->assertSame([1, 4, 8], collect($catalog->products[223]['attributes'])
+            ->pluck('id')->sort()->values()->all());
+
+        foreach ([224, 225] as $variationId) {
+            $this->assertSame(8, (int) data_get(
+                $catalog->variations[223][$variationId],
+                'attributes.0.id',
+            ));
+            $this->assertSame(
+                collect($originalVariations[$variationId])->except(['attributes', 'menu_order'])->all(),
+                collect($catalog->variations[223][$variationId])->except(['attributes', 'menu_order'])->all(),
+            );
+        }
+    }
+
     public function test_parent_only_switch_activates_size_transition_before_final_put_and_rolls_back_exactly_on_failure(): void
     {
         [$parent, $catalog] = $this->family();
@@ -2243,6 +2314,24 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             }
         }
         unset($attribute);
+        $catalog->products[223]['attributes'][] = [
+            'id' => 2,
+            'name' => 'Skład',
+            'slug' => 'pa_sklad',
+            'position' => 3,
+            'visible' => true,
+            'variation' => false,
+            'options' => [],
+        ];
+        $catalog->products[223]['attributes'][] = [
+            'id' => 3,
+            'name' => 'Kolor',
+            'slug' => 'pa_kolor',
+            'position' => 4,
+            'visible' => true,
+            'variation' => false,
+            'options' => [''],
+        ];
         $catalog->products[223]['default_attributes'] = [
             ['id' => 8, 'name' => 'variant', 'option' => 's-m'],
             ['id' => 4, 'option' => 'Poland'],
@@ -2289,6 +2378,14 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             'id' => 4,
             'option' => 'Poland',
         ]], $catalog->products[223]['default_attributes']);
+        $englishAttributes = collect($catalog->products[223]['attributes']);
+        $this->assertFalse($englishAttributes->contains(
+            fn (array $attribute): bool => in_array((int) ($attribute['id'] ?? 0), [2, 3], true),
+        ));
+        $this->assertSame(
+            ['100% Bawełna'],
+            $englishAttributes->firstWhere('id', 4)['options'] ?? null,
+        );
 
         foreach ([123 => [124 => 'S/M', 125 => 'M/L'], 223 => [224 => 'S/M', 225 => 'M/L']] as $parentId => $options) {
             foreach ($options as $variationId => $option) {
@@ -2385,6 +2482,182 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             'two translated children select the same size' => ['duplicate child option'],
             'default is absent from exact children' => ['unknown default'],
         ];
+    }
+
+    #[DataProvider('translatedAttributePlaceholderProvider')]
+    public function test_only_a_proven_inert_translated_global_attribute_placeholder_is_ignored(
+        string $shape,
+        bool $ignored,
+    ): void {
+        $service = app(WooOwnedVariantAxisRepairService::class);
+        $method = new \ReflectionMethod(
+            $service,
+            'withoutInertTranslatedGlobalAttributePlaceholders',
+        );
+        $target = ['language' => $shape === 'primary language' ? 'pl' : 'en'];
+        $candidate = [
+            'id' => $shape === 'custom axis' ? 0 : 2,
+            'name' => 'Skład',
+            'slug' => 'pa_sklad',
+            'position' => 4,
+            'visible' => true,
+            'variation' => $shape === 'variation axis',
+            'options' => $shape === 'nonempty option' ? ['Len'] : [],
+        ];
+
+        if ($shape === 'missing variation flag') {
+            unset($candidate['variation']);
+        } elseif ($shape === 'missing options') {
+            unset($candidate['options']);
+        } elseif ($shape === 'nonarray options') {
+            $candidate['options'] = null;
+        } elseif ($shape === 'blank identity') {
+            $candidate['name'] = ' ';
+            $candidate['slug'] = '';
+        } elseif ($shape === 'zero option') {
+            $candidate['options'] = ['0'];
+        } elseif ($shape === 'nonstring option') {
+            $candidate['options'] = [null];
+        } elseif ($shape === 'object option') {
+            $candidate['options'] = [new \stdClass];
+        } elseif ($shape === 'invalid id') {
+            $candidate['id'] = true;
+        } elseif ($shape === 'missing position') {
+            unset($candidate['position']);
+        } elseif ($shape === 'invalid visibility') {
+            $candidate['visible'] = 1;
+        } elseif ($shape === 'unknown candidate data') {
+            $candidate['term_id'] = 123;
+        }
+
+        $parent = [
+            'attributes' => [$candidate],
+            'default_attributes' => $shape === 'parent default'
+                ? [['id' => 2, 'name' => 'Skład', 'option' => '']]
+                : [],
+        ];
+
+        if ($shape === 'duplicate global id') {
+            $parent['attributes'][] = $candidate;
+        } elseif ($shape === 'malformed sibling attribute') {
+            $parent['attributes'][] = 'malformed';
+        } elseif ($shape === 'malformed default') {
+            $parent['default_attributes'][] = 'malformed';
+        } elseif ($shape === 'empty default row') {
+            $parent['default_attributes'][] = [];
+        } elseif ($shape === 'invalid default option') {
+            $parent['default_attributes'][] = [
+                'id' => 3,
+                'name' => 'Kolor',
+                'option' => null,
+            ];
+        }
+
+        $variations = [[
+            'attributes' => $shape === 'child reference'
+                ? [['id' => 2, 'name' => 'Skład', 'option' => '']]
+                : [],
+        ]];
+
+        if ($shape === 'malformed child attribute') {
+            $variations[0]['attributes'][] = 'malformed';
+        } elseif ($shape === 'empty child attribute') {
+            $variations[0]['attributes'][] = [];
+        } elseif ($shape === 'invalid child option') {
+            $variations[0]['attributes'][] = [
+                'id' => 3,
+                'name' => 'Kolor',
+                'option' => false,
+            ];
+        } elseif ($shape === 'malformed variation') {
+            $variations[] = 'malformed';
+        } elseif ($shape === 'missing variation attributes') {
+            unset($variations[0]['attributes']);
+        } elseif ($shape === 'nonarray variation attributes') {
+            $variations[0]['attributes'] = null;
+        }
+
+        $normalized = $method->invoke($service, $target, $parent, $variations);
+
+        $this->assertSame(
+            $ignored ? 0 : count($parent['attributes']),
+            count((array) ($normalized['attributes'] ?? [])),
+        );
+
+        if (! $ignored) {
+            $this->assertSame($parent['attributes'], $normalized['attributes']);
+        }
+    }
+
+    public static function translatedAttributePlaceholderProvider(): array
+    {
+        return [
+            'inert translated global row' => ['inert', true],
+            'primary-language empty row remains protected' => ['primary language', false],
+            'custom empty row remains protected' => ['custom axis', false],
+            'nonempty row remains protected' => ['nonempty option', false],
+            'variation row remains protected' => ['variation axis', false],
+            'defaulted row remains protected' => ['parent default', false],
+            'child-referenced row remains protected' => ['child reference', false],
+            'duplicate global ID remains protected' => ['duplicate global id', false],
+            'row without an explicit variation flag remains protected' => ['missing variation flag', false],
+            'row without explicit options remains protected' => ['missing options', false],
+            'row with nonarray options remains protected' => ['nonarray options', false],
+            'row without a nonblank identity remains protected' => ['blank identity', false],
+            'the literal zero is a nonempty option' => ['zero option', false],
+            'a nonstring option remains protected' => ['nonstring option', false],
+            'an object option remains protected without conversion' => ['object option', false],
+            'a noninteger ID remains protected' => ['invalid id', false],
+            'a row without an explicit position remains protected' => ['missing position', false],
+            'a row without boolean visibility remains protected' => ['invalid visibility', false],
+            'a row with unknown data remains protected' => ['unknown candidate data', false],
+            'a malformed sibling attribute fails closed' => ['malformed sibling attribute', false],
+            'a malformed default fails closed' => ['malformed default', false],
+            'an empty default row fails closed' => ['empty default row', false],
+            'a default with a nonstring option fails closed' => ['invalid default option', false],
+            'a malformed child attribute fails closed' => ['malformed child attribute', false],
+            'an empty child attribute fails closed' => ['empty child attribute', false],
+            'a child with a nonstring option fails closed' => ['invalid child option', false],
+            'a malformed variation fails closed' => ['malformed variation', false],
+            'a variation without attributes fails closed' => ['missing variation attributes', false],
+            'a variation with nonarray attributes fails closed' => ['nonarray variation attributes', false],
+        ];
+    }
+
+    public function test_inert_translation_allowlist_never_masks_later_or_unproven_attribute_data(): void
+    {
+        $service = app(WooOwnedVariantAxisRepairService::class);
+        $method = new \ReflectionMethod(
+            $service,
+            'withoutProvenInertGlobalAttributePlaceholders',
+        );
+        $parent = [
+            'attributes' => [
+                [
+                    'id' => 2,
+                    'name' => 'Skład',
+                    'variation' => false,
+                    'options' => ['Len'],
+                ],
+                [
+                    'id' => 3,
+                    'name' => 'Kolor',
+                    'variation' => false,
+                    'options' => [],
+                ],
+            ],
+            'default_attributes' => [],
+        ];
+
+        $normalized = $method->invoke($service, $parent, [['attributes' => []]], [2]);
+
+        $this->assertSame([2, 3], collect($normalized['attributes'])->pluck('id')->all());
+
+        $parent['attributes'][0]['options'] = [];
+        $parent['attributes'][] = 'malformed';
+        $normalized = $method->invoke($service, $parent, [['attributes' => []]], [2]);
+
+        $this->assertSame($parent['attributes'], $normalized['attributes']);
     }
 
     #[DataProvider('unsafeLegacyDefaultFallbackProvider')]
