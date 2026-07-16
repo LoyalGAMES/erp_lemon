@@ -1829,8 +1829,22 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             return Http::response([
                 ['id' => 71, 'name' => 'm-l', 'slug' => 'm-l', 'menu_order' => 20],
                 ['id' => 72, 'name' => 's-m', 'slug' => 's-m', 'menu_order' => 10],
-                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en', 'menu_order' => 20],
-                ['id' => 82, 'name' => 's-m', 'slug' => 's-m-2-en', 'menu_order' => 10],
+                [
+                    'id' => 81,
+                    'name' => 'm-l',
+                    'slug' => 'm-l-2-en',
+                    'menu_order' => 20,
+                    'language' => 'pl',
+                    'translations' => ['pl' => 81],
+                ],
+                [
+                    'id' => 82,
+                    'name' => 's-m',
+                    'slug' => 's-m-2-en',
+                    'menu_order' => 10,
+                    'language' => 'pl',
+                    'translations' => ['pl' => 82],
+                ],
             ]);
         });
 
@@ -1948,7 +1962,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
     }
 
     #[DataProvider('unprovenUnfilteredLegacyNameTermProvider')]
-    public function test_unfiltered_legacy_name_fallback_rejects_foreign_malformed_and_duplicate_terms_before_every_write(
+    public function test_unfiltered_legacy_name_fallback_rejects_base_malformed_duplicate_and_conflicting_terms_before_every_write(
         array $terms,
     ): void {
         [$parent, $catalog] = $this->family();
@@ -1987,8 +2001,14 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             'only Polish base term' => [[
                 ['id' => 71, 'name' => 'm-l', 'slug' => 'm-l'],
             ]],
-            'collision term explicitly belongs to Polish via language fallback' => [[
-                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en', 'lang' => '', 'language' => 'pl'],
+            'collision term belongs to a non-source foreign language' => [[
+                [
+                    'id' => 81,
+                    'name' => 'm-l',
+                    'slug' => 'm-l-2-en',
+                    'language' => 'de',
+                    'translations' => ['de' => 81],
+                ],
             ]],
             'conflicting explicit language fields' => [[
                 ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en', 'lang' => 'en', 'language' => 'pl'],

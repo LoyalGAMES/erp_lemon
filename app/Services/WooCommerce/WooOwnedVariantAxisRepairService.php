@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000028';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000029';
+
+    public const PREVIOUS_CANONICAL_SIZE_TAXONOMY_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000028';
 
     public const PREVIOUS_LEGACY_DEFAULT_TERM_LANGUAGE_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000027';
 
@@ -51,6 +53,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_CANONICAL_SIZE_TAXONOMY_REVISION,
             self::PREVIOUS_LEGACY_DEFAULT_TERM_LANGUAGE_REVISION,
             self::PREVIOUS_DEFAULT_TERM_SLUG_REVISION,
             self::PREVIOUS_COMPLEMENTARY_LANGUAGE_REVISION,
@@ -4539,7 +4542,28 @@ final class WooOwnedVariantAxisRepairService
             }
 
             $proven = $unfilteredMatches
-                ->filter(function (array $term) use ($language): bool {
+                ->filter(function (array $term) use ($axis, $language): bool {
+                    $legacyPolishLanguageCollision = $this->isGenericAttribute($axis)
+                        && $this->isTargetLanguageCollisionTermSlug(
+                            (string) ($term['name'] ?? ''),
+                            (string) ($term['slug'] ?? ''),
+                            $language,
+                        )
+                        && $this->termHasLanguageIdentity($term)
+                        && $this->termMatchesLanguage($term, 'pl');
+
+                    // This taxonomy is the legacy source axis being removed,
+                    // not the target Size taxonomy. Historical Polylang data
+                    // can consistently label its `*-2-en` term as PL even
+                    // while the verified EN product and its children use it.
+                    // The deterministic EN collision slug may therefore prove
+                    // only the source option's semantics. The exact target EN
+                    // term on canonical Size is still proved separately before
+                    // the first PUT, and contradictory identities stay blocked.
+                    if ($legacyPolishLanguageCollision) {
+                        return true;
+                    }
+
                     if ($this->termHasLanguageIdentity($term)) {
                         return $this->termMatchesLanguage($term, $language);
                     }
