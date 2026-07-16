@@ -266,6 +266,42 @@ class BLPaczkaIntegrationTest extends TestCase
         $this->assertSame('gls', data_get($label->response_payload, 'blpaczka.courier_code'));
     }
 
+    public function test_new_blpaczka_cod_shipment_sends_uptake_and_cover_to_valuation_and_order(): void
+    {
+        Http::fake([
+            '*/api/getValuation.json' => Http::response([
+                'success' => true,
+                'data' => ['results' => [
+                    ['Courier' => ['name' => 'Kurier DPD', 'courier_code' => 'dpd_classic'], 'Price' => ['value' => '16.50']],
+                ]],
+            ]),
+            '*/api/createOrderV2.json' => Http::response(['success' => true, 'data' => ['blpaczka_order_id' => 778900]]),
+            '*/api/getWaybill.json' => Http::response(['success' => true, 'data' => [[
+                'filename' => 'dpd-cod.pdf',
+                'mime' => 'application/pdf',
+                'content' => base64_encode('%PDF-1.4 cod-label'),
+            ]]]),
+            '*/api/getOrderDetails.json' => Http::response(['success' => true, 'data' => ['Order' => ['waybill_number' => 'COD9988']]]),
+        ]);
+
+        $order = $this->createOrderWithBLPaczkaMeta(withPluginShipment: false);
+        $order->update(['raw_payload' => array_replace($order->raw_payload, [
+            'payment_method' => 'cod',
+            'payment_method_title' => 'Płatność przy odbiorze',
+        ])]);
+
+        app(ShippingLabelService::class)->generateForOrder($order->fresh(), $this->createBLPaczkaAccount(withSenderAndParcel: true));
+
+        Http::assertSent(function ($request): bool {
+            if (! str_contains($request->url(), 'getValuation.json') && ! str_contains($request->url(), 'createOrderV2.json')) {
+                return true;
+            }
+
+            return (float) data_get($request->data(), 'CourierSearch.uptake') === 250.0
+                && (float) data_get($request->data(), 'CourierSearch.cover') === 250.0;
+        });
+    }
+
     public function test_new_blpaczka_shipment_requires_sender_and_parcel_config(): void
     {
         $order = $this->createOrderWithBLPaczkaMeta(withPluginShipment: false);

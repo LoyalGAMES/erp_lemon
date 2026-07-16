@@ -2,6 +2,8 @@
     $filters = $orderFilters ?? [];
     $currentQuery = (string) ($filters['q'] ?? '');
     $currentStatus = (string) ($filters['status'] ?? '');
+    $currentPaymentMethod = (string) ($filters['payment_method'] ?? '');
+    $currentShippingMethod = (string) ($filters['shipping_method'] ?? '');
     $currentPerPage = (int) ($filters['per_page'] ?? 50);
     $thumbnailService = app(\App\Services\Products\ProductImageThumbnailService::class);
     $shippingProviderResolver = app(\App\Services\Shipping\ShippingProviderResolver::class);
@@ -88,6 +90,22 @@
                 @endforeach
             </select>
         </label>
+        <label>Forma płatności
+            <select name="payment_method">
+                <option value="">Wszystkie formy płatności</option>
+                @foreach ($orderPaymentMethodOptions as $paymentMethod)
+                    <option value="{{ $paymentMethod }}" @selected($currentPaymentMethod === $paymentMethod)>{{ $paymentMethod }}</option>
+                @endforeach
+            </select>
+        </label>
+        <label>Forma dostawy
+            <select name="shipping_method">
+                <option value="">Wszystkie formy dostawy</option>
+                @foreach ($orderShippingMethodOptions as $shippingMethod)
+                    <option value="{{ $shippingMethod }}" @selected($currentShippingMethod === $shippingMethod)>{{ $shippingMethod }}</option>
+                @endforeach
+            </select>
+        </label>
         <label>Na stronie
             <select name="per_page">
                 @foreach ([25, 50, 75, 100] as $size)
@@ -97,7 +115,7 @@
         </label>
         <div class="orders-filter-actions">
             <button class="button" type="submit">Szukaj</button>
-            @if ($currentQuery !== '' || $currentStatus !== '')
+            @if ($currentQuery !== '' || $currentStatus !== '' || $currentPaymentMethod !== '' || $currentShippingMethod !== '')
                 <a class="button secondary" href="{{ route('modules.show', 'orders') }}">Wyczyść</a>
             @endif
         </div>

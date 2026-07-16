@@ -231,6 +231,38 @@ class ShipmentGenerationTest extends TestCase
             && str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/shipments'));
     }
 
+    public function test_new_inpost_cod_shipment_contains_cod_and_matching_insurance(): void
+    {
+        Http::fake([
+            '*/v1/organizations/111/shipments?*' => Http::response(['items' => []], 200),
+            '*/v1/organizations/111/shipments' => Http::response(['id' => 'SHIP-COD', 'status' => 'created'], 201),
+            '*/v1/shipments/SHIP-COD/label*' => Http::response('^XA^XZ', 200, ['Content-Type' => 'text/plain']),
+            '*/v1/shipments/SHIP-COD' => Http::response([
+                'id' => 'SHIP-COD',
+                'status' => 'confirmed',
+                'tracking_number' => '520000888888888888888888',
+            ], 200),
+        ]);
+        $order = $this->createOrder();
+        $order->update(['raw_payload' => [
+            'payment_method' => 'cod',
+            'payment_method_title' => 'Za pobraniem',
+        ]]);
+
+        app(ShippingLabelService::class)->generateForOrder($order->fresh(), $this->createAccount());
+
+        Http::assertSent(function ($request): bool {
+            if ($request->method() !== 'POST' || ! str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/shipments')) {
+                return true;
+            }
+
+            return (float) data_get($request->data(), 'cod.amount') === 150.0
+                && data_get($request->data(), 'cod.currency') === 'PLN'
+                && (float) data_get($request->data(), 'insurance.amount') === 150.0
+                && data_get($request->data(), 'insurance.currency') === 'PLN';
+        });
+    }
+
     public function test_existing_shipment_is_found_by_meta_shipment_id(): void
     {
         Http::fake([

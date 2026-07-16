@@ -220,4 +220,50 @@ class OrderListPerformanceTest extends TestCase
             ->assertSee('brak e-maila')
             ->assertSee('Produkt z importu legacy');
     }
+
+    public function test_orders_module_filters_by_payment_and_shipping_methods(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-FILTERS',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+
+        foreach ([
+            ['number' => 'COD-INPOST', 'payment' => 'Płatność przy odbiorze', 'shipping' => 'InPost Paczkomat'],
+            ['number' => 'PAYU-DPD', 'payment' => 'PayU', 'shipping' => 'Kurier DPD'],
+        ] as $data) {
+            ExternalOrder::query()->create([
+                'sales_channel_id' => $channel->id,
+                'external_id' => $data['number'],
+                'external_number' => $data['number'],
+                'status' => 'processing',
+                'currency' => 'PLN',
+                'total_gross' => 100,
+                'raw_payload' => [
+                    'payment_method' => $data['payment'] === 'PayU' ? 'payu' : 'cod',
+                    'payment_method_title' => $data['payment'],
+                    'shipping_lines' => [['method_id' => 'flat_rate', 'method_title' => $data['shipping']]],
+                ],
+            ]);
+        }
+
+        $this->get(route('modules.show', ['module' => 'orders']))
+            ->assertOk()
+            ->assertSee('Forma płatności')
+            ->assertSee('Forma dostawy')
+            ->assertSee('Płatność przy odbiorze')
+            ->assertSee('Kurier DPD');
+
+        $this->get(route('modules.show', ['module' => 'orders', 'payment_method' => 'Płatność przy odbiorze']))
+            ->assertOk()
+            ->assertSee('COD-INPOST')
+            ->assertDontSee('PAYU-DPD');
+
+        $this->get(route('modules.show', ['module' => 'orders', 'shipping_method' => 'Kurier DPD']))
+            ->assertOk()
+            ->assertSee('PAYU-DPD')
+            ->assertDontSee('COD-INPOST');
+    }
 }

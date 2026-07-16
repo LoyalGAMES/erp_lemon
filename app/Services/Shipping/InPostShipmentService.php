@@ -7,6 +7,7 @@ namespace App\Services\Shipping;
 use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\ReturnCase;
+use App\Services\Payments\PaymentMethodClassifier;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
@@ -30,6 +31,7 @@ final class InPostShipmentService
 
     public function __construct(
         private readonly ShippingAddressParser $addressParser,
+        private readonly PaymentMethodClassifier $paymentMethods,
     ) {}
 
     /**
@@ -204,7 +206,7 @@ final class InPostShipmentService
             throw new RuntimeException('Etykieta wymiany wymaga zwrotu powiązanego z zamówieniem.');
         }
 
-        $payload = $this->shipmentPayload($order, $account);
+        $payload = $this->shipmentPayload($order, $account, includeCod: false);
         $payload['reference'] = 'WYMIANA '.$returnCase->number;
         $payload['comments'] = 'Wymiana towaru '.$returnCase->number.' / zam. '.($order->external_number ?: $order->external_id);
 
@@ -364,6 +366,7 @@ final class InPostShipmentService
         ExternalOrder $order,
         CourierAccount $account,
         ?string $parcelTemplate = null,
+        bool $includeCod = true,
     ): array {
         $shipping = (array) ($order->shipping_data ?? []);
         $billing = (array) ($order->billing_data ?? []);
@@ -392,6 +395,19 @@ final class InPostShipmentService
             'reference' => (string) ($order->external_number ?: $order->external_id),
             'comments' => 'Zamówienie '.($order->external_number ?: $order->external_id),
         ];
+
+        if ($includeCod && $this->paymentMethods->isCashOnDelivery($order)) {
+            $amount = round((float) $order->total_gross, 2);
+
+            if ($amount <= 0) {
+                throw new RuntimeException('Nie można utworzyć przesyłki pobraniowej bez dodatniej kwoty zamówienia.');
+            }
+
+            $currency = strtoupper(trim((string) $order->currency)) ?: 'PLN';
+            $payload['cod'] = ['amount' => $amount, 'currency' => $currency];
+            // ShipX wymaga ubezpieczenia co najmniej równego pobraniu.
+            $payload['insurance'] = ['amount' => $amount, 'currency' => $currency];
+        }
 
         if ($targetPoint !== null) {
             $payload['custom_attributes'] = [

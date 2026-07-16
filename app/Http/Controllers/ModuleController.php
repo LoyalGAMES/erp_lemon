@@ -268,6 +268,8 @@ class ModuleController extends Controller
             'orderFilters' => [
                 'q' => trim((string) $request->query('q', '')),
                 'status' => trim((string) $request->query('status', '')),
+                'payment_method' => trim((string) $request->query('payment_method', '')),
+                'shipping_method' => trim((string) $request->query('shipping_method', '')),
                 'per_page' => $this->orderListPerPage($request),
             ],
             'orderStatusOptions' => ExternalOrder::query()
@@ -278,6 +280,14 @@ class ModuleController extends Controller
                 ->pluck('status')
                 ->filter()
                 ->values(),
+            'orderPaymentMethodOptions' => $this->orderJsonFilterOptions([
+                '$.payment_method_title',
+                '$.payment_method',
+            ]),
+            'orderShippingMethodOptions' => $this->orderJsonFilterOptions([
+                '$.shipping_lines[0].method_title',
+                '$.shipping_lines[0].method_id',
+            ]),
             'html_last_column' => true,
         ];
     }
@@ -285,10 +295,26 @@ class ModuleController extends Controller
     private function applyOrderListFilters(Builder $query, Request $request): void
     {
         $status = trim((string) $request->query('status', ''));
+        $paymentMethod = trim((string) $request->query('payment_method', ''));
+        $shippingMethod = trim((string) $request->query('shipping_method', ''));
         $term = trim((string) $request->query('q', ''));
 
         if ($status !== '') {
             $query->where('status', $status);
+        }
+
+        if ($paymentMethod !== '') {
+            $query->whereRaw($this->coalescedOrderJsonSql([
+                '$.payment_method_title',
+                '$.payment_method',
+            ]).' = ?', [$paymentMethod]);
+        }
+
+        if ($shippingMethod !== '') {
+            $query->whereRaw($this->coalescedOrderJsonSql([
+                '$.shipping_lines[0].method_title',
+                '$.shipping_lines[0].method_id',
+            ]).' = ?', [$shippingMethod]);
         }
 
         if ($term === '') {
@@ -324,6 +350,40 @@ class ModuleController extends Controller
                     ->orWhereRaw($this->normalizedJsonTextSql('shipping_data').' LIKE ?', ["%{$phoneNeedle}%"]);
             }
         });
+    }
+
+    /**
+     * @param  list<string>  $paths
+     * @return Collection<int, string>
+     */
+    private function orderJsonFilterOptions(array $paths): Collection
+    {
+        $valueSql = $this->coalescedOrderJsonSql($paths);
+
+        return ExternalOrder::query()
+            ->selectRaw("{$valueSql} AS filter_value")
+            ->whereRaw("{$valueSql} IS NOT NULL")
+            ->whereRaw("{$valueSql} <> ''")
+            ->distinct()
+            ->orderBy('filter_value')
+            ->pluck('filter_value')
+            ->map(fn ($value): string => trim((string) $value))
+            ->filter()
+            ->values();
+    }
+
+    /** @param list<string> $paths */
+    private function coalescedOrderJsonSql(array $paths): string
+    {
+        $driver = DB::connection()->getDriverName();
+        $expressions = array_map(
+            fn (string $path): string => $driver === 'sqlite'
+                ? "json_extract(raw_payload, '{$path}')"
+                : "JSON_UNQUOTE(JSON_EXTRACT(raw_payload, '{$path}'))",
+            $paths,
+        );
+
+        return 'COALESCE('.implode(', ', $expressions).')';
     }
 
     private function normalizedJsonTextSql(string $column): string

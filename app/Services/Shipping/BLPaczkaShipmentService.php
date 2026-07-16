@@ -6,6 +6,7 @@ namespace App\Services\Shipping;
 
 use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
+use App\Services\Payments\PaymentMethodClassifier;
 use Illuminate\Support\Facades\Http;
 use RuntimeException;
 
@@ -52,6 +53,7 @@ final class BLPaczkaShipmentService
 
     public function __construct(
         private readonly ShippingAddressParser $addressParser,
+        private readonly PaymentMethodClassifier $paymentMethods,
     ) {}
 
     /**
@@ -66,6 +68,7 @@ final class BLPaczkaShipmentService
         $sender = $this->senderFromAccount($account);
         $parcel = $this->parcelFromAccount($account);
         $takerPoint = $this->pickupPointFromMeta($order);
+        $codAmount = $this->codAmount($order);
 
         $courierSearch = [
             'type' => 'package',
@@ -76,6 +79,13 @@ final class BLPaczkaShipmentService
             'country_code' => 'PL',
             'origin' => 'woocommerce',
         ];
+
+        if ($codAmount !== null) {
+            // BLPaczka używa `uptake` jako kwoty pobrania. Wysyłamy ją już
+            // do wyceny, aby wybrana oferta rzeczywiście obsługiwała COD.
+            $courierSearch['uptake'] = $codAmount;
+            $courierSearch['cover'] = $codAmount;
+        }
 
         $valuation = $this->post($account, 'getValuation.json', [
             'CourierSearch' => $courierSearch,
@@ -133,6 +143,21 @@ final class BLPaczkaShipmentService
         ]);
 
         return $label;
+    }
+
+    private function codAmount(ExternalOrder $order): ?float
+    {
+        if (! $this->paymentMethods->isCashOnDelivery($order)) {
+            return null;
+        }
+
+        $amount = round((float) $order->total_gross, 2);
+
+        if ($amount <= 0) {
+            throw new RuntimeException('Nie można utworzyć przesyłki pobraniowej bez dodatniej kwoty zamówienia.');
+        }
+
+        return $amount;
     }
 
     /**
