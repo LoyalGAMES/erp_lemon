@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000027';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000028';
+
+    public const PREVIOUS_LEGACY_DEFAULT_TERM_LANGUAGE_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000027';
 
     public const PREVIOUS_DEFAULT_TERM_SLUG_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000026';
 
@@ -49,6 +51,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_LEGACY_DEFAULT_TERM_LANGUAGE_REVISION,
             self::PREVIOUS_DEFAULT_TERM_SLUG_REVISION,
             self::PREVIOUS_COMPLEMENTARY_LANGUAGE_REVISION,
             self::PREVIOUS_ERP_SYNCHRONIZED_REVISION,
@@ -93,13 +96,11 @@ final class WooOwnedVariantAxisRepairService
         'cross_sell_ids',
     ];
 
-    /** @var Collection<int, ProductParameterDefinition>|null */
-    private ?Collection $sizeDefinitions = null;
-
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly ProductVariantOptionNormalizer $variantOptions,
         private readonly LegacySizeVariantAxisResolver $legacySizeAxis,
+        private readonly WooCommerceSizeDictionaryOrder $sizeOrder,
     ) {}
 
     public function markPending(Product $product): int
@@ -733,8 +734,22 @@ final class WooOwnedVariantAxisRepairService
             $dictionaryOrder = $this->sizeDictionaryOrder($sizeName);
             $menuOrders = collect($supplemental)
                 ->map(fn (mixed $option): ?int => $dictionaryOrder[$this->optionKey((string) $option)]
-                    ?? $this->canonicalSizeRank((string) $option))
+                    ?? null)
                 ->all();
+
+            if (collect($menuOrders)->contains(fn (?int $order): bool => $order === null)) {
+                return [
+                    'status' => 'manual_review',
+                    'targets' => count($plans),
+                    'mutations' => 0,
+                    'reason' => sprintf(
+                        'WooCommerce %s #%s: Brakująca wartość rozmiaru nie istnieje w żadnym słowniku rozmiarów ERP.',
+                        mb_strtoupper($targetLanguage),
+                        $entry['target']['external_product_id'],
+                    ),
+                    'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
+                ];
+            }
 
             try {
                 $this->client->ensureExistingGlobalProductAttributeOptions(
@@ -2293,16 +2308,8 @@ final class WooOwnedVariantAxisRepairService
             return false;
         }
 
-        $dictionaryKeys = ($this->sizeDefinitions ??= ProductParameterDefinition::query()
-            ->orderBy('id')
-            ->get())
-            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
-                $definition->name,
-                $definition->name_en,
-                $definition->slug,
-            ])->filter()->contains(fn (mixed $name): bool => $this->variantOptions->isSizeAttribute(
-                (string) $name,
-            )))
+        $dictionaryKeys = $this->sizeOrder
+            ->definitions()
             ->flatMap(fn (ProductParameterDefinition $definition): Collection => collect([
                 ...(array) $definition->values,
                 ...(array) $definition->values_en,
@@ -2690,17 +2697,8 @@ final class WooOwnedVariantAxisRepairService
             return null;
         }
 
-        $definitions = $this->sizeDefinitions ??= ProductParameterDefinition::query()
-            ->orderBy('id')
-            ->get();
-        $dictionaryKeys = $definitions
-            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
-                $definition->name,
-                $definition->name_en,
-                $definition->slug,
-            ])->filter()->contains(fn (mixed $name): bool => $this->variantOptions->isSizeAttribute(
-                (string) $name,
-            )))
+        $dictionaryKeys = $this->sizeOrder
+            ->definitions()
             ->flatMap(fn (ProductParameterDefinition $definition): Collection => collect([
                 ...(array) $definition->values,
                 ...(array) $definition->values_en,
@@ -4397,6 +4395,33 @@ final class WooOwnedVariantAxisRepairService
             ->map(fn (mixed $option): string => trim((string) $option))
             ->filter()
             ->values();
+        $rawCanonicalKey = $this->canonicalSizeOptionKey(
+            ProductVariantAxisNameResolver::SIZE,
+            $rawOption,
+        );
+        $canonicalAxisOptions = $axisOptions
+            ->filter(fn (string $option): bool => $rawCanonicalKey !== ''
+                && $this->canonicalSizeOptionKey(
+                    ProductVariantAxisNameResolver::SIZE,
+                    $option,
+                ) === $rawCanonicalKey)
+            ->values();
+
+        if ($canonicalAxisOptions->count() > 1) {
+            throw new DomainException(
+                "Domyślny wariant starej globalnej osi #{$attributeId} pasuje do kilku wartości tej osi.",
+            );
+        }
+
+        // A legacy default can use Woo's display spelling (`M/L`) while the
+        // old taxonomy stores the same selected option as `m-l`. Both values
+        // come from this exact target parent, so the unique axis option is a
+        // safe additional lookup alias. It is never submitted directly.
+        $lookupOptions = collect([$rawOption])
+            ->merge($canonicalAxisOptions)
+            ->filter()
+            ->unique()
+            ->values();
         $terms = collect($this->client->globalProductAttributeTermsById(
             $integration,
             $attributeId,
@@ -4406,14 +4431,18 @@ final class WooOwnedVariantAxisRepairService
                 && (int) ($term['id'] ?? 0) > 0)
             ->values();
         $rawMatches = $terms
-            ->filter(fn (array $term): bool => trim((string) ($term['name'] ?? '')) === $rawOption
-                || trim((string) ($term['slug'] ?? '')) === $rawOption)
+            ->filter(fn (array $term): bool => $lookupOptions->contains(
+                trim((string) ($term['name'] ?? '')),
+            ) || $lookupOptions->contains(
+                trim((string) ($term['slug'] ?? '')),
+            ))
             ->values();
 
         if ($rawMatches
-            ->filter(fn (array $term): bool => trim((string) ($term['slug'] ?? '')) === $rawOption)
             ->unique(fn (array $term): int => (int) $term['id'])
-            ->count() > 1
+            ->groupBy(fn (array $term): string => trim((string) ($term['slug'] ?? '')))
+            ->contains(fn (Collection $sameSlug, string $slug): bool => $slug !== ''
+                && $sameSlug->count() > 1)
         ) {
             throw new DomainException(
                 "Domyślny wariant starej globalnej osi #{$attributeId} wskazuje kilka termów o tym samym slugu.",
@@ -4476,6 +4505,74 @@ final class WooOwnedVariantAxisRepairService
             ->unique(fn (array $term): int => (int) $term['id'])
             ->values();
 
+        // Some WooCommerce/Polylang installations hide collision-suffixed
+        // legacy terms from `?lang=en`, even though the English product still
+        // references them. Retry one fresh, unfiltered read only when the
+        // language-aware proof found nothing. The fallback accepts either an
+        // explicit target-language identity or the strict historical
+        // collision slug (`m-l-2-en`), and therefore cannot select the Polish
+        // base term (`m-l`).
+        if ($proven->isEmpty()) {
+            $unfilteredMatches = collect($this->client->globalProductAttributeTermsById(
+                $integration,
+                $attributeId,
+                null,
+            ))
+                ->filter(fn (mixed $term): bool => is_array($term)
+                    && (int) ($term['id'] ?? 0) > 0)
+                ->filter(fn (array $term): bool => $lookupOptions->contains(
+                    trim((string) ($term['name'] ?? '')),
+                ) || $lookupOptions->contains(
+                    trim((string) ($term['slug'] ?? '')),
+                ))
+                ->unique(fn (array $term): int => (int) $term['id'])
+                ->values();
+
+            if ($unfilteredMatches
+                ->groupBy(fn (array $term): string => trim((string) ($term['slug'] ?? '')))
+                ->contains(fn (Collection $sameSlug, string $slug): bool => $slug !== ''
+                    && $sameSlug->count() > 1)
+            ) {
+                throw new DomainException(
+                    "Domyślny wariant starej globalnej osi #{$attributeId} wskazuje kilka termów o tym samym slugu.",
+                );
+            }
+
+            $proven = $unfilteredMatches
+                ->filter(function (array $term) use ($language): bool {
+                    if ($this->termHasLanguageIdentity($term)) {
+                        return $this->termMatchesLanguage($term, $language);
+                    }
+
+                    return $this->isTargetLanguageCollisionTermSlug(
+                        (string) ($term['name'] ?? ''),
+                        (string) ($term['slug'] ?? ''),
+                        $language,
+                    );
+                })
+                ->filter(function (array $term) use ($axisOptions): bool {
+                    $name = trim((string) ($term['name'] ?? ''));
+                    $slug = trim((string) ($term['slug'] ?? ''));
+                    $canonicalKey = $this->canonicalSizeOptionKey(
+                        ProductVariantAxisNameResolver::SIZE,
+                        $name,
+                    );
+                    $matchingOptions = $axisOptions
+                        ->filter(fn (string $option): bool => $this->canonicalSizeOptionKey(
+                            ProductVariantAxisNameResolver::SIZE,
+                            $option,
+                        ) === $canonicalKey)
+                        ->values();
+
+                    return $name !== ''
+                        && $slug !== ''
+                        && $canonicalKey !== ''
+                        && ($axisOptions->isEmpty() || $matchingOptions->count() === 1);
+                })
+                ->unique(fn (array $term): int => (int) $term['id'])
+                ->values();
+        }
+
         if ($proven->count() !== 1) {
             throw new DomainException(
                 "Domyślny wariant starej globalnej osi #{$attributeId} nie wskazuje jednego terminu rozmiaru we właściwym języku.",
@@ -4483,6 +4580,52 @@ final class WooOwnedVariantAxisRepairService
         }
 
         return trim((string) ($proven->first()['name'] ?? ''));
+    }
+
+    /** @param array<string,mixed> $term */
+    private function termHasLanguageIdentity(array $term): bool
+    {
+        return collect([$term['lang'] ?? null, $term['language'] ?? null])->contains(
+            fn (mixed $language): bool => filled($language),
+        )
+            || array_key_exists('translations', $term);
+    }
+
+    /** @param array<string,mixed> $term */
+    private function termMatchesLanguage(array $term, string $language): bool
+    {
+        $language = $this->language($language);
+        $termId = (int) ($term['id'] ?? 0);
+        $explicitLanguages = collect([$term['lang'] ?? null, $term['language'] ?? null])
+            ->map(fn (mixed $candidate): string => mb_strtolower(trim((string) $candidate)))
+            ->filter()
+            ->unique()
+            ->values();
+
+        if ($explicitLanguages->isNotEmpty()
+            && ($explicitLanguages->count() !== 1 || $explicitLanguages->first() !== $language)
+        ) {
+            return false;
+        }
+
+        if (array_key_exists('translations', $term)) {
+            $selfTranslationLanguages = collect((array) $term['translations'])
+                ->filter(fn (mixed $translatedId): bool => $termId > 0
+                    && (int) $translatedId === $termId)
+                ->keys()
+                ->map(fn (mixed $candidate): string => mb_strtolower(trim((string) $candidate)))
+                ->filter()
+                ->unique()
+                ->values();
+
+            if ($selfTranslationLanguages->count() !== 1
+                || $selfTranslationLanguages->first() !== $language
+            ) {
+                return false;
+            }
+        }
+
+        return $explicitLanguages->isNotEmpty() || array_key_exists('translations', $term);
     }
 
     private function isTargetLanguageCollisionTermSlug(
@@ -4522,17 +4665,25 @@ final class WooOwnedVariantAxisRepairService
     private function orderedExistingSizeOptionNames(array $options): array
     {
         $dictionaryOrder = $this->sizeDictionaryOrder(ProductVariantAxisNameResolver::SIZE);
-
-        return collect($options)
+        $ranked = collect($options)
             ->map(fn (mixed $option, int $index): array => [
                 'name' => trim((string) $option),
                 'index' => $index,
                 'rank' => $dictionaryOrder[$this->canonicalSizeOptionKey(
                     ProductVariantAxisNameResolver::SIZE,
                     (string) $option,
-                )] ?? $this->canonicalSizeRank((string) $option),
+                )] ?? null,
             ])
-            ->filter(fn (array $option): bool => $option['name'] !== '')
+            ->filter(fn (array $option): bool => $option['name'] !== '');
+        $unknown = $ranked->first(fn (array $option): bool => $option['rank'] === null);
+
+        if (is_array($unknown)) {
+            throw new DomainException(
+                "Wartość rozmiaru `{$unknown['name']}` nie istnieje w żadnym słowniku rozmiarów ERP.",
+            );
+        }
+
+        return $ranked
             ->sort(function (array $left, array $right): int {
                 if ($left['rank'] === null && $right['rank'] === null) {
                     return $left['index'] <=> $right['index'];
@@ -6060,8 +6211,7 @@ final class WooOwnedVariantAxisRepairService
     private function orderedSizeOptions(string $attribute, array $options): array
     {
         $dictionaryOrder = $this->sizeDictionaryOrder($attribute);
-
-        return collect($options)
+        $ranked = collect($options)
             ->map(fn (mixed $option): string => $this->canonicalSizeOption(
                 $attribute,
                 (string) $option,
@@ -6075,10 +6225,19 @@ final class WooOwnedVariantAxisRepairService
                 return [
                     'value' => $option,
                     'rank' => $dictionaryOrder[$key]
-                        ?? $this->canonicalSizeRank($option),
+                        ?? null,
                     'index' => $index,
                 ];
-            })
+            });
+        $unknown = $ranked->first(fn (array $option): bool => $option['rank'] === null);
+
+        if (is_array($unknown)) {
+            throw new DomainException(
+                "Wartość rozmiaru `{$unknown['value']}` nie istnieje w żadnym słowniku rozmiarów ERP.",
+            );
+        }
+
+        return $ranked
             ->sort(function (array $left, array $right): int {
                 if ($left['rank'] === null && $right['rank'] === null) {
                     return $left['index'] <=> $right['index'];
@@ -6158,46 +6317,24 @@ final class WooOwnedVariantAxisRepairService
         string $language,
     ): string {
         $canonicalOption = $this->canonicalSizeOption($attribute, $canonicalOption);
+        $localized = $this->sizeOrder->localizedOption(
+            $canonicalOption,
+            $this->language($language),
+        );
 
-        if ($this->language($language) !== 'en') {
-            return $canonicalOption;
-        }
-
-        $canonicalKey = $this->optionKey($canonicalOption);
-
-        foreach ($this->sizeDefinitionsByCanonicalPriority($attribute) as $definition) {
-            $polishValues = array_values((array) $definition->values);
-            $englishValues = array_values((array) $definition->values_en);
-
-            foreach ($polishValues as $index => $polishValue) {
-                if ($this->optionKey((string) $polishValue) !== $canonicalKey) {
-                    continue;
-                }
-
-                $englishValue = trim((string) ($englishValues[$index] ?? ''));
-
-                return $englishValue !== '' ? $englishValue : $canonicalOption;
-            }
-        }
-
-        return $canonicalOption;
+        return is_string($localized) && $localized !== ''
+            ? $localized
+            : $canonicalOption;
     }
 
     /** @return array<string, int> */
     private function sizeDictionaryOrder(string $attribute): array
     {
-        $definition = $this->sizeDefinitionsByCanonicalPriority($attribute)->first();
-
-        if (! $definition instanceof ProductParameterDefinition) {
-            return [];
-        }
-
-        return collect((array) $definition->values)
-            ->map(fn (mixed $value): string => $this->optionKey((string) $value))
-            ->filter()
-            ->unique()
-            ->values()
-            ->mapWithKeys(fn (string $key, int $index): array => [$key => ($index + 1) * 10])
+        return $this->sizeOrder
+            ->entries()
+            ->mapWithKeys(fn (array $entry): array => [
+                $this->optionKey($entry['source']) => $entry['menu_order'],
+            ])
             ->all();
     }
 
@@ -6206,16 +6343,8 @@ final class WooOwnedVariantAxisRepairService
     {
         $attributeKey = $this->attributeKey($attribute);
 
-        return ($this->sizeDefinitions ??= ProductParameterDefinition::query()
-            ->orderBy('id')
-            ->get())
-            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
-                $definition->name,
-                $definition->name_en,
-                $definition->slug,
-            ])->filter()->contains(
-                fn (mixed $name): bool => $this->variantOptions->isSizeAttribute((string) $name),
-            ))
+        return $this->sizeOrder
+            ->definitions()
             ->sortBy(function (ProductParameterDefinition $definition) use ($attributeKey): string {
                 $nameKey = $this->attributeKey((string) $definition->name);
                 $slugKey = $this->attributeKey((string) $definition->slug);
@@ -6235,51 +6364,6 @@ final class WooOwnedVariantAxisRepairService
                 return sprintf('%02d-%010d', $priority, (int) $definition->id);
             })
             ->values();
-    }
-
-    private function canonicalSizeRank(string $value): ?int
-    {
-        $value = mb_strtoupper(trim((string) preg_replace('/\s+/u', '', $value)));
-        $value = str_replace(['–', '—', '-'], '/', $value);
-        $aliases = [
-            'ONESIZE' => 0,
-            'ONE/SIZE' => 0,
-            'UNIWERSALNY' => 0,
-            'XXXXS' => 100,
-            'XXXS' => 200,
-            'XXS' => 300,
-            'XXS/XS' => 350,
-            'XS' => 400,
-            'XS/S' => 450,
-            'S' => 500,
-            'S/M' => 550,
-            'M' => 600,
-            'M/L' => 650,
-            'L' => 700,
-            'L/XL' => 750,
-            'XL' => 800,
-            'XL/XXL' => 850,
-            'XXL' => 900,
-            '2XL' => 900,
-            'XXXL' => 1000,
-            '3XL' => 1000,
-            '4XL' => 1100,
-            '5XL' => 1200,
-            '6XL' => 1300,
-        ];
-
-        if (array_key_exists($value, $aliases)) {
-            return $aliases[$value];
-        }
-
-        if (preg_match('/^(\d+(?:[.,]\d+)?)(?:\/(\d+(?:[.,]\d+)?))?$/', $value, $matches) === 1) {
-            $from = (float) str_replace(',', '.', $matches[1]);
-            $to = isset($matches[2]) ? (float) str_replace(',', '.', $matches[2]) : $from;
-
-            return 10_000 + (int) round($from * 100) + (int) round($to);
-        }
-
-        return null;
     }
 
     /**

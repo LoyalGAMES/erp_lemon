@@ -986,6 +986,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
     public function test_export_clears_removed_erp_variant_image_in_woocommerce(): void
     {
+        $this->createDefaultSizeDictionary();
         $this->fakeWooWithGlobalAttributes([
             'https://shop.test/wp-json/wc/v3/products/123' => Http::response(['id' => 123, 'sku' => 'SET-CLEAR']),
             'https://shop.test/wp-json/wc/v3/products/123/variations/456' => Http::response(['id' => 456, 'sku' => 'SET-CLEAR-S']),
@@ -1073,6 +1074,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
     public function test_erp_product_master_data_can_be_exported_to_mapped_woocommerce_product(): void
     {
+        $this->createDefaultSizeDictionary(['One size']);
         $this->fakeWooWithGlobalAttributes([
             'https://shop.test/wp-json/wc/v3/products/123' => Http::response([
                 'id' => 123,
@@ -2311,6 +2313,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
     public function test_existing_polish_mapped_copy_creates_missing_english_family_and_retries_link_safely(): void
     {
+        $this->createDefaultSizeDictionary();
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
             'name' => 'Sklep B2C',
@@ -2530,6 +2533,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
     public function test_direct_variant_export_uses_parent_inheritance_for_both_languages(): void
     {
+        $this->createDefaultSizeDictionary();
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
             'name' => 'Sklep B2C',
@@ -2637,7 +2641,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/456'
             && $request['description'] === '<p>Opis PL rodzica</p>'
             && ! array_key_exists('regular_price', $request->data())
-            && $request['menu_order'] === 7
+            && $request['menu_order'] === 20
             && $request['attributes'][0] === ['id' => 70, 'option' => 'M']
             && ! array_key_exists('date_created', $request->data())
             && collect($request['meta_data'])->contains(fn (array $meta): bool => $meta['key'] === '_sempre_erp_publication_date'
@@ -2649,7 +2653,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request['sale_price'] === '649.00'
             && $request['date_on_sale_from'] === '2026-07-15T08:00:00'
             && $request['date_on_sale_to'] === '2026-07-20T22:00:00'
-            && $request['menu_order'] === 7
+            && $request['menu_order'] === 20
             && $request['attributes'][0] === ['id' => 70, 'option' => 'M']
             && ! array_key_exists('date_created', $request->data())
             && collect($request['meta_data'])->contains(fn (array $meta): bool => $meta['key'] === '_sempre_erp_publication_date'
@@ -2869,6 +2873,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
     public function test_variable_creation_resumes_missing_polish_variants_before_translations(): void
     {
+        $this->createDefaultSizeDictionary();
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
             'name' => 'Sklep B2C',
@@ -2971,6 +2976,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
     public function test_erp_variable_product_with_only_non_woo_mapping_creates_canonical_parent_and_variants_in_woocommerce(): void
     {
+        $this->createDefaultSizeDictionary();
         $this->fakeWooWithGlobalAttributes(function ($request) {
             if ($request->method() === 'POST' && $request->url() === 'https://shop.test/wp-json/wc/v3/products') {
                 return Http::response([
@@ -3129,6 +3135,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
     public function test_export_converts_existing_mapped_product_to_variable_and_creates_missing_variants(): void
     {
+        $this->createDefaultSizeDictionary();
         $this->fakeWooWithGlobalAttributes(function ($request) {
             if ($request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/321') {
                 return Http::response([
@@ -3221,16 +3228,16 @@ class WooCommerceProductDataExportTest extends TestCase
         $variationRequest = $requests->first(fn ($request) => $request->url() === 'https://shop.test/wp-json/wc/v3/products/321/variations');
 
         $this->assertSame('variable', $parentRequest['type']);
-        $this->assertSame(71, $parentRequest['attributes'][1]['id']);
-        $this->assertSame(['S'], $parentRequest['attributes'][1]['options']);
-        $this->assertTrue($parentRequest['attributes'][1]['variation']);
+        $this->assertSame(70, $parentRequest['attributes'][0]['id']);
+        $this->assertSame(['S'], $parentRequest['attributes'][0]['options']);
+        $this->assertTrue($parentRequest['attributes'][0]['variation']);
         $this->assertTrue(collect($parentRequest['attributes'])->every(
             fn (array $attribute): bool => array_key_exists('id', $attribute)
                 && ! array_key_exists('name', $attribute)
                 && ! array_key_exists('source_name', $attribute),
         ));
         $this->assertSame('SET-LUNA-S', $variationRequest['sku']);
-        $this->assertSame(71, $variationRequest['attributes'][0]['id']);
+        $this->assertSame(70, $variationRequest['attributes'][0]['id']);
         $this->assertArrayNotHasKey('name', $variationRequest['attributes'][0]);
         $this->assertArrayNotHasKey('source_name', $variationRequest['attributes'][0]);
         $this->assertSame('S', $variationRequest['attributes'][0]['option']);
@@ -3828,6 +3835,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
     public function test_export_discovers_existing_english_variant_instead_of_creating_duplicate(): void
     {
+        $this->createDefaultSizeDictionary(['S'], ['Small']);
         $this->fakeWooWithGlobalAttributes(function ($request) {
             if ($request->method() === 'GET' && str_contains($request->url(), '/products/124/variations')) {
                 return Http::response([[
@@ -4221,8 +4229,8 @@ class WooCommerceProductDataExportTest extends TestCase
         $prepareVariablePayload = new \ReflectionMethod($service, 'prepareVariablePayload');
 
         foreach ([
-            'pl' => ['name' => 'Rozmiar', 'options' => ['M/L', 'S/M', 'Niestandardowy']],
-            'en' => ['name' => 'Size', 'options' => ['Medium/Large', 'Small/Medium', 'Bespoke legacy']],
+            'pl' => ['name' => 'Rozmiar', 'options' => ['S/M', 'M/L', 'Niestandardowy']],
+            'en' => ['name' => 'Size', 'options' => ['Small/Medium', 'Medium/Large', 'Legacy custom']],
         ] as $language => $expected) {
             $payload = $prepareVariablePayload->invoke(
                 $service,
@@ -4234,9 +4242,9 @@ class WooCommerceProductDataExportTest extends TestCase
             $axis = collect($payload['attributes'])->firstWhere('variation', true);
             $this->assertSame('Rozmiar', $axis['source_name'] ?? null);
             $this->assertSame($expected['name'], $axis['name'] ?? null);
-            $this->assertSame(['M/L', 'S/M', 'Niestandardowy'], $axis['source_options'] ?? null);
+            $this->assertSame(['S/M', 'M/L', 'Niestandardowy'], $axis['source_options'] ?? null);
             $this->assertSame($expected['options'], $axis['options'] ?? null);
-            $this->assertSame([10, 20, null], $axis['source_option_orders'] ?? null);
+            $this->assertSame([10, 20, 30], $axis['source_option_orders'] ?? null);
             $this->assertSame('Rozmiar', collect($payload['meta_data'])
                 ->firstWhere('key', '_sempre_erp_variant_attribute')['value'] ?? null);
         }
@@ -4251,9 +4259,9 @@ class WooCommerceProductDataExportTest extends TestCase
                 'pl',
             )['menu_order'],
         ]);
-        $this->assertSame(10, $menuOrders->get('MARKETPLACE-PLURAL-M-L'));
-        $this->assertSame(20, $menuOrders->get('MARKETPLACE-PLURAL-S-M'));
-        $this->assertSame(70, $menuOrders->get('MARKETPLACE-PLURAL-NIESTANDARDOWY'));
+        $this->assertSame(20, $menuOrders->get('MARKETPLACE-PLURAL-M-L'));
+        $this->assertSame(10, $menuOrders->get('MARKETPLACE-PLURAL-S-M'));
+        $this->assertSame(30, $menuOrders->get('MARKETPLACE-PLURAL-NIESTANDARDOWY'));
     }
 
     public function test_proven_generic_size_axis_uses_canonical_dictionary_spelling_translation_and_order(): void
@@ -4367,6 +4375,150 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame(10, data_get($english, 'GENERIC-SIZE-S-M.menu_order'));
         $this->assertSame('Medium/Large', data_get($english, 'GENERIC-SIZE-M-L.attributes.0.option'));
         $this->assertSame(20, data_get($english, 'GENERIC-SIZE-M-L.menu_order'));
+    }
+
+    public function test_size_term_orders_use_one_dense_union_of_all_legacy_size_dictionaries(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['M/L', 'Custom B', 'S/M', 'Custom A'],
+            'values_en' => ['M/L', 'Custom B', 'S/M', 'Custom A'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiary',
+            'name_en' => 'Sizes',
+            'slug' => 'rozmiary',
+            'input_type' => 'select',
+            'values' => ['XS', 'ONE SIZE'],
+            'values_en' => ['XS', 'ONE SIZE'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 20,
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'BLVariant',
+            'slug' => 'blvariant',
+            'input_type' => 'select',
+            // Proven generic legacy dictionary; slash/hyphen spellings must
+            // deduplicate against the canonical entries without shifting ranks.
+            'values' => ['s-m', 'm-l'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 30,
+        ]);
+        $method = new \ReflectionMethod(
+            ProductDataExportService::class,
+            'parameterOptionMenuOrders',
+        );
+
+        $orders = $method->invoke(
+            app(ProductDataExportService::class),
+            ['name' => 'Rozmiar', 'slug' => 'rozmiar'],
+            ['M/L', 'Custom A', 'XS', 'S/M', 'Custom B', 'ONE SIZE'],
+        );
+
+        $this->assertSame([40, 60, 20, 30, 50, 10], $orders);
+    }
+
+    public function test_size_export_rejects_a_value_absent_from_every_erp_size_dictionary(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            'values_en' => ['S/M', 'M/L'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
+        $method = new \ReflectionMethod(
+            ProductDataExportService::class,
+            'parameterOptionMenuOrders',
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Outside dictionary');
+
+        $method->invoke(
+            app(ProductDataExportService::class),
+            ['name' => 'Rozmiar', 'slug' => 'rozmiar'],
+            ['Outside dictionary'],
+        );
+    }
+
+    public function test_direct_size_axis_without_any_erp_dictionary_fails_closed(): void
+    {
+        $method = new \ReflectionMethod(
+            ProductDataExportService::class,
+            'parameterOptionMenuOrders',
+        );
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('S/M');
+
+        $method->invoke(
+            app(ProductDataExportService::class),
+            ['name' => 'Rozmiar', 'slug' => 'rozmiar'],
+            ['S/M', 'M/L'],
+        );
+    }
+
+    public function test_size_order_uses_the_shared_union_without_an_exact_canonical_row_and_for_a_proven_generic_row(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiary',
+            'name_en' => 'Sizes',
+            'slug' => 'rozmiary',
+            'input_type' => 'select',
+            'values' => ['M/L', 'S/M'],
+            'values_en' => ['Medium/Large', 'Small/Medium'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Imported axis',
+            'slug' => 'blvariant',
+            'input_type' => 'select',
+            'values' => ['m-l', 's-m'],
+            'values_en' => ['Legacy Medium/Large', 'Legacy Small/Medium'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 20,
+        ]);
+        $method = new \ReflectionMethod(
+            ProductDataExportService::class,
+            'parameterOptionMenuOrders',
+        );
+        $service = app(ProductDataExportService::class);
+
+        $this->assertSame([20, 10], $method->invoke(
+            $service,
+            ['name' => 'Rozmiar', 'slug' => 'rozmiar'],
+            ['M/L', 'S/M'],
+        ));
+        $this->assertSame([20, 10], $method->invoke(
+            $service,
+            ['name' => 'Imported axis', 'slug' => 'blvariant'],
+            ['m-l', 's-m'],
+        ));
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Outside dictionary');
+
+        $method->invoke(
+            $service,
+            ['name' => 'Imported axis', 'slug' => 'blvariant'],
+            ['Outside dictionary'],
+        );
     }
 
     public function test_export_replaces_legacy_blvariant_axis_with_canonical_global_size_for_pl_and_en(): void
@@ -5613,6 +5765,27 @@ class WooCommerceProductDataExportTest extends TestCase
     }
 
     /** @return array<string, mixed> */
+    /**
+     * @param  list<string>  $values
+     * @param  list<string>|null  $valuesEn
+     */
+    private function createDefaultSizeDictionary(
+        array $values = ['S', 'M'],
+        ?array $valuesEn = null,
+    ): ProductParameterDefinition {
+        return ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => $values,
+            'values_en' => $valuesEn ?? $values,
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
+    }
+
     private function readyProductTranslationCapabilities(): array
     {
         return [

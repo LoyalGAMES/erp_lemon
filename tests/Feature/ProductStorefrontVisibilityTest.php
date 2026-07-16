@@ -11,6 +11,7 @@ use App\Models\Product;
 use App\Models\ProductCategory;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
@@ -176,6 +177,17 @@ class ProductStorefrontVisibilityTest extends TestCase
     public function test_hiding_a_variant_hides_and_holds_the_whole_family(): void
     {
         Bus::fake();
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S', 'M'],
+            'values_en' => ['S', 'M'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
         $channel = $this->channel();
         WordpressIntegration::query()->create([
             'sales_channel_id' => $channel->id,
@@ -264,10 +276,11 @@ class ProductStorefrontVisibilityTest extends TestCase
                 'id' => 70,
                 'name' => 'Rozmiar',
                 'slug' => 'pa_rozmiar',
+                'order_by' => 'menu_order',
             ]]),
             'https://shop.test/wp-json/wc/v3/products/attributes/70/terms?*' => Http::response([
-                ['id' => 701, 'name' => 'S', 'slug' => 's-pl'],
-                ['id' => 702, 'name' => 'M', 'slug' => 'm-pl'],
+                ['id' => 701, 'name' => 'S', 'slug' => 's-pl', 'menu_order' => 10],
+                ['id' => 702, 'name' => 'M', 'slug' => 'm-pl', 'menu_order' => 20],
             ]),
             'https://shop.test/wp-json/wc/v3/products/900' => Http::response([
                 'id' => 900,

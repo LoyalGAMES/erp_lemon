@@ -33,6 +33,7 @@ final class ProductDataExportService
         private readonly ProductVariantOptionNormalizer $variantOptions,
         private readonly LegacySizeVariantAxisResolver $legacySizeAxis,
         private readonly ChannelStockAvailabilityService $channelStock,
+        private readonly WooCommerceSizeDictionaryOrder $sizeOrder,
     ) {}
 
     /**
@@ -1640,14 +1641,12 @@ final class ProductDataExportService
             (array) ($payload['meta_data'] ?? []),
             $this->variantAttributeName($parent, $this->variantChildren($parent)),
         );
+        $relationOrder = max(0, (int) ($variant->pivot?->sort_order ?? 100));
         $dictionaryOrder = data_get($payload, 'attributes.0.source_option_orders.0');
-        $menuOrder = is_numeric($dictionaryOrder)
-            ? (int) $dictionaryOrder
-            : (int) ($variant->pivot?->sort_order ?? 100);
-        // The shared ERP dictionary is the single source of option ordering
-        // for the parent, global taxonomy terms and children. Fall back to the
-        // relation only for a value absent from that dictionary. WooCommerce
-        // 10.9 ignores a falsey menu_order, hence the lower bound of one.
+        $menuOrder = is_numeric($dictionaryOrder) ? (int) $dictionaryOrder : $relationOrder;
+        // WooCommerce 10.9 ignores a falsey menu_order, hence the lower bound
+        // of one. Dictionary ranks are shared by the parent taxonomy terms
+        // and every child, so a later full export cannot reverse the family.
         $payload['menu_order'] = max(1, min(65535, $menuOrder));
         $payload['status'] = $parent->is_active && $variant->is_active
             ? (string) (data_get($parentMaster, 'publication_status') ?: 'publish')
@@ -2831,76 +2830,30 @@ final class ProductDataExportService
     /** @param array<string, mixed> $parameter */
     private function canonicalSizeDictionaryValue(array $parameter, string $language): ?string
     {
-        $definition = $this->parameterDefinition($parameter);
-
-        if (! $definition instanceof ProductParameterDefinition
-            || mb_strtolower(trim((string) $definition->name))
-                !== mb_strtolower(ProductVariantAxisNameResolver::SIZE)
-        ) {
-            return null;
-        }
-
         $language = trim($language) ?: 'pl';
-        $sourceValues = collect((array) $definition->values)->values();
-        $localizedValues = $language === 'pl'
-            ? $sourceValues
-            : collect((array) (
-                $definition->getAttribute("values_{$language}")
-                ?? data_get($definition->metadata, "translations.{$language}.values")
-                ?? []
-            ))->values();
         $inlineValue = trim((string) (
             $parameter["value_{$language}"]
             ?? data_get($parameter, "translations.{$language}.value")
             ?? ''
         ));
-        $candidateIdentities = collect([
+        $candidates = collect([
             $parameter['value'] ?? null,
             $inlineValue,
         ])
-            ->map(fn (mixed $value): string => $this->canonicalSizeDictionaryIdentity($value))
+            ->filter(fn (mixed $value): bool => is_scalar($value) || $value instanceof \Stringable)
+            ->map(fn (mixed $value): string => trim((string) $value))
             ->filter()
-            ->unique()
-            ->flip();
+            ->unique(fn (string $value): string => $this->sizeOrder->key($value));
 
-        if ($candidateIdentities->isEmpty()) {
-            return null;
-        }
+        foreach ($candidates as $candidate) {
+            $localized = $this->sizeOrder->localizedOption($candidate, $language);
 
-        foreach ($sourceValues as $index => $sourceValue) {
-            $sourceValue = trim((string) $sourceValue);
-            $localizedValue = trim((string) $localizedValues->get($index, ''));
-            $matches = collect([$sourceValue, $localizedValue])
-                ->map(fn (mixed $value): string => $this->canonicalSizeDictionaryIdentity($value))
-                ->filter()
-                ->contains(fn (string $identity): bool => $candidateIdentities->has($identity));
-
-            if (! $matches) {
-                continue;
+            if (is_string($localized) && $localized !== '') {
+                return $localized;
             }
-
-            if ($language === 'pl') {
-                return $sourceValue !== '' ? $sourceValue : null;
-            }
-
-            return $localizedValue !== ''
-                ? $localizedValue
-                : ($sourceValue !== '' ? $sourceValue : null);
         }
 
         return null;
-    }
-
-    private function canonicalSizeDictionaryIdentity(mixed $value): string
-    {
-        if (! is_scalar($value) && ! $value instanceof \Stringable) {
-            return '';
-        }
-
-        $value = (string) preg_replace('/\s*(?:\/|-)\s*/u', '/', trim((string) $value));
-        $value = (string) preg_replace('/\s+/u', ' ', $value);
-
-        return mb_strtolower($value, 'UTF-8');
     }
 
     /**
@@ -3048,26 +3001,60 @@ final class ProductDataExportService
     private function parameterOptionMenuOrders(array $parameter, array $sourceOptions): array
     {
         $definition = $this->parameterDefinition($parameter);
+        $isSize = collect([
+            $parameter['name'] ?? null,
+            $parameter['name_en'] ?? null,
+            $parameter['slug'] ?? null,
+        ])
+            ->map(fn (mixed $name): string => trim((string) $name))
+            ->filter()
+            ->contains(fn (string $attributeName): bool => $this->sizeOrder->isSizeAxis(
+                $attributeName,
+                $sourceOptions,
+                $definition,
+            ));
+
+        if ($isSize) {
+            if (collect($sourceOptions)->contains(
+                fn (mixed $option): bool => $this->isAggregateVariantOption($option),
+            )) {
+                // The informational parent row is replaced by the concrete
+                // per-child axis in variableAttributes(); never create one
+                // taxonomy term from its `S | M` aggregate placeholder.
+                return array_fill(0, count($sourceOptions), null);
+            }
+
+            return $this->sizeOrder->menuOrders(
+                $sourceOptions,
+            );
+        }
 
         if (! $definition instanceof ProductParameterDefinition) {
             return array_fill(0, count($sourceOptions), null);
         }
 
-        $orders = collect((array) $definition->values)
+        $definitionName = (string) $definition->name;
+
+        $dictionaryEntries = collect((array) $definition->values)
             ->map(fn (mixed $value): string => $this->variantOptions->identity(
-                (string) $definition->name,
+                $definitionName,
                 $value,
             ))
             ->filter()
-            ->unique()
+            ->unique();
+
+        $orders = $dictionaryEntries
             ->values()
-            ->mapWithKeys(fn (string $value, int $index): array => [$value => ($index + 1) * 10]);
+            ->mapWithKeys(fn (string $identity, int $index): array => [
+                $identity => ($index + 1) * 10,
+            ])
+            ->all();
 
         return collect($sourceOptions)
-            ->map(fn (mixed $option): ?int => $orders->get($this->variantOptions->identity(
-                (string) $definition->name,
+            ->map(fn (mixed $option): ?int => $orders[$this->variantOptions->identity(
+                $definitionName,
                 $option,
-            )))
+            )] ?? null)
             ->all();
     }
 

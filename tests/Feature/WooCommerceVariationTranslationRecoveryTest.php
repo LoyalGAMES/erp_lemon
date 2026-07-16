@@ -7,6 +7,7 @@ namespace Tests\Feature;
 use App\Models\Product;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\StockBalance;
@@ -132,7 +133,7 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
         $this->assertSame('699.00', $finalUpdate['regular_price']);
         $this->assertSame(4, $finalUpdate['stock_quantity']);
         $this->assertSame('instock', $finalUpdate['stock_status']);
-        $this->assertSame(20, $finalUpdate['menu_order']);
+        $this->assertSame(10, $finalUpdate['menu_order']);
         $this->assertArrayNotHasKey('date_created', $finalUpdate->data());
         $this->assertTrue(collect((array) $finalUpdate['meta_data'])->contains(
             fn (array $meta): bool => ($meta['key'] ?? null) === '_ean'
@@ -267,6 +268,17 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
      */
     private function family(string $suffix): array
     {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S'],
+            'values_en' => ['S'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
         $channel = SalesChannel::query()->create([
             'code' => 'B2C-'.$suffix,
             'name' => 'B2C '.$suffix,

@@ -1761,6 +1761,151 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame(0, $second['mutations']);
     }
 
+    public function test_partially_repaired_english_family_uses_fresh_unfiltered_collision_term_when_lang_filter_hides_it(): void
+    {
+        [$parent, $catalog] = $this->family();
+        ProductParameterDefinition::query()->where('name', 'Rozmiar')->update([
+            'values' => ['M/L', 'S/M'],
+            'values_en' => ['M/L', 'S/M'],
+        ]);
+        $catalog->products[223]['attributes'][2]['variation'] = true;
+        $catalog->products[223]['default_attributes'][0]['option'] = 'm-l';
+        $protectedBefore = collect($catalog->products)
+            ->map(fn (array $product): array => collect($product)->only([
+                'name',
+                'description',
+                'short_description',
+                'sku',
+                'status',
+                'price',
+                'regular_price',
+                'sale_price',
+                'manage_stock',
+                'stock_quantity',
+                'stock_status',
+            ])->all())
+            ->all();
+        $variationCommercialBefore = collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)
+                ->map(fn (array $variation): array => collect($variation)->only([
+                    'id',
+                    'sku',
+                    'status',
+                    'price',
+                    'regular_price',
+                    'sale_price',
+                    'manage_stock',
+                    'stock_quantity',
+                    'stock_status',
+                ])->all())
+                ->all())
+            ->all();
+        $scopedReads = 0;
+        $unfilteredReads = 0;
+        $this->fakeCatalog($catalog, static function (Request $request) use (
+            &$scopedReads,
+            &$unfilteredReads,
+        ): mixed {
+            if ($request->method() !== 'GET'
+                || parse_url($request->url(), PHP_URL_PATH)
+                    !== '/wp-json/wc/v3/products/attributes/8/terms'
+            ) {
+                return null;
+            }
+
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if (($query['lang'] ?? null) === 'en') {
+                $scopedReads++;
+
+                return Http::response([
+                    ['id' => 71, 'name' => 'm-l', 'slug' => 'm-l', 'menu_order' => 20],
+                    ['id' => 72, 'name' => 's-m', 'slug' => 's-m', 'menu_order' => 10],
+                ]);
+            }
+
+            $unfilteredReads++;
+
+            return Http::response([
+                ['id' => 71, 'name' => 'm-l', 'slug' => 'm-l', 'menu_order' => 20],
+                ['id' => 72, 'name' => 's-m', 'slug' => 's-m', 'menu_order' => 10],
+                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en', 'menu_order' => 20],
+                ['id' => 82, 'name' => 's-m', 'slug' => 's-m-2-en', 'menu_order' => 10],
+            ]);
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame(
+            'repaired',
+            $result['status'],
+            (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        );
+        $this->assertGreaterThan(0, $scopedReads);
+        $this->assertGreaterThan(0, $unfilteredReads);
+        $this->assertSame([['id' => 1, 'option' => 'M/L']], $catalog->products[223]['default_attributes']);
+        $this->assertFalse(collect($catalog->products[223]['attributes'])->contains(
+            fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) === 8,
+        ));
+        $this->assertSame(
+            ['S/M', 'M/L'],
+            collect($catalog->products[223]['attributes'])->firstWhere('id', 1)['options'],
+        );
+        $this->assertSame(
+            [224 => 'S/M', 225 => 'M/L'],
+            collect($catalog->variations[223])
+                ->map(fn (array $variation): string => $variation['attributes'][0]['option'])
+                ->all(),
+        );
+        $this->assertSame(
+            [10, 20],
+            collect($catalog->variations[223])->pluck('menu_order')->values()->all(),
+        );
+        $this->assertSame($protectedBefore, collect($catalog->products)
+            ->map(fn (array $product): array => collect($product)->only([
+                'name',
+                'description',
+                'short_description',
+                'sku',
+                'status',
+                'price',
+                'regular_price',
+                'sale_price',
+                'manage_stock',
+                'stock_quantity',
+                'stock_status',
+            ])->all())
+            ->all());
+        $this->assertSame($variationCommercialBefore, collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)
+                ->map(fn (array $variation): array => collect($variation)->only([
+                    'id',
+                    'sku',
+                    'status',
+                    'price',
+                    'regular_price',
+                    'sale_price',
+                    'manage_stock',
+                    'stock_quantity',
+                    'stock_status',
+                ])->all())
+                ->all())
+            ->all());
+        Http::assertSent(function (Request $request): bool {
+            if ($request->method() !== 'GET'
+                || parse_url($request->url(), PHP_URL_PATH)
+                    !== '/wp-json/wc/v3/products/attributes/8/terms'
+            ) {
+                return false;
+            }
+
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            return ! array_key_exists('lang', $query)
+                && filled($query['_lemon_erp_no_cache'] ?? null);
+        });
+    }
+
     #[DataProvider('unprovenLegacyDefaultTermProvider')]
     public function test_legacy_default_slug_without_one_exact_language_term_stops_before_every_write(
         array $terms,
@@ -1802,6 +1947,75 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         ];
     }
 
+    #[DataProvider('unprovenUnfilteredLegacyNameTermProvider')]
+    public function test_unfiltered_legacy_name_fallback_rejects_foreign_malformed_and_duplicate_terms_before_every_write(
+        array $terms,
+    ): void {
+        [$parent, $catalog] = $this->family();
+        $catalog->products[223]['attributes'][2]['variation'] = true;
+        $catalog->products[223]['default_attributes'][0]['option'] = 'm-l';
+        $original = unserialize(serialize([
+            'products' => $catalog->products,
+            'variations' => $catalog->variations,
+        ]));
+        $this->fakeCatalog($catalog, static function (Request $request) use ($terms): mixed {
+            if ($request->method() !== 'GET'
+                || parse_url($request->url(), PHP_URL_PATH)
+                    !== '/wp-json/wc/v3/products/attributes/8/terms'
+            ) {
+                return null;
+            }
+
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            return Http::response(($query['lang'] ?? null) === 'en' ? [] : $terms);
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertSame(0, $result['mutations']);
+        $this->assertStringContainsString('#8', $result['reason']);
+        $this->assertSame($original['products'], $catalog->products);
+        $this->assertSame($original['variations'], $catalog->variations);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    }
+
+    public static function unprovenUnfilteredLegacyNameTermProvider(): array
+    {
+        return [
+            'only Polish base term' => [[
+                ['id' => 71, 'name' => 'm-l', 'slug' => 'm-l'],
+            ]],
+            'collision term explicitly belongs to Polish via language fallback' => [[
+                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en', 'lang' => '', 'language' => 'pl'],
+            ]],
+            'conflicting explicit language fields' => [[
+                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en', 'lang' => 'en', 'language' => 'pl'],
+            ]],
+            'explicit language conflicts with self translation' => [[
+                [
+                    'id' => 81,
+                    'name' => 'm-l',
+                    'slug' => 'm-l-2-en',
+                    'lang' => 'pl',
+                    'translations' => ['pl' => 71, 'en' => 81],
+                ],
+            ]],
+            'duplicate English collision slug' => [[
+                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en'],
+                ['id' => 91, 'name' => 'm-l', 'slug' => 'm-l-2-en'],
+            ]],
+            'two different English collision slugs' => [[
+                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en'],
+                ['id' => 91, 'name' => 'm-l', 'slug' => 'm-l-3-en'],
+            ]],
+            'malformed language suffix' => [[
+                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-en-2'],
+            ]],
+        ];
+    }
+
     public function test_size_default_term_slug_candidates_cover_woo_and_historical_formats(): void
     {
         $this->family();
@@ -1826,6 +2040,36 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertEqualsCanonicalizing(
             ['large', 'large-en'],
             $method->invoke($service, 'Large', 'en'),
+        );
+    }
+
+    public function test_repair_uses_canonical_dictionary_order_then_preserves_unknown_family_order(): void
+    {
+        $this->family();
+        ProductParameterDefinition::query()->where('name', 'Rozmiar')->update([
+            'values' => ['M/L', 'Custom B', 'S/M', 'Custom A', 'XS'],
+            'values_en' => ['M/L', 'Custom B', 'S/M', 'Custom A', 'XS'],
+        ]);
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'orderedSizeOptions',
+        );
+
+        $this->assertSame(
+            ['XS', 'S/M', 'M/L', 'Custom B', 'Custom A'],
+            $method->invoke(
+                app(WooOwnedVariantAxisRepairService::class),
+                'Rozmiar',
+                ['M/L', 'Custom A', 'XS', 'S/M', 'Custom B'],
+            ),
+        );
+
+        $this->expectException(\DomainException::class);
+        $this->expectExceptionMessage('Outside dictionary');
+        $method->invoke(
+            app(WooOwnedVariantAxisRepairService::class),
+            'Rozmiar',
+            ['Outside dictionary'],
         );
     }
 

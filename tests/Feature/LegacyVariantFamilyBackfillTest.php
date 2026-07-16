@@ -8,6 +8,7 @@ use App\Jobs\ExportWooCommerceProductDataJob;
 use App\Models\Product;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
@@ -426,6 +427,17 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
     public function test_migration_queues_one_durable_family_export_that_creates_the_missing_english_family(): void
     {
         Bus::fake();
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S'],
+            'values_en' => ['S'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
         $channel = SalesChannel::query()->create([
             'code' => 'B2C-LEGACY-BACKFILL',
             'name' => 'Sklep B2C legacy backfill',
@@ -575,6 +587,7 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
                     'id' => 70,
                     'name' => 'Rozmiar',
                     'slug' => 'pa_rozmiar',
+                    'order_by' => 'menu_order',
                 ]]);
             }
 
@@ -587,10 +600,12 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
                     'id' => 702,
                     'name' => 'S',
                     'slug' => 's-en',
+                    'menu_order' => 10,
                 ]] : [[
                     'id' => 701,
                     'name' => 'S',
                     'slug' => 's-pl',
+                    'menu_order' => 10,
                 ]]);
             }
 

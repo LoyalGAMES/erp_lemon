@@ -143,6 +143,115 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
     }
 
+    public function test_it_matches_legacy_source_and_translation_aliases_but_writes_the_canonical_direct_spelling(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Imported axis',
+            'slug' => 'blvariant',
+            'input_type' => 'select',
+            'values' => ['s-m', 'm-l'],
+            'values_en' => ['Legacy Small/Medium', 'Legacy Medium/Large'],
+            'is_variant' => true,
+            'sort_order' => 1,
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            'values_en' => ['Small/Medium', 'Medium/Large'],
+            'is_variant' => true,
+            'sort_order' => 999,
+        ]);
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-LEGACY-ALIASES');
+        $attribute = $this->sizeAttribute();
+        $terms = [
+            11 => ['id' => 11, 'name' => 's-m', 'slug' => 's-m', 'lang' => 'pl', 'menu_order' => 0],
+            12 => ['id' => 12, 'name' => 'm-l', 'slug' => 'm-l', 'lang' => 'pl', 'menu_order' => 0],
+            21 => ['id' => 21, 'name' => 'Legacy Small/Medium', 'slug' => 'legacy-small-medium-en', 'lang' => 'en', 'menu_order' => 0],
+            22 => ['id' => 22, 'name' => 'Legacy Medium/Large', 'slug' => 'legacy-medium-large-en', 'lang' => 'en', 'menu_order' => 0],
+        ];
+        $mutations = [];
+        $this->fakeWooCatalog($attribute, $terms, $mutations);
+
+        $result = app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
+
+        $this->assertSame('synchronized', $result['status']);
+        $this->assertSame(4, $result['matched_terms']);
+        $this->assertSame('S/M', $terms[11]['name']);
+        $this->assertSame('M/L', $terms[12]['name']);
+        $this->assertSame('Small/Medium', $terms[21]['name']);
+        $this->assertSame('Medium/Large', $terms[22]['name']);
+        $this->assertSame(10, $terms[11]['menu_order']);
+        $this->assertSame(20, $terms[12]['menu_order']);
+        $this->assertSame(10, $terms[21]['menu_order']);
+        $this->assertSame(20, $terms[22]['menu_order']);
+        $this->assertSame('menu_order', $attribute['order_by']);
+    }
+
+    public function test_colliding_woo_slugs_in_the_size_union_abort_before_the_first_remote_mutation(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['XL', 'XL+'],
+            'values_en' => ['XL', 'XL+'],
+            'is_variant' => true,
+            'sort_order' => 10,
+        ]);
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-SLUG-COLLISION');
+        $attribute = $this->sizeAttribute();
+        $terms = $this->allLanguageTerms();
+        $mutations = [];
+        $this->fakeWooCatalog($attribute, $terms, $mutations);
+
+        try {
+            app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
+            $this->fail('Kolizja slugów XL i XL+ powinna przerwać synchronizację.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('kolidującym slugu WooCommerce', $exception->getMessage());
+        }
+
+        $this->assertSame([], $mutations);
+        $this->assertSame('name', $attribute['order_by']);
+    }
+
+    public function test_a_used_remote_size_outside_the_erp_union_aborts_before_menu_order_is_enabled(): void
+    {
+        $this->createSizeDefinition();
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-USED-OUTSIDE');
+        $attribute = $this->sizeAttribute();
+        $terms = $this->allLanguageTerms();
+        $terms[99] = [
+            'id' => 99,
+            'name' => 'Outside dictionary',
+            'slug' => 'outside-dictionary',
+            'menu_order' => 0,
+            'count' => 1,
+        ];
+        $mutations = [];
+        $this->fakeWooCatalog($attribute, $terms, $mutations);
+
+        try {
+            app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
+            $this->fail('Używany termin spoza słownika powinien przerwać synchronizację.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('używane wartości spoza słownika ERP', $exception->getMessage());
+            $this->assertStringContainsString('#99', $exception->getMessage());
+        }
+
+        $this->assertSame([], $mutations);
+        $this->assertSame('name', $attribute['order_by']);
+        Http::assertNotSent(fn (Request $request): bool => in_array(
+            $request->method(),
+            ['POST', 'PUT', 'PATCH', 'DELETE'],
+            true,
+        ));
+    }
+
     public function test_it_uses_the_definition_matching_the_existing_taxonomy_when_a_historical_size_dictionary_also_exists(): void
     {
         $this->createSizeDefinition();
@@ -236,9 +345,9 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $this->assertSame('menu_order', $attributes[1]['order_by']);
         $this->assertSame('name', $attributes[9]['order_by']);
         $this->assertSame('S/M', $terms[58]['name']);
-        $this->assertSame(10, $terms[58]['menu_order']);
+        $this->assertSame(20, $terms[58]['menu_order']);
         $this->assertSame('M/L', $terms[57]['name']);
-        $this->assertSame(20, $terms[57]['menu_order']);
+        $this->assertSame(30, $terms[57]['menu_order']);
         $this->assertNotEmpty($mutations);
         $this->assertTrue(collect($mutations)->every(
             fn (array $mutation): bool => str_starts_with(
@@ -331,49 +440,44 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         ));
     }
 
-    public function test_competing_direct_dictionary_matches_abort_before_the_first_remote_mutation(): void
+    public function test_shared_union_syncs_without_an_exact_canonical_rozmiar_definition(): void
     {
         ProductParameterDefinition::query()->create([
-            'name' => 'Rozmiar',
-            'name_en' => 'Size',
-            'slug' => 'rozmiar-odziezy',
+            'name' => 'Imported axis',
+            'slug' => 'blvariant',
             'input_type' => 'select',
-            'values' => ['S/M', 'M/L'],
-            'is_variant' => false,
+            'values' => ['m-l', 's-m'],
+            'values_en' => ['Legacy M/L', 'Legacy S/M'],
+            'is_variant' => true,
             'is_required' => false,
-            'sort_order' => 10,
+            'sort_order' => 1,
         ]);
         ProductParameterDefinition::query()->create([
-            'name' => 'Sizes',
-            'slug' => 'rozmiar',
+            'name' => 'Size',
+            'slug' => 'size',
             'input_type' => 'select',
-            'values' => ['S/M', 'M/L'],
+            'values' => ['M/L', 'S/M'],
+            'values_en' => ['M/L', 'S/M'],
             'is_variant' => false,
             'is_required' => false,
             'sort_order' => 20,
         ]);
-        $integration = $this->createWooIntegration('GLOBAL-SIZE-DIRECT-DICTIONARY-AMBIGUITY');
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-UNION-NO-CANONICAL-ROW');
         $attribute = $this->sizeAttribute();
         $terms = $this->allLanguageTerms();
         $mutations = [];
         $this->fakeWooCatalog($attribute, $terms, $mutations);
 
-        try {
-            app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
-            $this->fail('Dwa bezpośrednie dopasowania słownika powinny przerwać synchronizację.');
-        } catch (RuntimeException $exception) {
-            $this->assertStringContainsString(
-                'kilka słowników bezpośrednio pasujących',
-                $exception->getMessage(),
-            );
-        }
+        $result = app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
 
-        $this->assertSame([], $mutations);
-        Http::assertNotSent(fn (Request $request): bool => in_array(
-            $request->method(),
-            ['POST', 'PUT', 'PATCH', 'DELETE'],
-            true,
-        ));
+        $this->assertSame('synchronized', $result['status']);
+        $this->assertSame(4, $result['matched_terms']);
+        $this->assertSame('S/M', $terms[58]['name']);
+        $this->assertSame(10, $terms[58]['menu_order']);
+        $this->assertSame('M/L', $terms[57]['name']);
+        $this->assertSame(20, $terms[57]['menu_order']);
+        $this->assertSame('menu_order', $attribute['order_by']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
     }
 
     public function test_an_ambiguous_existing_term_aborts_before_the_first_mutation(): void
@@ -928,6 +1032,62 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $observer->saved($definition);
 
         Bus::assertDispatchedTimes(SyncWooCommerceGlobalSizeOrderJob::class, 1);
+    }
+
+    public function test_the_observer_queues_when_a_generic_size_dictionary_changes_to_color(): void
+    {
+        $active = $this->createWooIntegration('GLOBAL-SIZE-GENERIC-OBSERVER');
+        $definition = ProductParameterDefinition::withoutEvents(fn (): ProductParameterDefinition => ProductParameterDefinition::query()->create([
+            'name' => 'Imported axis',
+            'slug' => 'blvariant',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            'values_en' => ['Small/Medium', 'Medium/Large'],
+            'is_variant' => true,
+            'sort_order' => 10,
+        ]));
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+        $observer = app(ProductParameterDefinitionObserver::class);
+
+        $definition->update([
+            'values' => ['Black', 'White'],
+            'values_en' => ['Black', 'White'],
+        ]);
+        $observer->saved($definition);
+
+        Bus::assertDispatchedTimes(SyncWooCommerceGlobalSizeOrderJob::class, 1);
+        Bus::assertDispatched(
+            SyncWooCommerceGlobalSizeOrderJob::class,
+            fn (SyncWooCommerceGlobalSizeOrderJob $job): bool => $job->integrationId === (int) $active->id
+                && $job->trigger === 'erp_size_dictionary_changed',
+        );
+
+    }
+
+    public function test_the_observer_queues_when_the_only_generic_size_dictionary_is_deleted(): void
+    {
+        $active = $this->createWooIntegration('GLOBAL-SIZE-GENERIC-DELETE-OBSERVER');
+        $definition = ProductParameterDefinition::withoutEvents(fn (): ProductParameterDefinition => ProductParameterDefinition::query()->create([
+            'name' => 'wariant',
+            'slug' => 'wariant',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            'values_en' => ['Small/Medium', 'Medium/Large'],
+            'is_variant' => true,
+            'sort_order' => 10,
+        ]));
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+        $observer = app(ProductParameterDefinitionObserver::class);
+
+        ProductParameterDefinition::withoutEvents(fn () => $definition->delete());
+        $observer->deleted($definition);
+
+        Bus::assertDispatchedTimes(SyncWooCommerceGlobalSizeOrderJob::class, 1);
+        Bus::assertDispatched(
+            SyncWooCommerceGlobalSizeOrderJob::class,
+            fn (SyncWooCommerceGlobalSizeOrderJob $job): bool => $job->integrationId === (int) $active->id
+                && $job->trigger === 'erp_size_dictionary_changed',
+        );
     }
 
     private function createSizeDefinition(): ProductParameterDefinition

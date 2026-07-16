@@ -19,6 +19,7 @@ final class WooCommerceGlobalSizeOrderSyncService
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly ProductVariantOptionNormalizer $variantOptions,
+        private readonly WooCommerceSizeDictionaryOrder $sizeOrder,
     ) {}
 
     /**
@@ -43,7 +44,6 @@ final class WooCommerceGlobalSizeOrderSyncService
         }
 
         $attribute = $this->existingSizeAttribute($integration, $definitions);
-        $definition = $this->sizeDefinitionForAttribute($definitions, $attribute);
         $attributeId = (int) $attribute['id'];
         $languages = collect($integration->productExportLanguages())
             ->map(fn (mixed $language): string => mb_strtolower(trim((string) $language)) ?: 'pl')
@@ -64,7 +64,7 @@ final class WooCommerceGlobalSizeOrderSyncService
                 ->unique(fn (array $term): int => (int) $term['id'])
                 ->values(),
         ]);
-        $plan = $this->preflightPlan($definition, $languages, $termBuckets);
+        $plan = $this->preflightPlan($languages, $termBuckets);
         $languagesWithoutMatches = $languages
             ->reject(fn (string $language): bool => $plan->contains(
                 fn (array $entry): bool => $entry['language'] === $language,
@@ -80,6 +80,8 @@ final class WooCommerceGlobalSizeOrderSyncService
                 ),
             );
         }
+
+        $this->assertNoUsedTermsOutsideDictionary($termBuckets, $plan, $attributeId);
 
         // Mutate only after every language and duplicate candidate passed the
         // preflight above. This prevents a later ambiguity from leaving half
@@ -126,83 +128,11 @@ final class WooCommerceGlobalSizeOrderSyncService
     /** @return Collection<int, ProductParameterDefinition> */
     private function sizeDefinitions(): Collection
     {
-        return ProductParameterDefinition::query()
-            ->orderBy('sort_order')
-            ->orderBy('id')
-            ->get()
-            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
-                $definition->name,
-                $definition->name_en,
-                $definition->slug,
-            ])->contains(fn (mixed $name): bool => $this->variantOptions
-                ->isSizeAttribute((string) $name)))
+        return $this->sizeOrder
+            ->definitions()
             ->filter(fn (ProductParameterDefinition $definition): bool => collect($definition->values)
                 ->contains(fn (mixed $value): bool => trim((string) $value) !== ''))
             ->values();
-    }
-
-    /**
-     * Historical Woo imports can leave a separate `Size` dictionary next to
-     * the canonical Polish `Rozmiar` row. Select the ERP row whose source
-     * name/slug identifies the concrete taxonomy. A localized name is only a
-     * fallback; genuinely competing direct matches remain a hard stop before
-     * any remote mutation.
-     *
-     * @param  Collection<int, ProductParameterDefinition>  $definitions
-     * @param  array<string, mixed>  $attribute
-     */
-    private function sizeDefinitionForAttribute(
-        Collection $definitions,
-        array $attribute,
-    ): ProductParameterDefinition {
-        $attributeKeys = collect([
-            $attribute['name'] ?? null,
-            $attribute['slug'] ?? null,
-        ])
-            ->map(fn (mixed $value): string => $this->attributeKey((string) $value))
-            ->filter()
-            ->unique()
-            ->values();
-        $directMatches = $definitions
-            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
-                $definition->name,
-                $definition->slug,
-            ])
-                ->map(fn (mixed $value): string => $this->attributeKey((string) $value))
-                ->filter()
-                ->intersect($attributeKeys)
-                ->isNotEmpty())
-            ->values();
-
-        if ($directMatches->count() === 1) {
-            return $directMatches->first();
-        }
-
-        if ($directMatches->count() > 1) {
-            throw new RuntimeException(sprintf(
-                'ERP zawiera kilka słowników bezpośrednio pasujących do globalnego atrybutu Rozmiar/Size #%d.',
-                (int) ($attribute['id'] ?? 0),
-            ));
-        }
-
-        $localizedMatches = $definitions
-            ->filter(fn (ProductParameterDefinition $definition): bool => $attributeKeys->contains(
-                $this->attributeKey((string) $definition->name_en),
-            ))
-            ->values();
-
-        if ($localizedMatches->count() === 1) {
-            return $localizedMatches->first();
-        }
-
-        if ($definitions->count() === 1) {
-            return $definitions->first();
-        }
-
-        throw new RuntimeException(sprintf(
-            'ERP zawiera kilka słowników Rozmiar/Size, ale żaden nie odpowiada jednoznacznie globalnemu atrybutowi #%d.',
-            (int) ($attribute['id'] ?? 0),
-        ));
     }
 
     /**
@@ -365,7 +295,6 @@ final class WooCommerceGlobalSizeOrderSyncService
      * @return Collection<int,array{term:array<string,mixed>,name:string,menu_order:int,language:string,index:int}>
      */
     private function preflightPlan(
-        ProductParameterDefinition $definition,
         Collection $languages,
         Collection $termBuckets,
     ): Collection {
@@ -373,7 +302,7 @@ final class WooCommerceGlobalSizeOrderSyncService
         $assignedTermIds = [];
 
         foreach ($languages as $language) {
-            $entries = $this->dictionaryEntries($definition, $language);
+            $entries = $this->dictionaryEntries($language);
             /** @var Collection<int,array<string,mixed>> $terms */
             $terms = $termBuckets->get($language, collect());
 
@@ -440,53 +369,31 @@ final class WooCommerceGlobalSizeOrderSyncService
     /**
      * @return Collection<int,array{index:int,name:string,menu_order:int,identities:list<string>,base_slugs:list<string>,localized_slugs:list<string>}>
      */
-    private function dictionaryEntries(
-        ProductParameterDefinition $definition,
-        string $language,
-    ): Collection {
-        $sourceValues = collect((array) $definition->values)
-            ->map(fn (mixed $value): string => trim((string) $value))
-            ->values();
-        $localizedValues = collect($definition->valuesForLanguage($language));
-        $attributeNames = collect([
-            (string) $definition->name,
-            $definition->nameForLanguage($language),
-            'Rozmiar',
-            'Size',
-        ])->filter()->unique()->values();
-        $pairs = $sourceValues
-            ->map(fn (string $sourceValue, int $index): array => [
-                'source' => $sourceValue,
-                'localized' => trim((string) $localizedValues->get($index, '')) ?: $sourceValue,
-                'source_index' => $index,
-                'rank' => $this->canonicalSizeRank($sourceValue),
+    private function dictionaryEntries(string $language): Collection
+    {
+        $attributeNames = $this->sizeOrder
+            ->definitions()
+            ->flatMap(fn (ProductParameterDefinition $definition): array => [
+                (string) $definition->name,
+                $definition->nameForLanguage($language),
+                (string) $definition->slug,
             ])
-            ->filter(fn (array $pair): bool => $pair['source'] !== '')
-            ->sort(function (array $left, array $right): int {
-                if ($left['rank'] === null && $right['rank'] === null) {
-                    return $left['source_index'] <=> $right['source_index'];
-                }
-
-                if ($left['rank'] === null) {
-                    return 1;
-                }
-
-                if ($right['rank'] === null) {
-                    return -1;
-                }
-
-                return $left['rank'] <=> $right['rank']
-                    ?: $left['source_index'] <=> $right['source_index'];
-            })
+            ->push('Rozmiar')
+            ->push('Size')
+            ->filter()
+            ->unique()
             ->values();
-        $entries = $pairs
-            ->map(function (array $pair, int $index) use (
+        $entries = $this->sizeOrder
+            ->entries($language)
+            ->map(function (array $pair) use (
                 $attributeNames,
                 $language,
             ): array {
-                $sourceValue = $pair['source'];
                 $localizedValue = $pair['localized'];
-                $values = collect([$sourceValue, $localizedValue])->unique()->values();
+                $values = collect([
+                    ...$pair['source_aliases'],
+                    ...$pair['localized_aliases'],
+                ])->unique()->values();
                 $identities = $values
                     ->flatMap(fn (string $value): Collection => $attributeNames->map(
                         fn (string $attributeName): string => $this->variantOptions
@@ -515,9 +422,9 @@ final class WooCommerceGlobalSizeOrderSyncService
                     : $languageSlugs;
 
                 return [
-                    'index' => $index,
+                    'index' => $pair['index'],
                     'name' => $localizedValue,
-                    'menu_order' => ($index + 1) * 10,
+                    'menu_order' => $pair['menu_order'],
                     'identities' => $identities->all(),
                     'base_slugs' => $baseSlugs->all(),
                     'localized_slugs' => $localizedSlugs->all(),
@@ -543,79 +450,46 @@ final class WooCommerceGlobalSizeOrderSyncService
         return $entries;
     }
 
-    private function canonicalSizeRank(string $value): ?int
-    {
-        $value = mb_strtoupper(trim((string) preg_replace('/\s+/u', '', $value)));
-        $value = str_replace(['–', '—', '-'], '/', $value);
+    /**
+     * Enabling menu_order while a used, unmatched term remains at zero would
+     * move that size to the beginning of listings. Treat every such term as a
+     * catalog-contract violation before the first remote mutation.
+     *
+     * @param  Collection<string,Collection<int,array<string,mixed>>>  $termBuckets
+     * @param  Collection<int,array{term:array<string,mixed>,name:string,menu_order:int,language:string,index:int}>  $plan
+     */
+    private function assertNoUsedTermsOutsideDictionary(
+        Collection $termBuckets,
+        Collection $plan,
+        int $attributeId,
+    ): void {
+        $assignedIds = $plan
+            ->map(fn (array $entry): int => (int) ($entry['term']['id'] ?? 0))
+            ->filter()
+            ->flip();
+        $outside = $termBuckets
+            ->flatMap(fn (Collection $terms): Collection => $terms)
+            ->filter(fn (array $term): bool => (int) ($term['id'] ?? 0) > 0
+                && ! $assignedIds->has((int) $term['id'])
+                && (! array_key_exists('count', $term) || (int) $term['count'] > 0))
+            ->unique(fn (array $term): int => (int) $term['id'])
+            ->values();
 
-        if (in_array($value, [
-            'ONESIZE',
-            'ONE/SIZE',
-            'UNI',
-            'UNIWERSALNY',
-            'UNIWERSALNA',
-        ], true)) {
-            return 0;
+        if ($outside->isEmpty()) {
+            return;
         }
 
-        $tokenRanks = collect(explode('/', $value))
-            ->map(fn (string $token): ?int => $this->canonicalSizeTokenRank($token));
+        $terms = $outside
+            ->map(fn (array $term): string => sprintf(
+                '#%d `%s`',
+                (int) $term['id'],
+                trim((string) ($term['name'] ?? $term['slug'] ?? '')),
+            ))
+            ->implode(', ');
 
-        if ($tokenRanks->isNotEmpty()
-            && ! $tokenRanks->contains(fn (?int $rank): bool => $rank === null)
-        ) {
-            return (int) round($tokenRanks->average());
-        }
-
-        if (preg_match('/^(\d+(?:[.,]\d+)?)(?:\/(\d+(?:[.,]\d+)?))?$/', $value, $matches) === 1) {
-            $from = (float) str_replace(',', '.', $matches[1]);
-            $to = isset($matches[2]) ? (float) str_replace(',', '.', $matches[2]) : $from;
-
-            return 10_000 + (int) round($from * 100) + (int) round($to);
-        }
-
-        return null;
-    }
-
-    private function canonicalSizeTokenRank(string $token): ?int
-    {
-        if ($token === 'S') {
-            return 500;
-        }
-
-        if ($token === 'M') {
-            return 600;
-        }
-
-        if ($token === 'L') {
-            return 700;
-        }
-
-        if ($token === 'XS') {
-            return 400;
-        }
-
-        if (preg_match('/^X{2,6}S$/', $token) === 1) {
-            return 400 - ((substr_count($token, 'X') - 1) * 100);
-        }
-
-        if (preg_match('/^([2-6])XS$/', $token, $matches) === 1) {
-            return 400 - (((int) $matches[1] - 1) * 100);
-        }
-
-        if ($token === 'XL') {
-            return 800;
-        }
-
-        if (preg_match('/^X{2,6}L$/', $token) === 1) {
-            return 800 + ((substr_count($token, 'X') - 1) * 100);
-        }
-
-        if (preg_match('/^([2-9])XL$/', $token, $matches) === 1) {
-            return 800 + (((int) $matches[1] - 1) * 100);
-        }
-
-        return null;
+        throw new RuntimeException(
+            "Globalny atrybut Rozmiar/Size #{$attributeId} zawiera używane wartości spoza słownika ERP: {$terms}.",
+        );
     }
 
     /**
