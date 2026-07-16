@@ -2914,8 +2914,10 @@ final class WooCommerceClient
             : "/products/{$externalProductId}";
         $url = $this->endpoint($integration, $endpoint);
 
-        if (filled($language) && filled($externalVariationId)) {
-            $url .= '?lang='.rawurlencode((string) $language);
+        $language = mb_strtolower(trim((string) $language));
+
+        if ($language !== '' && $language !== 'pl') {
+            $url .= '?lang='.rawurlencode($language);
         }
 
         $response = $this->request($integration)
@@ -3039,15 +3041,13 @@ final class WooCommerceClient
 
                 $actualLanguage = $this->catalogItemLanguage($product) ?? $language;
 
-                $updateResponse = $this->request($integration)
-                    ->put(
-                        $this->endpoint($integration, "/products/{$translationId}"),
-                        (array) ($payloadsByLanguage[$actualLanguage] ?? $payloadsByLanguage[$language] ?? $payloadsByLanguage['pl'] ?? []),
-                    );
-
-                if (! $updateResponse->successful()) {
-                    throw new RuntimeException("Aktualizacja danych tłumaczenia WooCommerce #{$translationId} zwróciła HTTP {$updateResponse->status()}.");
-                }
+                $this->updateProductDataByIds(
+                    $integration,
+                    $translationId,
+                    null,
+                    (array) ($payloadsByLanguage[$actualLanguage] ?? $payloadsByLanguage[$language] ?? $payloadsByLanguage['pl'] ?? []),
+                    $actualLanguage,
+                );
 
                 $updatedIds[] = $translationId;
                 $updated[] = [

@@ -617,7 +617,7 @@ final class LegacyVariantFamilyBackfillTest extends TestCase
                 return Http::response(['id' => 223, 'sku' => ''], 201);
             }
 
-            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/223') {
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/223?lang=en') {
                 return Http::response(['id' => 223, 'sku' => $request['sku']]);
             }
 

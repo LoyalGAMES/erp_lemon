@@ -154,10 +154,13 @@ class WooCommerceProductDataExportTest extends TestCase
 
             if ($request->method() === 'PUT' && in_array($request->url(), [
                 'https://shop.test/wp-json/wc/v3/products/123',
-                'https://shop.test/wp-json/wc/v3/products/124',
+                'https://shop.test/wp-json/wc/v3/products/124?lang=en',
             ], true)) {
                 return Http::response([
-                    'id' => str_ends_with($request->url(), '/124') ? 124 : 123,
+                    'id' => str_ends_with(
+                        (string) parse_url($request->url(), PHP_URL_PATH),
+                        '/124',
+                    ) ? 124 : 123,
                     'sku' => 'SKU-AUTO-IMAGE',
                 ]);
             }
@@ -241,7 +244,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 && ! str_contains(json_encode($request['images']) ?: '', 'old-woo.jpg');
         });
         Http::assertSent(function ($request) use ($product): bool {
-            if ($request->method() !== 'PUT' || $request->url() !== 'https://shop.test/wp-json/wc/v3/products/124') {
+            if ($request->method() !== 'PUT' || $request->url() !== 'https://shop.test/wp-json/wc/v3/products/124?lang=en') {
                 return false;
             }
 
@@ -601,7 +604,9 @@ class WooCommerceProductDataExportTest extends TestCase
                 ]]);
             }
 
-            if ($request->method() === 'PUT' && str_ends_with($request->url(), '/124')) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'PUT' && str_ends_with($path, '/124')) {
                 $fresh = $product->fresh();
                 $attributes = (array) $fresh->attributes;
                 data_set($attributes, 'master.media', [['src' => '/uploads/products/newer.jpg']]);
@@ -610,7 +615,7 @@ class WooCommerceProductDataExportTest extends TestCase
             }
 
             return Http::response([
-                'id' => str_ends_with($request->url(), '/124') ? 124 : 123,
+                'id' => str_ends_with($path, '/124') ? 124 : 123,
                 'sku' => 'SKU-REFERENCE-RACE',
             ]);
         });
@@ -705,11 +710,14 @@ class WooCommerceProductDataExportTest extends TestCase
 
             if ($request->method() === 'PUT' && in_array($url, [
                 "https://a.test/wp-json/wc/v3/products/{$primaryId}",
-                "https://a.test/wp-json/wc/v3/products/{$englishId}",
+                "https://a.test/wp-json/wc/v3/products/{$englishId}?lang=en",
                 "https://b.test/wp-json/wc/v3/products/{$primaryId}",
-                "https://b.test/wp-json/wc/v3/products/{$englishId}",
+                "https://b.test/wp-json/wc/v3/products/{$englishId}?lang=en",
             ], true)) {
-                return Http::response(['id' => (int) basename($url), 'sku' => 'MULTI-STORE-SKU']);
+                return Http::response([
+                    'id' => (int) basename((string) parse_url($url, PHP_URL_PATH)),
+                    'sku' => 'MULTI-STORE-SKU',
+                ]);
             }
 
             return Http::response([], 404);
@@ -718,9 +726,9 @@ class WooCommerceProductDataExportTest extends TestCase
         app(ProductDataExportService::class)->export($product);
 
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://a.test/wp-json/wc/v3/products/101');
+            && $request->url() === 'https://a.test/wp-json/wc/v3/products/101?lang=en');
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://b.test/wp-json/wc/v3/products/201');
+            && $request->url() === 'https://b.test/wp-json/wc/v3/products/201?lang=en');
         Http::assertNotSent(fn ($request): bool => $request->method() === 'PUT'
             && in_array($request->url(), [
                 'https://a.test/wp-json/wc/v3/products/201',
@@ -885,13 +893,13 @@ class WooCommerceProductDataExportTest extends TestCase
                 ['languages' => ['pl', 'de']],
             )),
             'https://de.test/wp-json/wc/v3/products/300' => Http::response(['id' => 300, 'sku' => 'SKU-DE']),
-            'https://de.test/wp-json/wc/v3/products/301' => Http::response(['id' => 301, 'sku' => 'SKU-DE']),
+            'https://de.test/wp-json/wc/v3/products/301?lang=de' => Http::response(['id' => 301, 'sku' => 'SKU-DE']),
         ]);
 
         app(ProductDataExportService::class)->export($product);
 
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://de.test/wp-json/wc/v3/products/301'
+            && $request->url() === 'https://de.test/wp-json/wc/v3/products/301?lang=de'
             && $request['name'] === 'Hemd'
             && $request['description'] === '<p>Deutsche Beschreibung</p>');
     }
@@ -1351,7 +1359,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 'sku' => 'POLYLANG-SKU',
                 'name' => 'Polish product',
             ]),
-            'https://shop.test/wp-json/wc/v3/products/124' => Http::response([
+            'https://shop.test/wp-json/wc/v3/products/124?lang=en' => Http::response([
                 'id' => 124,
                 'sku' => 'POLYLANG-SKU',
                 'name' => 'English product',
@@ -1411,7 +1419,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 'id' => 123,
                 'sku' => 'SKU-HIDDEN',
             ]),
-            'https://shop.test/wp-json/wc/v3/products/124' => Http::response([
+            'https://shop.test/wp-json/wc/v3/products/124?lang=en' => Http::response([
                 'id' => 124,
                 'sku' => 'SKU-HIDDEN',
             ]),
@@ -1471,7 +1479,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
             && $request['catalog_visibility'] === 'hidden');
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124?lang=en'
             && $request['catalog_visibility'] === 'hidden');
 
         $requests = Http::recorded()->map(fn (array $record) => $record[0])->values();
@@ -1586,7 +1594,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 };
             }
 
-            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/124') {
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/124?lang=en') {
                 return Http::response([
                     'id' => 124,
                     'sku' => 'SKU-DATE',
@@ -1662,7 +1670,7 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'GET'
             && str_contains($request->url(), 'lang=en'));
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124?lang=en'
             && $request['date_created'] === '2026-07-15T09:30:00+02:00'
             && str_ends_with($request['images'][0]['src'], '/uploads/products/shared-pl-en.jpg'));
     }
@@ -1791,7 +1799,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 return Http::response(['id' => 556, 'sku' => ''], 201);
             }
 
-            if ($request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/556') {
+            if ($request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/556?lang=en') {
                 return Http::response(['id' => 556, 'sku' => $request['sku']]);
             }
 
@@ -1883,7 +1891,7 @@ class WooCommerceProductDataExportTest extends TestCase
             )
             && ! isset($request['translations']));
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/556'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/556?lang=en'
             && $request['sku'] === 'SKU-BILINGUAL'
             && $request['global_unique_id'] === '5901234567890'
             && $request['status'] === 'publish'
@@ -2085,7 +2093,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 return Http::response(['id' => 123, 'sku' => 'SKU-RESUME', 'name' => 'Produkt PL']);
             }
 
-            if ($request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223') {
+            if ($request->method() === 'PUT' && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223?lang=en') {
                 return Http::response(['id' => 223, 'sku' => 'SKU-RESUME', 'name' => 'Product EN']);
             }
 
@@ -2140,7 +2148,7 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123');
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223?lang=en'
             && $request['sku'] === 'SKU-RESUME'
             && $request['name'] === 'Product EN'
             && $request['description'] === '<p>Full resumed English content</p>'
@@ -2249,7 +2257,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 ]);
             }
 
-            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/556') {
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/556?lang=en') {
                 return Http::response(['id' => 556, 'sku' => $request['sku']]);
             }
 
@@ -2295,7 +2303,7 @@ class WooCommerceProductDataExportTest extends TestCase
         $linkRequestIndex = $requests->search(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations');
         $skuRequestIndex = $requests->search(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/556');
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/556?lang=en');
         $this->assertIsInt($linkRequestIndex);
         $this->assertIsInt($skuRequestIndex);
         $this->assertLessThan($skuRequestIndex, $linkRequestIndex);
@@ -2406,7 +2414,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 return Http::response(['id' => 223, 'sku' => ''], 201);
             }
 
-            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/223') {
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/223?lang=en') {
                 return Http::response(['id' => 223, 'sku' => $request['sku']]);
             }
 
@@ -2514,7 +2522,7 @@ class WooCommerceProductDataExportTest extends TestCase
             ->keys()
             ->last();
         $finalEnglishPutIndex = $requests->search(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223');
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223?lang=en');
         $this->assertIsInt($successfulLinkIndex);
         $this->assertIsInt($finalEnglishPutIndex);
         $this->assertLessThan($finalEnglishPutIndex, $successfulLinkIndex);
@@ -2761,7 +2769,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 return Http::response(['id' => 800, 'sku' => ''], 201);
             }
 
-            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/800') {
+            if ($request->method() === 'PUT' && $url === 'https://shop.test/wp-json/wc/v3/products/800?lang=en') {
                 return Http::response(['id' => 800, 'sku' => $request['sku']]);
             }
 
@@ -3528,7 +3536,7 @@ class WooCommerceProductDataExportTest extends TestCase
     {
         $this->fakeWooWithGlobalAttributes([
             'https://shop.test/wp-json/wc/v3/products/123' => Http::response(['id' => 123, 'sku' => 'SKU-I18N']),
-            'https://shop.test/wp-json/wc/v3/products/124' => Http::response(['id' => 124, 'sku' => 'SKU-I18N']),
+            'https://shop.test/wp-json/wc/v3/products/124?lang=en' => Http::response(['id' => 124, 'sku' => 'SKU-I18N']),
         ]);
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
@@ -3609,7 +3617,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 ['id' => 71, 'position' => 1, 'visible' => true, 'variation' => false, 'options' => ['Czerwony']],
             ]);
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124?lang=en'
             && $request['attributes'] === [
                 ['id' => 70, 'position' => 0, 'visible' => true, 'variation' => false, 'options' => ['Petite']],
                 ['id' => 71, 'position' => 1, 'visible' => true, 'variation' => false, 'options' => ['Red']],
@@ -3703,7 +3711,7 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::fake([
             'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities' => Http::response($this->readyProductTranslationCapabilities()),
             'https://shop.test/wp-json/wc/v3/products/123' => Http::response(['id' => 123, 'sku' => 'SKU-FULL']),
-            'https://shop.test/wp-json/wc/v3/products/124' => Http::response(['id' => 124, 'sku' => 'SKU-FULL']),
+            'https://shop.test/wp-json/wc/v3/products/124?lang=en' => Http::response(['id' => 124, 'sku' => 'SKU-FULL']),
         ]);
 
         $channel = SalesChannel::query()->create([
@@ -3778,12 +3786,12 @@ class WooCommerceProductDataExportTest extends TestCase
             ->filter(fn ($request): bool => $request->method() === 'PUT'
                 && in_array($request->url(), [
                     'https://shop.test/wp-json/wc/v3/products/123',
-                    'https://shop.test/wp-json/wc/v3/products/124',
+                    'https://shop.test/wp-json/wc/v3/products/124?lang=en',
                 ], true))
             ->keyBy(fn ($request): string => $request->url());
         $this->assertSame(
             $languageRequests['https://shop.test/wp-json/wc/v3/products/123']['images'],
-            $languageRequests['https://shop.test/wp-json/wc/v3/products/124']['images'],
+            $languageRequests['https://shop.test/wp-json/wc/v3/products/124?lang=en']['images'],
         );
         $this->assertCount(2, $languageRequests['https://shop.test/wp-json/wc/v3/products/123']['images']);
 
@@ -3805,7 +3813,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 && $meta['_lemon_product_label_bg_color'] === '#112233';
         });
         Http::assertSent(function ($request): bool {
-            if ($request->method() !== 'PUT' || $request->url() !== 'https://shop.test/wp-json/wc/v3/products/124') {
+            if ($request->method() !== 'PUT' || $request->url() !== 'https://shop.test/wp-json/wc/v3/products/124?lang=en') {
                 return false;
             }
 
@@ -3845,7 +3853,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
             return match ([$request->method(), $request->url()]) {
                 ['PUT', 'https://shop.test/wp-json/wc/v3/products/123'] => Http::response(['id' => 123, 'sku' => 'SET-LEGACY']),
-                ['PUT', 'https://shop.test/wp-json/wc/v3/products/124'] => Http::response(['id' => 124, 'sku' => 'SET-LEGACY']),
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/124?lang=en'] => Http::response(['id' => 124, 'sku' => 'SET-LEGACY']),
                 ['PUT', 'https://shop.test/wp-json/wc/v3/products/123/variations/456'] => Http::response(['id' => 456, 'sku' => 'SET-LEGACY-S']),
                 ['PUT', 'https://shop.test/wp-json/wc/v3/products/124/variations/457?lang=en'] => Http::response(['id' => 457, 'sku' => 'SET-LEGACY-S']),
                 default => Http::response([], 404),
@@ -3962,7 +3970,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
             return match ([$request->method(), $request->url()]) {
                 ['PUT', 'https://shop.test/wp-json/wc/v3/products/123'] => Http::response(['id' => 123, 'sku' => 'SET-NEW']),
-                ['PUT', 'https://shop.test/wp-json/wc/v3/products/124'] => Http::response(['id' => 124, 'sku' => 'SET-NEW']),
+                ['PUT', 'https://shop.test/wp-json/wc/v3/products/124?lang=en'] => Http::response(['id' => 124, 'sku' => 'SET-NEW']),
                 ['POST', 'https://shop.test/wp-json/wc/v3/products/123/variations'] => Http::response(['id' => 456, 'sku' => 'SEM-NEW-S'], 201),
                 ['POST', 'https://shop.test/wp-json/wc/v3/products/124/variations?lang=en'] => Http::response(['id' => 457, 'sku' => $request['sku']], 201),
                 ['PUT', 'https://shop.test/wp-json/wc/v3/products/124/variations/457?lang=en'] => Http::response(['id' => 457, 'sku' => $request['sku']]),
@@ -4368,7 +4376,7 @@ class WooCommerceProductDataExportTest extends TestCase
 
             if ($request->method() === 'PUT' && in_array($url, [
                 'https://shop.test/wp-json/wc/v3/products/123',
-                'https://shop.test/wp-json/wc/v3/products/223',
+                'https://shop.test/wp-json/wc/v3/products/223?lang=en',
                 'https://shop.test/wp-json/wc/v3/products/123/variations/124',
                 'https://shop.test/wp-json/wc/v3/products/123/variations/125',
                 'https://shop.test/wp-json/wc/v3/products/223/variations/224?lang=en',

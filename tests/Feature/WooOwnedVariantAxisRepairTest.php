@@ -156,6 +156,17 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             }
         }
 
+        $englishParentPuts = $putRequests->filter(function (Request $request): bool {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            return $path === '/wp-json/wc/v3/products/223';
+        });
+        $this->assertCount(2, $englishParentPuts);
+        $englishParentPuts->each(function (Request $request): void {
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+            $this->assertSame('en', $query['lang'] ?? null);
+        });
+
         $putsAfterFirstRepair = $putRequests->count();
         $second = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
         $this->assertSame('already_canonical', $second['status']);

@@ -474,7 +474,7 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
 
         return match ([$request->method(), $url]) {
             ['PUT', 'https://shop.test/wp-json/wc/v3/products/123'] => Http::response(['id' => 123, 'sku' => $request['sku']]),
-            ['PUT', 'https://shop.test/wp-json/wc/v3/products/124'] => Http::response(['id' => 124, 'sku' => $request['sku']]),
+            ['PUT', 'https://shop.test/wp-json/wc/v3/products/124?lang=en'] => Http::response(['id' => 124, 'sku' => $request['sku']]),
             ['PUT', 'https://shop.test/wp-json/wc/v3/products/123/variations/456'] => Http::response([
                 'id' => 456,
                 'sku' => $request['sku'],

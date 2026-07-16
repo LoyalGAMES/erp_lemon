@@ -803,7 +803,7 @@ final class WooOwnedVariantAxisRepairService
                         $target['external_product_id'],
                         null,
                         $transition,
-                        null,
+                        $this->apiLanguage($target['language']),
                     );
 
                     if (! $this->parentAxisPayloadMatches($transitionalParent, $transition)) {
@@ -841,7 +841,7 @@ final class WooOwnedVariantAxisRepairService
                         $target['external_product_id'],
                         null,
                         $payload,
-                        null,
+                        $this->apiLanguage($target['language']),
                     );
 
                     if (! $this->parentAxisPayloadMatches($updatedParent, $payload)) {
@@ -1304,7 +1304,7 @@ final class WooOwnedVariantAxisRepairService
                         $target['external_product_id'],
                         null,
                         $transition,
-                        null,
+                        $this->apiLanguage($target['language']),
                     );
 
                     if ($this->parentAxisPayloadMatches($transitionalParent, $transition)) {
@@ -1446,7 +1446,7 @@ final class WooOwnedVariantAxisRepairService
                         ->values()
                         ->all(),
                 ],
-                null,
+                $this->apiLanguage($target['language']),
             );
         } catch (Throwable $exception) {
             $rollbackErrors[] = 'rodzic: '.$exception->getMessage();

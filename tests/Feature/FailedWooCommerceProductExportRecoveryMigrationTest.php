@@ -323,7 +323,9 @@ final class FailedWooCommerceProductExportRecoveryMigrationTest extends TestCase
                 return Http::response(['id' => 9302, 'sku' => ''], 201);
             }
 
-            if ($request->method() === 'PUT' && str_ends_with($url, '/wp-json/wc/v3/products/9302')) {
+            if ($request->method() === 'PUT'
+                && $url === 'https://recovery-1.test/wp-json/wc/v3/products/9302?lang=en'
+            ) {
                 return Http::response(['id' => 9302, 'sku' => $product->sku]);
             }
 
