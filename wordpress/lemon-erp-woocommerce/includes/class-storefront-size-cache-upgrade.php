@@ -7,17 +7,17 @@ if (! defined('ABSPATH')) {
 }
 
 /**
- * Invalidates historical size tiles cached by the storefront theme.
+ * Purges historical size tiles and product data cached before version 0.5.6.
  *
- * Version 0.5.4 already normalizes WooCommerce variation attributes before
- * the theme reads them. Theme transients created before that fix can still
- * contain the old order, though, so this upgrade removes lemon_sizes_* entries
- * and lets the theme rebuild them through the existing normalizer. External
- * object caches are invalidated using the narrowest operation they support.
+ * Version 0.5.6 removes the storefront normalizer completely. Theme
+ * transients and persistent WooCommerce product objects created by an older
+ * version can otherwise keep its wrong availability/order after the code is
+ * gone. This admin-only, revisioned cleanup deletes those historical values
+ * once; it never creates a cache or changes product presentation at runtime.
  */
 final class Lemon_Erp_Storefront_Size_Cache_Upgrade
 {
-    public const REVISION = 'lemon_sizes_2026_07_16_000001';
+    public const REVISION = 'lemon_sizes_2026_07_16_000002';
 
     private const REVISION_OPTION = 'lemon_erp_storefront_size_cache_revision';
 
@@ -31,7 +31,7 @@ final class Lemon_Erp_Storefront_Size_Cache_Upgrade
 
     public function hooks(): void
     {
-        add_action('init', [self::class, 'maybeUpgrade'], 1);
+        add_action('admin_init', [self::class, 'maybeUpgrade'], 1);
     }
 
     /**
@@ -165,11 +165,11 @@ final class Lemon_Erp_Storefront_Size_Cache_Upgrade
     }
 
     /**
-     * With an external object cache WordPress stores transients only in the
-     * `transient` cache group, so there may be no database names to discover.
-     * Prefer a group-only flush. Older cache backends expose no portable key
-     * enumeration or group invalidation; a one-time full object-cache flush is
-     * then the only reliable way to invalidate an unknown lemon_sizes_* key.
+     * With an external object cache WordPress can retain both theme transients
+     * and the `product_variation_attributes_*` values written by the removed
+     * normalizer. Prefer narrow group invalidation for `transient` and
+     * `products`. Older backends expose no portable key enumeration or group
+     * invalidation, so a one-time full flush is the only reliable fallback.
      */
     private static function flushExternalObjectCache(): bool
     {
@@ -180,9 +180,13 @@ final class Lemon_Erp_Storefront_Size_Cache_Upgrade
         if (function_exists('wp_cache_supports')
             && function_exists('wp_cache_flush_group')
             && wp_cache_supports('flush_group')
-            && wp_cache_flush_group('transient')
         ) {
-            return true;
+            $transientsFlushed = wp_cache_flush_group('transient');
+            $productsFlushed = wp_cache_flush_group('products');
+
+            if ($transientsFlushed && $productsFlushed) {
+                return true;
+            }
         }
 
         return wp_cache_flush();

@@ -1844,16 +1844,28 @@ class WooCommerceProductDataExportTest extends TestCase
             'allow_negative_stock' => false,
             'is_active' => true,
         ]);
-        StockBalance::query()->create([
+        $balance = StockBalance::query()->create([
             'warehouse_id' => $warehouse->id,
             'product_id' => $product->id,
             'quantity_on_hand' => 7,
             'quantity_reserved' => 0,
             'quantity_available' => 7,
         ]);
+        $product->load('stockBalances');
+        $this->assertSame(7, (int) $product->stockBalances->sum('quantity_available'));
+        StockBalance::query()->whereKey($balance->id)->update([
+            'quantity_on_hand' => 11,
+            'quantity_available' => 11,
+        ]);
+        $this->assertSame(7, (int) $product->stockBalances->sum('quantity_available'));
 
         $result = app(ProductDataExportService::class)->create($product, $integration);
 
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && $request->url() === 'https://shop.test/wp-json/wc/v3/products'
+            && $request['manage_stock'] === true
+            && $request['stock_quantity'] === 11
+            && $request['stock_status'] === 'instock');
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products?lang=en'
             && $request['name'] === 'English product'
@@ -1876,7 +1888,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request['status'] === 'publish'
             && $request['catalog_visibility'] === 'catalog'
             && $request['manage_stock'] === true
-            && $request['stock_quantity'] === 7
+            && $request['stock_quantity'] === 11
             && $request['stock_status'] === 'instock'
             && $request['backorders'] === 'no'
             && collect((array) $request['meta_data'])->contains(
@@ -2821,8 +2833,8 @@ class WooCommerceProductDataExportTest extends TestCase
         );
         $this->assertSame($publicationDateWithOffset, $plParent['date_created']);
         $this->assertSame($publicationDateWithOffset, $enParent['date_created']);
-        $this->assertSame([10, 20], $plVariants->pluck('menu_order')->all());
-        $this->assertSame([10, 20], $enVariants->pluck('menu_order')->all());
+        $this->assertSame([20, 30], $plVariants->pluck('menu_order')->all());
+        $this->assertSame([20, 30], $enVariants->pluck('menu_order')->all());
         $this->assertSame(['<p>Opis rodzica PL</p>', '<p>Opis rodzica PL</p>'], $plVariants->pluck('description')->all());
         $this->assertSame(['<p>Parent description EN</p>', '<p>Parent description EN</p>'], $enVariants->pluck('description')->all());
         $this->assertSame(['699.00', '699.00'], $plVariants->pluck('regular_price')->all());
@@ -3045,10 +3057,10 @@ class WooCommerceProductDataExportTest extends TestCase
             ->filter(fn (array $attribute): bool => (bool) $attribute['variation'])
             ->values();
         $this->assertCount(1, $variantAttributes);
-        $this->assertSame(72, $variantAttributes[0]['id']);
+        $this->assertSame(70, $variantAttributes[0]['id']);
         $this->assertSame(['S', 'M'], $variantAttributes[0]['options']);
         $this->assertTrue(collect($parentRequest['attributes'])
-            ->reject(fn (array $attribute): bool => $attribute['id'] === 72)
+            ->reject(fn (array $attribute): bool => $attribute['id'] === 70)
             ->every(fn (array $attribute): bool => $attribute['variation'] === false));
         $this->assertTrue(collect($parentRequest['attributes'])->every(
             fn (array $attribute): bool => ! array_key_exists('name', $attribute)
@@ -3063,13 +3075,13 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame(2, $variationRequests->count());
         $this->assertSame('SET-AMORA-S', $variationRequests[0]['sku']);
         $this->assertCount(1, $variationRequests[0]['attributes']);
-        $this->assertSame(72, $variationRequests[0]['attributes'][0]['id']);
+        $this->assertSame(70, $variationRequests[0]['attributes'][0]['id']);
         $this->assertSame('S', $variationRequests[0]['attributes'][0]['option']);
         $this->assertSame(10, $variationRequests[0]['menu_order']);
         $this->assertSame('819.00', $variationRequests[0]['regular_price']);
         $this->assertSame('SET-AMORA-M', $variationRequests[1]['sku']);
         $this->assertCount(1, $variationRequests[1]['attributes']);
-        $this->assertSame(72, $variationRequests[1]['attributes'][0]['id']);
+        $this->assertSame(70, $variationRequests[1]['attributes'][0]['id']);
         $this->assertSame('M', $variationRequests[1]['attributes'][0]['option']);
         $this->assertSame(20, $variationRequests[1]['menu_order']);
         $this->assertSame('829.00', $variationRequests[1]['regular_price']);
@@ -3515,6 +3527,7 @@ class WooCommerceProductDataExportTest extends TestCase
             'values' => ['S', 'M'],
             'values_en' => ['Small', 'Medium'],
             'is_variant' => true,
+            'sort_order' => 10,
         ]);
         ProductParameterDefinition::query()->create([
             'name' => 'Kolor',
@@ -3523,6 +3536,7 @@ class WooCommerceProductDataExportTest extends TestCase
             'input_type' => 'select',
             'values' => ['Czerwony', 'Niebieski'],
             'values_en' => ['Red', 'Blue'],
+            'sort_order' => 20,
         ]);
         $product = Product::query()->create([
             'sku' => 'SKU-I18N',
@@ -3539,13 +3553,13 @@ class WooCommerceProductDataExportTest extends TestCase
                         'en' => ['name' => 'Shirt'],
                     ],
                     'parameters' => [
+                        ['name' => 'Kolor', 'value' => 'Czerwony'],
                         [
                             'name' => 'Rozmiar',
                             'value' => 'S',
                             'name_en' => 'Sizing',
                             'value_en' => 'Petite',
                         ],
-                        ['name' => 'Kolor', 'value' => 'Czerwony'],
                     ],
                 ],
                 'woocommerce_translations' => [
@@ -3566,14 +3580,14 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
             && $request['attributes'] === [
-                ['id' => 70, 'visible' => true, 'variation' => false, 'options' => ['S']],
-                ['id' => 71, 'visible' => true, 'variation' => false, 'options' => ['Czerwony']],
+                ['id' => 70, 'position' => 0, 'visible' => true, 'variation' => false, 'options' => ['S']],
+                ['id' => 71, 'position' => 1, 'visible' => true, 'variation' => false, 'options' => ['Czerwony']],
             ]);
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124'
             && $request['attributes'] === [
-                ['id' => 70, 'visible' => true, 'variation' => false, 'options' => ['Petite']],
-                ['id' => 71, 'visible' => true, 'variation' => false, 'options' => ['Red']],
+                ['id' => 70, 'position' => 0, 'visible' => true, 'variation' => false, 'options' => ['Petite']],
+                ['id' => 71, 'position' => 1, 'visible' => true, 'variation' => false, 'options' => ['Red']],
             ]);
     }
 
@@ -4017,7 +4031,7 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations'
             && $request['sku'] === 'SEM-NEW-S'
-            && $request['menu_order'] === 1
+            && $request['menu_order'] === 10
             && $request['global_unique_id'] === '5901234567890'
             && str_ends_with($request['image']['src'], '/uploads/products/shared-variant-pl-en.jpg'));
         Http::assertSent(fn ($request): bool => $request->method() === 'POST'
@@ -4032,7 +4046,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && collect((array) $request['meta_data'])->doesntContain(
                 fn (array $meta): bool => in_array($meta['key'] ?? null, ['_ean', '_sempre_erp_ean'], true),
             )
-            && $request['menu_order'] === 1
+            && $request['menu_order'] === 10
             && $request['attributes'][0]['id'] === 70
             && $request['attributes'][0]['option'] === 'Petite'
             && str_ends_with($request['image']['src'], '/uploads/products/shared-variant-pl-en.jpg'));
@@ -4045,7 +4059,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request['stock_quantity'] === 0
             && $request['stock_status'] === 'outofstock'
             && $request['backorders'] === 'no'
-            && $request['menu_order'] === 1
+            && $request['menu_order'] === 10
             && $request['attributes'][0]['option'] === 'Petite'
             && ! array_key_exists('date_created', $request->data())
             && collect((array) $request['meta_data'])->contains(
@@ -4104,6 +4118,25 @@ class WooCommerceProductDataExportTest extends TestCase
             'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
             'settings' => ['product_import' => ['languages' => ['pl', 'en']]],
         ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            'values_en' => ['S/M', 'M/L'],
+            'is_variant' => true,
+            'sort_order' => 10,
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Kolor',
+            'name_en' => 'Colour',
+            'slug' => 'kolor',
+            'input_type' => 'select',
+            'values' => ['Kremowy'],
+            'values_en' => ['Cream'],
+            'sort_order' => 20,
+        ]);
         $parent = Product::query()->create([
             'sku' => 'LEGACY-BLVARIANT',
             'name' => 'Spodnie legacy',
@@ -4124,12 +4157,7 @@ class WooCommerceProductDataExportTest extends TestCase
                     ],
                     'parameters' => [
                         ['name' => 'BLVariant', 'value' => 's-m | m-l', 'variation' => true],
-                        [
-                            'name' => 'Rozmiar',
-                            'name_en' => 'Size',
-                            'value' => 'S/M | M/L',
-                            'variation' => false,
-                        ],
+                        ['name' => 'Kolor', 'name_en' => 'Colour', 'value' => 'Kremowy', 'value_en' => 'Cream'],
                     ],
                 ],
                 'woocommerce_translations' => [
@@ -4153,8 +4181,8 @@ class WooCommerceProductDataExportTest extends TestCase
         ]);
 
         foreach ([
-            ['option' => 's-m', 'pl_id' => '124', 'en_id' => '224', 'order' => 10, 'stock' => 2],
-            ['option' => 'm-l', 'pl_id' => '125', 'en_id' => '225', 'order' => 20, 'stock' => 3],
+            ['option' => 's-m', 'pl_id' => '124', 'en_id' => '224', 'order' => 20, 'stock' => 2],
+            ['option' => 'm-l', 'pl_id' => '125', 'en_id' => '225', 'order' => 10, 'stock' => 3],
         ] as $row) {
             $variant = Product::query()->create([
                 'sku' => 'LEGACY-BLVARIANT-'.strtoupper($row['option']),
@@ -4172,6 +4200,11 @@ class WooCommerceProductDataExportTest extends TestCase
                         'parameters' => [[
                             'name' => 'BLVariant',
                             'value' => $row['option'],
+                            'variation' => true,
+                        ], [
+                            'name' => 'Rozmiar',
+                            'name_en' => 'Size',
+                            'value' => $row['option'] === 's-m' ? 'S/M' : 'M/L',
                             'variation' => true,
                         ]],
                     ],
@@ -4229,7 +4262,14 @@ class WooCommerceProductDataExportTest extends TestCase
                 ->filter(fn (array $attribute): bool => (bool) $attribute['variation'])
                 ->values();
             $this->assertCount(1, $variationAttributes);
+            $this->assertSame(0, $variationAttributes->first()['position']);
             $this->assertSame(['S/M', 'M/L'], $variationAttributes->first()['options']);
+            $this->assertSame([0, 1], collect($request['attributes'])->pluck('position')->all());
+            $this->assertSame(['S/M', 'M/L'], $request['attributes'][0]['options']);
+            $this->assertSame(
+                str_contains($request->url(), '/products/223') ? ['Cream'] : ['Kremowy'],
+                $request['attributes'][1]['options'],
+            );
             $this->assertSame('Rozmiar', collect($request['meta_data'])
                 ->firstWhere('key', '_sempre_erp_variant_attribute')['value'] ?? null);
         });
@@ -4238,14 +4278,16 @@ class WooCommerceProductDataExportTest extends TestCase
             (string) parse_url($request->url(), PHP_URL_PATH),
             '/variations/',
         ));
-        $this->assertSame(
-            ['S/M', 'S/M', 'M/L', 'M/L'],
-            $variations->map(fn ($request): mixed => $request['attributes'][0]['option'])
-                ->values()
-                ->all(),
-        );
-        $this->assertSame([10, 10, 20, 20], $variations->pluck('menu_order')->values()->all());
-        $this->assertSame([2, 2, 3, 3], $variations->pluck('stock_quantity')->values()->all());
+        $sizes = $variations->groupBy(fn ($request): string => $request['attributes'][0]['option']);
+        $this->assertSame(['S/M', 'M/L'], $sizes->keys()->sortBy(
+            fn (string $option): int => $option === 'S/M' ? 0 : 1,
+        )->values()->all());
+        $this->assertCount(2, $sizes->get('S/M'));
+        $this->assertSame([10], $sizes->get('S/M')->pluck('menu_order')->unique()->values()->all());
+        $this->assertSame([2], $sizes->get('S/M')->pluck('stock_quantity')->unique()->values()->all());
+        $this->assertCount(2, $sizes->get('M/L'));
+        $this->assertSame([20], $sizes->get('M/L')->pluck('menu_order')->unique()->values()->all());
+        $this->assertSame([3], $sizes->get('M/L')->pluck('stock_quantity')->unique()->values()->all());
         $variations->each(function ($request): void {
             $this->assertTrue($request['manage_stock']);
             $this->assertSame('instock', $request['stock_status']);
@@ -4509,7 +4551,7 @@ class WooCommerceProductDataExportTest extends TestCase
             [10, 20],
         );
 
-        $this->assertSame(3, Http::recorded()->filter(
+        $this->assertSame(6, Http::recorded()->filter(
             fn (array $pair): bool => $pair[0]->method() === 'PUT',
         )->count());
     }
@@ -4937,6 +4979,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
             && $request['attributes'] === [[
                 'id' => 90,
+                'position' => 0,
                 'visible' => true,
                 'variation' => false,
                 'options' => ['SEMPRE'],
@@ -4997,6 +5040,7 @@ class WooCommerceProductDataExportTest extends TestCase
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products'
             && $request['attributes'] === [[
                 'id' => 90,
+                'position' => 0,
                 'visible' => true,
                 'variation' => false,
                 'options' => ['SEMPRE'],

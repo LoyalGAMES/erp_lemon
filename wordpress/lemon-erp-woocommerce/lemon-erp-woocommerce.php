@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Lemon ERP for WooCommerce
  * Description: Adds Lemon ERP checkout fields, catalog identity and invoice metadata endpoints for WooCommerce.
- * Version: 0.5.5
+ * Version: 0.5.6
  * Author: Lemon ERP
  * Requires PHP: 8.0
  * Requires Plugins: woocommerce
@@ -26,7 +26,11 @@ require_once __DIR__.'/includes/class-customer-webhook.php';
 require_once __DIR__.'/includes/class-product-publication-date.php';
 require_once __DIR__.'/includes/class-product-translation-linker.php';
 require_once __DIR__.'/includes/class-storefront-size-cache-upgrade.php';
-require_once __DIR__.'/includes/class-storefront-variation-attributes.php';
+
+register_activation_hook(
+    __FILE__,
+    [Lemon_Erp_Storefront_Size_Cache_Upgrade::class, 'maybeUpgrade'],
+);
 
 add_action('before_woocommerce_init', static function (): void {
     if (class_exists(FeaturesUtil::class)) {
@@ -36,7 +40,7 @@ add_action('before_woocommerce_init', static function (): void {
 
 final class Lemon_Erp_WooCommerce
 {
-    private const VERSION = '0.5.5';
+    private const VERSION = '0.5.6';
 
     private const CATALOG_CONTRACT = 1;
 
@@ -82,7 +86,6 @@ final class Lemon_Erp_WooCommerce
         (new Lemon_Erp_Product_Publication_Date)->hooks();
         (new Lemon_Erp_Product_Translation_Linker)->hooks();
         (new Lemon_Erp_Storefront_Size_Cache_Upgrade)->hooks();
-        (new Lemon_Erp_Storefront_Variation_Attributes)->hooks();
         add_filter('woocommerce_checkout_fields', [$this, 'classicCheckoutFields']);
         add_action('wp_enqueue_scripts', [$this, 'enqueueCheckoutUi']);
         add_action('woocommerce_after_checkout_validation', [$this, 'validateClassicCheckout'], 10, 2);

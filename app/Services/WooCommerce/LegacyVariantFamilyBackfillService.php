@@ -43,6 +43,8 @@ final class LegacyVariantFamilyBackfillService
 
     public const WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION = 'woo_owned_post_axis_catalog_sync_2026_07_15_000020';
 
+    public const ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION = 'attribute_positions_and_live_stock_2026_07_16_000023';
+
     public const CRITICAL_EXPORT_QUEUE = 'woocommerce-critical';
 
     private const BACKFILL_PATH = 'product_data_export.legacy_variant_backfill';
@@ -207,11 +209,15 @@ final class LegacyVariantFamilyBackfillService
         // immediately instead of reusing readiness from an earlier attempt.
         $this->integrationReadiness = [];
 
-        if (! $this->productIntegrationsReady((int) $product->id)) {
+        if (! $this->productIntegrationsReady((int) $product->id, $revision)) {
             return 'unready';
         }
 
-        $reservation = $this->reserve((int) $mapping->id, max(1, $staleMinutes));
+        $reservation = $this->reserve(
+            (int) $mapping->id,
+            max(1, $staleMinutes),
+            $revision,
+        );
 
         if ($reservation['status'] === 'active') {
             return 'active';
@@ -221,12 +227,17 @@ final class LegacyVariantFamilyBackfillService
             return 'backoff';
         }
 
+        if ($reservation['status'] === 'changed') {
+            return 'active';
+        }
+
         if ($reservation['status'] !== 'reserved') {
             return 'missing';
         }
 
         try {
-            if (in_array($revision, [
+            if (in_array($reservation['revision'], [
+                self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
                 self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
                 self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
             ], true)) {
@@ -280,6 +291,7 @@ final class LegacyVariantFamilyBackfillService
         // catalog backfill. Dispatch its revision first, then continue the
         // normal newest-first queue without visiting the same mapping twice.
         foreach ([
+            self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
             self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
             self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
             self::LEGACY_SIZE_VARIANT_AXIS_FOLLOWUP_REVISION,
@@ -316,13 +328,25 @@ final class LegacyVariantFamilyBackfillService
                     continue;
                 }
 
-                if (! $this->productIntegrationsReady((int) $mapping->product_id)) {
+                $requestedRevision = $this->normalizedRevision(data_get(
+                    $mapping->metadata,
+                    self::BACKFILL_PATH.'.revision',
+                ));
+
+                if (! $this->productIntegrationsReady(
+                    (int) $mapping->product_id,
+                    $requestedRevision,
+                )) {
                     $result['skipped_unready']++;
 
                     continue;
                 }
 
-                $reservation = $this->reserve($mapping->id, max(1, $staleMinutes));
+                $reservation = $this->reserve(
+                    $mapping->id,
+                    max(1, $staleMinutes),
+                    $requestedRevision,
+                );
 
                 if ($reservation['status'] === 'active') {
                     $result['skipped_active']++;
@@ -336,15 +360,19 @@ final class LegacyVariantFamilyBackfillService
                     continue;
                 }
 
+                if ($reservation['status'] === 'changed') {
+                    $result['skipped_active']++;
+
+                    continue;
+                }
+
                 if ($reservation['status'] !== 'reserved') {
                     continue;
                 }
 
                 try {
-                    if (in_array(data_get(
-                        $mapping->metadata,
-                        self::BACKFILL_PATH.'.revision',
-                    ), [
+                    if (in_array($reservation['revision'], [
+                        self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
                         self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
                         self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
                     ], true)) {
@@ -398,11 +426,14 @@ final class LegacyVariantFamilyBackfillService
     }
 
     /**
-     * @return array{status: 'active'|'backoff'|'missing'|'reserved', product_id?: int, token?: string}
+     * @return array{status: 'active'|'backoff'|'changed'|'missing'|'reserved', product_id?: int, token?: string, revision?: ?string}
      */
-    private function reserve(int $mappingId, int $staleMinutes): array
-    {
-        return DB::transaction(function () use ($mappingId, $staleMinutes): array {
+    private function reserve(
+        int $mappingId,
+        int $staleMinutes,
+        ?string $expectedRevision,
+    ): array {
+        return DB::transaction(function () use ($mappingId, $staleMinutes, $expectedRevision): array {
             $mapping = ProductChannelMapping::query()->lockForUpdate()->find($mappingId);
 
             if (! $mapping instanceof ProductChannelMapping || ! $this->isPendingBackfill($mapping)) {
@@ -410,6 +441,21 @@ final class LegacyVariantFamilyBackfillService
             }
 
             $metadata = (array) $mapping->metadata;
+            $revision = $this->normalizedRevision(data_get(
+                $metadata,
+                self::BACKFILL_PATH.'.revision',
+            ));
+
+            // Readiness was checked outside the transaction because it calls
+            // WordPress. Never reserve a newer repair revision that appeared
+            // while that remote check was in flight; the next dispatcher pass
+            // will validate the exact new requirements first.
+            if ($revision !== $expectedRevision) {
+                return ['status' => 'changed'];
+            }
+
+            $reservedRevision = $revision;
+
             $nextAttemptAt = $this->date(data_get(
                 $metadata,
                 self::BACKFILL_PATH.'.next_attempt_at',
@@ -449,12 +495,12 @@ final class LegacyVariantFamilyBackfillService
                         'queued_at' => now()->toISOString(),
                         'attempts' => max(0, (int) ($backfill['attempts'] ?? 0)) + 1,
                     ]);
-                    $revision = trim((string) ($backfill['revision'] ?? ''));
+                    $productRevision = trim((string) ($backfill['revision'] ?? ''));
 
-                    if ($revision === '') {
+                    if ($productRevision === '') {
                         unset($queuedBackfill['queued_revision']);
                     } else {
-                        $queuedBackfill['queued_revision'] = $revision;
+                        $queuedBackfill['queued_revision'] = $productRevision;
                     }
 
                     data_set($productMetadata, self::BACKFILL_PATH, $queuedBackfill);
@@ -468,6 +514,7 @@ final class LegacyVariantFamilyBackfillService
                 'status' => 'reserved',
                 'product_id' => (int) $mapping->product_id,
                 'token' => $token,
+                'revision' => $reservedRevision,
             ];
         });
     }
@@ -511,6 +558,17 @@ final class LegacyVariantFamilyBackfillService
             );
     }
 
+    private function normalizedRevision(mixed $revision): ?string
+    {
+        if (! is_string($revision)) {
+            return null;
+        }
+
+        $revision = trim($revision);
+
+        return $revision !== '' ? $revision : null;
+    }
+
     private function localReservationState(ProductChannelMapping $mapping, int $staleMinutes): ?string
     {
         $nextAttemptAt = $this->date(data_get(
@@ -543,7 +601,7 @@ final class LegacyVariantFamilyBackfillService
                 : 'active';
     }
 
-    private function productIntegrationsReady(int $productId): bool
+    private function productIntegrationsReady(int $productId, ?string $revision = null): bool
     {
         $requiresVariantTranslationLink = Product::query()
             ->whereKey($productId)
@@ -580,7 +638,8 @@ final class LegacyVariantFamilyBackfillService
                 fn (mixed $language): bool => mb_strtolower(trim((string) $language)) !== 'pl',
             );
             $readinessKey = $integration->id.'|'.implode(',', $languages)
-                .'|variants:'.(int) ($requiresVariantTranslationLink && $needsTranslations);
+                .'|variants:'.(int) ($requiresVariantTranslationLink && $needsTranslations)
+                .'|revision:'.($revision ?? 'legacy');
 
             if (! array_key_exists($readinessKey, $this->integrationReadiness)) {
                 $this->integrationReadiness[$readinessKey] = $this->client
@@ -590,7 +649,9 @@ final class LegacyVariantFamilyBackfillService
                         || $this->client->productVariationTranslationLinkingAvailable(
                             $integration,
                             $languages,
-                        ));
+                        ))
+                    && ($revision !== self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION
+                        || $this->client->lemonErpPluginVersionAtLeast($integration, '0.5.6'));
             }
 
             if (! $this->integrationReadiness[$readinessKey]) {

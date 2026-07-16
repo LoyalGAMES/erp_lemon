@@ -35,12 +35,6 @@ final class WooCommerceClient
 
     private const PRODUCT_VARIATION_TRANSLATION_CREATION_SKU_PREFIX = 'LEMON-VTR-';
 
-    /** @var array<string, list<array<string, mixed>>> */
-    private array $globalProductAttributesCache = [];
-
-    /** @var array<string, list<array<string, mixed>>> */
-    private array $globalProductAttributeTermsCache = [];
-
     /** @var array<string, true> */
     private array $linkedGlobalProductAttributeTermTranslations = [];
 
@@ -1326,12 +1320,10 @@ final class WooCommerceClient
 
             if (is_array($created) && filled($created['id'] ?? null)) {
                 $attribute = $created;
-                $this->appendGlobalProductAttributeCache($integration, $created);
             } else {
                 // Handle a concurrent create, a term_exists style collision,
                 // and an ambiguous transport failure with one deterministic
                 // refetch by canonical slug/name.
-                $this->forgetGlobalProductAttributes($integration);
                 $attribute = $this->findGlobalProductAttribute($integration, $sourceName);
             }
 
@@ -1376,7 +1368,6 @@ final class WooCommerceClient
                 is_array($updated) ? $updated : [],
                 ['order_by' => 'menu_order'],
             );
-            $this->replaceGlobalProductAttributeCache($integration, $attribute);
         }
 
         $resolvedOptions = [];
@@ -1538,7 +1529,6 @@ final class WooCommerceClient
             is_array($updated) ? $updated : [],
             ['order_by' => 'menu_order'],
         );
-        $this->replaceGlobalProductAttributeCache($integration, $attribute);
 
         return $attribute;
     }
@@ -1601,7 +1591,6 @@ final class WooCommerceClient
             is_array($updated) ? $updated : [],
             $payload,
         );
-        $this->replaceGlobalProductAttributeTermCache($integration, $attributeId, $term);
 
         return $term;
     }
@@ -1613,7 +1602,7 @@ final class WooCommerceClient
         array $translations,
     ): void {
         ksort($translations);
-        $signature = $this->globalProductAttributeCacheKey($integration)
+        $signature = $this->globalProductAttributeIntegrationKey($integration)
             .'|'.$attributeId
             .'|'.sha1(json_encode($translations, JSON_UNESCAPED_SLASHES) ?: '');
 
@@ -1661,12 +1650,6 @@ final class WooCommerceClient
      */
     private function globalProductAttributes(WordpressIntegration $integration): array
     {
-        $cacheKey = $this->globalProductAttributeCacheKey($integration);
-
-        if (array_key_exists($cacheKey, $this->globalProductAttributesCache)) {
-            return $this->globalProductAttributesCache[$cacheKey];
-        }
-
         $attributes = [];
 
         for ($page = 1; $page <= 100; $page++) {
@@ -1696,7 +1679,7 @@ final class WooCommerceClient
             }
         }
 
-        return $this->globalProductAttributesCache[$cacheKey] = $attributes;
+        return $attributes;
     }
 
     /**
@@ -1753,9 +1736,7 @@ final class WooCommerceClient
                 && ! in_array((int) $created['id'], $excludedTermIds, true)
             ) {
                 $term = $created;
-                $this->appendGlobalProductAttributeTermCache($integration, $attributeId, $language, $created);
             } else {
-                $this->forgetGlobalProductAttributeTerms($integration, $attributeId, $language);
                 $term = $this->findGlobalProductAttributeTerm(
                     $integration,
                     $attributeId,
@@ -1778,8 +1759,7 @@ final class WooCommerceClient
         }
 
         // Treat a missing response field as unknown and write the canonical
-        // value once. The updated response is cached, keeping later calls in
-        // this export idempotent.
+        // value once.
         if ($menuOrder !== null
             && (! array_key_exists('menu_order', $term)
                 || (int) $term['menu_order'] !== $menuOrder)
@@ -1804,7 +1784,6 @@ final class WooCommerceClient
                 is_array($updated) ? $updated : [],
                 ['menu_order' => $menuOrder],
             );
-            $this->replaceGlobalProductAttributeTermCache($integration, $attributeId, $term);
         }
 
         return $term;
@@ -2019,12 +1998,6 @@ final class WooCommerceClient
         int $attributeId,
         ?string $language,
     ): array {
-        $cacheKey = $this->globalProductAttributeTermsCacheKey($integration, $attributeId, $language);
-
-        if (array_key_exists($cacheKey, $this->globalProductAttributeTermsCache)) {
-            return $this->globalProductAttributeTermsCache[$cacheKey];
-        }
-
         $terms = [];
 
         for ($page = 1; $page <= 100; $page++) {
@@ -2060,104 +2033,12 @@ final class WooCommerceClient
             }
         }
 
-        return $this->globalProductAttributeTermsCache[$cacheKey] = $terms;
+        return $terms;
     }
 
-    /** @param array<string, mixed> $attribute */
-    private function appendGlobalProductAttributeCache(WordpressIntegration $integration, array $attribute): void
-    {
-        $cacheKey = $this->globalProductAttributeCacheKey($integration);
-
-        if (array_key_exists($cacheKey, $this->globalProductAttributesCache)) {
-            $this->globalProductAttributesCache[$cacheKey][] = $attribute;
-        }
-    }
-
-    /** @param array<string, mixed> $attribute */
-    private function replaceGlobalProductAttributeCache(
-        WordpressIntegration $integration,
-        array $attribute,
-    ): void {
-        $cacheKey = $this->globalProductAttributeCacheKey($integration);
-
-        if (! array_key_exists($cacheKey, $this->globalProductAttributesCache)) {
-            return;
-        }
-
-        $attributeId = (int) ($attribute['id'] ?? 0);
-        $this->globalProductAttributesCache[$cacheKey] = collect(
-            $this->globalProductAttributesCache[$cacheKey],
-        )
-            ->map(fn (array $cached): array => (int) ($cached['id'] ?? 0) === $attributeId
-                ? array_merge($cached, $attribute)
-                : $cached)
-            ->all();
-    }
-
-    private function forgetGlobalProductAttributes(WordpressIntegration $integration): void
-    {
-        unset($this->globalProductAttributesCache[$this->globalProductAttributeCacheKey($integration)]);
-    }
-
-    /** @param array<string, mixed> $term */
-    private function appendGlobalProductAttributeTermCache(
-        WordpressIntegration $integration,
-        int $attributeId,
-        ?string $language,
-        array $term,
-    ): void {
-        $cacheKey = $this->globalProductAttributeTermsCacheKey($integration, $attributeId, $language);
-
-        if (array_key_exists($cacheKey, $this->globalProductAttributeTermsCache)) {
-            $this->globalProductAttributeTermsCache[$cacheKey][] = $term;
-        }
-    }
-
-    /** @param array<string, mixed> $term */
-    private function replaceGlobalProductAttributeTermCache(
-        WordpressIntegration $integration,
-        int $attributeId,
-        array $term,
-    ): void {
-        $prefix = $this->globalProductAttributeCacheKey($integration).'|'.$attributeId.'|';
-        $termId = (int) ($term['id'] ?? 0);
-
-        foreach ($this->globalProductAttributeTermsCache as $cacheKey => $cachedTerms) {
-            if (! str_starts_with($cacheKey, $prefix)) {
-                continue;
-            }
-
-            $this->globalProductAttributeTermsCache[$cacheKey] = collect($cachedTerms)
-                ->map(fn (array $cached): array => (int) ($cached['id'] ?? 0) === $termId
-                    ? array_merge($cached, $term)
-                    : $cached)
-                ->all();
-        }
-    }
-
-    private function forgetGlobalProductAttributeTerms(
-        WordpressIntegration $integration,
-        int $attributeId,
-        ?string $language,
-    ): void {
-        unset($this->globalProductAttributeTermsCache[
-            $this->globalProductAttributeTermsCacheKey($integration, $attributeId, $language)
-        ]);
-    }
-
-    private function globalProductAttributeCacheKey(WordpressIntegration $integration): string
+    private function globalProductAttributeIntegrationKey(WordpressIntegration $integration): string
     {
         return (string) ($integration->getKey() ?: $integration->base_url);
-    }
-
-    private function globalProductAttributeTermsCacheKey(
-        WordpressIntegration $integration,
-        int $attributeId,
-        ?string $language,
-    ): string {
-        return $this->globalProductAttributeCacheKey($integration)
-            .'|'.$attributeId
-            .'|'.(filled($language) ? mb_strtolower(trim((string) $language)) : '*');
     }
 
     private function globalProductAttributeSlug(string $name): string
@@ -2485,6 +2366,40 @@ final class WooCommerceClient
         return $requiredLanguages->every(
             fn (string $language): bool => $availableLanguages->contains($language),
         );
+    }
+
+    /**
+     * Read the installed Lemon ERP plugin version from WordPress without
+     * retaining it between checks. Corrective catalog exports that depend on
+     * a plugin upgrade must remain pending until that exact backend is live.
+     */
+    public function lemonErpPluginVersionAtLeast(
+        WordpressIntegration $integration,
+        string $minimumVersion,
+    ): bool {
+        $minimumVersion = trim($minimumVersion);
+
+        if ($minimumVersion === '') {
+            return false;
+        }
+
+        try {
+            $response = $this->request($integration, retry: false)
+                ->withoutRedirecting()
+                ->get($this->wordpressRestEndpoint(
+                    $integration,
+                    '/wc-lemon-erp/v1/catalog/products/translations/capabilities',
+                ));
+        } catch (Throwable) {
+            return false;
+        }
+
+        $pluginVersion = $response->successful()
+            ? data_get($response->json(), 'plugin_version')
+            : null;
+
+        return is_string($pluginVersion)
+            && version_compare($pluginVersion, $minimumVersion, '>=');
     }
 
     /**

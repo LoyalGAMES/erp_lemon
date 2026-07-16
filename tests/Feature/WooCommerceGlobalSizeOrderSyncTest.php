@@ -94,7 +94,7 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
             'renamed_terms' => 0,
         ], $second);
         $this->assertCount(3, $mutations);
-        $this->assertSame($requestCount, Http::recorded()->count());
+        $this->assertSame($requestCount + 3, Http::recorded()->count());
     }
 
     public function test_it_uses_the_definition_matching_the_existing_taxonomy_when_a_historical_size_dictionary_also_exists(): void

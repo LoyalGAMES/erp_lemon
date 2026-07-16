@@ -214,7 +214,11 @@ require_once __DIR__.'/../wordpress/lemon-erp-woocommerce/includes/class-storefr
 
 $upgrade = new Lemon_Erp_Storefront_Size_Cache_Upgrade;
 $upgrade->hooks();
-test_expect(isset($actions['init']) && $actions['init']['priority'] === 1, 'The upgrade must run on early init.');
+test_expect(
+    isset($actions['admin_init']) && $actions['admin_init']['priority'] === 1,
+    'The purge must run only on early admin init.',
+);
+test_expect(! isset($actions['init']), 'The purge must not register a storefront init hook.');
 
 // Normal WordPress cache: remove only matching database rows and their exact
 // option-cache entries. Unrelated options and runtime cache remain untouched.
@@ -266,25 +270,48 @@ Lemon_Erp_Storefront_Size_Cache_Upgrade::maybeUpgrade();
 test_expect(! isset($options['_transient_lemon_sizes_retry_sql']), 'The SQL retry did not clean the transient.');
 
 // External cache with group support can have no DB rows at all. The transient
-// group is flushed while every other persistent cache group remains intact.
+// transient and product groups are flushed while every other persistent cache
+// group remains intact.
 reset_revision();
 $usingExternalObjectCache = true;
 $cacheSupportsGroupFlush = true;
 $objectCache = [
     'transient:lemon_sizes_external_only' => ['M/L', 'S/M'],
     'transient:unrelated_transient' => 'also expires',
-    'products:keep' => 'keep',
+    'products:historical_variation_attributes' => ['m-l', 's-m'],
+    'orders:keep' => 'keep',
 ];
 Lemon_Erp_Storefront_Size_Cache_Upgrade::maybeUpgrade();
-test_expect($groupFlushes === ['transient'], 'External cache did not use group invalidation.');
+test_expect($groupFlushes === ['transient', 'products'], 'External cache did not use narrow group invalidation.');
 test_expect($globalFlushes === 0, 'Group-capable cache was flushed globally.');
 test_expect(! isset($objectCache['transient:lemon_sizes_external_only']), 'External-only size cache survived.');
-test_expect(isset($objectCache['products:keep']), 'Group flush removed another cache group.');
+test_expect(! isset($objectCache['products:historical_variation_attributes']), 'Historical Woo product cache survived.');
+test_expect(isset($objectCache['orders:keep']), 'Group flush removed another cache group.');
 test_expect(isset($options['lemon_erp_storefront_size_cache_revision']), 'Group flush did not persist revision.');
+
+// A backend can advertise group flushing and still fail an operation. Both
+// narrow groups are attempted first, then the reliable one-time global
+// fallback completes the purge instead of retrying forever.
+reset_revision();
+$groupFlushes = [];
+$globalFlushes = 0;
+$groupFlushSucceeds = false;
+$objectCache = [
+    'transient:lemon_sizes_failed_group' => ['M/L', 'S/M'],
+    'products:historical_failed_group' => ['m-l', 's-m'],
+];
+Lemon_Erp_Storefront_Size_Cache_Upgrade::maybeUpgrade();
+test_expect($groupFlushes === ['transient', 'products'], 'A failed group flush skipped a cache group.');
+test_expect($globalFlushes === 1, 'A failed group flush did not use the global fallback.');
+test_expect($objectCache === [], 'Global fallback after group failure did not clear the cache.');
+test_expect(isset($options['lemon_erp_storefront_size_cache_revision']), 'Group fallback did not persist revision.');
 
 // Without a portable group operation the one-time global flush is the only
 // reliable way to invalidate an unknown external lemon_sizes_* key.
 reset_revision();
+$groupFlushes = [];
+$globalFlushes = 0;
+$groupFlushSucceeds = true;
 $cacheSupportsGroupFlush = false;
 $objectCache = [
     'transient:lemon_sizes_external_fallback' => ['M/L', 'S/M'],

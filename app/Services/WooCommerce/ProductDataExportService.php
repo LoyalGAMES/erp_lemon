@@ -24,9 +24,6 @@ use RuntimeException;
 
 final class ProductDataExportService
 {
-    /** @var Collection<int, ProductParameterDefinition>|null */
-    private ?Collection $parameterDefinitions = null;
-
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly ProductDescriptionSanitizer $descriptionSanitizer,
@@ -1448,7 +1445,7 @@ final class ProductDataExportService
         ?array $effectiveMaster = null,
         bool $fallbackLanguageContent = false,
     ): array {
-        $product->loadMissing(['stockBalances', 'channelMappings']);
+        $product->loadMissing('channelMappings');
         $master = $effectiveMaster ?? $product->masterData();
         $retailPrice = data_get($master, 'prices.retail_price_pln');
         $salePrice = data_get($master, 'prices.sale_price_pln');
@@ -1474,7 +1471,7 @@ final class ProductDataExportService
         $manageStock = $forceStorefrontStockZero || (bool) data_get($master, 'inventory.manage_stock', true);
         $stockQuantity = $forceStorefrontStockZero
             ? 0
-            : (int) floor(max(0, (float) $product->stockBalances->sum('quantity_available')));
+            : $this->freshStockQuantity($product, $salesChannelId);
 
         $payload = [
             'sku' => $product->sku,
@@ -1615,23 +1612,6 @@ final class ProductDataExportService
             $this->mappingHasStockReleasePending($parent, $salesChannelId),
             $master,
         );
-        $channelAvailability = $this->channelStock->availabilityForProduct(
-            $salesChannelId,
-            (int) $variant->id,
-        );
-
-        // Match the dedicated stock-sync pipeline: only warehouses routed to
-        // this sales channel contribute, and every configured buffer is
-        // deducted. Keep the legacy aggregate only when the channel has no
-        // stock route at all (older installations/tests before route setup).
-        if (! $variant->forcesStorefrontStockZero()
-            && $channelAvailability['breakdown'] !== []
-        ) {
-            $stockQuantity = (int) floor(max(0, $channelAvailability['quantity']));
-            $payload['manage_stock'] = true;
-            $payload['stock_quantity'] = $stockQuantity;
-            $payload['stock_status'] = $stockQuantity > 0 ? 'instock' : 'outofstock';
-        }
         $parentRegularPrice = data_get($parentMaster, 'prices.retail_price_pln');
         $parentSalePrice = data_get($parentMaster, 'prices.sale_price_pln');
         $parentSaleStartsAt = data_get($parentMaster, 'prices.sale_price_starts_at');
@@ -1658,15 +1638,47 @@ final class ProductDataExportService
             (array) ($payload['meta_data'] ?? []),
             $this->variantAttributeName($parent, $this->variantChildren($parent)),
         );
-        // WooCommerce 10.9 only applies a variation menu_order when the value
-        // is truthy. Clamp legacy zeroes to 1 so a requested first position is
-        // not silently ignored by the REST controller.
-        $payload['menu_order'] = max(1, min(65535, (int) ($variant->pivot?->sort_order ?? 100)));
+        $dictionaryOrder = data_get($payload, 'attributes.0.source_option_orders.0');
+        $menuOrder = is_numeric($dictionaryOrder)
+            ? (int) $dictionaryOrder
+            : (int) ($variant->pivot?->sort_order ?? 100);
+        // The shared ERP dictionary is the single source of option ordering
+        // for the parent, global taxonomy terms and children. Fall back to the
+        // relation only for a value absent from that dictionary. WooCommerce
+        // 10.9 ignores a falsey menu_order, hence the lower bound of one.
+        $payload['menu_order'] = max(1, min(65535, $menuOrder));
         $payload['status'] = $parent->is_active && $variant->is_active
             ? (string) (data_get($parentMaster, 'publication_status') ?: 'publish')
             : 'draft';
 
         return $payload;
+    }
+
+    /**
+     * Read stock from its authoritative tables for every outbound payload.
+     * Product export can span the Polish product, translations and all child
+     * variations; reusing an Eloquent relation loaded at the beginning of that
+     * work would let a stale zero survive after inventory changed mid-export.
+     */
+    private function freshStockQuantity(Product $product, ?int $salesChannelId): int
+    {
+        if ($salesChannelId !== null) {
+            $availability = $this->channelStock->availabilityForProduct(
+                $salesChannelId,
+                (int) $product->id,
+            );
+
+            // Match the dedicated stock-sync pipeline whenever the channel
+            // has warehouse routes. With no routes, retain the legacy sum of
+            // every balance, but query it fresh instead of reading a cached
+            // model relation.
+            if ($availability['breakdown'] !== []) {
+                return (int) floor(max(0, $availability['quantity']));
+            }
+        }
+
+        return (int) floor(max(0, (float) $product->stockBalances()
+            ->sum('quantity_available')));
     }
 
     /**
@@ -1870,13 +1882,14 @@ final class ProductDataExportService
 
     /**
      * @param  array<string, mixed>  $master
-     * @return list<array{source_name:string,source_options:list<string>,source_option_orders:list<int|null>,name:string,visible:bool,variation:bool,options:list<string>}>
+     * @return list<array{source_name:string,source_options:list<string>,source_option_orders:list<int|null>,source_position:int,position:int,name:string,visible:bool,variation:bool,options:list<string>}>
      */
     private function attributes(array $master, string $language = 'pl'): array
     {
         return collect(data_get($master, 'parameters', []))
             ->filter(fn ($row): bool => is_array($row))
-            ->map(function (array $row) use ($language): ?array {
+            ->values()
+            ->map(function (array $row, int $index) use ($language): ?array {
                 $name = $this->translatedParameterName($row, $language);
                 $value = $this->translatedParameterValue($row, $language);
 
@@ -1891,6 +1904,8 @@ final class ProductDataExportService
                         $row,
                         [trim((string) ($row['value'] ?? $value))],
                     ),
+                    'source_position' => $this->parameterAttributePosition($row, $index),
+                    'source_index' => $index,
                     'name' => $name,
                     'visible' => true,
                     'variation' => (bool) ($row['variation'] ?? false),
@@ -1898,13 +1913,12 @@ final class ProductDataExportService
                 ];
             })
             ->filter()
-            ->values()
-            ->all();
+            ->pipe(fn (Collection $attributes): array => $this->withCanonicalAttributePositions($attributes));
     }
 
     /**
      * @param  Collection<int, Product>  $variants
-     * @return list<array{source_name:string,source_options:list<string>,source_option_orders:list<int|null>,name:string,visible:bool,variation:bool,options:list<string>}>
+     * @return list<array{source_name:string,source_options:list<string>,source_option_orders:list<int|null>,source_position:int,position:int,name:string,visible:bool,variation:bool,options:list<string>}>
      */
     private function variableAttributes(Product $product, Collection $variants, string $language = 'pl'): array
     {
@@ -1977,22 +1991,37 @@ final class ProductDataExportService
             throw new RuntimeException('Dwie źródłowe opcje wariantu mają to samo tłumaczenie.');
         }
 
+        $variantOptionPairs = $this->orderVariantOptionPairs(
+            $translationSource,
+            $variantOptionPairs,
+        );
         $variantOptions = $variantOptionPairs->pluck('localized')->all();
         $sourceVariantOptions = $variantOptionPairs->pluck('source')->all();
+        $attributes = collect($this->attributes($master, $language));
+        $isVariantAxis = fn (array $attribute): bool => in_array(
+            mb_strtolower(trim((string) ($attribute['source_name'] ?? $attribute['name']))),
+            [mb_strtolower($sourceVariantAttribute), mb_strtolower($variantAttribute)],
+            true,
+        ) || $this->isLegacyGenericVariantAttribute(
+            (string) ($attribute['source_name'] ?? $attribute['name']),
+            $sourceVariantAttribute,
+        );
+        $existingAxis = $attributes->filter($isVariantAxis);
+        $configuredAxisPosition = $this->parameterAttributeSortOrder($translationSource);
+        $axisSourcePosition = $configuredAxisPosition
+            ?? ($existingAxis->isNotEmpty()
+                ? (int) $existingAxis->min('source_position')
+                : 100_000 + $attributes->count());
+        $axisSourceIndex = $existingAxis->isNotEmpty()
+            ? (int) $existingAxis->min('source_index')
+            : $attributes->count();
 
-        return collect($this->attributes($master, $language))
+        $attributes = $attributes
             // The ERP variant model intentionally supports one variant axis.
             // Imported/stale flags must not make Woo require an additional
             // attribute that none of the child variations supplies.
             ->map(fn (array $attribute): array => array_merge($attribute, ['variation' => false]))
-            ->reject(fn (array $attribute): bool => in_array(
-                mb_strtolower(trim((string) ($attribute['source_name'] ?? $attribute['name']))),
-                [mb_strtolower($sourceVariantAttribute), mb_strtolower($variantAttribute)],
-                true,
-            ) || $this->isLegacyGenericVariantAttribute(
-                (string) ($attribute['source_name'] ?? $attribute['name']),
-                $sourceVariantAttribute,
-            ))
+            ->reject($isVariantAxis)
             ->push([
                 'source_name' => $sourceVariantAttribute,
                 'source_options' => $sourceVariantOptions,
@@ -2000,13 +2029,15 @@ final class ProductDataExportService
                     $translationSource,
                     $sourceVariantOptions,
                 ),
+                'source_position' => $axisSourcePosition,
+                'source_index' => $axisSourceIndex,
                 'name' => $variantAttribute,
                 'visible' => true,
                 'variation' => true,
                 'options' => $variantOptions,
-            ])
-            ->values()
-            ->all();
+            ]);
+
+        return $this->withCanonicalAttributePositions($attributes);
     }
 
     private function isLegacyGenericVariantAttribute(string $attribute, string $selectedVariantAttribute): bool
@@ -2089,6 +2120,7 @@ final class ProductDataExportService
 
         $resolved = [];
         $parentAttributeIndexes = [];
+        $hasParentAttributes = false;
 
         foreach ($attributes as $attribute) {
             $sourceName = trim((string) ($attribute['source_name'] ?? $attribute['name'] ?? ''));
@@ -2123,8 +2155,10 @@ final class ProductDataExportService
                 continue;
             }
 
+            $hasParentAttributes = true;
             $normalized = [
                 'id' => $attributeId,
+                'position' => max(0, (int) ($attribute['position'] ?? count($resolved))),
                 'visible' => (bool) ($attribute['visible'] ?? true),
                 'variation' => (bool) ($attribute['variation'] ?? false),
                 'options' => array_values((array) $global['options']),
@@ -2135,6 +2169,10 @@ final class ProductDataExportService
             // its options while preserving their first-seen order.
             if (array_key_exists($attributeId, $parentAttributeIndexes)) {
                 $index = $parentAttributeIndexes[$attributeId];
+                $resolved[$index]['position'] = min(
+                    (int) $resolved[$index]['position'],
+                    (int) $normalized['position'],
+                );
                 $resolved[$index]['visible'] = $resolved[$index]['visible'] || $normalized['visible'];
                 $resolved[$index]['variation'] = $resolved[$index]['variation'] || $normalized['variation'];
                 $resolved[$index]['options'] = collect(array_merge(
@@ -2150,6 +2188,18 @@ final class ProductDataExportService
 
             $parentAttributeIndexes[$attributeId] = count($resolved);
             $resolved[] = $normalized;
+        }
+
+        if ($hasParentAttributes) {
+            $resolved = collect($resolved)
+                ->sortBy('position', SORT_NUMERIC)
+                ->values()
+                ->map(function (array $attribute, int $position): array {
+                    $attribute['position'] = $position;
+
+                    return $attribute;
+                })
+                ->all();
         }
 
         $payload['attributes'] = $resolved;
@@ -2498,7 +2548,10 @@ final class ProductDataExportService
             return null;
         }
 
-        $definitions = $this->parameterDefinitions ??= ProductParameterDefinition::query()->get();
+        // Attribute dictionaries are operator-managed catalog data. Always
+        // read the current rows so a long-running export cannot reuse an old
+        // order after the dictionary was edited.
+        $definitions = ProductParameterDefinition::query()->get();
 
         return $definitions->first(function (ProductParameterDefinition $definition) use ($name, $slug): bool {
             if ($slug !== '' && mb_strtolower(trim((string) $definition->slug)) === $slug) {
@@ -2507,6 +2560,101 @@ final class ProductDataExportService
 
             return $name !== '' && mb_strtolower(trim((string) $definition->name)) === $name;
         });
+    }
+
+    /** @param array<string, mixed> $parameter */
+    private function parameterAttributePosition(array $parameter, int $fallbackIndex): int
+    {
+        $configuredPosition = $this->parameterAttributeSortOrder($parameter);
+
+        // Configured definitions come first; parameters unknown to the shared
+        // dictionary retain their order from the product payload afterwards.
+        return $configuredPosition ?? 100_000 + max(0, $fallbackIndex);
+    }
+
+    /** @param array<string, mixed> $parameter */
+    private function parameterAttributeSortOrder(array $parameter): ?int
+    {
+        $definition = $this->parameterDefinition($parameter);
+
+        return $definition instanceof ProductParameterDefinition
+            ? max(0, (int) $definition->sort_order)
+            : null;
+    }
+
+    /**
+     * @param  Collection<int, array<string, mixed>>  $attributes
+     * @return list<array<string, mixed>>
+     */
+    private function withCanonicalAttributePositions(Collection $attributes): array
+    {
+        return $attributes
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->sort(function (array $left, array $right): int {
+                $comparison = (int) ($left['source_position'] ?? PHP_INT_MAX)
+                    <=> (int) ($right['source_position'] ?? PHP_INT_MAX);
+
+                if ($comparison !== 0) {
+                    return $comparison;
+                }
+
+                return (int) ($left['source_index'] ?? PHP_INT_MAX)
+                    <=> (int) ($right['source_index'] ?? PHP_INT_MAX);
+            })
+            ->values()
+            ->map(function (array $attribute, int $position): array {
+                $attribute['position'] = $position;
+
+                return $attribute;
+            })
+            ->all();
+    }
+
+    /**
+     * @param  array<string, mixed>  $parameter
+     * @param  Collection<int, array{source:string,localized:string}>  $pairs
+     * @return Collection<int, array{source:string,localized:string}>
+     */
+    private function orderVariantOptionPairs(array $parameter, Collection $pairs): Collection
+    {
+        $orders = $this->parameterOptionMenuOrders(
+            $parameter,
+            $pairs->pluck('source')->all(),
+        );
+
+        return $pairs
+            ->values()
+            ->map(function (array $pair, int $index) use ($orders): array {
+                $pair['dictionary_order'] = $orders[$index] ?? null;
+                $pair['source_index'] = $index;
+
+                return $pair;
+            })
+            ->sort(function (array $left, array $right): int {
+                $leftKnown = is_numeric($left['dictionary_order']);
+                $rightKnown = is_numeric($right['dictionary_order']);
+
+                if ($leftKnown !== $rightKnown) {
+                    return $leftKnown ? -1 : 1;
+                }
+
+                if ($leftKnown) {
+                    $comparison = (int) $left['dictionary_order']
+                        <=> (int) $right['dictionary_order'];
+
+                    if ($comparison !== 0) {
+                        return $comparison;
+                    }
+                }
+
+                return (int) $left['source_index'] <=> (int) $right['source_index'];
+            })
+            ->values()
+            ->map(function (array $pair): array {
+                unset($pair['dictionary_order'], $pair['source_index']);
+
+                return $pair;
+            });
     }
 
     /**

@@ -53,39 +53,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $this->assertStringContainsString('product publication date tests passed', $process->getOutput());
     }
 
-    public function test_storefront_variation_attribute_contract_harness_passes(): void
-    {
-        $process = new Process([PHP_BINARY, base_path('tools/test-lemon-erp-storefront-variation-attributes.php')]);
-        $process->setTimeout(30);
-        $process->run();
-
-        $this->assertSame(
-            0,
-            $process->getExitCode(),
-            $process->getErrorOutput().$process->getOutput(),
-        );
-        $this->assertStringContainsString('storefront variation attribute tests passed', $process->getOutput());
-
-        $restProcess = new Process([
-            PHP_BINARY,
-            base_path('tools/test-lemon-erp-storefront-variation-attributes.php'),
-            '--rest-request',
-        ]);
-        $restProcess->setTimeout(30);
-        $restProcess->run();
-
-        $this->assertSame(
-            0,
-            $restProcess->getExitCode(),
-            $restProcess->getErrorOutput().$restProcess->getOutput(),
-        );
-        $this->assertStringContainsString(
-            'storefront variation attribute REST isolation tests passed',
-            $restProcess->getOutput(),
-        );
-    }
-
-    public function test_storefront_size_cache_upgrade_contract_harness_passes(): void
+    public function test_historical_storefront_cache_purge_contract_harness_passes(): void
     {
         $process = new Process([PHP_BINARY, base_path('tools/test-lemon-erp-storefront-size-cache-upgrade.php')]);
         $process->setTimeout(30);
@@ -105,7 +73,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $package = $packages->build();
         $zip = new ZipArchive;
 
-        $this->assertSame('0.5.5', $package['version']);
+        $this->assertSame('0.5.6', $package['version']);
         $this->assertTrue($zip->open($package['path']) === true);
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-customer-webhook.php'),
@@ -119,12 +87,18 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-global-attribute-taxonomies.php'),
         );
-        $this->assertNotFalse(
+        $this->assertFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-storefront-variation-attributes.php'),
         );
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-storefront-size-cache-upgrade.php'),
         );
+        $cachePurgeModule = $zip->getFromName(
+            'lemon-erp-woocommerce/includes/class-storefront-size-cache-upgrade.php',
+        );
+        $this->assertIsString($cachePurgeModule);
+        $this->assertStringContainsString("add_action('admin_init'", $cachePurgeModule);
+        $this->assertStringNotContainsString("add_action('init'", $cachePurgeModule);
         $taxonomyModule = $zip->getFromName(
             'lemon-erp-woocommerce/includes/class-global-attribute-taxonomies.php',
         );
@@ -165,10 +139,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             'Lemon_Erp_Global_Attribute_Taxonomies::register();',
             $mainFile,
         );
-        $this->assertStringContainsString(
-            '(new Lemon_Erp_Storefront_Variation_Attributes)->hooks();',
-            $mainFile,
-        );
+        $this->assertStringNotContainsString('Lemon_Erp_Storefront_Variation_Attributes', $mainFile);
         $this->assertStringContainsString(
             '(new Lemon_Erp_Storefront_Size_Cache_Upgrade)->hooks();',
             $mainFile,
@@ -196,7 +167,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             '/wp-json/wc-lemon-erp/v1/catalog/products/translations',
             $readme,
         );
-        $this->assertStringContainsString('Wersja `0.5.5`', $readme);
+        $this->assertStringContainsString('Wersja `0.5.6`', $readme);
         $zip->close();
     }
 }
