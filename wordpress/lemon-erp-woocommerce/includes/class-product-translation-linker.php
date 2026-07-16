@@ -15,7 +15,7 @@ if (! defined('ABSPATH')) {
  */
 final class Lemon_Erp_Product_Translation_Linker
 {
-    private const PLUGIN_VERSION = '0.5.4';
+    private const PLUGIN_VERSION = '0.5.5';
 
     private const CATALOG_CONTRACT = 1;
 
