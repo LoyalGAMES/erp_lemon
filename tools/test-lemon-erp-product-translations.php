@@ -628,7 +628,7 @@ test_expect($testActions[1]['hook'] === 'created_term', 'New global attribute te
 test_expect($testActions[2]['hook'] === 'edited_term', 'Edited global attribute terms must invalidate the bootstrap marker.');
 test_expect($testActions[3]['hook'] === 'rest_api_init', 'The endpoint must register during rest_api_init.');
 
-// Version 0.5.3 must not advertise term-link readiness before the bootstrap.
+// The plugin must not advertise term-link readiness before the bootstrap.
 $capabilitiesBeforeBootstrap = $linker->capabilities(new WP_REST_Request);
 test_expect(
     $capabilitiesBeforeBootstrap->data['attribute_term_translation_link_available'] === false,
@@ -810,7 +810,7 @@ test_expect(
     'The capability endpoint returned an unexpected variation-link endpoint.',
 );
 test_expect($capabilities->data['attribute_term_translation_link_available'] === true, 'The capability endpoint did not confirm attribute term readiness.');
-test_expect($capabilities->data['plugin_version'] === '0.5.3', 'The capability endpoint returned an unexpected plugin version.');
+test_expect($capabilities->data['plugin_version'] === '0.5.4', 'The capability endpoint returned an unexpected plugin version.');
 test_expect($capabilities->data['languages'] === ['pl', 'en', 'de', 'pt', 'pt-br'], 'The capability endpoint returned unexpected languages.');
 
 $testManageWooCommerce = false;
@@ -980,7 +980,7 @@ test_expect($linkedVariations->data['resource'] === 'product_variation', 'The va
 test_expect($linkedVariations->data['parents'] === ['en' => 102, 'pl' => 101], 'The variation response lost the parent map.');
 test_expect($linkedVariations->data['translations'] === ['en' => 106, 'pl' => 105], 'The variation response returned an incorrect translation map.');
 test_expect($linkedVariations->data['translation_group'] === 'variation:105|106', 'The variation response contains an unstable translation group.');
-test_expect($linkedVariations->data['plugin_version'] === '0.5.3', 'The variation response returned an unexpected plugin version.');
+test_expect($linkedVariations->data['plugin_version'] === '0.5.4', 'The variation response returned an unexpected plugin version.');
 test_expect(count($testWrites) === 3, 'The first variation link must assign two languages and save one family.');
 test_expect($testTranslationGroups[101] === ['en' => 102, 'pl' => 101] && $testTranslationGroups[102] === ['en' => 102, 'pl' => 101], 'A successful variation link modified the parent family.');
 

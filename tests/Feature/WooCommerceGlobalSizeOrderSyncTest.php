@@ -212,6 +212,11 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
             $middleware[0]->key,
         );
         $this->assertTrue($middleware[0]->shareKey);
+        $this->assertSame(60, $middleware[0]->releaseAfter);
+        $this->assertSame(
+            ImportWooCommerceProductsJob::CATALOG_LOCK_SECONDS,
+            $middleware[0]->expiresAfter,
+        );
         $this->assertSame(
             "woocommerce-global-size-order:{$integration->id}:dictionary-fingerprint",
             $job->uniqueId(),
@@ -371,6 +376,166 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         );
     }
 
+    public function test_the_deploy_sync_command_refuses_to_bypass_the_catalog_lock_outside_maintenance(): void
+    {
+        $this->createSizeDefinition();
+        $this->createWooIntegration('GLOBAL-SIZE-DEPLOY-NOT-DOWN');
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+
+        $exitCode = Artisan::call('erp:sync-woocommerce-global-size-order-during-maintenance', [
+            '--trigger' => 'deploy_abcdef123456-123-1',
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString(
+            'allowed only while the application is in maintenance mode',
+            Artisan::output(),
+        );
+        Bus::assertNotDispatched(SyncWooCommerceGlobalSizeOrderJob::class);
+        $this->assertSame(0, IntegrationSyncLog::query()
+            ->where('operation', 'sync_woocommerce_global_size_order')
+            ->count());
+        Http::assertNothingSent();
+    }
+
+    public function test_the_deploy_sync_command_runs_each_active_integration_directly_during_maintenance(): void
+    {
+        $this->createSizeDefinition();
+        $active = $this->createWooIntegration('GLOBAL-SIZE-DEPLOY-SYNC');
+        $this->createWooIntegration('GLOBAL-SIZE-DEPLOY-SYNC-INACTIVE', active: false);
+        $this->createWooIntegration('GLOBAL-SIZE-DEPLOY-SYNC-MARKETPLACE', type: 'marketplace');
+        $attribute = $this->sizeAttribute();
+        $terms = $this->allLanguageTerms();
+        $mutations = [];
+        $this->fakeWooCatalog($attribute, $terms, $mutations);
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+        Artisan::call('down', ['--retry' => 60]);
+
+        try {
+            $exitCode = Artisan::call('erp:sync-woocommerce-global-size-order-during-maintenance', [
+                '--trigger' => 'deploy_abcdef123456-123-1',
+            ]);
+            $output = Artisan::output();
+        } finally {
+            Artisan::call('up');
+        }
+
+        $this->assertSame(0, $exitCode);
+        $this->assertStringContainsString(
+            "completed for integration {$active->id}",
+            $output,
+        );
+        $this->assertStringContainsString(
+            'active=1, succeeded=1, failed=0, trigger=deploy_abcdef123456-123-1',
+            $output,
+        );
+        Bus::assertNotDispatched(SyncWooCommerceGlobalSizeOrderJob::class);
+        $log = IntegrationSyncLog::query()
+            ->where('operation', 'sync_woocommerce_global_size_order')
+            ->sole();
+        $this->assertSame((int) $active->id, (int) $log->wordpress_integration_id);
+        $this->assertSame('success', $log->status);
+        $this->assertSame('deploy_abcdef123456-123-1', data_get($log->request_payload, 'trigger'));
+        $this->assertSame('synchronized', data_get($log->response_payload, 'status'));
+        $this->assertSame('menu_order', $attribute['order_by']);
+        $this->assertSame(10, $terms[58]['menu_order']);
+        $this->assertSame(20, $terms[57]['menu_order']);
+    }
+
+    public function test_the_deploy_sync_command_rejects_an_empty_audit_trigger(): void
+    {
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+
+        $exitCode = Artisan::call('erp:sync-woocommerce-global-size-order-during-maintenance', [
+            '--trigger' => '   ',
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString('trigger cannot be empty', Artisan::output());
+        Bus::assertNotDispatched(SyncWooCommerceGlobalSizeOrderJob::class);
+    }
+
+    public function test_an_exact_deploy_trigger_is_not_satisfied_by_another_success_from_the_same_second(): void
+    {
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-POSTCONDITION-TRIGGER');
+        $since = now()->startOfSecond();
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'out',
+            'operation' => 'sync_woocommerce_global_size_order',
+            'status' => 'success',
+            'external_resource' => 'product_attribute',
+            'request_payload' => ['trigger' => 'deploy_previous-release'],
+            'response_payload' => ['status' => 'synchronized'],
+            'attempts' => 1,
+            'started_at' => $since,
+            'finished_at' => $since,
+        ]);
+
+        $exitCode = Artisan::call('erp:verify-woocommerce-global-size-order-sync', [
+            '--since' => $since->toIso8601String(),
+            '--trigger' => 'deploy_current-release',
+        ]);
+        $output = Artisan::output();
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString(
+            "active=1, fresh_success=0, missing={$integration->id}, pending=0, failed=0",
+            $output,
+        );
+        $this->assertStringContainsString('trigger=deploy_current-release', $output);
+    }
+
+    public function test_an_exact_deploy_success_supersedes_async_queue_rows_from_the_same_second(): void
+    {
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-POSTCONDITION-SUPERSEDE');
+        $since = now()->startOfSecond();
+        $payload = json_encode([
+            'displayName' => SyncWooCommerceGlobalSizeOrderJob::class,
+        ], JSON_THROW_ON_ERROR);
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'out',
+            'operation' => 'sync_woocommerce_global_size_order',
+            'status' => 'success',
+            'external_resource' => 'product_attribute',
+            'request_payload' => ['trigger' => 'deploy_current-release'],
+            'response_payload' => ['status' => 'synchronized'],
+            'attempts' => 1,
+            'started_at' => $since,
+            'finished_at' => $since,
+        ]);
+        DB::table('jobs')->insert([
+            'queue' => SyncWooCommerceGlobalSizeOrderJob::QUEUE,
+            'payload' => $payload,
+            'attempts' => 0,
+            'reserved_at' => null,
+            'available_at' => $since->timestamp + 60,
+            'created_at' => $since->timestamp,
+        ]);
+        DB::table('failed_jobs')->insert([
+            'uuid' => 'global-size-order-superseded',
+            'connection' => 'database',
+            'queue' => SyncWooCommerceGlobalSizeOrderJob::QUEUE,
+            'payload' => $payload,
+            'exception' => 'superseded fixture',
+            'failed_at' => $since,
+        ]);
+
+        $exitCode = Artisan::call('erp:verify-woocommerce-global-size-order-sync', [
+            '--since' => $since->toIso8601String(),
+            '--trigger' => 'deploy_current-release',
+        ]);
+
+        $this->assertSame(0, $exitCode);
+        $this->assertStringContainsString(
+            'active=1, fresh_success=1, missing=-, pending=0, failed=0',
+            Artisan::output(),
+        );
+    }
+
     public function test_the_deploy_postcondition_rejects_a_pending_exact_job_and_missing_success(): void
     {
         $integration = $this->createWooIntegration('GLOBAL-SIZE-POSTCONDITION-PENDING');
@@ -405,6 +570,44 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $this->assertSame(1, $exitCode);
         $this->assertStringContainsString(
             "active=1, fresh_success=0, missing={$integration->id}, pending=1, failed=0",
+            Artisan::output(),
+        );
+    }
+
+    public function test_the_postcondition_without_an_exact_trigger_still_rejects_an_old_pending_job(): void
+    {
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-POSTCONDITION-OLD-PENDING');
+        $since = now()->subMinute();
+        IntegrationSyncLog::query()->create([
+            'sales_channel_id' => $integration->sales_channel_id,
+            'wordpress_integration_id' => $integration->id,
+            'direction' => 'out',
+            'operation' => 'sync_woocommerce_global_size_order',
+            'status' => 'success',
+            'external_resource' => 'product_attribute',
+            'response_payload' => ['status' => 'synchronized'],
+            'attempts' => 1,
+            'started_at' => now(),
+            'finished_at' => now(),
+        ]);
+        DB::table('jobs')->insert([
+            'queue' => SyncWooCommerceGlobalSizeOrderJob::QUEUE,
+            'payload' => json_encode([
+                'displayName' => SyncWooCommerceGlobalSizeOrderJob::class,
+            ], JSON_THROW_ON_ERROR),
+            'attempts' => 1,
+            'reserved_at' => null,
+            'available_at' => now()->timestamp + 60,
+            'created_at' => now()->subHours(2)->timestamp,
+        ]);
+
+        $exitCode = Artisan::call('erp:verify-woocommerce-global-size-order-sync', [
+            '--since' => $since->toIso8601String(),
+        ]);
+
+        $this->assertSame(1, $exitCode);
+        $this->assertStringContainsString(
+            'active=1, fresh_success=1, missing=-, pending=1, failed=0',
             Artisan::output(),
         );
     }

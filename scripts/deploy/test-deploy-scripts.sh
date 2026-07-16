@@ -533,17 +533,24 @@ SLEEP
         fail 'PREVIOUS nie zachował pierwszego wydania.'
     [[ "$(cat "$integration_deploy_path/tools/windows-print-listener/dist/CURRENT")" == '0.2.0-201-1' ]] ||
         fail 'kolejny deploy zgubił współdzielony instalator Windows.'
+    maintenance_line="$(grep -nF ' down --retry=60' "$deploy_log" | head -n 1 | cut -d: -f1)"
     queue_restart_line="$(grep -nF ' queue:restart' "$deploy_log" | head -n 1 | cut -d: -f1)"
     worker_wait_line="$(grep -nF 'pgrep ' "$deploy_log" | head -n 1 | cut -d: -f1)"
     migration_line="$(grep -nF 'php artisan migrate --force' "$deploy_log" | head -n 1 | cut -d: -f1)"
-    size_order_worker_line="$(grep -nF ' queue:work database --queue=woocommerce-size-order' "$deploy_log" | head -n 1 | cut -d: -f1)"
+    size_order_sync_line="$(grep -nF ' erp:sync-woocommerce-global-size-order-during-maintenance ' "$deploy_log" | head -n 1 | cut -d: -f1)"
     size_order_verify_line="$(grep -nF ' erp:verify-woocommerce-global-size-order-sync ' "$deploy_log" | head -n 1 | cut -d: -f1)"
-    [[ -n "$queue_restart_line" && -n "$worker_wait_line" && -n "$migration_line" && -n "$size_order_worker_line" && -n "$size_order_verify_line" ]] ||
+    [[ -n "$maintenance_line" && -n "$queue_restart_line" && -n "$worker_wait_line" && -n "$migration_line" && -n "$size_order_sync_line" && -n "$size_order_verify_line" ]] ||
         fail 'deploy nie zarejestrował pełnej sekwencji restart-worker-migracja.'
-    (( queue_restart_line < worker_wait_line && worker_wait_line < migration_line && migration_line < size_order_worker_line && size_order_worker_line < size_order_verify_line )) ||
+    (( maintenance_line < queue_restart_line && queue_restart_line < worker_wait_line && worker_wait_line < migration_line && migration_line < size_order_sync_line && size_order_sync_line < size_order_verify_line )) ||
         fail 'warunek końcowy kolejności rozmiarów ruszył przed migracją, workerem albo zakończeniem starych workerów.'
-    grep -F ' queue:work database --queue=woocommerce-size-order' "$deploy_log" | head -n 1 | grep -Fq -- '--force' ||
-        fail 'dedykowany worker kolejności rozmiarów nie działa podczas maintenance.'
+    [[ "$(grep -Fc ' erp:sync-woocommerce-global-size-order-during-maintenance ' "$deploy_log")" -eq 1 && "$(grep -Fc ' erp:verify-woocommerce-global-size-order-sync ' "$deploy_log")" -eq 1 ]] ||
+        fail 'deploy nie wykonał dokładnie jednej świeżej synchronicznej naprawy i weryfikacji.'
+    grep -F ' erp:sync-woocommerce-global-size-order-during-maintenance ' "$deploy_log" | grep -Fq -- "--trigger=deploy_${second_release}" ||
+        fail 'synchroniczna naprawa nie zapisała triggera bieżącego release.'
+    grep -F ' erp:verify-woocommerce-global-size-order-sync ' "$deploy_log" | grep -Fq -- "--trigger=deploy_${second_release}" ||
+        fail 'warunek końcowy nie wymaga triggera bieżącego release.'
+    ! grep -Fq ' queue:work database --queue=woocommerce-size-order' "$deploy_log" ||
+        fail 'deploy nadal uruchamia job bez wspólnej blokady katalogu.'
     grep -Fq 'sleep 2' "$deploy_log" ||
         fail 'deploy nie czekał na aktywnego workera po queue:restart.'
 
@@ -650,15 +657,17 @@ grep -Fq 'erp:inspect-woocommerce-product-export-failures --limit=20' "$remote_s
     fail 'deploy nie uruchamia diagnostyki błędów eksportu produktów WooCommerce.'
 grep -Fq 'erp:inspect-woo-owned-variant-axis-repair --limit=30' "$remote_script" ||
     fail 'deploy nie uruchamia diagnostyki historycznej naprawy osi wariantów WooCommerce.'
-grep -Fq -- '--queue=woocommerce-size-order' "$remote_script" ||
-    fail 'deploy nie opróżnia dedykowanej kolejki globalnej kolejności rozmiarów.'
+grep -Fq 'erp:sync-woocommerce-global-size-order-during-maintenance' "$remote_script" ||
+    fail 'deploy nie wykonuje świeżej synchronicznej naprawy globalnej kolejności rozmiarów.'
 grep -Fq 'erp:verify-woocommerce-global-size-order-sync' "$remote_script" ||
     fail 'deploy nie sprawdza warunku końcowego globalnej kolejności rozmiarów.'
+! grep -Fq 'queue:work database' "$remote_script" ||
+    fail 'deploy nie powinien uruchamiać workera z pominięciem wspólnej blokady katalogu.'
 
 creation_recovery_diagnostic_line="$(grep -n 'erp:inspect-woocommerce-product-creation-recovery --limit=20' "$remote_script" | cut -d: -f1)"
 product_export_diagnostic_line="$(grep -n 'erp:inspect-woocommerce-product-export-failures --limit=20' "$remote_script" | cut -d: -f1)"
 variant_axis_diagnostic_line="$(grep -n 'erp:inspect-woo-owned-variant-axis-repair --limit=30' "$remote_script" | cut -d: -f1)"
-size_order_worker_line="$(grep -n -- '--queue=woocommerce-size-order' "$remote_script" | cut -d: -f1)"
+size_order_sync_line="$(grep -n 'erp:sync-woocommerce-global-size-order-during-maintenance' "$remote_script" | cut -d: -f1)"
 size_order_verify_line="$(grep -n 'erp:verify-woocommerce-global-size-order-sync' "$remote_script" | cut -d: -f1)"
 [[ "$creation_recovery_diagnostic_line" -lt "$product_export_diagnostic_line" ]] ||
     fail 'diagnostyka eksportu produktów nie jest uruchamiana po diagnostyce tworzenia produktów.'
@@ -671,9 +680,9 @@ preflight_line="$(grep -n '\"\$php_bin\" artisan erp:preflight' "$remote_script"
 activation_line="$(grep -n 'atomic_link \"\$release_path\" \"\$current_link\"' "$remote_script" | head -n 1 | cut -d: -f1)"
 [[ "$backup_line" -lt "$migration_line" && "$migration_line" -lt "$preflight_line" && "$preflight_line" -lt "$activation_line" ]] ||
     fail 'kolejność backup -> migracja -> preflight -> aktywacja została naruszona.'
-[[ "$preflight_line" -lt "$size_order_worker_line" && "$size_order_worker_line" -lt "$activation_line" ]] ||
-    fail 'dedykowany worker kolejności rozmiarów nie działa po preflight i przed aktywacją/schedulerem.'
-[[ "$size_order_worker_line" -lt "$size_order_verify_line" && "$size_order_verify_line" -lt "$activation_line" ]] ||
-    fail 'warunek końcowy kolejności rozmiarów nie działa po workerze i przed aktywacją.'
+[[ "$preflight_line" -lt "$size_order_sync_line" && "$size_order_sync_line" -lt "$activation_line" ]] ||
+    fail 'synchroniczna naprawa kolejności rozmiarów nie działa po preflight i przed aktywacją/schedulerem.'
+[[ "$size_order_sync_line" -lt "$size_order_verify_line" && "$size_order_verify_line" -lt "$activation_line" ]] ||
+    fail 'warunek końcowy kolejności rozmiarów nie działa po synchronicznej naprawie i przed aktywacją.'
 
 echo 'Testy skryptów wdrożeniowych przeszły.'

@@ -14,13 +14,15 @@ use Illuminate\Support\Facades\DB;
 final class VerifyWooCommerceGlobalSizeOrderSyncCommand extends Command
 {
     protected $signature = 'erp:verify-woocommerce-global-size-order-sync
-        {--since= : ISO-8601 lower bound for a fresh successful sync}';
+        {--since= : ISO-8601 lower bound for a fresh successful sync}
+        {--trigger= : Exact deployment trigger required in the successful sync log}';
 
     protected $description = 'Verify that every active WooCommerce integration completed the global size-order repair.';
 
     public function handle(): int
     {
         $since = $this->since();
+        $trigger = trim((string) $this->option('trigger'));
         $activeIntegrationIds = WordpressIntegration::query()
             ->whereHas('salesChannel', fn ($query) => $query
                 ->where('type', 'woocommerce')
@@ -34,11 +36,12 @@ final class VerifyWooCommerceGlobalSizeOrderSyncCommand extends Command
             ->where('status', 'success')
             ->where('finished_at', '>=', $since->format('Y-m-d H:i:s'))
             ->whereIn('wordpress_integration_id', $activeIntegrationIds)
-            ->get(['wordpress_integration_id', 'response_payload'])
+            ->get(['wordpress_integration_id', 'request_payload', 'response_payload'])
             ->filter(fn (IntegrationSyncLog $log): bool => data_get(
                 $log->response_payload,
                 'status',
-            ) === 'synchronized')
+            ) === 'synchronized'
+                && ($trigger === '' || data_get($log->request_payload, 'trigger') === $trigger))
             ->pluck('wordpress_integration_id')
             ->map(fn (mixed $id): int => (int) $id)
             ->unique()
@@ -46,26 +49,35 @@ final class VerifyWooCommerceGlobalSizeOrderSyncCommand extends Command
         $missingIntegrationIds = $activeIntegrationIds
             ->diff($successfulIntegrationIds)
             ->values();
-        $pending = DB::table('jobs')
-            ->select(['id', 'queue', 'payload'])
-            ->get()
-            ->filter(fn (object $job): bool => $this->isTargetPayload($job->payload))
-            ->values();
-        $failed = DB::table('failed_jobs')
-            ->where('failed_at', '>=', $since->format('Y-m-d H:i:s'))
-            ->select(['id', 'queue', 'payload'])
-            ->get()
-            ->filter(fn (object $job): bool => $this->isTargetPayload($job->payload))
-            ->values();
+        // An exact deployment trigger is produced by the guarded synchronous
+        // command and queues no work. Its fresh success supersedes any older
+        // async fingerprint because every queued job reads the current ERP
+        // dictionary when it eventually runs under the shared catalog lock.
+        $pending = $trigger !== ''
+            ? collect()
+            : DB::table('jobs')
+                ->select(['id', 'queue', 'payload'])
+                ->get()
+                ->filter(fn (object $job): bool => $this->isTargetPayload($job->payload))
+                ->values();
+        $failed = $trigger !== ''
+            ? collect()
+            : DB::table('failed_jobs')
+                ->where('failed_at', '>=', $since->format('Y-m-d H:i:s'))
+                ->select(['id', 'queue', 'payload'])
+                ->get()
+                ->filter(fn (object $job): bool => $this->isTargetPayload($job->payload))
+                ->values();
 
         $this->info(sprintf(
-            'Woo size-order postcondition: active=%d, fresh_success=%d, missing=%s, pending=%d, failed=%d, since=%s.',
+            'Woo size-order postcondition: active=%d, fresh_success=%d, missing=%s, pending=%d, failed=%d, since=%s, trigger=%s.',
             $activeIntegrationIds->count(),
             $successfulIntegrationIds->count(),
             $missingIntegrationIds->isEmpty() ? '-' : $missingIntegrationIds->implode(','),
             $pending->count(),
             $failed->count(),
             $since->toIso8601String(),
+            $trigger !== '' ? $trigger : '-',
         ));
 
         if ($missingIntegrationIds->isNotEmpty() || $pending->isNotEmpty() || $failed->isNotEmpty()) {

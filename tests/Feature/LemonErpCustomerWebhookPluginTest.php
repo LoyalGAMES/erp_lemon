@@ -53,13 +53,45 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $this->assertStringContainsString('product publication date tests passed', $process->getOutput());
     }
 
+    public function test_storefront_variation_attribute_contract_harness_passes(): void
+    {
+        $process = new Process([PHP_BINARY, base_path('tools/test-lemon-erp-storefront-variation-attributes.php')]);
+        $process->setTimeout(30);
+        $process->run();
+
+        $this->assertSame(
+            0,
+            $process->getExitCode(),
+            $process->getErrorOutput().$process->getOutput(),
+        );
+        $this->assertStringContainsString('storefront variation attribute tests passed', $process->getOutput());
+
+        $restProcess = new Process([
+            PHP_BINARY,
+            base_path('tools/test-lemon-erp-storefront-variation-attributes.php'),
+            '--rest-request',
+        ]);
+        $restProcess->setTimeout(30);
+        $restProcess->run();
+
+        $this->assertSame(
+            0,
+            $restProcess->getExitCode(),
+            $restProcess->getErrorOutput().$restProcess->getOutput(),
+        );
+        $this->assertStringContainsString(
+            'storefront variation attribute REST isolation tests passed',
+            $restProcess->getOutput(),
+        );
+    }
+
     public function test_downloadable_plugin_contains_integration_modules(): void
     {
         $packages = app(LemonErpWooCommercePluginPackageService::class);
         $package = $packages->build();
         $zip = new ZipArchive;
 
-        $this->assertSame('0.5.3', $package['version']);
+        $this->assertSame('0.5.4', $package['version']);
         $this->assertTrue($zip->open($package['path']) === true);
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-customer-webhook.php'),
@@ -72,6 +104,9 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         );
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-global-attribute-taxonomies.php'),
+        );
+        $this->assertNotFalse(
+            $zip->locateName('lemon-erp-woocommerce/includes/class-storefront-variation-attributes.php'),
         );
         $taxonomyModule = $zip->getFromName(
             'lemon-erp-woocommerce/includes/class-global-attribute-taxonomies.php',
@@ -113,6 +148,10 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             'Lemon_Erp_Global_Attribute_Taxonomies::register();',
             $mainFile,
         );
+        $this->assertStringContainsString(
+            '(new Lemon_Erp_Storefront_Variation_Attributes)->hooks();',
+            $mainFile,
+        );
         $taxonomyRegistration = strpos($mainFile, 'Lemon_Erp_Global_Attribute_Taxonomies::register();');
         $pluginsLoadedHook = strpos($mainFile, "add_action('plugins_loaded'");
         $this->assertIsInt($taxonomyRegistration);
@@ -136,7 +175,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             '/wp-json/wc-lemon-erp/v1/catalog/products/translations',
             $readme,
         );
-        $this->assertStringContainsString('Wersja `0.5.3`', $readme);
+        $this->assertStringContainsString('Wersja `0.5.4`', $readme);
         $zip->close();
     }
 }

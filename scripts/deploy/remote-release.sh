@@ -273,7 +273,7 @@ maintenance_enabled=0
 migration_started=0
 migration_completed=0
 bootstrap_moved=0
-size_order_sync_verified=1
+size_order_sync_verified=0
 previous_release=''
 rollback_release=''
 legacy_release=''
@@ -407,6 +407,11 @@ if [[ "$bootstrap_mode" != 'fresh' ]]; then
     maintenance_enabled=1
     "$php_bin" "$deploy_path/artisan" queue:restart
     wait_for_queue_workers
+else
+    # There is no previous application or worker to stop, but the deployment
+    # sync command still requires the same explicit maintenance invariant.
+    "$php_bin" "$release_path/artisan" down --retry=60
+    maintenance_enabled=1
 fi
 if [[ "$bootstrap_mode" == 'legacy-directory' ]]; then
     sync_bootstrap_runtime "$deploy_path"
@@ -438,32 +443,30 @@ migration_completed=1
     "$php_bin" artisan erp:preflight
 )
 
-# Migrations can queue this small, existing-term-only WooCommerce repair. The
-# old workers are already stopped, so drain its dedicated queue before an
-# ordinary catalog export can acquire the shared catalog lock. --force is
-# required because the ERP remains in maintenance until activation completes.
+# Every release performs a fresh existing-term-only WooCommerce repair. The
+# normal asynchronous job must share the full catalog lock with product
+# exports, because an overlapping export can overwrite term menu_order. During
+# deploy the application is in maintenance and all old queue workers have
+# exited, so this one guarded synchronous command can safely bypass a stale
+# cache lock left by a terminated worker.
 size_order_sync_since="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-if ! (
+if (
     cd "$release_path"
-    "$php_bin" artisan queue:work database \
-        --queue=woocommerce-size-order \
-        --stop-when-empty \
-        --sleep=1 \
-        --tries=2 \
-        --timeout=360 \
-        --max-jobs=10 \
-        --max-time=600 \
-        --force
+    "$php_bin" artisan erp:sync-woocommerce-global-size-order-during-maintenance \
+        --trigger="deploy_${release_id}"
 ); then
-    echo 'Ostrzeżenie: natychmiastowy worker kolejności rozmiarów zakończył próbę błędem; zadanie pozostaje w trwałej kolejce.' >&2
-fi
-if ! (
-    cd "$release_path"
-    "$php_bin" artisan erp:verify-woocommerce-global-size-order-sync \
-        --since="$size_order_sync_since"
-); then
-    size_order_sync_verified=0
-    echo 'Błąd: dedykowana naprawa kolejności rozmiarów nie spełniła warunku końcowego.' >&2
+    if (
+        cd "$release_path"
+        "$php_bin" artisan erp:verify-woocommerce-global-size-order-sync \
+            --since="$size_order_sync_since" \
+            --trigger="deploy_${release_id}"
+    ); then
+        size_order_sync_verified=1
+    else
+        echo 'Błąd: synchroniczna naprawa kolejności rozmiarów nie spełniła świeżego warunku końcowego.' >&2
+    fi
+else
+    echo 'Błąd: synchroniczna naprawa kolejności rozmiarów WooCommerce zakończyła się błędem.' >&2
 fi
 
 if [[ "$bootstrap_mode" == 'legacy-directory' ]]; then
