@@ -16,14 +16,17 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 final class WooOwnedVariantAxisPostRepairCatalogSyncMigrationTest extends TestCase
 {
     use RefreshDatabase;
 
-    public function test_previous_child_assignment_catalog_sync_revision_keeps_critical_priority_after_revision_bump(): void
-    {
+    #[DataProvider('previousChildAssignmentCatalogSyncRevisions')]
+    public function test_previous_child_assignment_catalog_sync_revision_keeps_critical_priority_after_revision_bump(
+        string $revision,
+    ): void {
         Bus::fake([ExportWooCommerceProductDataJob::class]);
         Http::fake(fn () => Http::response([
             'available' => true,
@@ -52,7 +55,7 @@ final class WooOwnedVariantAxisPostRepairCatalogSyncMigrationTest extends TestCa
         data_set($metadata, 'product_data_export.legacy_variant_backfill', [
             'status' => 'pending',
             'reason' => LegacyVariantFamilyBackfillService::REASON,
-            'revision' => LegacyVariantFamilyBackfillService::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            'revision' => $revision,
             'requested_at' => '2026-07-16T20:00:00+00:00',
         ]);
         $mapping->update(['metadata' => $metadata]);
@@ -65,6 +68,18 @@ final class WooOwnedVariantAxisPostRepairCatalogSyncMigrationTest extends TestCa
             fn (ExportWooCommerceProductDataJob $job): bool => $job->queue
                 === LegacyVariantFamilyBackfillService::CRITICAL_EXPORT_QUEUE,
         );
+    }
+
+    public static function previousChildAssignmentCatalogSyncRevisions(): array
+    {
+        return [
+            'revision 000032' => [
+                LegacyVariantFamilyBackfillService::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            ],
+            'revision 000031' => [
+                LegacyVariantFamilyBackfillService::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            ],
+        ];
     }
 
     public function test_migration_requeues_completed_repairs_and_preserves_an_unrelated_active_export(): void

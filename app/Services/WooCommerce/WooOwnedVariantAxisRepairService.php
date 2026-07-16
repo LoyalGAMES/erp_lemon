@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000032';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000033';
+
+    public const PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000032';
 
     public const PREVIOUS_CHILD_ASSIGNMENT_AUDIT_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000031';
 
@@ -59,6 +61,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION,
             self::PREVIOUS_CHILD_ASSIGNMENT_AUDIT_REVISION,
             self::PREVIOUS_EXACT_DEFAULT_REPAIR_REVISION,
             self::PREVIOUS_EXACT_LEGACY_DEFAULT_SLUG_REVISION,
@@ -224,10 +227,10 @@ final class WooOwnedVariantAxisRepairService
     {
         return $this->parentMappingsQuery($productId)
             ->get()
-            ->contains(fn (ProductChannelMapping $mapping): bool => data_get(
-                $mapping->metadata,
-                self::STATE_PATH.'.pending_token',
-            ) === $token);
+            ->contains(fn (ProductChannelMapping $mapping): bool => $this->ownsCurrentReservation(
+                (array) $mapping->metadata,
+                $token,
+            ));
     }
 
     /**
@@ -363,6 +366,8 @@ final class WooOwnedVariantAxisRepairService
                 $planningParent = $this->normalizeExistingParentSizeAxisForPlan(
                     $target,
                     $parent,
+                    $variations,
+                    $variationOptionHints,
                 );
             } catch (DomainException $exception) {
                 return [
@@ -3286,7 +3291,7 @@ final class WooOwnedVariantAxisRepairService
                 ->each(function (ProductChannelMapping $mapping) use ($token, $result): void {
                     $metadata = (array) $mapping->metadata;
 
-                    if (data_get($metadata, self::STATE_PATH.'.pending_token') !== $token) {
+                    if (! $this->ownsCurrentReservation($metadata, $token)) {
                         return;
                     }
 
@@ -3349,7 +3354,7 @@ final class WooOwnedVariantAxisRepairService
                 ->each(function (ProductChannelMapping $mapping) use ($token, $exception): void {
                     $metadata = (array) $mapping->metadata;
 
-                    if (data_get($metadata, self::STATE_PATH.'.pending_token') !== $token) {
+                    if (! $this->ownsCurrentReservation($metadata, $token)) {
                         return;
                     }
 
@@ -3431,6 +3436,14 @@ final class WooOwnedVariantAxisRepairService
                 'token' => $token,
             ];
         });
+    }
+
+    /** @param array<string,mixed> $metadata */
+    private function ownsCurrentReservation(array $metadata, string $token): bool
+    {
+        return data_get($metadata, self::STATE_PATH.'.revision') === self::REVISION
+            && data_get($metadata, self::STATE_PATH.'.status') === 'queued'
+            && data_get($metadata, self::STATE_PATH.'.pending_token') === $token;
     }
 
     private function parentMappingsQuery(int $productId)
@@ -4403,10 +4416,16 @@ final class WooOwnedVariantAxisRepairService
      *
      * @param  array{integration:WordpressIntegration,language:string}  $target
      * @param  array<string,mixed>  $parent
+     * @param  list<array<string,mixed>>  $variations
+     * @param  array<string,string>  $variationOptionHints
      * @return array<string,mixed>
      */
-    private function normalizeExistingParentSizeAxisForPlan(array $target, array $parent): array
-    {
+    private function normalizeExistingParentSizeAxisForPlan(
+        array $target,
+        array $parent,
+        array $variations,
+        array $variationOptionHints,
+    ): array {
         $attributes = collect((array) ($parent['attributes'] ?? []))
             ->filter(fn (mixed $attribute): bool => is_array($attribute))
             ->values();
@@ -4455,6 +4474,8 @@ final class WooOwnedVariantAxisRepairService
                 $language,
                 $targetAxesById,
                 $targetDefaultCount,
+                $variations,
+                $variationOptionHints,
                 &$ignoredLegacyDefault,
             ): array {
                 $attributeId = (int) ($default['id'] ?? 0);
@@ -4498,6 +4519,17 @@ final class WooOwnedVariantAxisRepairService
                                 (string) $option,
                             ) === $rawKey)
                         ->values();
+                    $axisHasNoConcreteOptions = collect((array) ($axis['options'] ?? []))
+                        ->map(fn (mixed $option): string => trim((string) $option))
+                        ->filter()
+                        ->isEmpty();
+                    $exactChildAssignmentProof = $axisHasNoConcreteOptions
+                        && $this->legacyDefaultMatchesExactChildAssignments(
+                            $axis,
+                            $rawKey,
+                            $variations,
+                            $variationOptionHints,
+                        );
 
                     if ($this->isGenericAttribute($axis)
                         && $attributeId > 0
@@ -4505,7 +4537,7 @@ final class WooOwnedVariantAxisRepairService
                         && (bool) ($axis['variation'] ?? false)
                         && $targetDefaultCount === 1
                         && $rawKey !== ''
-                        && $matchingAxisOptions->count() === 1
+                        && ($matchingAxisOptions->count() === 1 || $exactChildAssignmentProof)
                     ) {
                         $ignoredLegacyDefault = true;
 
@@ -4529,6 +4561,74 @@ final class WooOwnedVariantAxisRepairService
         }
 
         return $parent;
+    }
+
+    /**
+     * Some historical translated parents lost their legacy axis option list
+     * while every translated child kept one exact SKU/term assignment. That
+     * complete child bijection may prove the sole default on the axis being
+     * removed; a partial, blank, duplicate or locally conflicting family may
+     * never use this fallback.
+     *
+     * @param  array<string,mixed>  $axis
+     * @param  list<array<string,mixed>>  $variations
+     * @param  array<string,string>  $variationOptionHints
+     */
+    private function legacyDefaultMatchesExactChildAssignments(
+        array $axis,
+        string $rawDefaultKey,
+        array $variations,
+        array $variationOptionHints,
+    ): bool {
+        $attributeId = (int) ($axis['id'] ?? 0);
+
+        if ($attributeId <= 0
+            || $rawDefaultKey === ''
+            || $variations === []
+            || $variationOptionHints === []
+            || count($variations) !== count($variationOptionHints)
+        ) {
+            return false;
+        }
+
+        $seenSkus = [];
+        $seenOptions = [];
+
+        foreach ($variations as $variation) {
+            $sku = mb_strtoupper(trim((string) ($variation['sku'] ?? '')));
+            $expectedKey = $variationOptionHints[$sku] ?? null;
+            $axisRows = collect((array) ($variation['attributes'] ?? []))
+                ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                    && (int) ($attribute['id'] ?? 0) === $attributeId)
+                ->values();
+
+            if ($sku === ''
+                || ! is_string($expectedKey)
+                || trim($expectedKey) === ''
+                || isset($seenSkus[$sku])
+                || $axisRows->count() !== 1
+            ) {
+                return false;
+            }
+
+            $optionKey = $this->canonicalSizeOptionKey(
+                ProductVariantAxisNameResolver::SIZE,
+                (string) ($axisRows->first()['option'] ?? ''),
+            );
+
+            if ($optionKey === ''
+                || $optionKey !== trim($expectedKey)
+                || isset($seenOptions[$optionKey])
+            ) {
+                return false;
+            }
+
+            $seenSkus[$sku] = true;
+            $seenOptions[$optionKey] = true;
+        }
+
+        return count($seenSkus) === count($variationOptionHints)
+            && isset($seenOptions[$rawDefaultKey]);
     }
 
     /**

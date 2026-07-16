@@ -182,6 +182,36 @@ final class WooCommerceVariantAxisNameImportTest extends TestCase
             $directDecimalMapping->metadata,
             WooOwnedVariantAxisRepairService::STATE_PATH,
         ));
+
+        $auditedMapping = ProductChannelMapping::query()
+            ->where('product_id', Product::query()->where('sku', 'IMPORT-PLURAL')->value('id'))
+            ->whereNull('external_variation_id')
+            ->firstOrFail();
+        $auditedMetadata = (array) $auditedMapping->metadata;
+        $auditedState = [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION,
+            'status' => 'manual_review',
+            'requested_at' => '2026-07-16T08:00:00+00:00',
+            'completed_at' => '2026-07-16T08:01:00+00:00',
+            'result' => ['reason' => 'historical audit result'],
+        ];
+        data_set(
+            $auditedMetadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            $auditedState,
+        );
+        $auditedMapping->forceFill(['metadata' => $auditedMetadata])->save();
+
+        app(WooCommerceImportService::class)->importProducts($integration);
+
+        $this->assertSame(
+            $auditedState,
+            data_get(
+                $auditedMapping->fresh()->metadata,
+                WooOwnedVariantAxisRepairService::STATE_PATH,
+            ),
+            'A regular import may not promote the broad 000032 audit into the narrowly scoped 000033 release.',
+        );
     }
 
     /**

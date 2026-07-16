@@ -2233,6 +2233,160 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             });
     }
 
+    public function test_empty_translated_legacy_parent_options_use_the_exact_child_sku_bijection(): void
+    {
+        [$parent, $catalog] = $this->family();
+
+        foreach ($catalog->products[223]['attributes'] as &$attribute) {
+            if ((int) ($attribute['id'] ?? 0) === 8) {
+                $attribute['options'] = [];
+            }
+        }
+        unset($attribute);
+        $catalog->products[223]['default_attributes'] = [
+            ['id' => 8, 'name' => 'variant', 'option' => 's-m'],
+            ['id' => 4, 'option' => 'Poland'],
+        ];
+
+        foreach ([124 => 0, 125 => 1] as $variationId => $stock) {
+            $catalog->variations[123][$variationId]['attributes'][0]['option'] = null;
+            $catalog->variations[123][$variationId]['stock_quantity'] = $stock;
+            $catalog->variations[123][$variationId]['stock_status'] = $stock > 0
+                ? 'instock'
+                : 'outofstock';
+        }
+        foreach ([224 => 4, 225 => 7] as $variationId => $stock) {
+            $catalog->variations[223][$variationId]['stock_quantity'] = $stock;
+            $catalog->variations[223][$variationId]['stock_status'] = 'instock';
+        }
+
+        $protected = unserialize(serialize([
+            'products' => $catalog->products,
+            'variations' => $catalog->variations,
+        ]));
+        $this->fakeCatalog($catalog, static function (Request $request): mixed {
+            return $request->method() === 'GET'
+                && parse_url($request->url(), PHP_URL_PATH)
+                    === '/wp-json/wc/v3/products/attributes/8/terms'
+                ? Http::response([[
+                    'id' => 81,
+                    'name' => 's-m',
+                    'slug' => 's-m',
+                    'language' => 'pl',
+                    'translations' => ['pl' => 81],
+                ]])
+                : null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame(
+            'repaired',
+            $result['status'],
+            (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        );
+        $this->assertSame([[
+            'id' => 4,
+            'option' => 'Poland',
+        ]], $catalog->products[223]['default_attributes']);
+
+        foreach ([123 => [124 => 'S/M', 125 => 'M/L'], 223 => [224 => 'S/M', 225 => 'M/L']] as $parentId => $options) {
+            foreach ($options as $variationId => $option) {
+                $this->assertSame([[
+                    'id' => 1,
+                    'option' => $option,
+                ]], $catalog->variations[$parentId][$variationId]['attributes']);
+                $this->assertSame(
+                    collect($protected['variations'][$parentId][$variationId])
+                        ->except(['attributes', 'menu_order'])
+                        ->all(),
+                    collect($catalog->variations[$parentId][$variationId])
+                        ->except(['attributes', 'menu_order'])
+                        ->all(),
+                );
+            }
+        }
+
+        $englishParentPuts = Http::recorded()
+            ->map(fn (array $record): Request => $record[0])
+            ->filter(fn (Request $request): bool => $request->method() === 'PUT'
+                && parse_url($request->url(), PHP_URL_PATH) === '/wp-json/wc/v3/products/223')
+            ->values();
+        $this->assertCount(2, $englishParentPuts);
+        $this->assertSame([
+            ['id' => 8, 'option' => 's-m'],
+            ['id' => 4, 'option' => 'Poland'],
+        ], $englishParentPuts[0]->data()['default_attributes']);
+        $this->assertSame([[
+            'id' => 4,
+            'option' => 'Poland',
+        ]], $englishParentPuts[1]->data()['default_attributes']);
+
+        Http::recorded()
+            ->map(fn (array $record): Request => $record[0])
+            ->filter(fn (Request $request): bool => $request->method() === 'PUT')
+            ->each(function (Request $request): void {
+                foreach ([
+                    'sku', 'regular_price', 'sale_price', 'price', 'manage_stock',
+                    'stock_quantity', 'stock_status', 'backorders',
+                ] as $protectedField) {
+                    $this->assertArrayNotHasKey($protectedField, $request->data());
+                }
+            });
+    }
+
+    #[DataProvider('unsafeEmptyLegacyParentOptionsProvider')]
+    public function test_empty_legacy_parent_options_do_not_bypass_an_inexact_child_family(
+        string $shape,
+    ): void {
+        [$parent, $catalog] = $this->family();
+
+        foreach ($catalog->products[223]['attributes'] as &$attribute) {
+            if ((int) ($attribute['id'] ?? 0) === 8) {
+                $attribute['options'] = [];
+            }
+        }
+        unset($attribute);
+        $catalog->products[223]['default_attributes'][0]['option'] = $shape === 'unknown default'
+            ? 'XL'
+            : 's-m';
+
+        if ($shape === 'blank child') {
+            $catalog->variations[223][224]['attributes'][0]['option'] = null;
+        } elseif ($shape === 'duplicate child option') {
+            $catalog->variations[223][225]['attributes'][0]['option'] = 's-m';
+        }
+
+        $original = unserialize(serialize([
+            'products' => $catalog->products,
+            'variations' => $catalog->variations,
+        ]));
+        $this->fakeCatalog($catalog, static function (Request $request): mixed {
+            return $request->method() === 'GET'
+                && parse_url($request->url(), PHP_URL_PATH)
+                    === '/wp-json/wc/v3/products/attributes/8/terms'
+                ? Http::response([])
+                : null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertSame(0, $result['mutations']);
+        $this->assertSame($original['products'], $catalog->products);
+        $this->assertSame($original['variations'], $catalog->variations);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    }
+
+    public static function unsafeEmptyLegacyParentOptionsProvider(): array
+    {
+        return [
+            'one translated child is blank' => ['blank child'],
+            'two translated children select the same size' => ['duplicate child option'],
+            'default is absent from exact children' => ['unknown default'],
+        ];
+    }
+
     #[DataProvider('unsafeLegacyDefaultFallbackProvider')]
     public function test_unresolvable_legacy_default_is_not_dropped_without_one_exact_target_default_and_axis_option(
         string $shape,
@@ -3903,6 +4057,39 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_a_queued_job_from_revision_000032_is_a_no_op_after_the_revision_bump(): void
+    {
+        Bus::fake([ExportWooCommerceProductDataJob::class]);
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION,
+            'status' => 'queued',
+            'pending_token' => 'stale-000032-token',
+            'queued_at' => now()->toISOString(),
+        ]);
+        $mapping->update(['metadata' => $metadata]);
+        $before = $mapping->fresh()->getAttributes();
+        Http::fake();
+
+        app(RepairWooOwnedVariantAxisJob::class, [
+            'productId' => $parent->id,
+            'token' => 'stale-000032-token',
+        ])->handle(
+            app(WooOwnedVariantAxisRepairService::class),
+            app(LegacyVariantFamilyBackfillService::class),
+        );
+
+        $this->assertSame($before, $mapping->fresh()->getAttributes());
+        $this->assertFalse(app(WooOwnedVariantAxisRepairService::class)
+            ->hasCurrentReservation($parent->id, 'stale-000032-token'));
+        Http::assertNothingSent();
+        Bus::assertNotDispatched(ExportWooCommerceProductDataJob::class);
+    }
+
     public function test_deployment_gate_fails_closed_when_the_job_requires_manual_review(): void
     {
         [$parent] = $this->family();
@@ -4030,12 +4217,108 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
 
         $metadata = (array) $mapping->fresh()->metadata;
         data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
-            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_ERP_SYNCHRONIZED_REVISION,
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION,
             'status' => 'pending',
         ]);
         $mapping->forceFill(['metadata' => $metadata])->save();
+        $this->assertTrue(WooOwnedVariantAxisRepairService::isSynchronizedRevision(
+            WooOwnedVariantAxisRepairService::PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION,
+        ));
+        $this->assertFalse(app(WooOwnedVariantAxisRepairService::class)->blocksFullExport($parent));
         $this->assertSame(0, Artisan::call('erp:verify-woo-owned-variant-axis-repair'));
         $this->assertStringContainsString('mappings=0, families=0, statuses=-, unresolved=0', Artisan::output());
+    }
+
+    public function test_revision_000033_requeues_only_an_unresolved_exact_child_assignment_family(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        ProductChannelMapping::query()
+            ->where('external_product_id', '123')
+            ->update(['external_product_id' => '1506']);
+        $mapping->refresh();
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+        $setPreviousState = function (string $status) use ($mapping): void {
+            $metadata = (array) $mapping->fresh()->metadata;
+            data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+                'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION,
+                'status' => $status,
+                'result' => [
+                    'status' => $status === 'completed' ? 'repaired' : 'manual_review',
+                    'reason' => $status === 'completed'
+                        ? null
+                        : 'WooCommerce EN #500188: Domyślny wariant starej globalnej osi #6 nie wskazuje jednego terminu rozmiaru we właściwym języku.',
+                ],
+            ]);
+            $mapping->update(['metadata' => $metadata]);
+        };
+        $runMigration = static function (): void {
+            (require database_path(
+                'migrations/2026_07_16_000033_requeue_exact_child_size_assignment_audit.php',
+            ))->up();
+        };
+        Http::fake();
+
+        $this->assertTrue($repair->isChildSizeAssignmentAuditCandidate($parent->fresh()));
+        $setPreviousState('manual_review');
+        $productRows = Product::query()->orderBy('id')->get()->map->getAttributes()->all();
+        $relationRows = ProductRelation::query()->orderBy('id')->get()->map->getAttributes()->all();
+        $runMigration();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+        $requestedAt = $state['requested_at'] ?? null;
+        $runMigration();
+        $this->assertSame($requestedAt, data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.requested_at',
+        ));
+        $this->assertSame($productRows, Product::query()->orderBy('id')->get()->map->getAttributes()->all());
+        $this->assertSame($relationRows, ProductRelation::query()->orderBy('id')->get()->map->getAttributes()->all());
+        Http::assertNothingSent();
+
+        $setPreviousState('completed');
+        $completedMetadata = $mapping->fresh()->metadata;
+        $runMigration();
+        $this->assertSame($completedMetadata, $mapping->fresh()->metadata);
+
+        $setPreviousState('manual_review');
+        ProductChannelMapping::query()
+            ->where('external_product_id', '1506')
+            ->update(['external_product_id' => '999999']);
+        $this->assertTrue($repair->isChildSizeAssignmentAuditCandidate($parent->fresh()));
+        $unverifiedMetadata = $mapping->fresh()->metadata;
+        $runMigration();
+        $this->assertSame($unverifiedMetadata, $mapping->fresh()->metadata);
+        ProductChannelMapping::query()
+            ->where('external_product_id', '999999')
+            ->update(['external_product_id' => '1506']);
+
+        $variant = $parent->variantChildren()->firstOrFail();
+        $attributes = (array) $variant->attributes;
+        $parameters = (array) data_get($attributes, 'master.parameters', []);
+        $parameters[] = [
+            'name' => 'Kolor',
+            'value' => 'Czarny',
+            'variation' => true,
+        ];
+        data_set($attributes, 'master.parameters', $parameters);
+        $variant->update(['attributes' => $attributes]);
+        $this->assertFalse($repair->isChildSizeAssignmentAuditCandidate($parent->fresh()));
+        $setPreviousState('manual_review');
+        $nearMissMetadata = $mapping->fresh()->metadata;
+        $nearMissProducts = Product::query()->orderBy('id')->get()->map->getAttributes()->all();
+        $runMigration();
+
+        $this->assertSame($nearMissMetadata, $mapping->fresh()->metadata);
+        $this->assertSame($nearMissProducts, Product::query()->orderBy('id')->get()->map->getAttributes()->all());
+        Http::assertNothingSent();
     }
 
     public function test_manual_full_export_is_blocked_while_a_historical_family_is_pending_or_requires_review(): void

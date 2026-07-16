@@ -402,9 +402,23 @@ final class WooCommerceImportService
 
         Product::query()
             ->whereIn('id', $rootIds)
-            ->with(['variantChildren.parentRelations', 'parentRelations'])
+            ->with(['channelMappings', 'variantChildren.parentRelations', 'parentRelations'])
             ->get()
             ->each(function (Product $product): void {
+                $wasAuditedByPreviousRevision = $product->channelMappings
+                    ->contains(fn (ProductChannelMapping $mapping): bool => data_get(
+                        $mapping->metadata,
+                        WooOwnedVariantAxisRepairService::STATE_PATH.'.revision',
+                    ) === WooOwnedVariantAxisRepairService::PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION);
+
+                // Revision 000032 deliberately inspected the whole historical
+                // catalog and proved too broad. Its results stay historical;
+                // migration 000033 explicitly promotes only the production
+                // families whose SKU -> Size bijection was verified end to end.
+                if ($wasAuditedByPreviousRevision) {
+                    return;
+                }
+
                 $rawAxes = collect((array) data_get($product->attributes, 'woocommerce_attributes', []))
                     ->filter(fn (mixed $attribute): bool => is_array($attribute)
                         && (bool) ($attribute['variation'] ?? false))
