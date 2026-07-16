@@ -368,6 +368,64 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
             && ($request->data()['_fields'] ?? null) === 'id,type,attributes');
     }
 
+    public function test_canonical_size_taxonomy_wins_over_a_still_used_generic_axis_before_family_repair(): void
+    {
+        $this->createSizeDefinition();
+        ProductParameterDefinition::query()->create([
+            'name' => 'wariant',
+            'slug' => 'wariant',
+            'input_type' => 'select',
+            'values' => ['s-m', 'm-l'],
+            'values_en' => ['s-m', 'm-l'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 1,
+        ]);
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-CANONICAL-BEFORE-REPAIR');
+        $this->createMappedVariantFamily(
+            $integration,
+            '808184',
+            'CANONICAL-BEFORE-REPAIR',
+        );
+        $attributes = [
+            6 => [
+                'id' => 6,
+                'name' => 'wariant',
+                'slug' => 'pa_wariant',
+                'order_by' => 'name',
+            ],
+            1 => $this->sizeAttribute(),
+        ];
+        $terms = $this->allLanguageTerms();
+        $mutations = [];
+        $this->fakeWooCatalogWithAttributeEvidence(
+            $attributes,
+            $terms,
+            $mutations,
+            [[
+                'id' => 808184,
+                'type' => 'variable',
+                'attributes' => [[
+                    'id' => 6,
+                    'name' => 'wariant',
+                    'variation' => true,
+                    'options' => ['s-m', 'm-l'],
+                ]],
+            ]],
+        );
+
+        $result = app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
+
+        $this->assertSame('synchronized', $result['status']);
+        $this->assertSame(1, $result['attribute_id']);
+        $this->assertSame('menu_order', $attributes[1]['order_by']);
+        $this->assertSame('name', $attributes[6]['order_by']);
+        $this->assertSame(10, $terms[58]['menu_order']);
+        $this->assertSame(20, $terms[57]['menu_order']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'GET'
+            && (string) parse_url($request->url(), PHP_URL_PATH) === '/wp-json/wc/v3/products');
+    }
+
     public function test_split_mapped_variation_axes_abort_before_the_first_remote_mutation(): void
     {
         $this->createSizeDefinition();

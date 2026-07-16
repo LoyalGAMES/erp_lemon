@@ -170,6 +170,29 @@ final class WooCommerceGlobalSizeOrderSyncService
             return $attributes->first();
         }
 
+        // A historical `wariant`/`BLVariant` taxonomy can still drive the
+        // damaged families that this deployment is about to repair. It is
+        // evidence of the source defect, never a competing target when Woo
+        // already contains exactly one direct Rozmiar/Size taxonomy.
+        $directSizeAttributes = $attributes
+            ->filter(fn (array $attribute): bool => collect([
+                $attribute['name'] ?? null,
+                $attribute['slug'] ?? null,
+            ])->contains(fn (mixed $name): bool => $this->variantOptions
+                ->isSizeAttribute((string) $name)))
+            ->values();
+
+        if ($directSizeAttributes->count() === 1) {
+            return $directSizeAttributes->first();
+        }
+
+        if ($directSizeAttributes->count() > 1) {
+            return $this->sizeAttributeUsedByMappedVariantFamilies(
+                $integration,
+                $directSizeAttributes,
+            );
+        }
+
         return $this->sizeAttributeUsedByMappedVariantFamilies($integration, $attributes);
     }
 
