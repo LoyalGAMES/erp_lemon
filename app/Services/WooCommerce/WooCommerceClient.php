@@ -825,6 +825,62 @@ final class WooCommerceClient
     }
 
     /**
+     * Read a bounded set of exact products in batches. Maintenance resolvers
+     * use this to prove which global attribute is a real variation axis; they
+     * must not select a taxonomy from its mutable label or creation order.
+     *
+     * @param  list<int|string>  $externalProductIds
+     * @return list<array<string, mixed>>
+     */
+    public function productsByIds(
+        WordpressIntegration $integration,
+        array $externalProductIds,
+    ): array {
+        $ids = collect($externalProductIds)
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->unique()
+            ->values();
+        $products = collect();
+
+        foreach ($ids->chunk(100) as $chunk) {
+            $requestedIds = $chunk->map(fn (int $id): int => $id)->values();
+            $response = $this->request($integration)->get(
+                $this->endpoint($integration, '/products'),
+                [
+                    'include' => $requestedIds->implode(','),
+                    'per_page' => 100,
+                    'status' => 'any',
+                    '_fields' => 'id,type,attributes',
+                ],
+            );
+
+            if (! $response->successful()) {
+                throw new RuntimeException(
+                    "Pobranie zmapowanych produktów WooCommerce zwróciło HTTP {$response->status()}.",
+                );
+            }
+
+            $items = $response->json();
+
+            if (! is_array($items)) {
+                continue;
+            }
+
+            $products->push(...collect($items)
+                ->filter(fn (mixed $product): bool => is_array($product)
+                    && $requestedIds->contains((int) ($product['id'] ?? 0)))
+                ->all());
+        }
+
+        return $products
+            ->unique(fn (array $product): int => (int) $product['id'])
+            ->sortBy(fn (array $product): int => (int) $product['id'])
+            ->values()
+            ->all();
+    }
+
+    /**
      * Read raw variations for one exact translated parent. Unlike the import
      * iterator, this method keeps their real parent/variation IDs and payload.
      *
@@ -1382,6 +1438,44 @@ final class WooCommerceClient
         string $sourceName,
     ): ?array {
         return $this->findGlobalProductAttribute($integration, $sourceName);
+    }
+
+    /**
+     * Resolve every existing global attribute matching any supplied source
+     * name without creating, mutating or arbitrarily choosing one of them.
+     *
+     * @param  list<string>  $sourceNames
+     * @return list<array<string, mixed>>
+     */
+    public function globalProductAttributesByNames(
+        WordpressIntegration $integration,
+        array $sourceNames,
+    ): array {
+        $names = collect($sourceNames)
+            ->map(fn (mixed $name): string => mb_strtolower(trim((string) $name)))
+            ->filter()
+            ->unique()
+            ->values();
+        $slugs = collect($sourceNames)
+            ->map(fn (mixed $name): string => $this->globalProductAttributeSlug((string) $name))
+            ->filter()
+            ->unique()
+            ->values();
+
+        return collect($this->globalProductAttributes($integration))
+            ->filter(function (array $attribute) use ($names, $slugs): bool {
+                $candidateSlug = $this->normalizeGlobalProductAttributeSlug(
+                    (string) ($attribute['slug'] ?? ''),
+                );
+                $candidateName = mb_strtolower(trim((string) ($attribute['name'] ?? '')));
+
+                return $slugs->contains($candidateSlug) || $names->contains($candidateName);
+            })
+            ->filter(fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) > 0)
+            ->unique(fn (array $attribute): int => (int) $attribute['id'])
+            ->sortBy(fn (array $attribute): int => (int) $attribute['id'])
+            ->values()
+            ->all();
     }
 
     /**

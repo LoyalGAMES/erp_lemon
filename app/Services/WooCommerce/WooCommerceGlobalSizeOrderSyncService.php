@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace App\Services\WooCommerce;
 
+use App\Models\ProductChannelAlias;
+use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
+use App\Models\ProductRelation;
 use App\Models\WordpressIntegration;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use Illuminate\Support\Collection;
@@ -140,10 +143,10 @@ final class WooCommerceGlobalSizeOrderSyncService
 
     /**
      * Historical Woo imports can leave a separate `Size` dictionary next to
-     * the canonical Polish `Rozmiar` row. The Woo taxonomy is still singular,
-     * so select the ERP row whose source name/slug identifies that concrete
-     * taxonomy. A localized name is only a fallback; genuinely competing
-     * direct matches remain a hard stop before any remote mutation.
+     * the canonical Polish `Rozmiar` row. Select the ERP row whose source
+     * name/slug identifies the concrete taxonomy. A localized name is only a
+     * fallback; genuinely competing direct matches remain a hard stop before
+     * any remote mutation.
      *
      * @param  Collection<int, ProductParameterDefinition>  $definitions
      * @param  array<string, mixed>  $attribute
@@ -217,24 +220,136 @@ final class WooCommerceGlobalSizeOrderSyncService
                 (string) $definition->slug,
             ])
             ->push('Rozmiar', 'Size');
-        $attributes = $names
-            ->map(fn (string $name): string => trim($name))
-            ->filter()
-            ->unique(fn (string $name): string => mb_strtolower($name))
-            ->map(fn (string $name): ?array => $this->client
-                ->globalProductAttributeByName($integration, $name))
-            ->filter(fn (mixed $attribute): bool => is_array($attribute)
-                && (int) ($attribute['id'] ?? 0) > 0)
-            ->unique(fn (array $attribute): int => (int) $attribute['id'])
-            ->values();
+        $attributes = collect($this->client->globalProductAttributesByNames(
+            $integration,
+            $names
+                ->map(fn (string $name): string => trim($name))
+                ->filter()
+                ->unique(fn (string $name): string => mb_strtolower($name))
+                ->values()
+                ->all(),
+        ));
 
-        if ($attributes->count() !== 1) {
-            throw new RuntimeException($attributes->isEmpty()
-                ? 'WooCommerce nie zawiera istniejącego globalnego atrybutu Rozmiar/Size.'
-                : 'WooCommerce zawiera kilka globalnych atrybutów Rozmiar/Size.');
+        if ($attributes->isEmpty()) {
+            throw new RuntimeException(
+                'WooCommerce nie zawiera istniejącego globalnego atrybutu Rozmiar/Size.',
+            );
         }
 
-        return $attributes->first();
+        if ($attributes->count() === 1) {
+            return $attributes->first();
+        }
+
+        return $this->sizeAttributeUsedByMappedVariantFamilies($integration, $attributes);
+    }
+
+    /**
+     * A label, slug, term count or the lowest Woo ID cannot prove which of
+     * several historical Size-like taxonomies is the live variation axis.
+     * Use only ERP-mapped parent families and the remote `variation=true`
+     * contract. A catalog split across candidate IDs remains a hard stop.
+     *
+     * @param  Collection<int, array<string, mixed>>  $attributes
+     * @return array<string, mixed>
+     */
+    private function sizeAttributeUsedByMappedVariantFamilies(
+        WordpressIntegration $integration,
+        Collection $attributes,
+    ): array {
+        $parentProductIds = ProductRelation::query()
+            ->where('relation_type', 'variant')
+            ->distinct()
+            ->pluck('parent_product_id');
+        $externalProductIds = ProductChannelMapping::query()
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->whereIn('product_id', $parentProductIds)
+            ->where(function ($query): void {
+                $query
+                    ->whereNull('external_variation_id')
+                    ->orWhereIn('external_variation_id', ['', '0'])
+                    ->orWhereRaw("TRIM(external_variation_id) = ''");
+            })
+            ->orderBy('id')
+            ->pluck('external_product_id')
+            ->map(fn (mixed $id): string => trim((string) $id))
+            ->filter(fn (string $id): bool => ctype_digit($id) && (int) $id > 0)
+            ->values();
+        $aliasExternalProductIds = ProductChannelAlias::query()
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->where(function ($query) use ($parentProductIds): void {
+                $query
+                    ->whereIn('product_id', $parentProductIds)
+                    ->orWhereIn('source_product_id', $parentProductIds);
+            })
+            ->where(function ($query): void {
+                $query
+                    ->whereNull('external_variation_id')
+                    ->orWhereIn('external_variation_id', ['', '0'])
+                    ->orWhereRaw("TRIM(external_variation_id) = ''");
+            })
+            ->orderBy('id')
+            ->get()
+            ->filter(fn (ProductChannelAlias $alias): bool => $alias->isOutboundSyncEnabled())
+            ->pluck('external_product_id')
+            ->map(fn (mixed $id): string => trim((string) $id))
+            ->filter(fn (string $id): bool => ctype_digit($id) && (int) $id > 0)
+            ->values();
+        $externalProductIds = $externalProductIds
+            ->merge($aliasExternalProductIds)
+            ->unique()
+            ->values();
+
+        if ($externalProductIds->isEmpty()) {
+            throw new RuntimeException(
+                'WooCommerce zawiera kilka globalnych atrybutów Rozmiar/Size, ale ERP nie ma zmapowanej rodziny wariantowej, która pozwala bezpiecznie wybrać oś.',
+            );
+        }
+
+        $candidateIds = $attributes
+            ->map(fn (array $attribute): int => (int) ($attribute['id'] ?? 0))
+            ->filter()
+            ->unique()
+            ->values();
+        $usedAxisIds = collect($this->client->productsByIds(
+            $integration,
+            $externalProductIds->all(),
+        ))
+            ->filter(fn (array $product): bool => mb_strtolower(
+                trim((string) ($product['type'] ?? '')),
+            ) === 'variable')
+            ->flatMap(fn (array $product): Collection => collect((array) ($product['attributes'] ?? []))
+                ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                    && $this->attributeDrivesVariations($attribute))
+                ->map(fn (array $attribute): int => (int) ($attribute['id'] ?? 0))
+                ->filter(fn (int $attributeId): bool => $candidateIds->contains($attributeId)))
+            ->unique()
+            ->values();
+
+        if ($usedAxisIds->count() !== 1) {
+            throw new RuntimeException($usedAxisIds->isEmpty()
+                ? 'WooCommerce zawiera kilka globalnych atrybutów Rozmiar/Size, ale żaden nie jest jednoznacznie osią zmapowanych rodzin wariantowych ERP.'
+                : 'Zmapowane rodziny wariantowe ERP używają kilku globalnych atrybutów Rozmiar/Size; automatyczna zmiana kolejności została przerwana.');
+        }
+
+        $selectedId = (int) $usedAxisIds->first();
+
+        return $attributes->first(
+            fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) === $selectedId,
+        );
+    }
+
+    /** @param array<string, mixed> $attribute */
+    private function attributeDrivesVariations(array $attribute): bool
+    {
+        return $this->truthy($attribute['variation'] ?? false)
+            || $this->truthy($attribute['has_variations'] ?? false);
+    }
+
+    private function truthy(mixed $value): bool
+    {
+        return $value === true
+            || $value === 1
+            || in_array(mb_strtolower(trim((string) $value)), ['1', 'true', 'yes'], true);
     }
 
     private function attributeKey(string $value): string

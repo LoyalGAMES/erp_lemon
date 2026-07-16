@@ -7,7 +7,11 @@ namespace Tests\Feature;
 use App\Jobs\ImportWooCommerceProductsJob;
 use App\Jobs\SyncWooCommerceGlobalSizeOrderJob;
 use App\Models\IntegrationSyncLog;
+use App\Models\Product;
+use App\Models\ProductChannelAlias;
+use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
+use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Observers\ProductParameterDefinitionObserver;
@@ -122,6 +126,163 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $this->assertSame('M/L', $terms[57]['name']);
         $this->assertSame(20, $terms[57]['menu_order']);
         $this->assertSame('menu_order', $attribute['order_by']);
+    }
+
+    public function test_it_selects_only_the_size_attribute_used_as_the_mapped_variation_axis(): void
+    {
+        $this->createSizeDefinition();
+        $this->createPluralSizeDefinition();
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-DUPLICATE-WOO-ATTRIBUTE');
+        $parent = $this->createMappedVariantFamily(
+            $integration,
+            '808184',
+            'DUPLICATE-WOO-ATTRIBUTE',
+        );
+        $this->createParentAlias($integration, $parent, '808192', 'en');
+        $attributes = [
+            9 => [
+                'id' => 9,
+                'name' => 'Rozmiary',
+                'slug' => 'pa_rozmiary',
+                'order_by' => 'name',
+            ],
+            1 => $this->sizeAttribute(),
+        ];
+        $terms = $this->allLanguageTerms();
+        $mutations = [];
+        $this->fakeWooCatalogWithAttributeEvidence(
+            $attributes,
+            $terms,
+            $mutations,
+            [[
+                'id' => 808184,
+                'type' => 'variable',
+                'attributes' => [
+                    [
+                        'id' => 9,
+                        'name' => 'Rozmiary',
+                        'variation' => false,
+                        'options' => ['One size'],
+                    ],
+                    [
+                        'id' => 1,
+                        'name' => 'Rozmiar',
+                        'variation' => true,
+                        'options' => ['S/M', 'M/L'],
+                    ],
+                ],
+            ], [
+                'id' => 808192,
+                'type' => 'variable',
+                'attributes' => [[
+                    'id' => 1,
+                    'name' => 'Size',
+                    'variation' => true,
+                    'options' => ['S/M', 'M/L'],
+                ]],
+            ]],
+        );
+
+        $result = app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
+
+        $this->assertSame('synchronized', $result['status']);
+        $this->assertSame(1, $result['attribute_id']);
+        $this->assertSame('menu_order', $attributes[1]['order_by']);
+        $this->assertSame('name', $attributes[9]['order_by']);
+        $this->assertSame('S/M', $terms[58]['name']);
+        $this->assertSame(10, $terms[58]['menu_order']);
+        $this->assertSame('M/L', $terms[57]['name']);
+        $this->assertSame(20, $terms[57]['menu_order']);
+        $this->assertNotEmpty($mutations);
+        $this->assertTrue(collect($mutations)->every(
+            fn (array $mutation): bool => str_starts_with(
+                $mutation['path'],
+                '/wp-json/wc/v3/products/attributes/1',
+            ),
+        ));
+        Http::assertNotSent(fn (Request $request): bool => str_contains(
+            (string) parse_url($request->url(), PHP_URL_PATH),
+            '/products/attributes/9/terms',
+        ) || ($request->method() !== 'GET'
+            && (string) parse_url($request->url(), PHP_URL_PATH)
+                === '/wp-json/wc/v3/products/attributes/9'));
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'GET'
+            && (string) parse_url($request->url(), PHP_URL_PATH) === '/wp-json/wc/v3/products'
+            && ($request->data()['include'] ?? null) === '808184,808192'
+            && ($request->data()['status'] ?? null) === 'any'
+            && ($request->data()['_fields'] ?? null) === 'id,type,attributes');
+    }
+
+    public function test_split_mapped_variation_axes_abort_before_the_first_remote_mutation(): void
+    {
+        $this->createSizeDefinition();
+        $this->createPluralSizeDefinition();
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-SPLIT-WOO-ATTRIBUTE');
+        $parent = $this->createMappedVariantFamily(
+            $integration,
+            '808184',
+            'SPLIT-WOO-ATTRIBUTE',
+        );
+        $this->createParentAlias($integration, $parent, '2098', 'en');
+        $attributes = [
+            9 => [
+                'id' => 9,
+                'name' => 'Rozmiary',
+                'slug' => 'pa_rozmiary',
+                'order_by' => 'name',
+            ],
+            1 => $this->sizeAttribute(),
+        ];
+        $terms = $this->allLanguageTerms();
+        $mutations = [];
+        $this->fakeWooCatalogWithAttributeEvidence(
+            $attributes,
+            $terms,
+            $mutations,
+            [
+                [
+                    'id' => 808184,
+                    'type' => 'variable',
+                    'attributes' => [[
+                        'id' => 1,
+                        'name' => 'Rozmiar',
+                        'variation' => true,
+                        'options' => ['S/M', 'M/L'],
+                    ]],
+                ],
+                [
+                    'id' => 2098,
+                    'type' => 'variable',
+                    'attributes' => [[
+                        'id' => 9,
+                        'name' => 'Rozmiary',
+                        'has_variations' => true,
+                        'options' => ['One size'],
+                    ]],
+                ],
+            ],
+        );
+
+        try {
+            app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
+            $this->fail('Podzielona oś rozmiaru powinna przerwać synchronizację.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'używają kilku globalnych atrybutów Rozmiar/Size',
+                $exception->getMessage(),
+            );
+        }
+
+        $this->assertSame([], $mutations);
+        Http::assertNotSent(fn (Request $request): bool => in_array(
+            $request->method(),
+            ['POST', 'PUT', 'PATCH', 'DELETE'],
+            true,
+        ));
+        Http::assertNotSent(fn (Request $request): bool => str_contains(
+            (string) parse_url($request->url(), PHP_URL_PATH),
+            '/terms',
+        ));
     }
 
     public function test_competing_direct_dictionary_matches_abort_before_the_first_remote_mutation(): void
@@ -740,6 +901,86 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         ]);
     }
 
+    private function createPluralSizeDefinition(): ProductParameterDefinition
+    {
+        return ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiary',
+            'name_en' => 'Sizes',
+            'slug' => 'rozmiary',
+            'input_type' => 'select',
+            'values' => ['ONE SIZE'],
+            'values_en' => ['ONE SIZE'],
+            'is_variant' => false,
+            'is_required' => false,
+            'sort_order' => 20,
+        ]);
+    }
+
+    private function createMappedVariantFamily(
+        WordpressIntegration $integration,
+        string $externalProductId,
+        string $skuPrefix,
+    ): Product {
+        $parent = Product::query()->create([
+            'sku' => $skuPrefix.'-PARENT',
+            'name' => $skuPrefix.' parent',
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variable',
+                ],
+            ],
+        ]);
+        $variant = Product::query()->create([
+            'sku' => $skuPrefix.'-VARIANT',
+            'name' => $skuPrefix.' variant',
+            'attributes' => [
+                'master' => [
+                    'source' => 'erp',
+                    'product_type' => 'variation',
+                ],
+            ],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $integration->sales_channel_id,
+            'external_product_id' => $externalProductId,
+            'external_variation_id' => null,
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+            'metadata' => [
+                'mapping_role' => 'primary',
+                'language' => 'pl',
+            ],
+        ]);
+
+        return $parent;
+    }
+
+    private function createParentAlias(
+        WordpressIntegration $integration,
+        Product $parent,
+        string $externalProductId,
+        string $language,
+    ): void {
+        ProductChannelAlias::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $integration->sales_channel_id,
+            'source_product_id' => $parent->id,
+            'external_product_id' => $externalProductId,
+            'external_variation_id' => null,
+            'external_sku' => $parent->sku,
+            'language' => $language,
+            'metadata' => [],
+        ]);
+    }
+
     private function createWooIntegration(
         string $code,
         bool $active = true,
@@ -858,6 +1099,79 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
                     return Http::response(['message' => 'persistent test failure'], 500);
                 }
 
+                $terms[$termId] = array_merge($terms[$termId], $payload);
+
+                return Http::response($terms[$termId]);
+            }
+
+            throw new RuntimeException("Nieoczekiwane żądanie WooCommerce: {$method} {$path}");
+        });
+    }
+
+    /**
+     * @param  array<int, array<string, mixed>>  $attributes
+     * @param  array<int, array<string, mixed>>  $terms
+     * @param  list<array{method:string,path:string,payload:array<string,mixed>}>  $mutations
+     * @param  list<array<string, mixed>>  $products
+     */
+    private function fakeWooCatalogWithAttributeEvidence(
+        array &$attributes,
+        array &$terms,
+        array &$mutations,
+        array $products,
+    ): void {
+        Http::fake(function (Request $request) use (
+            &$attributes,
+            &$terms,
+            &$mutations,
+            $products,
+        ) {
+            $method = $request->method();
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($method === 'GET' && $path === '/wp-json/wc/v3/products/attributes') {
+                return Http::response(array_values($attributes));
+            }
+
+            if ($method === 'GET' && $path === '/wp-json/wc/v3/products') {
+                parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+                $include = $query['include'] ?? '';
+                $requestedProductIds = collect(is_array($include) ? $include : explode(',', $include))
+                    ->map(fn (mixed $id): int => (int) $id)
+                    ->filter(fn (int $id): bool => $id > 0)
+                    ->unique();
+
+                return Http::response(collect($products)
+                    ->filter(fn (array $product): bool => $requestedProductIds->contains(
+                        (int) ($product['id'] ?? 0),
+                    ))
+                    ->values()
+                    ->all());
+            }
+
+            if ($method === 'GET' && $path === '/wp-json/wc/v3/products/attributes/1/terms') {
+                return Http::response(array_values($terms));
+            }
+
+            if ($method === 'PUT' && $path === '/wp-json/wc/v3/products/attributes/1') {
+                $payload = $request->data();
+                $attributes[1] = array_merge($attributes[1], $payload);
+                $mutations[] = compact('method', 'path', 'payload');
+
+                return Http::response($attributes[1]);
+            }
+
+            if ($method === 'PUT'
+                && preg_match('#^/wp-json/wc/v3/products/attributes/1/terms/(\d+)$#', $path, $matches) === 1
+            ) {
+                $termId = (int) $matches[1];
+
+                if (! isset($terms[$termId])) {
+                    throw new RuntimeException("Test otrzymał aktualizację nieistniejącego terminu #{$termId}.");
+                }
+
+                $payload = $request->data();
+                $mutations[] = compact('method', 'path', 'payload');
                 $terms[$termId] = array_merge($terms[$termId], $payload);
 
                 return Http::response($terms[$termId]);
