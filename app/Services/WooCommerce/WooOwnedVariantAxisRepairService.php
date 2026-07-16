@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000030';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000031';
+
+    public const PREVIOUS_EXACT_DEFAULT_REPAIR_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000030';
 
     public const PREVIOUS_EXACT_LEGACY_DEFAULT_SLUG_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000029';
 
@@ -55,6 +57,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_EXACT_DEFAULT_REPAIR_REVISION,
             self::PREVIOUS_EXACT_LEGACY_DEFAULT_SLUG_REVISION,
             self::PREVIOUS_CANONICAL_SIZE_TAXONOMY_REVISION,
             self::PREVIOUS_LEGACY_DEFAULT_TERM_LANGUAGE_REVISION,
@@ -858,7 +861,9 @@ final class WooOwnedVariantAxisRepairService
                     $mutations++;
                 }
 
-                foreach ($entry['plan']['variation_payloads'] as $variationId => $payload) {
+                foreach ($this->orderedVariationPayloads(
+                    $entry['plan']['variation_payloads'],
+                ) as $variationId => $payload) {
                     $updatedVariation = $this->client->updateProductVariantAxisByIds(
                         $target['integration'],
                         $target['external_product_id'],
@@ -2005,6 +2010,86 @@ final class WooOwnedVariantAxisRepairService
     {
         return $this->isWooOwnedVariantRootCandidate($product)
             || $this->isErpOwnedVariantRootCandidate($product);
+    }
+
+    /**
+     * Historical editor saves can promote the parent to ERP ownership while
+     * its already mapped children retain their Woo-import ownership marker.
+     * That mixed provenance is not sufficient for the broad legacy migration,
+     * but it is safe for a child-assignment audit when every local SKU has one
+     * concrete Size option and every active parent mapping has one exact child
+     * variation mapping. The live remote preflight remains authoritative.
+     */
+    public function isChildSizeAssignmentAuditCandidate(Product $product): bool
+    {
+        $product->loadMissing([
+            'parentRelations',
+            'variantChildren.parentRelations',
+            'variantChildren.channelMappings',
+        ]);
+
+        if (! $this->isRepairableRoot($product)
+            || $product->variantChildren->isEmpty()
+            || ! $this->hasLocalSizeAxisEvidence($product)
+        ) {
+            return false;
+        }
+
+        try {
+            $optionHints = $this->localVariationOptionHints($product);
+        } catch (DomainException) {
+            return false;
+        }
+
+        if ($optionHints === []) {
+            return false;
+        }
+
+        $parentMappings = $this->parentMappingsQuery((int) $product->id)->get();
+
+        if ($parentMappings->isEmpty()
+            || $parentMappings->contains(fn (ProductChannelMapping $mapping): bool => ! ctype_digit(
+                trim((string) $mapping->external_product_id),
+            ) || (int) $mapping->external_product_id <= 0)
+        ) {
+            return false;
+        }
+
+        return $product->variantChildren->every(function (Product $variant) use (
+            $product,
+            $parentMappings,
+        ): bool {
+            $variantParents = $variant->parentRelations
+                ->filter(fn (ProductRelation $relation): bool => $relation->relation_type === 'variant')
+                ->values();
+
+            if (! in_array($variant->masterSource(), [
+                'erp',
+                'woocommerce',
+                'woocommerce_import',
+            ], true)
+                || data_get($variant->masterData(), 'product_type') !== 'variation'
+                || $variantParents->count() !== 1
+                || (int) $variantParents->first()->parent_product_id !== (int) $product->id
+            ) {
+                return false;
+            }
+
+            return $parentMappings->every(function (ProductChannelMapping $parentMapping) use (
+                $variant,
+            ): bool {
+                $matches = $variant->channelMappings->filter(
+                    fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id
+                            === (int) $parentMapping->sales_channel_id
+                        && trim((string) $mapping->external_product_id)
+                            === trim((string) $parentMapping->external_product_id)
+                        && ctype_digit(trim((string) $mapping->external_variation_id))
+                        && (int) $mapping->external_variation_id > 0,
+                );
+
+                return $matches->count() === 1;
+            });
+        });
     }
 
     /**
@@ -6330,6 +6415,41 @@ final class WooOwnedVariantAxisRepairService
             })
             ->pluck('value')
             ->values()
+            ->all();
+    }
+
+    /**
+     * Submit child assignments in the canonical Size dictionary order. This
+     * mirrors the successful manual S/M-then-M/L repair and makes our write
+     * sequence deterministic without claiming that Woo's later DISTINCT
+     * attribute query guarantees any physical database row order.
+     *
+     * @param  array<int|string,array<string,mixed>>  $payloads
+     * @return array<int|string,array<string,mixed>>
+     */
+    private function orderedVariationPayloads(array $payloads): array
+    {
+        return collect($payloads)
+            ->map(fn (array $payload, int|string $variationId): array => [
+                'variation_id' => $variationId,
+                'payload' => $payload,
+            ])
+            ->sort(function (array $left, array $right): int {
+                $menuOrder = (int) data_get($left, 'payload.menu_order', PHP_INT_MAX)
+                    <=> (int) data_get($right, 'payload.menu_order', PHP_INT_MAX);
+
+                if ($menuOrder !== 0) {
+                    return $menuOrder;
+                }
+
+                return strnatcmp(
+                    (string) $left['variation_id'],
+                    (string) $right['variation_id'],
+                );
+            })
+            ->mapWithKeys(fn (array $entry): array => [
+                $entry['variation_id'] => $entry['payload'],
+            ])
             ->all();
     }
 

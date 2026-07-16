@@ -495,6 +495,12 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             'status' => 'queued',
             'pending_token' => $token,
         ]);
+        data_set($metadata, 'product_data_export.legacy_variant_backfill', [
+            'reason' => LegacyVariantFamilyBackfillService::REASON,
+            'revision' => LegacyVariantFamilyBackfillService::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
+            'status' => 'completed',
+            'completed_at' => '2026-07-16T18:00:00+00:00',
+        ]);
         $mapping->update(['metadata' => $metadata]);
         $originalIds = collect($catalog->variations)
             ->map(fn (array $variations): array => array_keys($variations))
@@ -518,7 +524,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('repaired', data_get($state, 'result.status'));
         $this->assertSame('dispatched', data_get($state, 'result.full_export_queue'));
         $this->assertSame(
-            LegacyVariantFamilyBackfillService::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
+            LegacyVariantFamilyBackfillService::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
             data_get($mapping->fresh()->metadata, 'product_data_export.legacy_variant_backfill.revision'),
         );
         Bus::assertDispatched(
@@ -2795,22 +2801,66 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
     public function test_it_recovers_an_erased_remote_child_option_only_from_the_exact_local_sku_bijection(): void
     {
         [$parent, $catalog] = $this->family();
+        $parentAttributes = (array) $parent->attributes;
+        data_set($parentAttributes, 'master.source', 'erp');
+        $parent->update(['attributes' => $parentAttributes]);
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+
+        $this->assertFalse($repair->isSizeVariantRootCandidate($parent->fresh()));
+        $this->assertTrue($repair->isChildSizeAssignmentAuditCandidate($parent->fresh()));
 
         foreach ([123, 223] as $parentId) {
             foreach ($catalog->variations[$parentId] as &$variation) {
                 $variation['attributes'] = [];
             }
             unset($variation);
+            // Woo can return blank rows in its old M/L-first order. The
+            // backend repair must still submit concrete assignments in the
+            // canonical S/M -> M/L sequence.
+            $catalog->variations[$parentId] = array_reverse(
+                $catalog->variations[$parentId],
+                true,
+            );
         }
 
         $this->fakeCatalog($catalog);
-        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+        $result = $repair->repair($parent->fresh());
 
         $this->assertSame('repaired', $result['status']);
         $this->assertSame([['id' => 1, 'option' => 'S/M']], $catalog->variations[123][124]['attributes']);
         $this->assertSame([['id' => 1, 'option' => 'M/L']], $catalog->variations[123][125]['attributes']);
         $this->assertSame([['id' => 1, 'option' => 'S/M']], $catalog->variations[223][224]['attributes']);
         $this->assertSame([['id' => 1, 'option' => 'M/L']], $catalog->variations[223][225]['attributes']);
+
+        $variationPuts = Http::recorded()
+            ->map(fn (array $record): Request => $record[0])
+            ->filter(fn (Request $request): bool => $request->method() === 'PUT'
+                && str_contains(
+                    (string) parse_url($request->url(), PHP_URL_PATH),
+                    '/variations/',
+                ))
+            ->values();
+        $this->assertSame([
+            '/wp-json/wc/v3/products/123/variations/124',
+            '/wp-json/wc/v3/products/123/variations/125',
+            '/wp-json/wc/v3/products/223/variations/224',
+            '/wp-json/wc/v3/products/223/variations/225',
+        ], $variationPuts
+            ->map(fn (Request $request): string => (string) parse_url(
+                $request->url(),
+                PHP_URL_PATH,
+            ))
+            ->all());
+        $variationPuts->each(function (Request $request): void {
+            $this->assertEqualsCanonicalizing(
+                ['attributes', 'menu_order'],
+                array_keys($request->data()),
+            );
+            $this->assertArrayNotHasKey('stock_quantity', $request->data());
+            $this->assertArrayNotHasKey('stock_status', $request->data());
+            $this->assertArrayNotHasKey('regular_price', $request->data());
+            $this->assertArrayNotHasKey('sale_price', $request->data());
+        });
     }
 
     public function test_it_repairs_the_live_complementary_pl_en_damage_only_after_a_complete_remote_sku_bijection(): void
@@ -3961,7 +4011,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             WooOwnedVariantAxisRepairService::STATE_PATH.'.result.full_export_queue',
         ));
         $this->assertSame(
-            LegacyVariantFamilyBackfillService::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
+            LegacyVariantFamilyBackfillService::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
             data_get($metadata, 'product_data_export.legacy_variant_backfill.revision'),
         );
         $this->assertSame('queued', data_get(

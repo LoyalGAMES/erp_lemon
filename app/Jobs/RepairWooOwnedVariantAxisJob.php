@@ -91,7 +91,9 @@ final class RepairWooOwnedVariantAxisJob implements ShouldQueue
             // the now-canonical identities.
             $result['full_export_queue'] = $backfill->queueProductRevision(
                 $product,
-                LegacyVariantFamilyBackfillService::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
+                ($result['status'] ?? null) === 'repaired'
+                    ? LegacyVariantFamilyBackfillService::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION
+                    : LegacyVariantFamilyBackfillService::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
             );
         } elseif (($result['allow_full_export'] ?? false) === true) {
             $result['full_export_queue'] = $backfill->queueProductRevision(
