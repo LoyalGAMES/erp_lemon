@@ -1439,6 +1439,166 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
     }
 
+    public function test_woo_global_size_default_slug_is_the_same_term_and_does_not_roll_back(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->makeEnglishPrimary($parent);
+        $polishParentPuts = 0;
+        $englishParentPuts = 0;
+        $normalizedReads = 0;
+        $termLanguages = [];
+        $this->fakeCatalog($catalog, static function (Request $request, object $liveCatalog) use (
+            &$polishParentPuts,
+            &$englishParentPuts,
+            &$normalizedReads,
+            &$termLanguages,
+        ): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+            ) {
+                parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+                $language = (string) ($query['lang'] ?? '');
+                $termLanguages[] = $language;
+
+                return $language === 'en'
+                    ? Http::response([
+                        ['id' => 11, 'name' => 'S/M', 'slug' => 's-m', 'menu_order' => 10],
+                        ['id' => 12, 'name' => 'M/L', 'slug' => 'm-l', 'menu_order' => 20],
+                        ['id' => 21, 'name' => 'S/M', 'slug' => 's-m-en', 'menu_order' => 10],
+                        ['id' => 22, 'name' => 'M/L', 'slug' => 'm-l-en', 'menu_order' => 20],
+                    ])
+                    : null;
+            }
+
+            if ($request->method() === 'PUT' && $path === '/wp-json/wc/v3/products/123') {
+                $polishParentPuts++;
+
+                return null;
+            }
+
+            if ($request->method() === 'PUT' && $path === '/wp-json/wc/v3/products/223') {
+                $englishParentPuts++;
+
+                return null;
+            }
+
+            if (($polishParentPuts >= 2 || $englishParentPuts >= 2)
+                && $request->method() === 'GET'
+                && in_array($path, [
+                    '/wp-json/wc/v3/products/123',
+                    '/wp-json/wc/v3/products/223',
+                ], true)
+            ) {
+                $normalizedReads++;
+                $parentId = str_ends_with($path, '/223') ? 223 : 123;
+                $response = unserialize(serialize($liveCatalog->products[$parentId]));
+
+                foreach ($response['default_attributes'] as &$attribute) {
+                    if ((int) ($attribute['id'] ?? 0) === 1) {
+                        $attribute['option'] = $parentId === 223 ? 'm-l-en' : 'm-l';
+                    }
+                }
+                unset($attribute);
+
+                return Http::response($response);
+            }
+
+            return null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame(
+            'repaired',
+            $result['status'],
+            (string) json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
+        );
+        $this->assertSame(2, $polishParentPuts);
+        $this->assertSame(2, $englishParentPuts);
+        $this->assertGreaterThan(0, $normalizedReads);
+        $this->assertContains('pl', $termLanguages);
+        $this->assertContains('en', $termLanguages);
+        $this->assertSame('M/L', data_get(
+            $parent->fresh()->attributes,
+            'woocommerce_default_attributes.0.option',
+        ));
+        $this->assertTrue((bool) collect($catalog->products[123]['attributes'])
+            ->firstWhere('id', 1)['variation']);
+        $this->assertFalse(collect($catalog->products[123]['attributes'])->contains(
+            fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) === 6,
+        ));
+
+        $secondResult = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('already_canonical', $secondResult['status']);
+        $this->assertSame(0, $secondResult['mutations']);
+        $this->assertSame(2, $polishParentPuts);
+        $this->assertSame(2, $englishParentPuts);
+    }
+
+    public function test_global_size_default_slug_must_match_the_proven_language_term(): void
+    {
+        $this->family();
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'parentDefaultAxisPayloadMatches',
+        );
+        $service = app(WooOwnedVariantAxisRepairService::class);
+        $actual = [['id' => 1, 'option' => 'm-l']];
+        $expected = [['id' => 1, 'option' => 'M/L']];
+
+        $this->assertFalse($method->invoke(
+            $service,
+            $actual,
+            $expected,
+            1,
+            ['m-l' => ['M/L', 'm-l-en']],
+        ));
+        $this->assertTrue($method->invoke(
+            $service,
+            [['id' => 1, 'option' => 'm-l-en']],
+            $expected,
+            1,
+            ['m-l' => ['M/L', 'm-l-en']],
+        ));
+        $this->assertTrue($method->invoke(
+            $service,
+            $actual,
+            $expected,
+            1,
+            ['m-l' => ['M/L', 'm-l']],
+        ));
+    }
+
+    public function test_size_default_term_slug_candidates_cover_woo_and_historical_formats(): void
+    {
+        $this->family();
+        ProductParameterDefinition::query()->where('name', 'Rozmiar')->update([
+            'values' => ['Mały', 'Duży'],
+            'values_en' => ['Small', 'Large'],
+        ]);
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'sizeDefaultTermLanguageSlugs',
+        );
+        $service = app(WooOwnedVariantAxisRepairService::class);
+
+        $this->assertEqualsCanonicalizing(
+            ['m-l', 'ml', 'm-l-pl', 'ml-pl'],
+            $method->invoke($service, 'M/L', 'pl'),
+        );
+        $this->assertEqualsCanonicalizing(
+            ['m-l-en', 'ml-en'],
+            $method->invoke($service, 'M/L', 'en'),
+        );
+        $this->assertEqualsCanonicalizing(
+            ['large', 'large-en'],
+            $method->invoke($service, 'Large', 'en'),
+        );
+    }
+
     #[DataProvider('nonOrderParentDriftProvider')]
     public function test_final_verification_rejects_every_parent_drift_except_response_array_order(
         string $drift,
@@ -4236,10 +4396,17 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             if ($path === '/wp-json/wc/v3/products/attributes/1/terms'
                 && $request->method() === 'GET'
             ) {
-                return Http::response([
-                    ['id' => 11, 'name' => 'S/M', 'slug' => 's-m', 'menu_order' => 10],
-                    ['id' => 12, 'name' => 'M/L', 'slug' => 'm-l', 'menu_order' => 20],
-                ]);
+                parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+                return Http::response(($query['lang'] ?? 'pl') === 'en'
+                    ? [
+                        ['id' => 21, 'name' => 'S/M', 'slug' => 's-m-en', 'menu_order' => 10],
+                        ['id' => 22, 'name' => 'M/L', 'slug' => 'm-l-en', 'menu_order' => 20],
+                    ]
+                    : [
+                        ['id' => 11, 'name' => 'S/M', 'slug' => 's-m', 'menu_order' => 10],
+                        ['id' => 12, 'name' => 'M/L', 'slug' => 'm-l', 'menu_order' => 20],
+                    ]);
             }
 
             if (in_array($path, [

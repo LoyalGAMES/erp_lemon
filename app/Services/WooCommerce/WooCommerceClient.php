@@ -1611,6 +1611,87 @@ final class WooCommerceClient
     }
 
     /**
+     * Resolve one existing term through the same language-aware, duplicate-
+     * safe logic used by attribute export. This method is read-only.
+     *
+     * @param  list<string>  $languageSlugs
+     * @return array<string,mixed>|null
+     */
+    public function globalProductAttributeTermByNameAndLanguage(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $option,
+        string $language,
+        array $languageSlugs = [],
+    ): ?array {
+        if ($attributeId <= 0 || trim($option) === '') {
+            throw new RuntimeException('Wyszukanie wartości globalnego atrybutu wymaga ID i nazwy terminu.');
+        }
+
+        $language = mb_strtolower(trim($language));
+
+        if ($languageSlugs !== []) {
+            $normalizedName = mb_strtolower(trim($option));
+            $allowedSlugs = collect($languageSlugs)
+                ->map(fn (mixed $slug): string => Str::slug((string) $slug))
+                ->filter()
+                ->unique()
+                ->values();
+            $candidates = collect($this->globalProductAttributeTerms(
+                $integration,
+                $attributeId,
+                $language,
+            ))
+                ->filter(fn (array $term): bool => (int) ($term['id'] ?? 0) > 0
+                    && mb_strtolower(trim((string) ($term['name'] ?? ''))) === $normalizedName)
+                ->reject(fn (array $term): bool => $this->globalProductAttributeTermHasLanguageIdentity($term)
+                    && ! $this->globalProductAttributeTermMatchesLanguage($term, $language))
+                ->unique(fn (array $term): int => (int) $term['id'])
+                ->values();
+            $languageMatches = $candidates
+                ->filter(fn (array $term): bool => $this->globalProductAttributeTermMatchesLanguage(
+                    $term,
+                    $language,
+                ))
+                ->values();
+
+            if ($languageMatches->count() === 1) {
+                return $languageMatches->first();
+            }
+
+            if ($languageMatches->count() > 1) {
+                $candidates = $languageMatches;
+            }
+
+            $slugMatches = $candidates
+                ->filter(fn (array $term): bool => $allowedSlugs->contains(
+                    Str::slug((string) ($term['slug'] ?? '')),
+                ))
+                ->values();
+
+            if ($slugMatches->count() === 1) {
+                return $slugMatches->first();
+            }
+
+            if ($candidates->isEmpty() || $slugMatches->isEmpty()) {
+                return null;
+            }
+
+            throw new RuntimeException(
+                "WooCommerce zawiera kilka wartości {$option} języka ".mb_strtoupper($language)
+                    ." globalnego atrybutu #{$attributeId}; eksport został przerwany.",
+            );
+        }
+
+        return $this->findGlobalProductAttributeTerm(
+            $integration,
+            $attributeId,
+            trim($option),
+            $language,
+        );
+    }
+
+    /**
      * Switch an already existing global taxonomy to explicit term ordering.
      * This maintenance path never creates an attribute.
      *

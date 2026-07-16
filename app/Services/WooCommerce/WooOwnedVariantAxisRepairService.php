@@ -342,10 +342,15 @@ final class WooOwnedVariantAxisRepairService
                 $target['external_product_id'],
                 $this->apiLanguage($target['language']),
             );
+            $planningParent = $this->normalizeExistingParentSizeAxisForPlan(
+                $target,
+                $parent,
+            );
 
             $remoteFamilies[] = [
                 'target' => $target,
                 'parent' => $parent,
+                'planning_parent' => $planningParent,
                 'variations' => $variations,
                 'protected' => $this->protectedSnapshot($parent, $variations),
             ];
@@ -353,7 +358,7 @@ final class WooOwnedVariantAxisRepairService
 
         $planRemoteFamily = function (array $entry, array $optionHints): array {
             $target = $entry['target'];
-            $parent = $entry['parent'];
+            $parent = $entry['planning_parent'] ?? $entry['parent'];
             $variations = $entry['variations'];
 
             $childOnlyAxisOptions = [];
@@ -551,7 +556,7 @@ final class WooOwnedVariantAxisRepairService
             }
 
             $resolvedPlan = $this->familyPlan(
-                $entry['parent'],
+                $entry['planning_parent'] ?? $entry['parent'],
                 $entry['variations'],
                 $globalSize,
                 $variationOptionHints,
@@ -567,7 +572,7 @@ final class WooOwnedVariantAxisRepairService
                         $entry['variations'],
                     );
                     $resolvedPlan = $this->familyPlan(
-                        $entry['parent'],
+                        $entry['planning_parent'] ?? $entry['parent'],
                         $entry['variations'],
                         $globalSize,
                         $variationOptionHints,
@@ -735,6 +740,47 @@ final class WooOwnedVariantAxisRepairService
             }
         }
 
+        // Woo persists a global default's submitted term name as a slug. Read
+        // the exact target-language term pair before the first product PUT;
+        // final verification may then accept only that proven name<->slug
+        // representation, never a canonical-looking term from another
+        // Polylang language.
+        foreach ($plans as $index => $entry) {
+            try {
+                $expectedParentPayload = $entry['plan']['parent_payload'] ?? [
+                    'attributes' => array_values((array) data_get(
+                        $entry,
+                        'planning_parent.attributes',
+                        [],
+                    )),
+                    'default_attributes' => array_values((array) data_get(
+                        $entry,
+                        'planning_parent.default_attributes',
+                        [],
+                    )),
+                ];
+                $plans[$index]['expected_parent_payload'] = $expectedParentPayload;
+                $plans[$index]['size_default_term_aliases'] = $this->resolveSizeDefaultTermAliases(
+                    $entry['target'],
+                    $expectedParentPayload,
+                    (int) $entry['plan']['size_id'],
+                );
+            } catch (Throwable $exception) {
+                return [
+                    'status' => 'manual_review',
+                    'targets' => count($plans),
+                    'mutations' => 0,
+                    'reason' => sprintf(
+                        'WooCommerce %s #%s: %s',
+                        mb_strtoupper($entry['target']['language']),
+                        $entry['target']['external_product_id'],
+                        $exception->getMessage(),
+                    ),
+                    'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
+                ];
+            }
+        }
+
         $mutations = 0;
 
         // Finish and verify one language at a time. If any write/read fails,
@@ -811,6 +857,7 @@ final class WooOwnedVariantAxisRepairService
                 $parent = [];
                 $variations = [];
                 $verificationConfirmed = false;
+                $expectedParentPayload = $entry['expected_parent_payload'];
 
                 // A proxy/object-cache layer can briefly serve the pre-PUT
                 // representation. Every read carries a unique cache buster;
@@ -825,8 +872,14 @@ final class WooOwnedVariantAxisRepairService
                         $target['external_product_id'],
                         $this->apiLanguage($target['language']),
                     );
-                    $verified = $this->familyPlan(
+                    $planningParent = $this->normalizeVerifiedSizeDefaultAliasesForPlan(
                         $parent,
+                        $expectedParentPayload,
+                        (int) $entry['plan']['size_id'],
+                        (array) ($entry['size_default_term_aliases'] ?? []),
+                    );
+                    $verified = $this->familyPlan(
+                        $planningParent,
                         $variations,
                         null,
                         [],
@@ -835,10 +888,8 @@ final class WooOwnedVariantAxisRepairService
                     $verificationConfirmed = $this->finalAxisStateMatches(
                         $parent,
                         $verified,
-                        $entry['plan']['parent_payload'] ?? [
-                            'attributes' => array_values((array) ($entry['parent']['attributes'] ?? [])),
-                            'default_attributes' => array_values((array) ($entry['parent']['default_attributes'] ?? [])),
-                        ],
+                        $expectedParentPayload,
+                        (array) ($entry['size_default_term_aliases'] ?? []),
                     );
 
                     if ($verificationConfirmed) {
@@ -853,9 +904,15 @@ final class WooOwnedVariantAxisRepairService
                 if (! $verificationConfirmed) {
                     throw new RuntimeException(
                         sprintf(
-                            'WooCommerce nie potwierdził kanonicznej osi rozmiaru produktu #%s po naprawie (%s).',
+                            'WooCommerce nie potwierdził kanonicznej osi rozmiaru produktu #%s po naprawie (%s, parent_delta=%s).',
                             $target['external_product_id'],
                             $this->verificationResidual($verified),
+                            $this->finalParentAxisPayloadDelta(
+                                $parent,
+                                $expectedParentPayload,
+                                (int) ($verified['size_id'] ?? 0),
+                                (array) ($entry['size_default_term_aliases'] ?? []),
+                            ),
                         ),
                     );
                 }
@@ -1550,6 +1607,17 @@ final class WooOwnedVariantAxisRepairService
             })
             ->values()
             ->all();
+        $expectedPrimaryPayload = $primary['expected_parent_payload'] ?? null;
+
+        if (is_array($expectedPrimaryPayload)) {
+            // The live GET legitimately contains term slugs. The already
+            // verified request payload is the canonical ERP snapshot and also
+            // handles localized slugs such as `m-l-en` without guessing.
+            $verifiedParent['default_attributes'] = collect((array) ($expectedPrimaryPayload['default_attributes'] ?? []))
+                ->filter(fn (mixed $attribute): bool => is_array($attribute))
+                ->values()
+                ->all();
+        }
         $remoteBySku = collect($verifiedVariations)
             ->mapWithKeys(fn (array $variation): array => [
                 mb_strtoupper(trim((string) ($variation['sku'] ?? ''))) => $variation,
@@ -4199,6 +4267,246 @@ final class WooOwnedVariantAxisRepairService
     }
 
     /**
+     * Normalize only response representations already proven by the existing
+     * target-language taxonomy. This makes a completed repair idempotent while
+     * preserving the untouched remote parent for rollback/protected hashing.
+     *
+     * @param  array{integration:WordpressIntegration,language:string}  $target
+     * @param  array<string,mixed>  $parent
+     * @return array<string,mixed>
+     */
+    private function normalizeExistingParentSizeAxisForPlan(array $target, array $parent): array
+    {
+        $attributes = collect((array) ($parent['attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->values();
+        $sizeAttributes = $attributes
+            ->filter(fn (array $attribute): bool => $this->isCanonicalGlobalSizeAttribute($attribute))
+            ->values();
+
+        if ($sizeAttributes->count() !== 1) {
+            return $parent;
+        }
+
+        $size = (array) $sizeAttributes->first();
+        $sizeId = (int) ($size['id'] ?? 0);
+        $sizeIndex = $attributes->search(fn (array $attribute): bool => $this->sameAttribute(
+            $attribute,
+            $size,
+        ));
+
+        if ($sizeId <= 0 || $sizeIndex === false) {
+            return $parent;
+        }
+
+        $orderedOptions = $this->orderedExistingSizeOptionNames((array) ($size['options'] ?? []));
+        $size['options'] = $orderedOptions;
+        $attributes->put($sizeIndex, $size);
+        $parent['attributes'] = $attributes->values()->all();
+
+        /** @var WordpressIntegration $integration */
+        $integration = $target['integration'];
+        $language = $this->language($target['language']);
+        $defaults = collect((array) ($parent['default_attributes'] ?? []))
+            ->filter(fn (mixed $default): bool => is_array($default))
+            ->values()
+            ->map(function (array $default) use (
+                $integration,
+                $language,
+                $sizeId,
+                $orderedOptions,
+            ): array {
+                if ((int) ($default['id'] ?? 0) !== $sizeId) {
+                    return $default;
+                }
+
+                $rawOption = trim((string) ($default['option'] ?? ''));
+
+                if ($rawOption === '' || in_array($rawOption, $orderedOptions, true)) {
+                    return $default;
+                }
+
+                $matches = collect($orderedOptions)
+                    ->filter(fn (string $name): bool => in_array(
+                        $rawOption,
+                        $this->sizeDefaultTermLanguageSlugs($name, $language),
+                        true,
+                    ))
+                    ->filter(function (string $name) use (
+                        $integration,
+                        $language,
+                        $sizeId,
+                        $rawOption,
+                    ): bool {
+                        $term = $this->client->globalProductAttributeTermByNameAndLanguage(
+                            $integration,
+                            $sizeId,
+                            $name,
+                            $language,
+                            $this->sizeDefaultTermLanguageSlugs($name, $language),
+                        );
+
+                        return is_array($term)
+                            && trim((string) ($term['name'] ?? '')) === $name
+                            && trim((string) ($term['slug'] ?? '')) === $rawOption;
+                    })
+                    ->values();
+
+                if ($matches->count() === 1) {
+                    $default['option'] = $matches->first();
+                }
+
+                return $default;
+            })
+            ->all();
+        $parent['default_attributes'] = $defaults;
+
+        return $parent;
+    }
+
+    /**
+     * Preserve the exact target-language names while applying only backend
+     * dictionary order.
+     *
+     * @param  list<mixed>  $options
+     * @return list<string>
+     */
+    private function orderedExistingSizeOptionNames(array $options): array
+    {
+        $dictionaryOrder = $this->sizeDictionaryOrder(ProductVariantAxisNameResolver::SIZE);
+
+        return collect($options)
+            ->map(fn (mixed $option, int $index): array => [
+                'name' => trim((string) $option),
+                'index' => $index,
+                'rank' => $dictionaryOrder[$this->canonicalSizeOptionKey(
+                    ProductVariantAxisNameResolver::SIZE,
+                    (string) $option,
+                )] ?? $this->canonicalSizeRank((string) $option),
+            ])
+            ->filter(fn (array $option): bool => $option['name'] !== '')
+            ->sort(function (array $left, array $right): int {
+                if ($left['rank'] === null && $right['rank'] === null) {
+                    return $left['index'] <=> $right['index'];
+                }
+
+                if ($left['rank'] === null) {
+                    return 1;
+                }
+
+                if ($right['rank'] === null) {
+                    return -1;
+                }
+
+                return $left['rank'] <=> $right['rank']
+                    ?: $left['index'] <=> $right['index'];
+            })
+            ->pluck('name')
+            ->values()
+            ->all();
+    }
+
+    /**
+     * Resolve exact name/slug pairs for target-language global Size defaults.
+     * A missing or duplicate term is unsafe: accepting a merely canonical
+     * value could otherwise cross Polylang term identities.
+     *
+     * @param  array{integration:WordpressIntegration,language:string}  $target
+     * @param  array{default_attributes?:list<array<string,mixed>>}|null  $parentPayload
+     * @return array<string,list<string>> Canonical option key => exact term aliases.
+     */
+    private function resolveSizeDefaultTermAliases(
+        array $target,
+        ?array $parentPayload,
+        int $sizeId,
+    ): array {
+        if ($parentPayload === null || $sizeId <= 0) {
+            return [];
+        }
+
+        $defaults = collect((array) ($parentPayload['default_attributes'] ?? []))
+            ->filter(fn (mixed $default): bool => is_array($default)
+                && (int) ($default['id'] ?? 0) === $sizeId)
+            ->values();
+
+        if ($defaults->isEmpty()) {
+            return [];
+        }
+
+        /** @var WordpressIntegration $integration */
+        $integration = $target['integration'];
+        $language = $this->language($target['language']);
+        $aliases = [];
+
+        foreach ($defaults as $default) {
+            $expectedName = trim((string) ($default['option'] ?? ''));
+            $canonicalKey = $this->canonicalSizeOptionKey(
+                ProductVariantAxisNameResolver::SIZE,
+                $expectedName,
+            );
+            $term = $expectedName === ''
+                ? null
+                : $this->client->globalProductAttributeTermByNameAndLanguage(
+                    $integration,
+                    $sizeId,
+                    $expectedName,
+                    $language,
+                    $this->sizeDefaultTermLanguageSlugs($expectedName, $language),
+                );
+
+            if ($canonicalKey === '' || ! is_array($term)) {
+                throw new RuntimeException(
+                    'Nie znaleziono jednego terminu domyślnego rozmiaru we właściwym języku.',
+                );
+            }
+
+            $termName = trim((string) ($term['name'] ?? ''));
+            $termSlug = trim((string) ($term['slug'] ?? ''));
+
+            if ($termName !== $expectedName || $termSlug === '') {
+                throw new RuntimeException(
+                    'Termin domyślnego rozmiaru nie ma pełnej tożsamości nazwa/slug.',
+                );
+            }
+
+            $aliases[$canonicalKey] = collect([$termName, $termSlug])
+                ->unique()
+                ->values()
+                ->all();
+        }
+
+        return $aliases;
+    }
+
+    /** @return list<string> */
+    private function sizeDefaultTermLanguageSlugs(string $option, string $language): array
+    {
+        $language = $this->language($language);
+        $localizedSlug = $this->optionKey($option);
+        $canonicalSlug = $this->canonicalSizeOptionKey(
+            ProductVariantAxisNameResolver::SIZE,
+            $option,
+        );
+        $baseSlugs = collect([$localizedSlug, Str::slug($option)])
+            ->filter()
+            ->unique()
+            ->values();
+        $slugs = $baseSlugs->map(
+            fn (string $slug): string => $slug.'-'.Str::slug($language),
+        );
+
+        // A visibly translated name (Large vs Duży) is itself language-
+        // specific and may legitimately keep an unsuffixed legacy slug. A
+        // shared label (M/L in PL and EN) requires the target-language suffix
+        // or explicit Polylang identity to avoid crossing term families.
+        if ($language === 'pl' || $localizedSlug !== $canonicalSlug) {
+            $slugs->push(...$baseSlugs);
+        }
+
+        return $slugs->filter()->unique()->values()->all();
+    }
+
+    /**
      * @param  array<string, mixed>  $parent
      * @param  list<array<string, mixed>>  $variations
      * @param  array<string, string>  $variationOptionHints  Canonical option keys keyed by unique SKU.
@@ -4957,6 +5265,59 @@ final class WooOwnedVariantAxisRepairService
     }
 
     /**
+     * Family planning works with canonical term names. Replace a Woo-returned
+     * default slug only after the target-language term lookup proved that it
+     * is the exact alias of the expected name. The untouched parent is still
+     * used by the final comparator and protected-data snapshot.
+     *
+     * @param  array<string,mixed>  $parent
+     * @param  array{attributes:list<array<string,mixed>>,default_attributes?:list<array<string,mixed>>}  $expectedParentPayload
+     * @param  array<string,list<string>>  $sizeDefaultTermAliases
+     * @return array<string,mixed>
+     */
+    private function normalizeVerifiedSizeDefaultAliasesForPlan(
+        array $parent,
+        array $expectedParentPayload,
+        int $sizeId,
+        array $sizeDefaultTermAliases,
+    ): array {
+        $actualDefaults = collect((array) ($parent['default_attributes'] ?? []))
+            ->filter(fn (mixed $default): bool => is_array($default))
+            ->values()
+            ->all();
+        $expectedDefaults = collect((array) ($expectedParentPayload['default_attributes'] ?? []))
+            ->filter(fn (mixed $default): bool => is_array($default))
+            ->values()
+            ->all();
+
+        foreach ($expectedDefaults as $index => $expectedDefault) {
+            $actualDefault = (array) ($actualDefaults[$index] ?? []);
+            $actualSerialized = $this->serializeDefaultAttribute($actualDefault);
+            $expectedSerialized = $this->serializeDefaultAttribute($expectedDefault);
+            $actualOption = (string) ($actualSerialized['option'] ?? '');
+            $expectedOption = (string) ($expectedSerialized['option'] ?? '');
+            unset($actualSerialized['option'], $expectedSerialized['option']);
+
+            if ($actualSerialized === $expectedSerialized
+                && $actualOption !== $expectedOption
+                && $this->provenSizeDefaultTermAliasMatches(
+                    $actualSerialized,
+                    $actualOption,
+                    $expectedOption,
+                    $sizeId,
+                    $sizeDefaultTermAliases,
+                )
+            ) {
+                $actualDefaults[$index]['option'] = $expectedOption;
+            }
+        }
+
+        $parent['default_attributes'] = $actualDefaults;
+
+        return $parent;
+    }
+
+    /**
      * Woo can return global taxonomy options in its own term-query order even
      * after accepting the requested product payload. Final verification may
      * ignore only that response-array order: every attribute identity,
@@ -4968,11 +5329,13 @@ final class WooOwnedVariantAxisRepairService
      * @param  array<string,mixed>  $parent
      * @param  array<string,mixed>  $verified
      * @param  array{attributes:list<array<string,mixed>>,default_attributes?:list<array<string,mixed>>}  $expectedParentPayload
+     * @param  array<string,list<string>>  $sizeDefaultTermAliases
      */
     private function finalAxisStateMatches(
         array $parent,
         array $verified,
         array $expectedParentPayload,
+        array $sizeDefaultTermAliases,
     ): bool {
         if (! in_array((string) ($verified['status'] ?? ''), ['canonical', 'repair'], true)
             || ($verified['transitional_parent_payload'] ?? null) !== null
@@ -4981,7 +5344,12 @@ final class WooOwnedVariantAxisRepairService
             return false;
         }
 
-        return $this->finalParentAxisPayloadMatches($parent, $expectedParentPayload);
+        return $this->finalParentAxisPayloadMatches(
+            $parent,
+            $expectedParentPayload,
+            (int) ($verified['size_id'] ?? 0),
+            $sizeDefaultTermAliases,
+        );
     }
 
     /**
@@ -4991,9 +5359,14 @@ final class WooOwnedVariantAxisRepairService
      *
      * @param  array<string,mixed>  $parent
      * @param  array{attributes:list<array<string,mixed>>,default_attributes?:list<array<string,mixed>>}  $payload
+     * @param  array<string,list<string>>  $sizeDefaultTermAliases
      */
-    private function finalParentAxisPayloadMatches(array $parent, array $payload): bool
-    {
+    private function finalParentAxisPayloadMatches(
+        array $parent,
+        array $payload,
+        int $sizeId,
+        array $sizeDefaultTermAliases,
+    ): bool {
         $actualAttributes = collect((array) ($parent['attributes'] ?? []))
             ->filter(fn (mixed $attribute): bool => is_array($attribute))
             ->map(function (array $attribute): array {
@@ -5055,18 +5428,245 @@ final class WooOwnedVariantAxisRepairService
             }
         }
 
-        $actualDefaults = collect((array) ($parent['default_attributes'] ?? []))
+        return $this->parentDefaultAxisPayloadMatches(
+            (array) ($parent['default_attributes'] ?? []),
+            (array) ($payload['default_attributes'] ?? []),
+            $sizeId,
+            $sizeDefaultTermAliases,
+        );
+    }
+
+    /**
+     * Woo stores the submitted name of a global default term as its slug (for
+     * example `M/L` becomes `m-l`) and returns that slug on GET. Treat those
+     * two representations as equal only when a fresh target-language term
+     * lookup proved that exact pair. Count, order, axis identity and every
+     * non-Size default stay exact.
+     *
+     * @param  list<array<string,mixed>>  $actualDefaults
+     * @param  list<array<string,mixed>>  $expectedDefaults
+     * @param  array<string,list<string>>  $sizeDefaultTermAliases
+     */
+    private function parentDefaultAxisPayloadMatches(
+        array $actualDefaults,
+        array $expectedDefaults,
+        int $sizeId,
+        array $sizeDefaultTermAliases,
+    ): bool {
+        $actualDefaults = collect($actualDefaults)
             ->filter(fn (mixed $attribute): bool => is_array($attribute))
             ->map(fn (array $attribute): array => $this->serializeDefaultAttribute($attribute))
             ->values()
             ->all();
-        $expectedDefaults = collect((array) ($payload['default_attributes'] ?? []))
+        $expectedDefaults = collect($expectedDefaults)
             ->filter(fn (mixed $attribute): bool => is_array($attribute))
             ->map(fn (array $attribute): array => $this->serializeDefaultAttribute($attribute))
             ->values()
             ->all();
 
-        return $actualDefaults === $expectedDefaults;
+        if (count($actualDefaults) !== count($expectedDefaults)) {
+            return false;
+        }
+
+        foreach ($expectedDefaults as $index => $expectedDefault) {
+            $actualDefault = (array) ($actualDefaults[$index] ?? []);
+            $actualOption = (string) ($actualDefault['option'] ?? '');
+            $expectedOption = (string) ($expectedDefault['option'] ?? '');
+            unset($actualDefault['option'], $expectedDefault['option']);
+
+            if ($actualDefault !== $expectedDefault) {
+                return false;
+            }
+
+            if ($actualOption === $expectedOption) {
+                continue;
+            }
+
+            if (! $this->provenSizeDefaultTermAliasMatches(
+                $actualDefault,
+                $actualOption,
+                $expectedOption,
+                $sizeId,
+                $sizeDefaultTermAliases,
+            )) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @param  array<string,mixed>  $defaultIdentity
+     * @param  array<string,list<string>>  $sizeDefaultTermAliases
+     */
+    private function provenSizeDefaultTermAliasMatches(
+        array $defaultIdentity,
+        string $actualOption,
+        string $expectedOption,
+        int $sizeId,
+        array $sizeDefaultTermAliases,
+    ): bool {
+        $canonicalKey = $this->canonicalSizeOptionKey(
+            ProductVariantAxisNameResolver::SIZE,
+            $expectedOption,
+        );
+        $aliases = array_values((array) ($sizeDefaultTermAliases[$canonicalKey] ?? []));
+
+        return $sizeId > 0
+            && (int) ($defaultIdentity['id'] ?? 0) === $sizeId
+            && $canonicalKey !== ''
+            && in_array($expectedOption, $aliases, true)
+            && in_array($actualOption, $aliases, true);
+    }
+
+    /**
+     * Return axis-only diagnostics. Never include product content, stock,
+     * prices, SKUs or raw attribute/default values in deployment logs.
+     *
+     * @param  array<string,mixed>  $parent
+     * @param  array{attributes:list<array<string,mixed>>,default_attributes?:list<array<string,mixed>>}  $payload
+     * @param  array<string,list<string>>  $sizeDefaultTermAliases
+     */
+    private function finalParentAxisPayloadDelta(
+        array $parent,
+        array $payload,
+        int $sizeId,
+        array $sizeDefaultTermAliases,
+    ): string {
+        $differences = collect();
+        $actualAttributes = collect((array) ($parent['attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(fn (array $attribute): array => $this->serializeParentAttribute($attribute))
+            ->values();
+        $expectedAttributes = collect((array) ($payload['attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(fn (array $attribute): array => $this->serializeParentAttribute($attribute))
+            ->values();
+
+        if ($actualAttributes->count() !== $expectedAttributes->count()) {
+            $differences->push(sprintf(
+                'attributes.count:%d/%d',
+                $actualAttributes->count(),
+                $expectedAttributes->count(),
+            ));
+        }
+
+        $actualByAxis = $actualAttributes->keyBy(
+            fn (array $attribute): string => $this->axisIdentityKey($attribute),
+        );
+        $expectedByAxis = $expectedAttributes->keyBy(
+            fn (array $attribute): string => $this->axisIdentityKey($attribute),
+        );
+
+        foreach ($expectedByAxis as $axis => $expected) {
+            $actual = $actualByAxis->get($axis);
+            $safeAxis = $this->safeAxisDiagnosticKey($expected);
+
+            if (! is_array($actual)) {
+                $differences->push("axis({$safeAxis}).missing");
+
+                continue;
+            }
+
+            foreach (['position', 'visible', 'variation'] as $field) {
+                if (($actual[$field] ?? null) !== ($expected[$field] ?? null)) {
+                    $differences->push("axis({$safeAxis}).{$field}");
+                }
+            }
+
+            $actualOptions = collect((array) ($actual['options'] ?? []))
+                ->map(fn (mixed $option): string => trim((string) $option))
+                ->sort()
+                ->values()
+                ->all();
+            $expectedOptions = collect((array) ($expected['options'] ?? []))
+                ->map(fn (mixed $option): string => trim((string) $option))
+                ->sort()
+                ->values()
+                ->all();
+
+            if ($actualOptions !== $expectedOptions) {
+                $differences->push("axis({$safeAxis}).options");
+            }
+        }
+
+        foreach ($actualByAxis->keys()->diff($expectedByAxis->keys()) as $axis) {
+            $actual = (array) $actualByAxis->get($axis, []);
+            $differences->push(sprintf(
+                'axis(%s).extra',
+                $this->safeAxisDiagnosticKey($actual),
+            ));
+        }
+
+        $actualDefaults = collect((array) ($parent['default_attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(fn (array $attribute): array => $this->serializeDefaultAttribute($attribute))
+            ->values();
+        $expectedDefaults = collect((array) ($payload['default_attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(fn (array $attribute): array => $this->serializeDefaultAttribute($attribute))
+            ->values();
+
+        if ($actualDefaults->count() !== $expectedDefaults->count()) {
+            $differences->push(sprintf(
+                'defaults.count:%d/%d',
+                $actualDefaults->count(),
+                $expectedDefaults->count(),
+            ));
+        }
+
+        foreach ($expectedDefaults as $index => $expectedDefault) {
+            $actualDefault = $actualDefaults->get($index);
+
+            if (! is_array($actualDefault)) {
+                $differences->push("default[{$index}].missing");
+
+                continue;
+            }
+
+            $actualOption = (string) ($actualDefault['option'] ?? '');
+            $expectedOption = (string) ($expectedDefault['option'] ?? '');
+            unset($actualDefault['option'], $expectedDefault['option']);
+
+            if ($actualDefault !== $expectedDefault) {
+                $differences->push("default[{$index}].axis");
+            } elseif ($actualOption !== $expectedOption) {
+                $aliasProven = $this->provenSizeDefaultTermAliasMatches(
+                    $actualDefault,
+                    $actualOption,
+                    $expectedOption,
+                    $sizeId,
+                    $sizeDefaultTermAliases,
+                );
+                $differences->push(sprintf(
+                    'default[%d].option:%s',
+                    $index,
+                    $aliasProven ? 'term-alias-proven' : 'different',
+                ));
+            }
+        }
+
+        return Str::limit(
+            $differences->take(8)->implode('|') ?: 'none',
+            512,
+            '...',
+        );
+    }
+
+    /** @param array<string,mixed> $attribute */
+    private function safeAxisDiagnosticKey(array $attribute): string
+    {
+        $id = (int) ($attribute['id'] ?? 0);
+
+        if ($id > 0) {
+            return 'id:'.$id;
+        }
+
+        return 'custom:'.substr(hash(
+            'sha256',
+            $this->attributeKey($this->attributeName($attribute)),
+        ), 0, 8);
     }
 
     /**
