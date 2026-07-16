@@ -1556,6 +1556,196 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame([['id' => 1, 'option' => 'M/L']], $catalog->variations[223][225]['attributes']);
     }
 
+    public function test_it_repairs_the_live_complementary_pl_en_damage_only_after_a_complete_remote_sku_bijection(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+        $this->assertTrue($repair->isComplementaryLanguageSizeRootCandidate($parent->fresh()));
+
+        // Exact local shape left by the damaged PL import: the parent still
+        // proves wariant=Rozmiar, but every child option is blank.
+        $this->eraseLocalChildSizeEvidence($parent);
+
+        $this->assertTrue($repair->isComplementaryLanguageSizeRootCandidate($parent->fresh()));
+
+        // Exact public live shape: PL children are blank. EN has the inverse
+        // damage (blank generic parent terms), but its existing child IDs map
+        // the same SKUs 1:1 to s-m/m-l.
+        foreach ($catalog->variations[123] as &$variation) {
+            $variation['attributes'][0]['option'] = null;
+        }
+        unset($variation);
+        $catalog->products[223]['attributes'][1]['options'] = [];
+
+        $originalParents = unserialize(serialize($catalog->products));
+        $originalVariations = unserialize(serialize($catalog->variations));
+        $originalIds = collect($catalog->variations)
+            ->map(fn (array $variations): array => array_keys($variations))
+            ->all();
+
+        $this->fakeCatalog($catalog);
+        $result = $repair->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        $this->assertSame(2, $result['targets']);
+        $this->assertSame($originalIds, collect($catalog->variations)
+            ->map(fn (array $variations): array => array_keys($variations))
+            ->all());
+
+        foreach ([123 => [124 => 'S/M', 125 => 'M/L'], 223 => [224 => 'S/M', 225 => 'M/L']] as $parentId => $expected) {
+            $targetAxes = collect($catalog->products[$parentId]['attributes'])
+                ->filter(fn (array $attribute): bool => (bool) ($attribute['variation'] ?? false))
+                ->values();
+            $this->assertCount(1, $targetAxes);
+            $this->assertSame(1, (int) $targetAxes->first()['id']);
+            $this->assertSame(['S/M', 'M/L'], $targetAxes->first()['options']);
+
+            foreach ($expected as $variationId => $option) {
+                $this->assertSame(
+                    [['id' => 1, 'option' => $option]],
+                    $catalog->variations[$parentId][$variationId]['attributes'],
+                );
+                $this->assertSame(
+                    $option === 'S/M' ? 10 : 20,
+                    $catalog->variations[$parentId][$variationId]['menu_order'],
+                );
+                $this->assertSame(
+                    collect($originalVariations[$parentId][$variationId])
+                        ->except(['attributes', 'menu_order'])
+                        ->all(),
+                    collect($catalog->variations[$parentId][$variationId])
+                        ->except(['attributes', 'menu_order'])
+                        ->all(),
+                );
+            }
+
+            $this->assertSame(
+                collect($originalParents[$parentId])
+                    ->except(['attributes', 'default_attributes'])
+                    ->all(),
+                collect($catalog->products[$parentId])
+                    ->except(['attributes', 'default_attributes'])
+                    ->all(),
+            );
+        }
+
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
+    }
+
+    public function test_complementary_language_hint_never_overwrites_a_conflicting_non_empty_child_option(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->eraseLocalChildSizeEvidence($parent);
+
+        foreach ($catalog->variations[123] as &$variation) {
+            $variation['attributes'][0]['option'] = null;
+        }
+        unset($variation);
+        // The S/M SKU has a conflicting non-empty M/L value in PL. EN is a
+        // complete source, but its hint may fill blanks only, never overwrite.
+        $catalog->variations[123][124]['attributes'][0]['option'] = 'm-l';
+        $catalog->products[223]['attributes'][1]['options'] = [];
+
+        $this->fakeCatalog($catalog);
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertStringContainsString('nie mapuje się 1:1', $result['reason']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
+    }
+
+    public function test_complementary_language_hint_rejects_an_ambiguous_remote_sku_family_before_any_write(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->eraseLocalChildSizeEvidence($parent);
+
+        foreach ($catalog->variations[123] as &$variation) {
+            $variation['attributes'][0]['option'] = null;
+        }
+        unset($variation);
+        $catalog->products[223]['attributes'][1]['options'] = [];
+        $catalog->variations[223][225]['sku'] = $catalog->variations[223][224]['sku'];
+
+        $this->fakeCatalog($catalog);
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
+    }
+
+    public function test_complementary_candidate_and_repair_reject_shadow_localized_and_secondary_woo_values(): void
+    {
+        [$parent] = $this->family();
+        $this->eraseLocalChildSizeEvidence($parent);
+        $variant = $parent->variantChildren()->firstOrFail();
+        $attributes = (array) $variant->attributes;
+        data_set($attributes, 'master.parameters.0.value_en', 'M/L');
+        data_set($attributes, 'woocommerce_attributes.0.option', 'M/L');
+        $variant->update(['attributes' => $attributes]);
+
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+        $this->assertFalse($repair->isComplementaryLanguageSizeRootCandidate($parent->fresh()));
+        $result = $repair->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertStringContainsString('Lokalne warianty', $result['reason']);
+        Http::assertNothingSent();
+    }
+
+    public function test_complementary_candidate_rejects_an_explicit_parent_color_axis_even_with_duplicate_size_rows(): void
+    {
+        [$parent] = $this->family();
+        $attributes = (array) $parent->attributes;
+        data_set($attributes, 'master.variant_attribute', 'Kolor');
+        $parent->update(['attributes' => $attributes]);
+
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+        $this->assertFalse($repair->isComplementaryLanguageSizeRootCandidate($parent->fresh()));
+        $result = $repair->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        Http::assertNothingSent();
+    }
+
+    public function test_complementary_candidate_rejects_a_shadow_parent_color_translation(): void
+    {
+        [$parent] = $this->family();
+        $attributes = (array) $parent->attributes;
+        data_set($attributes, 'master.parameters.0.name_en', 'Color');
+        $parent->update(['attributes' => $attributes]);
+
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+        $this->assertFalse($repair->isComplementaryLanguageSizeRootCandidate($parent->fresh()));
+        $this->assertSame('manual_review', $repair->repair($parent->fresh())['status']);
+        Http::assertNothingSent();
+    }
+
+    public function test_complementary_candidate_rejects_a_non_target_child_variation_axis_before_remote_preflight(): void
+    {
+        [$parent] = $this->family();
+        $this->eraseLocalChildSizeEvidence($parent);
+        $variant = $parent->variantChildren()->firstOrFail();
+        $attributes = (array) $variant->attributes;
+        $parameters = (array) data_get($attributes, 'master.parameters', []);
+        $parameters[] = [
+            'name' => 'Kolor',
+            'value' => 'Czarny',
+            'variation' => true,
+        ];
+        data_set($attributes, 'master.parameters', $parameters);
+        $variant->update(['attributes' => $attributes]);
+
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+        $this->assertFalse($repair->isComplementaryLanguageSizeRootCandidate($parent->fresh()));
+        $result = $repair->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertStringContainsString('Lokalne warianty', $result['reason']);
+        Http::assertNothingSent();
+    }
+
     public function test_it_rejects_conflicting_generic_and_global_child_options_before_any_write(): void
     {
         [$parent, $catalog] = $this->family();
@@ -3097,6 +3287,39 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             $attributes = (array) $product->attributes;
             data_set($attributes, 'master.source', 'erp');
             $product->update(['attributes' => $attributes]);
+        }
+    }
+
+    private function eraseLocalChildSizeEvidence(Product $parent): void
+    {
+        foreach ($parent->variantChildren()->get() as $variant) {
+            $attributes = (array) $variant->attributes;
+            data_set($attributes, 'master.variant_attribute', 'wariant');
+            data_set($attributes, 'master.parameters', [[
+                'name' => 'wariant',
+                'value' => '',
+                'variation' => true,
+            ]]);
+            data_set($attributes, 'woocommerce_variation_attributes', [[
+                'id' => 6,
+                'name' => 'wariant',
+                'slug' => 'pa_wariant',
+                'option' => null,
+            ]]);
+            data_set($attributes, 'woocommerce_attributes', [[
+                'id' => 6,
+                'name' => 'wariant',
+                'slug' => 'pa_wariant',
+                'option' => null,
+            ]]);
+            $variant->update(['attributes' => $attributes]);
+            ProductRelation::query()
+                ->where('parent_product_id', $parent->id)
+                ->where('child_product_id', $variant->id)
+                ->update(['metadata' => [
+                    'variant_attribute' => 'wariant',
+                    'variant_option' => '',
+                ]]);
         }
     }
 

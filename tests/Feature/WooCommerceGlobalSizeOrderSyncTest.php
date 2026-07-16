@@ -97,6 +97,52 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $this->assertSame($requestCount + 3, Http::recorded()->count());
     }
 
+    public function test_it_semantically_orders_raw_dictionary_pairs_in_both_languages_without_mutating_the_definition(): void
+    {
+        $definition = ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['M/L', 'Unknown A', 'S/M', 'Unknown B'],
+            'values_en' => ['M/L EN', 'Unknown A EN', 'S/M EN', 'Unknown B EN'],
+            'is_variant' => true,
+            'sort_order' => 10,
+        ]);
+        $definitionBefore = (array) DB::table('product_parameter_definitions')
+            ->where('id', $definition->id)
+            ->first();
+        $integration = $this->createWooIntegration('GLOBAL-SIZE-PAIR-ORDER');
+        $attribute = $this->sizeAttribute();
+        $terms = [
+            11 => ['id' => 11, 'name' => 'M/L', 'slug' => 'm-l', 'menu_order' => 0],
+            12 => ['id' => 12, 'name' => 'Unknown A', 'slug' => 'unknown-a', 'menu_order' => 0],
+            13 => ['id' => 13, 'name' => 'S/M', 'slug' => 's-m', 'menu_order' => 0],
+            14 => ['id' => 14, 'name' => 'Unknown B', 'slug' => 'unknown-b', 'menu_order' => 0],
+            21 => ['id' => 21, 'name' => 'M/L EN', 'slug' => 'm-l-en', 'menu_order' => 0],
+            22 => ['id' => 22, 'name' => 'Unknown A EN', 'slug' => 'unknown-a-en', 'menu_order' => 0],
+            23 => ['id' => 23, 'name' => 'S/M EN', 'slug' => 's-m-en', 'menu_order' => 0],
+            24 => ['id' => 24, 'name' => 'Unknown B EN', 'slug' => 'unknown-b-en', 'menu_order' => 0],
+        ];
+        $mutations = [];
+        $this->fakeWooCatalog($attribute, $terms, $mutations);
+
+        $result = app(WooCommerceGlobalSizeOrderSyncService::class)->sync($integration);
+
+        $this->assertSame('synchronized', $result['status']);
+        $this->assertSame(8, $result['matched_terms']);
+        foreach ([13 => 10, 11 => 20, 12 => 30, 14 => 40] as $termId => $menuOrder) {
+            $this->assertSame($menuOrder, $terms[$termId]['menu_order']);
+        }
+        foreach ([23 => 10, 21 => 20, 22 => 30, 24 => 40] as $termId => $menuOrder) {
+            $this->assertSame($menuOrder, $terms[$termId]['menu_order']);
+        }
+        $this->assertSame($definitionBefore, (array) DB::table('product_parameter_definitions')
+            ->where('id', $definition->id)
+            ->first());
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
+    }
+
     public function test_it_uses_the_definition_matching_the_existing_taxonomy_when_a_historical_size_dictionary_also_exists(): void
     {
         $this->createSizeDefinition();

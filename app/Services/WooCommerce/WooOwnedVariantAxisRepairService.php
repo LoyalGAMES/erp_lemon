@@ -30,7 +30,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000024';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000025';
+
+    public const PREVIOUS_ERP_SYNCHRONIZED_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000024';
 
     public const PREVIOUS_SYNCHRONIZED_REVISION = 'woo_owned_size_variant_axis_2026_07_15_000017';
 
@@ -42,6 +44,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_ERP_SYNCHRONIZED_REVISION,
             self::PREVIOUS_SYNCHRONIZED_REVISION,
         ], true);
     }
@@ -238,8 +241,21 @@ final class WooOwnedVariantAxisRepairService
             ];
         }
 
-        $targetResolution = $this->remoteTargets($product);
         $variationOptionHints = $this->localVariationOptionHints($product);
+
+        if ($variationOptionHints === []
+            && $this->hasParentDuplicatedGenericAndSizeAxisEvidence($product)
+            && ! $this->hasOnlyBlankLocalChildAxisEvidence($product)
+        ) {
+            return [
+                'status' => 'manual_review',
+                'targets' => 0,
+                'mutations' => 0,
+                'reason' => 'Lokalne warianty zawierają niepuste lub obce wartości, których zdalna wersja językowa nie może nadpisać.',
+            ];
+        }
+
+        $targetResolution = $this->remoteTargets($product);
 
         if ($targetResolution['error'] !== null) {
             return [
@@ -251,7 +267,7 @@ final class WooOwnedVariantAxisRepairService
             ];
         }
 
-        $plans = [];
+        $remoteFamilies = [];
 
         foreach ($targetResolution['targets'] as $target) {
             $parent = $this->client->productById(
@@ -264,12 +280,25 @@ final class WooOwnedVariantAxisRepairService
                 $this->apiLanguage($target['language']),
             );
 
+            $remoteFamilies[] = [
+                'target' => $target,
+                'parent' => $parent,
+                'variations' => $variations,
+                'protected' => $this->protectedSnapshot($parent, $variations),
+            ];
+        }
+
+        $planRemoteFamily = function (array $entry, array $optionHints): array {
+            $target = $entry['target'];
+            $parent = $entry['parent'];
+            $variations = $entry['variations'];
+
             $childOnlyAxisOptions = [];
             $plan = $this->familyPlan(
                 $parent,
                 $variations,
                 null,
-                $variationOptionHints,
+                $optionHints,
                 $target['language'],
                 $childOnlyAxisOptions,
             );
@@ -285,7 +314,7 @@ final class WooOwnedVariantAxisRepairService
                         $parent,
                         $variations,
                         null,
-                        $variationOptionHints,
+                        $optionHints,
                         $target['language'],
                         $childOnlyAxisOptions,
                     );
@@ -294,28 +323,81 @@ final class WooOwnedVariantAxisRepairService
                 }
             }
 
-            if ($plan['status'] === 'unsafe') {
+            return [
+                'plan' => $plan,
+                'child_only_axis_options' => $childOnlyAxisOptions,
+            ];
+        };
+
+        $plans = collect($remoteFamilies)
+            ->map(function (array $entry) use ($planRemoteFamily, $variationOptionHints): array {
+                return array_merge(
+                    $entry,
+                    $planRemoteFamily($entry, $variationOptionHints),
+                );
+            })
+            ->all();
+
+        // Some historical multilingual families have complementary damage:
+        // the PL child options were erased while EN still maps every SKU to
+        // one Size term (or vice versa). Read every language before giving up.
+        // A complete remote SKU bijection may fill only blank child options;
+        // any disagreement with local/live non-empty evidence remains unsafe.
+        $remoteHintResolution = $this->completeRemoteVariationOptionHints($plans);
+
+        if ($remoteHintResolution['error'] !== null) {
+            return [
+                'status' => 'manual_review',
+                'targets' => count($targetResolution['targets']),
+                'mutations' => 0,
+                'reason' => $remoteHintResolution['error'],
+                'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
+            ];
+        }
+
+        foreach ($remoteHintResolution['hints'] as $sku => $optionKey) {
+            if (isset($variationOptionHints[$sku])
+                && $variationOptionHints[$sku] !== $optionKey
+            ) {
                 return [
                     'status' => 'manual_review',
                     'targets' => count($targetResolution['targets']),
                     'mutations' => 0,
-                    'reason' => sprintf(
-                        'WooCommerce %s #%s: %s',
-                        mb_strtoupper($target['language']),
-                        $target['external_product_id'],
-                        $plan['reason'],
-                    ),
+                    'reason' => "Lokalna i zdalna rodzina przypisują SKU {$sku} do różnych rozmiarów.",
                     'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
                 ];
             }
 
-            $plans[] = [
-                'target' => $target,
-                'plan' => $plan,
-                'parent' => $parent,
-                'variations' => $variations,
-                'child_only_axis_options' => $childOnlyAxisOptions,
-                'protected' => $this->protectedSnapshot($parent, $variations),
+            $variationOptionHints[$sku] = $optionKey;
+        }
+
+        if ($remoteHintResolution['hints'] !== []) {
+            $plans = collect($remoteFamilies)
+                ->map(function (array $entry) use ($planRemoteFamily, $variationOptionHints): array {
+                    return array_merge(
+                        $entry,
+                        $planRemoteFamily($entry, $variationOptionHints),
+                    );
+                })
+                ->all();
+        }
+
+        foreach ($plans as $entry) {
+            if ($entry['plan']['status'] !== 'unsafe') {
+                continue;
+            }
+
+            return [
+                'status' => 'manual_review',
+                'targets' => count($targetResolution['targets']),
+                'mutations' => 0,
+                'reason' => sprintf(
+                    'WooCommerce %s #%s: %s',
+                    mb_strtoupper($entry['target']['language']),
+                    $entry['target']['external_product_id'],
+                    $entry['plan']['reason'],
+                ),
+                'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
             ];
         }
 
@@ -1603,6 +1685,24 @@ final class WooOwnedVariantAxisRepairService
     }
 
     /**
+     * Follow-up candidate missed by the original 000024 scan: the parent is
+     * an exact generic/direct Size duplicate, but every trustworthy local
+     * child option is blank. A multilingual remote preflight must supply the
+     * missing SKU bijection before repair can write anything.
+     */
+    public function isComplementaryLanguageSizeRootCandidate(Product $product): bool
+    {
+        if (! $this->isSizeVariantRootCandidate($product)
+            || ! $this->hasParentDuplicatedGenericAndSizeAxisEvidence($product)
+        ) {
+            return false;
+        }
+
+        return $this->localVariationOptionHints($product) !== []
+            || $this->hasOnlyBlankLocalChildAxisEvidence($product);
+    }
+
+    /**
      * Queue only families that locally identify Size (or its known legacy
      * generic alias). A valid Color-only Woo family must never be converted
      * into permanent manual_review merely because it has variants.
@@ -1611,6 +1711,42 @@ final class WooOwnedVariantAxisRepairService
     {
         $product->loadMissing('variantChildren');
         $declared = trim((string) data_get($product->masterData(), 'variant_attribute', ''));
+
+        if ($declared !== ''
+            && ! $this->variantOptions->isSizeAttribute($declared)
+            && ! $this->legacySizeAxis->isLegacyGeneric($declared)
+        ) {
+            return false;
+        }
+
+        foreach ((array) data_get($product->masterData(), 'parameters', []) as $parameter) {
+            if (! is_array($parameter)) {
+                continue;
+            }
+
+            $kind = $this->localizedLocalTargetAxisKind($parameter);
+
+            if ($kind === false
+                || ($kind === null && (bool) ($parameter['variation'] ?? false))
+            ) {
+                return false;
+            }
+        }
+
+        foreach ((array) data_get($product->attributes, 'woocommerce_attributes', []) as $attribute) {
+            if (! is_array($attribute)) {
+                continue;
+            }
+
+            $kind = $this->localizedLocalTargetAxisKind($attribute);
+
+            if ($kind === false
+                || ($kind === null && (bool) ($attribute['variation'] ?? false))
+            ) {
+                return false;
+            }
+        }
+
         $masterVariationAxes = collect((array) data_get($product->masterData(), 'parameters', []))
             ->filter(fn (mixed $parameter): bool => is_array($parameter)
                 && (bool) ($parameter['variation'] ?? false))
@@ -1645,6 +1781,7 @@ final class WooOwnedVariantAxisRepairService
 
             return ! $declaresGenericVariationAxis
                 || $this->hasDuplicatedGenericAndSizeAxisEvidence($product)
+                || $this->hasParentDuplicatedGenericAndSizeAxisEvidence($product)
                 || $this->legacySizeAxis->recover($product, $product->variantChildren) !== null
                 || $this->hasDictionaryBackedGenericSizeAxis($product);
         }
@@ -1655,7 +1792,389 @@ final class WooOwnedVariantAxisRepairService
         return $this->legacySizeAxis->recover(
             $product,
             $product->variantChildren,
-        ) !== null || $this->hasDictionaryBackedGenericSizeAxis($product);
+        ) !== null
+            || $this->hasDictionaryBackedGenericSizeAxis($product)
+            || $this->hasParentDuplicatedGenericAndSizeAxisEvidence($product);
+    }
+
+    /**
+     * A damaged Woo family may have lost every local child option even though
+     * the parent still stores the legacy variation axis and an informational
+     * Size axis with exactly the same dictionary-backed values. This is safe
+     * evidence for queueing only; repair still performs a full multilingual
+     * remote preflight and requires a SKU/Size bijection before any PUT.
+     */
+    private function hasParentDuplicatedGenericAndSizeAxisEvidence(Product $product): bool
+    {
+        $declared = trim((string) data_get($product->masterData(), 'variant_attribute', ''));
+
+        if ($declared !== '' && $this->localTargetAxisKind($declared) === null) {
+            return false;
+        }
+
+        $sources = collect();
+
+        foreach ((array) data_get($product->masterData(), 'parameters', []) as $parameter) {
+            if (! is_array($parameter)) {
+                continue;
+            }
+
+            $names = collect([
+                $parameter['name'] ?? null,
+                $parameter['name_pl'] ?? null,
+                $parameter['name_en'] ?? null,
+                $parameter['slug'] ?? null,
+            ]);
+
+            foreach ((array) ($parameter['translations'] ?? []) as $translation) {
+                if (is_array($translation)) {
+                    $names->push($translation['name'] ?? null);
+                }
+            }
+
+            $names = $names
+                ->map(fn (mixed $name): string => trim((string) $name))
+                ->filter()
+                ->values();
+            $kinds = $names
+                ->map(fn (string $name): ?string => $this->localTargetAxisKind($name));
+
+            if ($kinds->filter()->isEmpty()) {
+                if ((bool) ($parameter['variation'] ?? false)) {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if ($kinds->contains(fn (?string $kind): bool => $kind === null)
+                || $kinds->unique()->count() !== 1
+            ) {
+                return false;
+            }
+
+            $kind = (string) $kinds->first();
+            $values = collect([
+                $parameter['value'] ?? null,
+                $parameter['value_pl'] ?? null,
+                $parameter['value_en'] ?? null,
+            ]);
+
+            foreach ((array) ($parameter['translations'] ?? []) as $translation) {
+                if (is_array($translation)) {
+                    $values->push($translation['value'] ?? null);
+                }
+            }
+
+            $keySets = $values
+                ->filter(fn (mixed $value): bool => $this->localOptionValues($value)
+                    ->contains(fn (string $option): bool => trim($option) !== ''))
+                ->map(fn (mixed $value): ?array => $this->exactLocalOptionKeys($value))
+                ->values();
+
+            if ($keySets->isEmpty()
+                || $keySets->contains(fn (?array $keys): bool => $keys === null)
+            ) {
+                return false;
+            }
+
+            foreach ($keySets as $keys) {
+                $sources->push([
+                    'kind' => $kind,
+                    'keys' => $keys,
+                    'variation' => (bool) ($parameter['variation'] ?? false),
+                ]);
+            }
+        }
+
+        foreach ((array) data_get($product->attributes, 'woocommerce_attributes', []) as $attribute) {
+            if (! is_array($attribute)) {
+                continue;
+            }
+
+            $names = collect([
+                $attribute['name'] ?? null,
+                $attribute['name_pl'] ?? null,
+                $attribute['name_en'] ?? null,
+                $attribute['slug'] ?? null,
+            ]);
+
+            foreach ((array) ($attribute['translations'] ?? []) as $translation) {
+                if (is_array($translation)) {
+                    $names->push($translation['name'] ?? null);
+                }
+            }
+
+            $names = $names
+                ->map(fn (mixed $name): string => trim((string) $name))
+                ->filter()
+                ->values();
+            $kinds = $names
+                ->map(fn (string $name): ?string => $this->localTargetAxisKind($name));
+
+            if ($kinds->filter()->isEmpty()) {
+                if ((bool) ($attribute['variation'] ?? false)) {
+                    return false;
+                }
+
+                continue;
+            }
+
+            if ($kinds->contains(fn (?string $kind): bool => $kind === null)
+                || $kinds->unique()->count() !== 1
+            ) {
+                return false;
+            }
+
+            $kind = (string) $kinds->first();
+            $values = collect([
+                $attribute['options'] ?? null,
+                $attribute['options_pl'] ?? null,
+                $attribute['options_en'] ?? null,
+            ]);
+
+            foreach ((array) ($attribute['translations'] ?? []) as $translation) {
+                if (is_array($translation)) {
+                    $values->push(
+                        $translation['options']
+                            ?? $translation['option']
+                            ?? $translation['value']
+                            ?? null,
+                    );
+                }
+            }
+
+            $keySets = $values
+                ->filter(fn (mixed $value): bool => $this->localOptionValues($value)
+                    ->contains(fn (string $option): bool => trim($option) !== ''))
+                ->map(fn (mixed $value): ?array => $this->exactLocalOptionKeys($value))
+                ->values();
+
+            if ($keySets->isEmpty()
+                || $keySets->contains(fn (?array $keys): bool => $keys === null)
+            ) {
+                return false;
+            }
+
+            foreach ($keySets as $keys) {
+                $sources->push([
+                    'kind' => $kind,
+                    'keys' => $keys,
+                    'variation' => (bool) ($attribute['variation'] ?? false),
+                ]);
+            }
+        }
+
+        $generic = $sources->where('kind', 'generic')->values();
+        $size = $sources->where('kind', 'size')->values();
+
+        if ($generic->isEmpty()
+            || ! $generic->contains(fn (array $source): bool => $source['variation'])
+            || $size->isEmpty()
+        ) {
+            return false;
+        }
+
+        $genericSignatures = $generic
+            ->map(fn (array $source): string => implode('|', $source['keys']))
+            ->unique()
+            ->values();
+        $sizeSignatures = $size
+            ->map(fn (array $source): string => implode('|', $source['keys']))
+            ->unique()
+            ->values();
+
+        if ($genericSignatures->count() !== 1
+            || $sizeSignatures->count() !== 1
+            || $genericSignatures->first() !== $sizeSignatures->first()
+        ) {
+            return false;
+        }
+
+        $dictionaryKeys = ($this->sizeDefinitions ??= ProductParameterDefinition::query()
+            ->orderBy('id')
+            ->get())
+            ->filter(fn (ProductParameterDefinition $definition): bool => collect([
+                $definition->name,
+                $definition->name_en,
+                $definition->slug,
+            ])->filter()->contains(fn (mixed $name): bool => $this->variantOptions->isSizeAttribute(
+                (string) $name,
+            )))
+            ->flatMap(fn (ProductParameterDefinition $definition): Collection => collect([
+                ...(array) $definition->values,
+                ...(array) $definition->values_en,
+            ]))
+            ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey(
+                ProductVariantAxisNameResolver::SIZE,
+                (string) $option,
+            ))
+            ->filter()
+            ->unique();
+
+        $keys = explode('|', (string) $sizeSignatures->first());
+
+        return $dictionaryKeys->isNotEmpty()
+            && collect($keys)->diff($dictionaryKeys)->isEmpty();
+    }
+
+    /**
+     * Distinguish genuinely erased child options from non-empty conflicts.
+     * Only the former may be completed from another language's SKU bijection.
+     */
+    private function hasOnlyBlankLocalChildAxisEvidence(Product $product): bool
+    {
+        $product->loadMissing('variantChildren');
+
+        if ($product->variantChildren->isEmpty()) {
+            return false;
+        }
+
+        foreach ($product->variantChildren as $variant) {
+            $sawTargetAxis = false;
+            $declared = trim((string) data_get($variant->masterData(), 'variant_attribute', ''));
+
+            if ($declared !== '') {
+                if ($this->localTargetAxisKind($declared) === null) {
+                    return false;
+                }
+
+                $sawTargetAxis = true;
+            }
+
+            $relationAxis = trim((string) data_get($variant->pivot?->metadata, 'variant_attribute', ''));
+            $relationOption = trim((string) data_get($variant->pivot?->metadata, 'variant_option', ''));
+
+            if ($relationAxis !== '') {
+                if ($this->localTargetAxisKind($relationAxis) === null) {
+                    return false;
+                }
+
+                $sawTargetAxis = true;
+            }
+
+            if ($relationOption !== '') {
+                return false;
+            }
+
+            foreach ((array) data_get($variant->masterData(), 'parameters', []) as $parameter) {
+                if (! is_array($parameter)) {
+                    continue;
+                }
+
+                $names = collect([
+                    $parameter['name'] ?? null,
+                    $parameter['name_pl'] ?? null,
+                    $parameter['name_en'] ?? null,
+                    $parameter['slug'] ?? null,
+                ]);
+
+                foreach ((array) ($parameter['translations'] ?? []) as $translation) {
+                    if (is_array($translation)) {
+                        $names->push($translation['name'] ?? null);
+                    }
+                }
+
+                $kinds = $names
+                    ->map(fn (mixed $name): string => trim((string) $name))
+                    ->filter()
+                    ->map(fn (string $name): ?string => $this->localTargetAxisKind($name))
+                    ->values();
+
+                if ($kinds->filter()->isEmpty()) {
+                    if ((bool) ($parameter['variation'] ?? false)) {
+                        return false;
+                    }
+
+                    continue;
+                }
+
+                if ($kinds->contains(fn (?string $kind): bool => $kind === null)
+                    || $kinds->unique()->count() !== 1
+                ) {
+                    return false;
+                }
+
+                $sawTargetAxis = true;
+                $localizedValues = collect([
+                    $parameter['value'] ?? null,
+                    $parameter['value_pl'] ?? null,
+                    $parameter['value_en'] ?? null,
+                ]);
+
+                foreach ((array) ($parameter['translations'] ?? []) as $translation) {
+                    if (is_array($translation)) {
+                        $localizedValues->push($translation['value'] ?? null);
+                    }
+                }
+
+                if ($localizedValues
+                    ->flatMap(fn (mixed $value): Collection => $this->localOptionValues($value))
+                    ->contains(fn (string $value): bool => trim($value) !== '')
+                ) {
+                    return false;
+                }
+            }
+
+            $wooAttributes = collect();
+
+            foreach (['woocommerce_variation_attributes', 'woocommerce_attributes'] as $snapshot) {
+                $wooAttributes = $wooAttributes->merge((array) data_get(
+                    $variant->attributes,
+                    $snapshot,
+                    [],
+                ));
+            }
+
+            foreach ($wooAttributes as $attribute) {
+                if (! is_array($attribute)) {
+                    continue;
+                }
+
+                $names = collect([
+                    $attribute['name'] ?? null,
+                    $attribute['name_pl'] ?? null,
+                    $attribute['name_en'] ?? null,
+                    $attribute['slug'] ?? null,
+                ]);
+
+                foreach ((array) ($attribute['translations'] ?? []) as $translation) {
+                    if (is_array($translation)) {
+                        $names->push($translation['name'] ?? null);
+                    }
+                }
+
+                $kinds = $names
+                    ->map(fn (mixed $name): string => trim((string) $name))
+                    ->filter()
+                    ->map(fn (string $name): ?string => $this->localTargetAxisKind($name))
+                    ->values();
+
+                if ($kinds->isEmpty()
+                    || $kinds->contains(fn (?string $kind): bool => $kind === null)
+                    || $kinds->unique()->count() !== 1
+                ) {
+                    return false;
+                }
+
+                $sawTargetAxis = true;
+
+                if (collect([
+                    $attribute['option'] ?? null,
+                    $attribute['options'] ?? null,
+                ])->flatMap(fn (mixed $value): Collection => $this->localOptionValues($value))
+                    ->contains(fn (string $value): bool => trim($value) !== '')
+                ) {
+                    return false;
+                }
+            }
+
+            if (! $sawTargetAxis) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -1809,6 +2328,44 @@ final class WooOwnedVariantAxisRepairService
         }
 
         return $this->variantOptions->isSizeAttribute($name) ? 'size' : null;
+    }
+
+    /**
+     * @return 'generic'|'size'|false|null False means localized names conflict;
+     *                                     null means the row is not a target axis.
+     */
+    private function localizedLocalTargetAxisKind(array $row): string|false|null
+    {
+        $names = collect([
+            $row['name'] ?? null,
+            $row['name_pl'] ?? null,
+            $row['name_en'] ?? null,
+            $row['slug'] ?? null,
+        ]);
+
+        foreach ((array) ($row['translations'] ?? []) as $translation) {
+            if (is_array($translation)) {
+                $names->push($translation['name'] ?? null);
+            }
+        }
+
+        $kinds = $names
+            ->map(fn (mixed $name): string => trim((string) $name))
+            ->filter()
+            ->map(fn (string $name): ?string => $this->localTargetAxisKind($name))
+            ->values();
+
+        if ($kinds->filter()->isEmpty()) {
+            return null;
+        }
+
+        if ($kinds->contains(fn (?string $kind): bool => $kind === null)
+            || $kinds->unique()->count() !== 1
+        ) {
+            return false;
+        }
+
+        return (string) $kinds->first();
     }
 
     /**
@@ -2080,18 +2637,49 @@ final class WooOwnedVariantAxisRepairService
                 return [];
             }
 
-            $rawOptions = collect((array) data_get($child->masterData(), 'parameters', []))
-                ->filter(fn (mixed $parameter): bool => is_array($parameter)
-                    && collect([
-                        $parameter['name'] ?? null,
-                        $parameter['name_en'] ?? null,
-                        $parameter['slug'] ?? null,
-                    ])->filter()->contains(fn (mixed $name): bool => $this->legacySizeAxis->isLegacyGeneric(
-                        (string) $name,
-                    ) || $this->attributeKey((string) $name) === $this->attributeKey($sizeAttribute)))
-                ->flatMap(fn (array $parameter): Collection => $this->localOptionValues(
-                    $parameter['value'] ?? null,
-                ));
+            $childDeclared = trim((string) data_get($child->masterData(), 'variant_attribute', ''));
+            $relationDeclared = trim((string) data_get($child->pivot?->metadata, 'variant_attribute', ''));
+
+            if (($childDeclared !== '' && $this->localTargetAxisKind($childDeclared) === null)
+                || ($relationDeclared !== '' && $this->localTargetAxisKind($relationDeclared) === null)
+            ) {
+                return [];
+            }
+
+            $parameters = collect((array) data_get($child->masterData(), 'parameters', []))
+                ->filter(fn (mixed $parameter): bool => is_array($parameter))
+                ->values();
+
+            if ($parameters->contains(function (array $parameter): bool {
+                $kind = $this->localizedLocalTargetAxisKind($parameter);
+
+                return $kind === false
+                    || ($kind === null && (bool) ($parameter['variation'] ?? false));
+            })) {
+                return [];
+            }
+
+            $rawOptions = $parameters
+                ->filter(fn (array $parameter): bool => is_string(
+                    $this->localizedLocalTargetAxisKind($parameter),
+                ))
+                ->flatMap(function (array $parameter): Collection {
+                    $values = collect([
+                        $parameter['value'] ?? null,
+                        $parameter['value_pl'] ?? null,
+                        $parameter['value_en'] ?? null,
+                    ]);
+
+                    foreach ((array) ($parameter['translations'] ?? []) as $translation) {
+                        if (is_array($translation)) {
+                            $values->push($translation['value'] ?? null);
+                        }
+                    }
+
+                    return $values->flatMap(
+                        fn (mixed $value): Collection => $this->localOptionValues($value),
+                    );
+                });
 
             $relationOption = trim((string) data_get($child->pivot?->metadata, 'variant_option', ''));
 
@@ -2099,19 +2687,27 @@ final class WooOwnedVariantAxisRepairService
                 $rawOptions->push($relationOption);
             }
 
-            collect((array) data_get(
-                $child->attributes,
-                'woocommerce_variation_attributes',
-                data_get($child->attributes, 'woocommerce_attributes', []),
-            ))
-                ->filter(fn (mixed $attribute): bool => is_array($attribute)
-                    && ($this->isGenericAttribute($attribute) || $this->isSizeAttribute($attribute)))
-                ->each(function (array $attribute) use ($rawOptions): void {
-                    $option = trim((string) ($attribute['option'] ?? ''));
+            $wooRows = collect([
+                ...(array) data_get($child->attributes, 'woocommerce_variation_attributes', []),
+                ...(array) data_get($child->attributes, 'woocommerce_attributes', []),
+            ])
+                ->filter(fn (mixed $attribute): bool => is_array($attribute))
+                ->values();
 
-                    if ($option !== '') {
-                        $rawOptions->push($option);
-                    }
+            if ($wooRows->contains(fn (array $attribute): bool => ! is_string(
+                $this->localizedLocalTargetAxisKind($attribute),
+            ))) {
+                return [];
+            }
+
+            $wooRows
+                ->each(function (array $attribute) use ($rawOptions): void {
+                    collect([
+                        $attribute['option'] ?? null,
+                        $attribute['options'] ?? null,
+                    ])->flatMap(fn (mixed $value): Collection => $this->localOptionValues($value))
+                        ->filter(fn (string $option): bool => trim($option) !== '')
+                        ->each(fn (string $option) => $rawOptions->push($option));
                 });
 
             $keys = $rawOptions
@@ -2141,6 +2737,70 @@ final class WooOwnedVariantAxisRepairService
         $actual = collect(array_values($hints))->sort()->values()->all();
 
         return $expected === $actual ? $hints : [];
+    }
+
+    /**
+     * Use only a complete, internally verified remote language as evidence for
+     * another language whose child options are blank. The source language must
+     * map every distinct non-empty SKU to every parent Size option exactly
+     * once. Multiple complete languages must agree byte-for-byte after option
+     * canonicalization or the whole repair stops before a write.
+     *
+     * @param  list<array{plan:array<string,mixed>,variations:list<array<string,mixed>>}>  $plans
+     * @return array{hints:array<string,string>,error:?string}
+     */
+    private function completeRemoteVariationOptionHints(array $plans): array
+    {
+        $complete = collect();
+
+        foreach ($plans as $entry) {
+            if (($entry['plan']['status'] ?? 'unsafe') === 'unsafe') {
+                continue;
+            }
+
+            $variations = collect((array) ($entry['variations'] ?? []))
+                ->filter(fn (mixed $variation): bool => is_array($variation))
+                ->values();
+            $skus = $variations
+                ->map(fn (array $variation): string => mb_strtoupper(trim((string) (
+                    $variation['sku'] ?? ''
+                ))))
+                ->filter()
+                ->values();
+            $hints = collect((array) data_get($entry, 'plan.sku_option_keys', []))
+                ->mapWithKeys(fn (mixed $option, mixed $sku): array => [
+                    mb_strtoupper(trim((string) $sku)) => trim((string) $option),
+                ])
+                ->filter(fn (string $option, string $sku): bool => $sku !== '' && $option !== '')
+                ->sortKeys();
+
+            if ($variations->isEmpty()
+                || $skus->count() !== $variations->count()
+                || $skus->unique()->count() !== $skus->count()
+                || $hints->count() !== $variations->count()
+                || $hints->keys()->sort()->values()->all() !== $skus->sort()->values()->all()
+                || $hints->values()->unique()->count() !== $hints->count()
+            ) {
+                continue;
+            }
+
+            $complete->push($hints->all());
+        }
+
+        if ($complete->isEmpty()) {
+            return ['hints' => [], 'error' => null];
+        }
+
+        $expected = $complete->first();
+
+        if ($complete->contains(fn (array $hints): bool => $hints !== $expected)) {
+            return [
+                'hints' => [],
+                'error' => 'Wersje językowe przypisują te same SKU do różnych rozmiarów.',
+            ];
+        }
+
+        return ['hints' => $expected, 'error' => null];
     }
 
     /** @return Collection<int, string> */
@@ -3495,7 +4155,9 @@ final class WooOwnedVariantAxisRepairService
                 ->sort()
                 ->values();
 
-            if ($genericKeys->all() !== $canonicalByKey->keys()->sort()->values()->all()) {
+            if ($genericKeys->isNotEmpty()
+                && $genericKeys->all() !== $canonicalByKey->keys()->sort()->values()->all()
+            ) {
                 return $this->unsafePlan('Tekstowy wariant i globalny rozmiar mają inne wartości.');
             }
 

@@ -454,17 +454,38 @@ final class WooCommerceGlobalSizeOrderSyncService
             'Rozmiar',
             'Size',
         ])->filter()->unique()->values();
-        $entries = $sourceValues
-            ->map(function (string $sourceValue, int $index) use (
-                $localizedValues,
-                $attributeNames,
-                $language,
-            ): ?array {
-                if ($sourceValue === '') {
-                    return null;
+        $pairs = $sourceValues
+            ->map(fn (string $sourceValue, int $index): array => [
+                'source' => $sourceValue,
+                'localized' => trim((string) $localizedValues->get($index, '')) ?: $sourceValue,
+                'source_index' => $index,
+                'rank' => $this->canonicalSizeRank($sourceValue),
+            ])
+            ->filter(fn (array $pair): bool => $pair['source'] !== '')
+            ->sort(function (array $left, array $right): int {
+                if ($left['rank'] === null && $right['rank'] === null) {
+                    return $left['source_index'] <=> $right['source_index'];
                 }
 
-                $localizedValue = trim((string) $localizedValues->get($index, '')) ?: $sourceValue;
+                if ($left['rank'] === null) {
+                    return 1;
+                }
+
+                if ($right['rank'] === null) {
+                    return -1;
+                }
+
+                return $left['rank'] <=> $right['rank']
+                    ?: $left['source_index'] <=> $right['source_index'];
+            })
+            ->values();
+        $entries = $pairs
+            ->map(function (array $pair, int $index) use (
+                $attributeNames,
+                $language,
+            ): array {
+                $sourceValue = $pair['source'];
+                $localizedValue = $pair['localized'];
                 $values = collect([$sourceValue, $localizedValue])->unique()->values();
                 $identities = $values
                     ->flatMap(fn (string $value): Collection => $attributeNames->map(
@@ -520,6 +541,81 @@ final class WooCommerceGlobalSizeOrderSyncService
         }
 
         return $entries;
+    }
+
+    private function canonicalSizeRank(string $value): ?int
+    {
+        $value = mb_strtoupper(trim((string) preg_replace('/\s+/u', '', $value)));
+        $value = str_replace(['–', '—', '-'], '/', $value);
+
+        if (in_array($value, [
+            'ONESIZE',
+            'ONE/SIZE',
+            'UNI',
+            'UNIWERSALNY',
+            'UNIWERSALNA',
+        ], true)) {
+            return 0;
+        }
+
+        $tokenRanks = collect(explode('/', $value))
+            ->map(fn (string $token): ?int => $this->canonicalSizeTokenRank($token));
+
+        if ($tokenRanks->isNotEmpty()
+            && ! $tokenRanks->contains(fn (?int $rank): bool => $rank === null)
+        ) {
+            return (int) round($tokenRanks->average());
+        }
+
+        if (preg_match('/^(\d+(?:[.,]\d+)?)(?:\/(\d+(?:[.,]\d+)?))?$/', $value, $matches) === 1) {
+            $from = (float) str_replace(',', '.', $matches[1]);
+            $to = isset($matches[2]) ? (float) str_replace(',', '.', $matches[2]) : $from;
+
+            return 10_000 + (int) round($from * 100) + (int) round($to);
+        }
+
+        return null;
+    }
+
+    private function canonicalSizeTokenRank(string $token): ?int
+    {
+        if ($token === 'S') {
+            return 500;
+        }
+
+        if ($token === 'M') {
+            return 600;
+        }
+
+        if ($token === 'L') {
+            return 700;
+        }
+
+        if ($token === 'XS') {
+            return 400;
+        }
+
+        if (preg_match('/^X{2,6}S$/', $token) === 1) {
+            return 400 - ((substr_count($token, 'X') - 1) * 100);
+        }
+
+        if (preg_match('/^([2-6])XS$/', $token, $matches) === 1) {
+            return 400 - (((int) $matches[1] - 1) * 100);
+        }
+
+        if ($token === 'XL') {
+            return 800;
+        }
+
+        if (preg_match('/^X{2,6}L$/', $token) === 1) {
+            return 800 + ((substr_count($token, 'X') - 1) * 100);
+        }
+
+        if (preg_match('/^([2-9])XL$/', $token, $matches) === 1) {
+            return 800 + (((int) $matches[1] - 1) * 100);
+        }
+
+        return null;
     }
 
     /**

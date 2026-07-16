@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Jobs\SyncWooCommerceGlobalSizeOrderJob;
 use App\Models\Product;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
@@ -17,6 +18,7 @@ use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
@@ -497,6 +499,238 @@ final class SizeVariantAxisRemoteRepairMigrationTest extends TestCase
         } finally {
             CarbonImmutable::setTestNow();
         }
+    }
+
+    public function test_followup_requeues_parent_proven_blank_children_and_restores_canonical_dictionary_order_without_touching_color(): void
+    {
+        Http::fake();
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+        CarbonImmutable::setTestNow('2026-07-16 14:00:00');
+
+        try {
+            $definition = ProductParameterDefinition::query()->create([
+                'name' => 'Rozmiar',
+                'name_en' => 'Size',
+                'slug' => 'rozmiar',
+                'input_type' => 'select',
+                'values' => ['M/L', 'Niestandardowy A', '2XS', 'S/M', 'Niestandardowy B'],
+                'values_en' => ['M/L EN', 'Custom A', '2XS EN', 'S/M EN', 'Custom B'],
+                'is_variant' => true,
+                'metadata' => ['operator_note' => 'preserve'],
+            ]);
+            $historicalSize = ProductParameterDefinition::query()->create([
+                'name' => 'Size',
+                'name_en' => 'Size historical',
+                'slug' => 'size',
+                'input_type' => 'select',
+                'values' => ['M/L', 'S/M'],
+                'values_en' => ['Historical M/L', 'Historical S/M'],
+            ]);
+            $erpPlural = ProductParameterDefinition::query()->create([
+                'name' => 'Rozmiary',
+                'name_en' => 'Sizes',
+                'slug' => 'rozmiary',
+                'input_type' => 'select',
+                'values' => ['M/L', 'S/M'],
+                'values_en' => ['ERP M/L', 'ERP S/M'],
+            ]);
+            $otherDefinitionsBefore = $this->rows(
+                'product_parameter_definitions',
+                [$historicalSize->id, $erpPlural->id],
+            );
+            $definitionId = $definition->id;
+            $channel = $this->wooChannel();
+            $warehouse = Warehouse::query()->create([
+                'code' => 'SIZE-AXIS-FOLLOWUP',
+                'name' => 'Size axis follow-up',
+                'type' => 'virtual',
+                'is_active' => true,
+            ]);
+            $damaged = $this->family(
+                $channel,
+                $warehouse,
+                'wariant',
+                'woocommerce_import',
+                3932,
+                [
+                    'maintenance' => [
+                        'woo_owned_variant_axis_repair' => [
+                            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_ERP_SYNCHRONIZED_REVISION,
+                            'status' => 'manual_review',
+                            'error' => 'old preflight could not recover blank PL options',
+                        ],
+                    ],
+                ],
+            );
+
+            foreach ($damaged['children'] as $child) {
+                $attributes = (array) $child->attributes;
+                data_set($attributes, 'master.parameters', [[
+                    'name' => 'wariant',
+                    'value' => '',
+                    'variation' => true,
+                ]]);
+                $child->update(['attributes' => $attributes]);
+            }
+            foreach ($damaged['relations'] as $relation) {
+                $metadata = (array) $relation->metadata;
+                $metadata['variant_option'] = '';
+                $relation->update(['metadata' => $metadata]);
+            }
+
+            $color = $this->family(
+                $channel,
+                $warehouse,
+                'BLVariant',
+                'woocommerce_import',
+                4932,
+            );
+            $colorParentAttributes = (array) $color['parent']->attributes;
+            data_set($colorParentAttributes, 'master.parameters.0.value', 'Czarny | Biały');
+            $color['parent']->update(['attributes' => $colorParentAttributes]);
+            foreach ($color['children']->values() as $index => $child) {
+                $option = $index === 0 ? 'Czarny' : 'Biały';
+                $attributes = (array) $child->attributes;
+                data_set($attributes, 'master.parameters.0.value', $option);
+                $child->update(['attributes' => $attributes]);
+                $relation = $color['relations'][$index];
+                $metadata = (array) $relation->metadata;
+                $metadata['variant_option'] = $option;
+                $relation->update(['metadata' => $metadata]);
+            }
+
+            $productIds = collect([$damaged, $color])
+                ->flatMap(fn (array $family): array => [
+                    $family['parent']->id,
+                    ...$family['children']->pluck('id')->all(),
+                ])
+                ->all();
+            $stockIds = collect([$damaged, $color])
+                ->flatMap(fn (array $family): array => $family['stocks']->pluck('id')->all())
+                ->all();
+            $productsBefore = $this->rows('products', $productIds);
+            $stocksBefore = $this->rows('stock_balances', $stockIds);
+            $jobsBefore = DB::table('jobs')->count();
+
+            $this->runFollowupMigration();
+
+            $definition->refresh();
+            $this->assertSame($definitionId, $definition->id);
+            $this->assertSame(
+                ['2XS', 'S/M', 'M/L', 'Niestandardowy A', 'Niestandardowy B'],
+                $definition->values,
+            );
+            $this->assertSame(
+                ['2XS EN', 'S/M EN', 'M/L EN', 'Custom A', 'Custom B'],
+                $definition->values_en,
+            );
+            $this->assertSame('preserve', data_get($definition->metadata, 'operator_note'));
+            $this->assertSame(
+                WooOwnedVariantAxisRepairService::REVISION,
+                data_get(
+                    $damaged['parent_mapping']->refresh()->metadata,
+                    WooOwnedVariantAxisRepairService::STATE_PATH.'.revision',
+                ),
+            );
+            $this->assertSame('pending', data_get(
+                $damaged['parent_mapping']->metadata,
+                WooOwnedVariantAxisRepairService::STATE_PATH.'.status',
+            ));
+            $this->assertSame(now()->toISOString(), data_get(
+                $damaged['parent_mapping']->metadata,
+                WooOwnedVariantAxisRepairService::STATE_PATH.'.requested_at',
+            ));
+            $this->assertNull(data_get(
+                $color['parent_mapping']->refresh()->metadata,
+                WooOwnedVariantAxisRepairService::STATE_PATH,
+            ));
+            $this->assertSame($productsBefore, $this->rows('products', $productIds));
+            $this->assertSame($stocksBefore, $this->rows('stock_balances', $stockIds));
+            $this->assertSame($otherDefinitionsBefore, $this->rows(
+                'product_parameter_definitions',
+                [$historicalSize->id, $erpPlural->id],
+            ));
+            $this->assertSame($jobsBefore, DB::table('jobs')->count());
+            Bus::assertNotDispatched(SyncWooCommerceGlobalSizeOrderJob::class);
+            Http::assertNothingSent();
+        } finally {
+            CarbonImmutable::setTestNow();
+        }
+    }
+
+    public function test_followup_orders_a_canonical_dictionary_with_null_english_values_without_dispatching_observer_jobs(): void
+    {
+        Http::fake();
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+        $definition = ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['M/L', '2XS', 'S/M'],
+            'values_en' => null,
+            'is_variant' => true,
+        ]);
+        $jobsBefore = DB::table('jobs')->count();
+
+        $this->runFollowupMigration();
+
+        $definition->refresh();
+        $this->assertSame(['2XS', 'S/M', 'M/L'], $definition->values);
+        $this->assertNull($definition->values_en);
+        $this->assertSame($jobsBefore, DB::table('jobs')->count());
+        Bus::assertNotDispatched(SyncWooCommerceGlobalSizeOrderJob::class);
+        Http::assertNothingSent();
+    }
+
+    public function test_followup_leaves_a_canonical_dictionary_with_a_malformed_english_tail_byte_for_byte_unchanged(): void
+    {
+        Http::fake();
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+        $definition = ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['M/L', 'S/M'],
+            'values_en' => ['M/L EN', 'S/M EN', 'orphaned tail'],
+            'is_variant' => true,
+            'metadata' => ['operator_note' => 'do not touch malformed pairs'],
+        ]);
+        $before = $this->rows('product_parameter_definitions', [$definition->id]);
+        $jobsBefore = DB::table('jobs')->count();
+
+        $this->runFollowupMigration();
+
+        $this->assertSame($before, $this->rows('product_parameter_definitions', [$definition->id]));
+        $this->assertSame($jobsBefore, DB::table('jobs')->count());
+        Bus::assertNotDispatched(SyncWooCommerceGlobalSizeOrderJob::class);
+        Http::assertNothingSent();
+    }
+
+    public function test_followup_leaves_a_canonical_dictionary_with_a_blank_polish_pair_byte_for_byte_unchanged(): void
+    {
+        Http::fake();
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+        $definition = ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['M/L', '', 'S/M'],
+            'values_en' => ['M/L EN', 'English without Polish owner', 'S/M EN'],
+            'is_variant' => true,
+            'metadata' => ['operator_note' => 'do not drop blank PL owner'],
+        ]);
+        $before = $this->rows('product_parameter_definitions', [$definition->id]);
+        $jobsBefore = DB::table('jobs')->count();
+
+        $this->runFollowupMigration();
+
+        $this->assertSame($before, $this->rows('product_parameter_definitions', [$definition->id]));
+        $this->assertSame($jobsBefore, DB::table('jobs')->count());
+        Bus::assertNotDispatched(SyncWooCommerceGlobalSizeOrderJob::class);
+        Http::assertNothingSent();
     }
 
     public function test_erp_only_family_is_atomically_unified_without_changing_identity_stock_price_or_relation_order(): void
@@ -1312,6 +1546,13 @@ final class SizeVariantAxisRemoteRepairMigrationTest extends TestCase
     {
         (require database_path(
             'migrations/2026_07_16_000024_queue_size_axes_for_remote_repair.php',
+        ))->up();
+    }
+
+    private function runFollowupMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_16_000025_requeue_complementary_language_size_axes.php',
         ))->up();
     }
 }
