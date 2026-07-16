@@ -4,6 +4,9 @@
     $currentStatus = (string) ($filters['status'] ?? '');
     $currentPaymentMethod = (string) ($filters['payment_method'] ?? '');
     $currentShippingMethod = (string) ($filters['shipping_method'] ?? '');
+    $currentDateFrom = (string) ($filters['date_from'] ?? '');
+    $currentDateTo = (string) ($filters['date_to'] ?? '');
+    $currentInvoice = (string) ($filters['invoice'] ?? '');
     $currentPerPage = (int) ($filters['per_page'] ?? 50);
     $thumbnailService = app(\App\Services\Products\ProductImageThumbnailService::class);
     $shippingProviderResolver = app(\App\Services\Shipping\ShippingProviderResolver::class);
@@ -106,6 +109,19 @@
                 @endforeach
             </select>
         </label>
+        <label>Data od
+            <input type="date" name="date_from" value="{{ $currentDateFrom }}">
+        </label>
+        <label>Data do
+            <input type="date" name="date_to" value="{{ $currentDateTo }}">
+        </label>
+        <label>Faktura wystawiona
+            <select name="invoice">
+                <option value="">Wszystkie zamówienia</option>
+                <option value="yes" @selected($currentInvoice === 'yes')>Tak</option>
+                <option value="no" @selected($currentInvoice === 'no')>Nie</option>
+            </select>
+        </label>
         <label>Na stronie
             <select name="per_page">
                 @foreach ([25, 50, 75, 100] as $size)
@@ -115,7 +131,7 @@
         </label>
         <div class="orders-filter-actions">
             <button class="button" type="submit">Szukaj</button>
-            @if ($currentQuery !== '' || $currentStatus !== '' || $currentPaymentMethod !== '' || $currentShippingMethod !== '')
+            @if ($currentQuery !== '' || $currentStatus !== '' || $currentPaymentMethod !== '' || $currentShippingMethod !== '' || $currentDateFrom !== '' || $currentDateTo !== '' || $currentInvoice !== '')
                 <a class="button secondary" href="{{ route('modules.show', 'orders') }}">Wyczyść</a>
             @endif
         </div>

@@ -6,6 +6,7 @@ namespace Tests\Feature;
 
 use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
+use App\Models\Invoice;
 use App\Models\Product;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
@@ -265,5 +266,64 @@ class OrderListPerformanceTest extends TestCase
             ->assertOk()
             ->assertSee('PAYU-DPD')
             ->assertDontSee('COD-INPOST');
+    }
+
+    public function test_orders_module_filters_by_date_range_and_invoice_presence(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-DATE-INVOICE',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $withInvoice = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => 'DATED-INVOICE',
+            'external_number' => 'DATED-INVOICE',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 100,
+            'external_created_at' => '2026-07-10 12:00:00',
+        ]);
+        $withoutInvoice = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => 'DATED-NO-INVOICE',
+            'external_number' => 'DATED-NO-INVOICE',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 100,
+            'external_created_at' => '2026-07-15 12:00:00',
+        ]);
+        Invoice::query()->create([
+            'external_order_id' => $withInvoice->id,
+            'number' => 'FV/2026/07/10',
+            'type' => 'vat',
+            'status' => 'issued',
+            'issue_date' => '2026-07-10',
+            'currency' => 'PLN',
+            'seller_data' => [],
+            'buyer_data' => [],
+            'gross_total' => 100,
+            'issued_at' => now(),
+        ]);
+
+        $this->get(route('modules.show', [
+            'module' => 'orders',
+            'date_from' => '2026-07-09',
+            'date_to' => '2026-07-11',
+        ]))
+            ->assertOk()
+            ->assertSee('DATED-INVOICE')
+            ->assertDontSee('DATED-NO-INVOICE');
+
+        $this->get(route('modules.show', ['module' => 'orders', 'invoice' => 'yes']))
+            ->assertOk()
+            ->assertSee('DATED-INVOICE')
+            ->assertDontSee('DATED-NO-INVOICE');
+
+        $this->get(route('modules.show', ['module' => 'orders', 'invoice' => 'no']))
+            ->assertOk()
+            ->assertSee('DATED-NO-INVOICE')
+            ->assertDontSee('DATED-INVOICE');
     }
 }

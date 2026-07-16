@@ -270,6 +270,9 @@ class ModuleController extends Controller
                 'status' => trim((string) $request->query('status', '')),
                 'payment_method' => trim((string) $request->query('payment_method', '')),
                 'shipping_method' => trim((string) $request->query('shipping_method', '')),
+                'date_from' => trim((string) $request->query('date_from', '')),
+                'date_to' => trim((string) $request->query('date_to', '')),
+                'invoice' => trim((string) $request->query('invoice', '')),
                 'per_page' => $this->orderListPerPage($request),
             ],
             'orderStatusOptions' => ExternalOrder::query()
@@ -297,6 +300,9 @@ class ModuleController extends Controller
         $status = trim((string) $request->query('status', ''));
         $paymentMethod = trim((string) $request->query('payment_method', ''));
         $shippingMethod = trim((string) $request->query('shipping_method', ''));
+        $dateFrom = trim((string) $request->query('date_from', ''));
+        $dateTo = trim((string) $request->query('date_to', ''));
+        $invoice = trim((string) $request->query('invoice', ''));
         $term = trim((string) $request->query('q', ''));
 
         if ($status !== '') {
@@ -315,6 +321,20 @@ class ModuleController extends Controller
                 '$.shipping_lines[0].method_title',
                 '$.shipping_lines[0].method_id',
             ]).' = ?', [$shippingMethod]);
+        }
+
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFrom) === 1) {
+            $query->whereDate(DB::raw('COALESCE(external_created_at, created_at)'), '>=', $dateFrom);
+        }
+
+        if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateTo) === 1) {
+            $query->whereDate(DB::raw('COALESCE(external_created_at, created_at)'), '<=', $dateTo);
+        }
+
+        if ($invoice === 'yes') {
+            $query->whereHas('invoices', fn (Builder $invoices) => $invoices->where('type', '<>', 'proforma'));
+        } elseif ($invoice === 'no') {
+            $query->whereDoesntHave('invoices', fn (Builder $invoices) => $invoices->where('type', '<>', 'proforma'));
         }
 
         if ($term === '') {
