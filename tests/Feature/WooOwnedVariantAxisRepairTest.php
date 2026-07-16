@@ -762,13 +762,22 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->fakeCatalog($catalog, static function (Request $request): mixed {
             $path = (string) parse_url($request->url(), PHP_URL_PATH);
 
-            if ($request->method() !== 'GET'
-                || $path !== '/wp-json/wc/v3/products/attributes/1/terms'
-            ) {
+            if ($request->method() !== 'GET') {
                 return null;
             }
 
             parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if ($path === '/wp-json/wc/v3/products/attributes/8/terms') {
+                return Http::response([
+                    ['id' => 81, 'name' => 'Small', 'slug' => 'small', 'menu_order' => 10],
+                    ['id' => 82, 'name' => 'Large', 'slug' => 'large', 'menu_order' => 20],
+                ]);
+            }
+
+            if ($path !== '/wp-json/wc/v3/products/attributes/1/terms') {
+                return null;
+            }
 
             return Http::response(($query['lang'] ?? 'pl') === 'en'
                 ? [
@@ -1634,6 +1643,165 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         ));
     }
 
+    public function test_english_legacy_default_collision_slug_is_resolved_by_its_exact_target_language_term(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $catalog->products[223]['default_attributes'][0]['option'] = 'm-l-2-en';
+        $protectedBefore = collect($catalog->products)
+            ->map(fn (array $product): array => collect($product)->only([
+                'name',
+                'description',
+                'short_description',
+                'sku',
+                'status',
+                'price',
+                'regular_price',
+                'sale_price',
+                'manage_stock',
+                'stock_quantity',
+                'stock_status',
+            ])->all())
+            ->all();
+        $variationCommercialBefore = collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)
+                ->map(fn (array $variation): array => collect($variation)->only([
+                    'sku',
+                    'status',
+                    'price',
+                    'regular_price',
+                    'sale_price',
+                    'manage_stock',
+                    'stock_quantity',
+                    'stock_status',
+                ])->all())
+                ->all())
+            ->all();
+
+        $this->fakeCatalog($catalog, static function (Request $request): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() !== 'GET'
+                || $path !== '/wp-json/wc/v3/products/attributes/8/terms'
+            ) {
+                return null;
+            }
+
+            return Http::response([
+                ['id' => 71, 'name' => 'm-l', 'slug' => 'm-l', 'menu_order' => 20],
+                ['id' => 72, 'name' => 's-m', 'slug' => 's-m', 'menu_order' => 10],
+                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en', 'menu_order' => 20],
+                ['id' => 82, 'name' => 's-m', 'slug' => 's-m-2-en', 'menu_order' => 10],
+            ]);
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('repaired', $result['status']);
+        $this->assertSame([['id' => 1, 'option' => 'M/L']], $catalog->products[223]['default_attributes']);
+        $this->assertSame($protectedBefore, collect($catalog->products)
+            ->map(fn (array $product): array => collect($product)->only([
+                'name',
+                'description',
+                'short_description',
+                'sku',
+                'status',
+                'price',
+                'regular_price',
+                'sale_price',
+                'manage_stock',
+                'stock_quantity',
+                'stock_status',
+            ])->all())
+            ->all());
+        $this->assertSame($variationCommercialBefore, collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)
+                ->map(fn (array $variation): array => collect($variation)->only([
+                    'sku',
+                    'status',
+                    'price',
+                    'regular_price',
+                    'sale_price',
+                    'manage_stock',
+                    'stock_quantity',
+                    'stock_status',
+                ])->all())
+                ->all())
+            ->all());
+        Http::assertSent(function (Request $request): bool {
+            if ($request->method() !== 'GET'
+                || parse_url($request->url(), PHP_URL_PATH)
+                    !== '/wp-json/wc/v3/products/attributes/8/terms'
+            ) {
+                return false;
+            }
+
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            return ($query['lang'] ?? null) === 'en'
+                && filled($query['_lemon_erp_no_cache'] ?? null);
+        });
+        Http::assertSent(function (Request $request): bool {
+            if ($request->method() !== 'PUT'
+                || parse_url($request->url(), PHP_URL_PATH) !== '/wp-json/wc/v3/products/223'
+                || data_get($request->data(), 'default_attributes.0.id') !== 1
+                || data_get($request->data(), 'default_attributes.0.option') !== 'M/L'
+            ) {
+                return false;
+            }
+
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            return ($query['lang'] ?? null) === 'en'
+                && array_keys($request->data()) === ['attributes', 'default_attributes'];
+        });
+
+        $second = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('already_canonical', $second['status']);
+        $this->assertSame(0, $second['mutations']);
+    }
+
+    #[DataProvider('unprovenLegacyDefaultTermProvider')]
+    public function test_legacy_default_slug_without_one_exact_language_term_stops_before_every_write(
+        array $terms,
+    ): void {
+        [$parent, $catalog] = $this->family();
+        $catalog->products[223]['default_attributes'][0]['option'] = 'm-l-2-en';
+        $original = unserialize(serialize([
+            'products' => $catalog->products,
+            'variations' => $catalog->variations,
+        ]));
+        $this->fakeCatalog($catalog, static function (Request $request) use ($terms): mixed {
+            return $request->method() === 'GET'
+                && parse_url($request->url(), PHP_URL_PATH)
+                    === '/wp-json/wc/v3/products/attributes/8/terms'
+                ? Http::response($terms)
+                : null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertSame(0, $result['mutations']);
+        $this->assertStringContainsString('#8', $result['reason']);
+        $this->assertSame($original['products'], $catalog->products);
+        $this->assertSame($original['variations'], $catalog->variations);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    }
+
+    public static function unprovenLegacyDefaultTermProvider(): array
+    {
+        return [
+            'missing exact slug' => [[
+                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-en'],
+            ]],
+            'duplicate exact slug' => [[
+                ['id' => 81, 'name' => 'm-l', 'slug' => 'm-l-2-en'],
+                ['id' => 91, 'name' => 'm-l', 'slug' => 'm-l-2-en'],
+            ]],
+        ];
+    }
+
     public function test_size_default_term_slug_candidates_cover_woo_and_historical_formats(): void
     {
         $this->family();
@@ -1921,7 +2089,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 ->all(),
         );
         $this->assertSame(
-            ['S/M', 'M/L'],
+            ['s-m', 'm-l'],
             collect((array) data_get($firstPut->data(), 'attributes', []))
                 ->firstWhere('id', 6)['options'],
         );
@@ -4507,12 +4675,44 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             if (in_array($path, [
                 '/wp-json/wc/v3/products/attributes/6/terms',
                 '/wp-json/wc/v3/products/attributes/8/terms',
+            ], true) && $request->method() === 'GET') {
+                $english = str_contains($path, '/attributes/8/');
+
+                return Http::response([
+                    [
+                        'id' => $english ? 81 : 61,
+                        'name' => 's-m',
+                        'slug' => $english ? 's-m-en' : 's-m',
+                        'menu_order' => 10,
+                    ],
+                    [
+                        'id' => $english ? 82 : 62,
+                        'name' => 'm-l',
+                        'slug' => $english ? 'm-l-en' : 'm-l',
+                        'menu_order' => 20,
+                    ],
+                ]);
+            }
+
+            if (in_array($path, [
                 '/wp-json/wc/v3/products/attributes/9/terms',
                 '/wp-json/wc/v3/products/attributes/10/terms',
             ], true) && $request->method() === 'GET') {
+                $english = str_contains($path, '/attributes/10/');
+
                 return Http::response([
-                    ['id' => 61, 'name' => 'S/M', 'slug' => 's-m', 'menu_order' => 10],
-                    ['id' => 62, 'name' => 'M/L', 'slug' => 'm-l', 'menu_order' => 20],
+                    [
+                        'id' => $english ? 101 : 91,
+                        'name' => 'S/M',
+                        'slug' => $english ? 's-m-en' : 's-m',
+                        'menu_order' => 10,
+                    ],
+                    [
+                        'id' => $english ? 102 : 92,
+                        'name' => 'M/L',
+                        'slug' => $english ? 'm-l-en' : 'm-l',
+                        'menu_order' => 20,
+                    ],
                 ]);
             }
 

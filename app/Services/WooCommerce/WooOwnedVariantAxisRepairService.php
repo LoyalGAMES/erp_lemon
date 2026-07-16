@@ -15,6 +15,7 @@ use App\Services\Products\LegacySizeVariantAxisResolver;
 use App\Services\Products\ProductVariantAxisNameResolver;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use Carbon\CarbonImmutable;
+use DomainException;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -30,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000026';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000027';
+
+    public const PREVIOUS_DEFAULT_TERM_SLUG_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000026';
 
     public const PREVIOUS_COMPLEMENTARY_LANGUAGE_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000025';
 
@@ -46,6 +49,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_DEFAULT_TERM_SLUG_REVISION,
             self::PREVIOUS_COMPLEMENTARY_LANGUAGE_REVISION,
             self::PREVIOUS_ERP_SYNCHRONIZED_REVISION,
             self::PREVIOUS_SYNCHRONIZED_REVISION,
@@ -342,10 +346,28 @@ final class WooOwnedVariantAxisRepairService
                 $target['external_product_id'],
                 $this->apiLanguage($target['language']),
             );
-            $planningParent = $this->normalizeExistingParentSizeAxisForPlan(
-                $target,
-                $parent,
-            );
+            try {
+                $planningParent = $this->normalizeExistingParentSizeAxisForPlan(
+                    $target,
+                    $parent,
+                );
+            } catch (DomainException $exception) {
+                return [
+                    'status' => 'manual_review',
+                    'targets' => count($targetResolution['targets']),
+                    'mutations' => 0,
+                    'reason' => sprintf(
+                        'WooCommerce %s #%s: %s',
+                        mb_strtoupper($target['language']),
+                        $target['external_product_id'],
+                        $exception->getMessage(),
+                    ),
+                    'languages' => array_values(array_unique(array_column(
+                        $targetResolution['targets'],
+                        'language',
+                    ))),
+                ];
+            }
 
             $remoteFamilies[] = [
                 'target' => $target,
@@ -4293,25 +4315,28 @@ final class WooOwnedVariantAxisRepairService
             ->filter(fn (array $attribute): bool => $this->isCanonicalGlobalSizeAttribute($attribute))
             ->values();
 
-        if ($sizeAttributes->count() !== 1) {
-            return $parent;
+        if ($sizeAttributes->count() === 1) {
+            $size = (array) $sizeAttributes->first();
+            $sizeIndex = $attributes->search(fn (array $attribute): bool => $this->sameAttribute(
+                $attribute,
+                $size,
+            ));
+
+            if ((int) ($size['id'] ?? 0) > 0 && $sizeIndex !== false) {
+                $size['options'] = $this->orderedExistingSizeOptionNames(
+                    (array) ($size['options'] ?? []),
+                );
+                $attributes->put($sizeIndex, $size);
+            }
         }
 
-        $size = (array) $sizeAttributes->first();
-        $sizeId = (int) ($size['id'] ?? 0);
-        $sizeIndex = $attributes->search(fn (array $attribute): bool => $this->sameAttribute(
-            $attribute,
-            $size,
-        ));
-
-        if ($sizeId <= 0 || $sizeIndex === false) {
-            return $parent;
-        }
-
-        $orderedOptions = $this->orderedExistingSizeOptionNames((array) ($size['options'] ?? []));
-        $size['options'] = $orderedOptions;
-        $attributes->put($sizeIndex, $size);
         $parent['attributes'] = $attributes->values()->all();
+        $targetAxesById = $attributes
+            ->filter(fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) > 0
+                && ($this->isGenericAttribute($attribute) || $this->isSizeAttribute($attribute)))
+            ->groupBy(fn (array $attribute): int => (int) $attribute['id'])
+            ->filter(fn (Collection $axes): bool => $axes->count() === 1)
+            ->map(fn (Collection $axes): array => (array) $axes->first());
 
         /** @var WordpressIntegration $integration */
         $integration = $target['integration'];
@@ -4322,48 +4347,27 @@ final class WooOwnedVariantAxisRepairService
             ->map(function (array $default) use (
                 $integration,
                 $language,
-                $sizeId,
-                $orderedOptions,
+                $targetAxesById,
             ): array {
-                if ((int) ($default['id'] ?? 0) !== $sizeId) {
+                $attributeId = (int) ($default['id'] ?? 0);
+                $axis = $targetAxesById->get($attributeId);
+
+                if ($attributeId <= 0 || ! is_array($axis)) {
                     return $default;
                 }
 
                 $rawOption = trim((string) ($default['option'] ?? ''));
 
-                if ($rawOption === '' || in_array($rawOption, $orderedOptions, true)) {
+                if ($rawOption === '') {
                     return $default;
                 }
 
-                $matches = collect($orderedOptions)
-                    ->filter(fn (string $name): bool => in_array(
-                        $rawOption,
-                        $this->sizeDefaultTermLanguageSlugs($name, $language),
-                        true,
-                    ))
-                    ->filter(function (string $name) use (
-                        $integration,
-                        $language,
-                        $sizeId,
-                        $rawOption,
-                    ): bool {
-                        $term = $this->client->globalProductAttributeTermByNameAndLanguage(
-                            $integration,
-                            $sizeId,
-                            $name,
-                            $language,
-                            $this->sizeDefaultTermLanguageSlugs($name, $language),
-                        );
-
-                        return is_array($term)
-                            && trim((string) ($term['name'] ?? '')) === $name
-                            && trim((string) ($term['slug'] ?? '')) === $rawOption;
-                    })
-                    ->values();
-
-                if ($matches->count() === 1) {
-                    $default['option'] = $matches->first();
-                }
+                $default['option'] = $this->resolveExistingTargetAxisDefaultTermName(
+                    $integration,
+                    $language,
+                    $axis,
+                    $rawOption,
+                );
 
                 return $default;
             })
@@ -4371,6 +4375,141 @@ final class WooOwnedVariantAxisRepairService
         $parent['default_attributes'] = $defaults;
 
         return $parent;
+    }
+
+    /**
+     * Resolve a global-axis default only through one exact term in the target
+     * language. Historical Woo responses can store the term name (`m-l`) or
+     * its collision slug (`m-l-2-en`). Neither representation is accepted by
+     * shape alone: the fresh taxonomy read, language-aware lookup, exact term
+     * identity and the parent's own option set must all agree before planning.
+     *
+     * @param  array<string,mixed>  $axis
+     */
+    private function resolveExistingTargetAxisDefaultTermName(
+        WordpressIntegration $integration,
+        string $language,
+        array $axis,
+        string $rawOption,
+    ): string {
+        $attributeId = (int) ($axis['id'] ?? 0);
+        $axisOptions = collect((array) ($axis['options'] ?? []))
+            ->map(fn (mixed $option): string => trim((string) $option))
+            ->filter()
+            ->values();
+        $terms = collect($this->client->globalProductAttributeTermsById(
+            $integration,
+            $attributeId,
+            $language,
+        ))
+            ->filter(fn (mixed $term): bool => is_array($term)
+                && (int) ($term['id'] ?? 0) > 0)
+            ->values();
+        $rawMatches = $terms
+            ->filter(fn (array $term): bool => trim((string) ($term['name'] ?? '')) === $rawOption
+                || trim((string) ($term['slug'] ?? '')) === $rawOption)
+            ->values();
+
+        if ($rawMatches
+            ->filter(fn (array $term): bool => trim((string) ($term['slug'] ?? '')) === $rawOption)
+            ->unique(fn (array $term): int => (int) $term['id'])
+            ->count() > 1
+        ) {
+            throw new DomainException(
+                "Domyślny wariant starej globalnej osi #{$attributeId} wskazuje kilka termów o tym samym slugu.",
+            );
+        }
+
+        $proven = $rawMatches
+            ->map(function (array $candidate) use (
+                $integration,
+                $attributeId,
+                $language,
+                $axisOptions,
+            ): ?array {
+                $name = trim((string) ($candidate['name'] ?? ''));
+                $slug = trim((string) ($candidate['slug'] ?? ''));
+
+                if ($name === '' || $slug === '') {
+                    return null;
+                }
+
+                $languageSlugs = collect($this->sizeDefaultTermLanguageSlugs($name, $language));
+
+                if ($this->isTargetLanguageCollisionTermSlug($name, $slug, $language)) {
+                    $languageSlugs->push($slug);
+                }
+
+                $term = $this->client->globalProductAttributeTermByNameAndLanguage(
+                    $integration,
+                    $attributeId,
+                    $name,
+                    $language,
+                    $languageSlugs->filter()->unique()->values()->all(),
+                );
+
+                if (! is_array($term)
+                    || (int) ($term['id'] ?? 0) !== (int) ($candidate['id'] ?? 0)
+                    || trim((string) ($term['name'] ?? '')) !== $name
+                    || trim((string) ($term['slug'] ?? '')) !== $slug
+                ) {
+                    return null;
+                }
+
+                $canonicalKey = $this->canonicalSizeOptionKey(
+                    ProductVariantAxisNameResolver::SIZE,
+                    $name,
+                );
+                $matchingOptions = $axisOptions
+                    ->filter(fn (string $option): bool => $this->canonicalSizeOptionKey(
+                        ProductVariantAxisNameResolver::SIZE,
+                        $option,
+                    ) === $canonicalKey)
+                    ->values();
+
+                return $canonicalKey !== ''
+                    && ($axisOptions->isEmpty() || $matchingOptions->count() === 1)
+                    ? $term
+                    : null;
+            })
+            ->filter(fn (mixed $term): bool => is_array($term))
+            ->unique(fn (array $term): int => (int) $term['id'])
+            ->values();
+
+        if ($proven->count() !== 1) {
+            throw new DomainException(
+                "Domyślny wariant starej globalnej osi #{$attributeId} nie wskazuje jednego terminu rozmiaru we właściwym języku.",
+            );
+        }
+
+        return trim((string) ($proven->first()['name'] ?? ''));
+    }
+
+    private function isTargetLanguageCollisionTermSlug(
+        string $name,
+        string $slug,
+        string $language,
+    ): bool {
+        $slug = Str::slug($slug);
+        $language = Str::slug($this->language($language));
+
+        return collect([$this->optionKey($name), Str::slug($name)])
+            ->filter()
+            ->unique()
+            ->contains(function (string $base) use ($slug, $language): bool {
+                $quotedBase = preg_quote($base, '/');
+
+                if ($language === 'pl') {
+                    return preg_match("/^{$quotedBase}-[2-9][0-9]*(?:-pl)?$/", $slug) === 1;
+                }
+
+                $quotedLanguage = preg_quote($language, '/');
+
+                return preg_match(
+                    "/^{$quotedBase}(?:-[2-9][0-9]*)?-{$quotedLanguage}$/",
+                    $slug,
+                ) === 1;
+            });
     }
 
     /**
