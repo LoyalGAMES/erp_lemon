@@ -25,6 +25,7 @@ use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 final class WooOwnedVariantAxisRepairTest extends TestCase
@@ -1280,7 +1281,15 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             ) {
                 $corruptReadsRemaining--;
                 $response = unserialize(serialize($liveCatalog->products[123]));
-                $response['attributes'][1]['variation'] = false;
+                $response['attributes'][] = [
+                    'id' => 6,
+                    'name' => 'wariant',
+                    'slug' => 'pa_wariant',
+                    'position' => 9,
+                    'visible' => true,
+                    'variation' => true,
+                    'options' => ['S/M', 'M/L'],
+                ];
 
                 return Http::response($response);
             }
@@ -1373,6 +1382,144 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             ->firstWhere('id', 1)['variation']);
         $this->assertSame(['S/M', 'M/L'], collect($catalog->products[123]['attributes'])
             ->firstWhere('id', 1)['options']);
+    }
+
+    public function test_woo_normalized_global_option_response_order_does_not_roll_back_an_exact_axis(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $polishParentPuts = 0;
+        $normalizedReads = 0;
+        $this->fakeCatalog($catalog, static function (Request $request, object $liveCatalog) use (
+            &$polishParentPuts,
+            &$normalizedReads,
+        ): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'PUT' && $path === '/wp-json/wc/v3/products/123') {
+                $polishParentPuts++;
+
+                return null;
+            }
+
+            if ($polishParentPuts >= 2
+                && $request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/123'
+            ) {
+                $normalizedReads++;
+                $response = unserialize(serialize($liveCatalog->products[123]));
+
+                foreach ($response['attributes'] as &$attribute) {
+                    if ((int) ($attribute['id'] ?? 0) === 1) {
+                        $attribute['options'] = array_reverse($attribute['options']);
+                    }
+                }
+                unset($attribute);
+
+                return Http::response($response);
+            }
+
+            return null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('repaired', $result['status']);
+        $this->assertSame(2, $polishParentPuts);
+        $this->assertGreaterThan(0, $normalizedReads);
+        $this->assertSame(['S/M', 'M/L'], collect($catalog->products[123]['attributes'])
+            ->firstWhere('id', 1)['options']);
+        $this->assertFalse(collect($catalog->products[123]['attributes'])->contains(
+            fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) === 6,
+        ));
+        $this->assertSame(
+            [124 => 'S/M', 125 => 'M/L'],
+            collect($catalog->variations[123])
+                ->map(fn (array $variation): string => $variation['attributes'][0]['option'])
+                ->all(),
+        );
+    }
+
+    #[DataProvider('nonOrderParentDriftProvider')]
+    public function test_final_verification_rejects_every_parent_drift_except_response_array_order(
+        string $drift,
+    ): void {
+        [$parent, $catalog] = $this->family();
+        $original = unserialize(serialize([
+            'products' => $catalog->products,
+            'variations' => $catalog->variations,
+        ]));
+        $polishParentPuts = 0;
+        $corruptReadsRemaining = 0;
+        $this->fakeCatalog($catalog, static function (Request $request, object $liveCatalog) use (
+            $drift,
+            &$polishParentPuts,
+            &$corruptReadsRemaining,
+        ): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'PUT' && $path === '/wp-json/wc/v3/products/123') {
+                $polishParentPuts++;
+
+                if ($polishParentPuts === 2) {
+                    $corruptReadsRemaining = 3;
+                }
+
+                return null;
+            }
+
+            if ($corruptReadsRemaining <= 0
+                || $request->method() !== 'GET'
+                || $path !== '/wp-json/wc/v3/products/123'
+            ) {
+                return null;
+            }
+
+            $corruptReadsRemaining--;
+            $response = unserialize(serialize($liveCatalog->products[123]));
+
+            foreach ($response['attributes'] as &$attribute) {
+                if ((int) ($attribute['id'] ?? 0) !== 1) {
+                    continue;
+                }
+
+                if ($drift === 'position') {
+                    $attribute['position'] = (int) $attribute['position'] + 1;
+                } elseif ($drift === 'visible') {
+                    $attribute['visible'] = ! (bool) $attribute['visible'];
+                } elseif ($drift === 'duplicate_option') {
+                    $attribute['options'][] = $attribute['options'][0];
+                }
+            }
+            unset($attribute);
+
+            if ($drift === 'default') {
+                $response['default_attributes'][0]['option'] = 'S/M';
+            }
+
+            return Http::response($response);
+        });
+
+        try {
+            app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+            $this->fail("Końcowa weryfikacja powinna odrzucić drift rodzica: {$drift}.");
+        } catch (\Throwable $exception) {
+            $this->assertStringContainsString('nie potwierdził kanonicznej osi', $exception->getMessage());
+        }
+
+        $this->assertSame(4, $polishParentPuts);
+        $this->assertSame($original['products'], $catalog->products);
+        $this->assertSame($original['variations'], $catalog->variations);
+    }
+
+    /** @return array<string,array{string}> */
+    public static function nonOrderParentDriftProvider(): array
+    {
+        return [
+            'position' => ['position'],
+            'visibility' => ['visible'],
+            'default' => ['default'],
+            'duplicate option' => ['duplicate_option'],
+        ];
     }
 
     public function test_it_aborts_the_whole_pl_en_family_before_any_write_when_one_language_has_color_axis(): void

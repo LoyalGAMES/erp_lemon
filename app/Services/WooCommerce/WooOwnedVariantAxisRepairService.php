@@ -810,6 +810,7 @@ final class WooOwnedVariantAxisRepairService
                 $verified = $this->unsafePlan('Nie wykonano końcowego odczytu WooCommerce.');
                 $parent = [];
                 $variations = [];
+                $verificationConfirmed = false;
 
                 // A proxy/object-cache layer can briefly serve the pre-PUT
                 // representation. Every read carries a unique cache buster;
@@ -831,11 +832,16 @@ final class WooOwnedVariantAxisRepairService
                         [],
                         $target['language'],
                     );
+                    $verificationConfirmed = $this->finalAxisStateMatches(
+                        $parent,
+                        $verified,
+                        $entry['plan']['parent_payload'] ?? [
+                            'attributes' => array_values((array) ($entry['parent']['attributes'] ?? [])),
+                            'default_attributes' => array_values((array) ($entry['parent']['default_attributes'] ?? [])),
+                        ],
+                    );
 
-                    if ($verified['status'] === 'canonical'
-                        && $verified['parent_payload'] === null
-                        && $verified['variation_payloads'] === []
-                    ) {
+                    if ($verificationConfirmed) {
                         break;
                     }
 
@@ -844,10 +850,7 @@ final class WooOwnedVariantAxisRepairService
                     }
                 }
 
-                if ($verified['status'] !== 'canonical'
-                    || $verified['parent_payload'] !== null
-                    || $verified['variation_payloads'] !== []
-                ) {
+                if (! $verificationConfirmed) {
                     throw new RuntimeException(
                         sprintf(
                             'WooCommerce nie potwierdził kanonicznej osi rozmiaru produktu #%s po naprawie (%s).',
@@ -1529,6 +1532,24 @@ final class WooOwnedVariantAxisRepairService
             (array) ($size['options'] ?? []),
         );
         $primaryLanguage = $this->language(data_get($primary, 'target.language', 'pl'));
+        $localizedOrderedOptions = collect($orderedOptions)
+            ->map(fn (string $option): string => $this->localizedSizeOption(
+                $sizeName,
+                $option,
+                $primaryLanguage,
+            ))
+            ->all();
+        $verifiedParent['attributes'] = collect((array) ($verifiedParent['attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(function (array $attribute) use ($size, $localizedOrderedOptions): array {
+                if ($this->sameAttribute($attribute, $size)) {
+                    $attribute['options'] = $localizedOrderedOptions;
+                }
+
+                return $attribute;
+            })
+            ->values()
+            ->all();
         $remoteBySku = collect($verifiedVariations)
             ->mapWithKeys(fn (array $variation): array => [
                 mb_strtoupper(trim((string) ($variation['sku'] ?? ''))) => $variation,
@@ -4933,6 +4954,119 @@ final class WooOwnedVariantAxisRepairService
 
                 return $expectedOptions === $actualOptions;
             });
+    }
+
+    /**
+     * Woo can return global taxonomy options in its own term-query order even
+     * after accepting the requested product payload. Final verification may
+     * ignore only that response-array order: every attribute identity,
+     * position, visibility, variation flag, option set and default must still
+     * match the intended final parent, and every child must already require no
+     * further repair. An old `wariant` axis or any commercial-data drift still
+     * fails and triggers the exact rollback below.
+     *
+     * @param  array<string,mixed>  $parent
+     * @param  array<string,mixed>  $verified
+     * @param  array{attributes:list<array<string,mixed>>,default_attributes?:list<array<string,mixed>>}  $expectedParentPayload
+     */
+    private function finalAxisStateMatches(
+        array $parent,
+        array $verified,
+        array $expectedParentPayload,
+    ): bool {
+        if (! in_array((string) ($verified['status'] ?? ''), ['canonical', 'repair'], true)
+            || ($verified['transitional_parent_payload'] ?? null) !== null
+            || (array) ($verified['variation_payloads'] ?? []) !== []
+        ) {
+            return false;
+        }
+
+        return $this->finalParentAxisPayloadMatches($parent, $expectedParentPayload);
+    }
+
+    /**
+     * Compare the final parent while treating only the order of attribute and
+     * option response arrays as non-semantic. `position` remains exact and is
+     * the backend-owned storefront ordering contract for attributes.
+     *
+     * @param  array<string,mixed>  $parent
+     * @param  array{attributes:list<array<string,mixed>>,default_attributes?:list<array<string,mixed>>}  $payload
+     */
+    private function finalParentAxisPayloadMatches(array $parent, array $payload): bool
+    {
+        $actualAttributes = collect((array) ($parent['attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(function (array $attribute): array {
+                $serialized = $this->serializeParentAttribute($attribute);
+                $serialized['options'] = collect((array) ($attribute['options'] ?? []))
+                    ->map(fn (mixed $option): string => trim((string) $option))
+                    ->all();
+
+                return $serialized;
+            })
+            ->values();
+        $expectedAttributes = collect((array) ($payload['attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(function (array $attribute): array {
+                $serialized = $this->serializeParentAttribute($attribute);
+                $serialized['options'] = collect((array) ($attribute['options'] ?? []))
+                    ->map(fn (mixed $option): string => trim((string) $option))
+                    ->all();
+
+                return $serialized;
+            })
+            ->values();
+
+        if ($actualAttributes->count() !== $expectedAttributes->count()) {
+            return false;
+        }
+
+        $actualByAxis = $actualAttributes->keyBy(
+            fn (array $attribute): string => $this->axisIdentityKey($attribute),
+        );
+        $expectedByAxis = $expectedAttributes->keyBy(
+            fn (array $attribute): string => $this->axisIdentityKey($attribute),
+        );
+
+        if ($actualByAxis->count() !== $actualAttributes->count()
+            || $expectedByAxis->count() !== $expectedAttributes->count()
+            || $actualByAxis->keys()->sort()->values()->all()
+                !== $expectedByAxis->keys()->sort()->values()->all()
+        ) {
+            return false;
+        }
+
+        foreach ($expectedByAxis as $axis => $expected) {
+            $actual = (array) $actualByAxis->get($axis, []);
+            $actualOptions = collect((array) ($actual['options'] ?? []))
+                ->map(fn (mixed $option): string => trim((string) $option))
+                ->sort()
+                ->values()
+                ->all();
+            $expectedOptions = collect((array) ($expected['options'] ?? []))
+                ->map(fn (mixed $option): string => trim((string) $option))
+                ->sort()
+                ->values()
+                ->all();
+            unset($actual['options'], $expected['options']);
+
+            if ($actual !== $expected || $actualOptions !== $expectedOptions) {
+                return false;
+            }
+        }
+
+        $actualDefaults = collect((array) ($parent['default_attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(fn (array $attribute): array => $this->serializeDefaultAttribute($attribute))
+            ->values()
+            ->all();
+        $expectedDefaults = collect((array) ($payload['default_attributes'] ?? []))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(fn (array $attribute): array => $this->serializeDefaultAttribute($attribute))
+            ->values()
+            ->all();
+
+        return $actualDefaults === $expectedDefaults;
     }
 
     /**
