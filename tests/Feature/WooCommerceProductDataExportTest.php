@@ -4250,8 +4250,8 @@ class WooCommerceProductDataExportTest extends TestCase
         $prepareVariablePayload = new \ReflectionMethod($service, 'prepareVariablePayload');
 
         foreach ([
-            'pl' => ['name' => 'Rozmiar', 'options' => ['S/M', 'M/L', 'Niestandardowy']],
-            'en' => ['name' => 'Size', 'options' => ['Small/Medium', 'Medium/Large', 'Legacy custom']],
+            'pl' => ['name' => 'Rozmiar', 'options' => ['M/L', 'S/M', 'Niestandardowy']],
+            'en' => ['name' => 'Size', 'options' => ['Medium/Large', 'Small/Medium', 'Legacy custom']],
         ] as $language => $expected) {
             $payload = $prepareVariablePayload->invoke(
                 $service,
@@ -4263,7 +4263,7 @@ class WooCommerceProductDataExportTest extends TestCase
             $axis = collect($payload['attributes'])->firstWhere('variation', true);
             $this->assertSame('Rozmiar', $axis['source_name'] ?? null);
             $this->assertSame($expected['name'], $axis['name'] ?? null);
-            $this->assertSame(['S/M', 'M/L', 'Niestandardowy'], $axis['source_options'] ?? null);
+            $this->assertSame(['M/L', 'S/M', 'Niestandardowy'], $axis['source_options'] ?? null);
             $this->assertSame($expected['options'], $axis['options'] ?? null);
             $this->assertSame([10, 20, 30], $axis['source_option_orders'] ?? null);
             $this->assertSame('Rozmiar', collect($payload['meta_data'])
@@ -4280,8 +4280,8 @@ class WooCommerceProductDataExportTest extends TestCase
                 'pl',
             )['menu_order'],
         ]);
-        $this->assertSame(20, $menuOrders->get('MARKETPLACE-PLURAL-M-L'));
-        $this->assertSame(10, $menuOrders->get('MARKETPLACE-PLURAL-S-M'));
+        $this->assertSame(10, $menuOrders->get('MARKETPLACE-PLURAL-M-L'));
+        $this->assertSame(20, $menuOrders->get('MARKETPLACE-PLURAL-S-M'));
         $this->assertSame(30, $menuOrders->get('MARKETPLACE-PLURAL-NIESTANDARDOWY'));
     }
 
@@ -4444,7 +4444,7 @@ class WooCommerceProductDataExportTest extends TestCase
             ['M/L', 'Custom A', 'XS', 'S/M', 'Custom B', 'ONE SIZE'],
         );
 
-        $this->assertSame([40, 60, 20, 30, 50, 10], $orders);
+        $this->assertSame([10, 40, 50, 30, 20, 60], $orders);
     }
 
     public function test_size_export_rejects_a_value_absent_from_every_erp_size_dictionary(): void
@@ -4521,12 +4521,12 @@ class WooCommerceProductDataExportTest extends TestCase
         );
         $service = app(ProductDataExportService::class);
 
-        $this->assertSame([20, 10], $method->invoke(
+        $this->assertSame([10, 20], $method->invoke(
             $service,
             ['name' => 'Rozmiar', 'slug' => 'rozmiar'],
             ['M/L', 'S/M'],
         ));
-        $this->assertSame([20, 10], $method->invoke(
+        $this->assertSame([10, 20], $method->invoke(
             $service,
             ['name' => 'Imported axis', 'slug' => 'blvariant'],
             ['m-l', 's-m'],
@@ -4890,6 +4890,66 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertFalse($color['variation'] ?? true);
         $this->assertSame(['Czarny | Biały'], $color['source_options'] ?? null);
         $this->assertSame(['Czarny | Biały'], $color['options'] ?? null);
+    }
+
+    public function test_direct_size_parameter_lists_are_split_into_atomic_terms_before_globalization(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L', '36', '37', '38', '39', '40'],
+            'values_en' => ['S/M', 'M/L', '36', '37', '38', '39', '40'],
+            'is_variant' => true,
+        ]);
+        $master = ['parameters' => [
+            [
+                'name' => 'Rozmiar',
+                'name_en' => 'Size',
+                'value' => 'M/L, S/M',
+                'value_en' => 'M/L, S/M',
+            ],
+            [
+                'name' => 'Rozmiary',
+                'name_en' => 'Sizes',
+                'value' => '36, 37, 38, 39, 40, 36, 37, 38, 39, 40',
+                'value_en' => '36, 37, 38, 39, 40, 36, 37, 38, 39, 40',
+            ],
+        ]];
+        $attributes = new \ReflectionMethod(ProductDataExportService::class, 'attributes');
+        $service = app(ProductDataExportService::class);
+
+        foreach (['pl', 'en'] as $language) {
+            $resolved = $attributes->invoke($service, $master, $language);
+
+            $this->assertSame(['M/L', 'S/M'], $resolved[0]['source_options']);
+            $this->assertSame(['M/L', 'S/M'], $resolved[0]['options']);
+            $this->assertSame(['36', '37', '38', '39', '40'], $resolved[1]['source_options']);
+            $this->assertSame(['36', '37', '38', '39', '40'], $resolved[1]['options']);
+            $this->assertTrue(collect($resolved[1]['source_option_orders'])
+                ->every(fn (mixed $order): bool => is_int($order) && $order > 0));
+        }
+    }
+
+    public function test_global_size_client_rejects_an_aggregate_term_before_any_http_request(): void
+    {
+        Http::fake();
+        $integration = new WordpressIntegration;
+
+        try {
+            app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+                $integration,
+                'Rozmiar',
+                ['36, 37, 38, 39, 40'],
+                'pl',
+            );
+            $this->fail('Zbiorczy term Rozmiar nie może dotrzeć do WooCommerce.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('zbiorczą wartość', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
     }
 
     public function test_global_attribute_resolution_paginates_attribute_and_term_collections(): void

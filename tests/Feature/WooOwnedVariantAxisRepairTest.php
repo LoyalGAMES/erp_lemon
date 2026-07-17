@@ -7,6 +7,7 @@ namespace Tests\Feature;
 use App\Jobs\ExportWooCommerceProductDataJob;
 use App\Jobs\ImportWooCommerceProductsJob;
 use App\Jobs\RepairWooOwnedVariantAxisJob;
+use App\Jobs\SyncWooCommerceGlobalSizeOrderJob;
 use App\Models\Product;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
@@ -177,6 +178,202 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 ->map(fn (array $record): Request => $record[0])
                 ->filter(fn (Request $request): bool => $request->method() === 'PUT'),
         );
+    }
+
+    public function test_it_collapses_wariant_and_blvariant_duplicates_into_size_without_recreating_variations_or_stock(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->addLocalBlVariantAxis($parent, ['s-m', 'm-l']);
+        $this->addRemoteBlVariantAxis($catalog, ['s-m', 'm-l']);
+        $originalVariationIds = collect($catalog->variations)
+            ->map(fn (array $variations): array => array_keys($variations))
+            ->all();
+        $originalCommercialData = collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)
+                ->map(fn (array $variation): array => [
+                    'sku' => $variation['sku'],
+                    'price' => $variation['price'],
+                    'manage_stock' => $variation['manage_stock'],
+                    'stock_quantity' => $variation['stock_quantity'],
+                    'stock_status' => $variation['stock_status'],
+                ])
+                ->all())
+            ->all();
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+
+        $this->assertTrue($repair->isMultipleLegacySizeAxisCandidate($parent->fresh()));
+        $this->fakeCatalog($catalog);
+
+        $result = $repair->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        $this->assertSame($originalVariationIds, collect($catalog->variations)
+            ->map(fn (array $variations): array => array_keys($variations))
+            ->all());
+        $this->assertSame($originalCommercialData, collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)
+                ->map(fn (array $variation): array => [
+                    'sku' => $variation['sku'],
+                    'price' => $variation['price'],
+                    'manage_stock' => $variation['manage_stock'],
+                    'stock_quantity' => $variation['stock_quantity'],
+                    'stock_status' => $variation['stock_status'],
+                ])
+                ->all())
+            ->all());
+
+        foreach ([123 => [124 => 'S/M', 125 => 'M/L'], 223 => [224 => 'S/M', 225 => 'M/L']] as $parentId => $variants) {
+            $variationAttributes = collect($catalog->products[$parentId]['attributes'])
+                ->where('variation', true)
+                ->values();
+            $this->assertCount(1, $variationAttributes);
+            $this->assertSame(1, (int) $variationAttributes->first()['id']);
+
+            foreach ($variants as $variationId => $option) {
+                $this->assertSame([[
+                    'id' => 1,
+                    'option' => $option,
+                ]], $catalog->variations[$parentId][$variationId]['attributes']);
+            }
+        }
+
+        $freshParent = $parent->fresh('variantChildren');
+        $this->assertSame(
+            ['Rozmiar'],
+            collect((array) data_get($freshParent->masterData(), 'parameters', []))
+                ->filter(fn (mixed $row): bool => is_array($row) && (bool) ($row['variation'] ?? false))
+                ->pluck('name')
+                ->values()
+                ->all(),
+        );
+
+        foreach ($freshParent->variantChildren as $variant) {
+            $this->assertSame(
+                ['Rozmiar'],
+                collect((array) data_get($variant->masterData(), 'parameters', []))
+                    ->filter(fn (mixed $row): bool => is_array($row) && (bool) ($row['variation'] ?? false))
+                    ->pluck('name')
+                    ->values()
+                    ->all(),
+            );
+        }
+
+        Http::assertNotSent(function (Request $request): bool {
+            if ($request->method() !== 'PUT') {
+                return false;
+            }
+
+            return collect([
+                'sku', 'price', 'regular_price', 'sale_price', 'manage_stock',
+                'stock_quantity', 'stock_status', 'backorders',
+            ])->contains(fn (string $field): bool => array_key_exists($field, $request->data()));
+        });
+
+        $putCount = Http::recorded()
+            ->filter(fn (array $record): bool => $record[0]->method() === 'PUT')
+            ->count();
+        $second = $repair->repair($parent->fresh());
+        $this->assertSame('already_canonical', $second['status']);
+        $this->assertCount(
+            $putCount,
+            Http::recorded()->filter(fn (array $record): bool => $record[0]->method() === 'PUT'),
+        );
+    }
+
+    public function test_multiple_legacy_axes_with_conflicting_blvariant_values_require_manual_review_without_writes(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->addLocalBlVariantAxis($parent, ['Black', 'White']);
+        $this->addRemoteBlVariantAxis($catalog, ['Black', 'White']);
+        $original = unserialize(serialize([
+            'products' => $catalog->products,
+            'variations' => $catalog->variations,
+        ]));
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+
+        $this->assertFalse($repair->isMultipleLegacySizeAxisCandidate($parent->fresh()));
+        $migration = require database_path(
+            'migrations/2026_07_17_000037_requeue_multiple_legacy_size_axes.php',
+        );
+        $migration->up();
+        $this->assertNull(data_get(
+            ProductChannelMapping::query()
+                ->where('product_id', $parent->id)
+                ->firstOrFail()
+                ->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.revision',
+        ));
+        $this->fakeCatalog($catalog);
+
+        $result = $repair->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertStringContainsString('mają inne wartości', $result['reason']);
+        $this->assertSame($original['products'], $catalog->products);
+        $this->assertSame($original['variations'], $catalog->variations);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_multiple_legacy_size_axis_migration_requeues_an_exact_old_manual_review_family(): void
+    {
+        [$parent] = $this->family();
+        $this->addLocalBlVariantAxis($parent, ['s-m', 'm-l']);
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_EXACT_CHILD_ASSIGNMENT_AUDIT_REVISION,
+            'status' => 'manual_review',
+            'result' => ['reason' => 'Rodzic zawiera kilka tekstowych osi wariantu.'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_17_000037_requeue_multiple_legacy_size_axes.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+        Http::assertNothingSent();
+    }
+
+    public function test_erp_size_configuration_order_migration_requeues_existing_size_families_and_global_terms(): void
+    {
+        Bus::fake([SyncWooCommerceGlobalSizeOrderJob::class]);
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_REVISION,
+            'status' => 'completed',
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_17_000038_requeue_erp_size_configuration_order.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+        Bus::assertDispatched(
+            SyncWooCommerceGlobalSizeOrderJob::class,
+            fn (SyncWooCommerceGlobalSizeOrderJob $job): bool => $job->trigger
+                === 'erp_size_configuration_order_2026_07_17_000038',
+        );
+        Http::assertNothingSent();
     }
 
     public function test_it_accepts_only_the_variation_names_woocommerce_regenerates_from_the_repaired_axis(): void
@@ -1957,7 +2154,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) === 8,
         ));
         $this->assertSame(
-            ['S/M', 'M/L'],
+            ['M/L', 'S/M'],
             collect($catalog->products[223]['attributes'])->firstWhere('id', 1)['options'],
         );
         $this->assertSame(
@@ -1967,7 +2164,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 ->all(),
         );
         $this->assertSame(
-            [10, 20],
+            [20, 10],
             collect($catalog->variations[223])->pluck('menu_order')->values()->all(),
         );
         $this->assertSame($protectedBefore, collect($catalog->products)
@@ -2886,7 +3083,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
     }
 
-    public function test_repair_uses_canonical_dictionary_order_then_preserves_unknown_family_order(): void
+    public function test_repair_uses_the_exact_erp_dictionary_order(): void
     {
         $this->family();
         ProductParameterDefinition::query()->where('name', 'Rozmiar')->update([
@@ -2899,7 +3096,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
 
         $this->assertSame(
-            ['XS', 'S/M', 'M/L', 'Custom B', 'Custom A'],
+            ['M/L', 'Custom B', 'S/M', 'Custom A', 'XS'],
             $method->invoke(
                 app(WooOwnedVariantAxisRepairService::class),
                 'Rozmiar',
@@ -5788,6 +5985,95 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         unset($variation);
     }
 
+    /** @param list<string> $options */
+    private function addLocalBlVariantAxis(Product $parent, array $options): void
+    {
+        $parentAttributes = (array) $parent->attributes;
+        $parameters = (array) data_get($parentAttributes, 'master.parameters', []);
+        $parameters[] = [
+            'name' => 'BLVariant',
+            'value' => implode(' | ', $options),
+            'variation' => true,
+        ];
+        data_set($parentAttributes, 'master.parameters', $parameters);
+        $wooAttributes = (array) data_get($parentAttributes, 'woocommerce_attributes', []);
+        $wooAttributes[] = [
+            'id' => 7,
+            'name' => 'BLVariant',
+            'slug' => 'pa_blvariant',
+            'position' => 3,
+            'visible' => true,
+            'variation' => true,
+            'options' => $options,
+        ];
+        data_set($parentAttributes, 'woocommerce_attributes', $wooAttributes);
+        $parent->forceFill(['attributes' => $parentAttributes])->save();
+
+        foreach ($parent->variantChildren()->get()->values() as $index => $variant) {
+            $option = $options === ['s-m', 'm-l']
+                ? (str_ends_with((string) $variant->sku, '-SM') ? 's-m' : 'm-l')
+                : (string) ($options[$index] ?? '');
+            $variantAttributes = (array) $variant->attributes;
+            $parameters = (array) data_get($variantAttributes, 'master.parameters', []);
+            $parameters[] = [
+                'name' => 'BLVariant',
+                'value' => $option,
+                'variation' => true,
+            ];
+            data_set($variantAttributes, 'master.parameters', $parameters);
+
+            foreach (['woocommerce_variation_attributes', 'woocommerce_attributes'] as $snapshot) {
+                $rows = (array) data_get($variantAttributes, $snapshot, []);
+                $rows[] = [
+                    'id' => 7,
+                    'name' => 'BLVariant',
+                    'option' => $option,
+                ];
+                data_set($variantAttributes, $snapshot, $rows);
+            }
+
+            $variant->forceFill(['attributes' => $variantAttributes])->save();
+        }
+    }
+
+    /** @param list<string> $options */
+    private function addRemoteBlVariantAxis(object $catalog, array $options): void
+    {
+        foreach ([123 => 7, 223 => 11] as $parentId => $attributeId) {
+            $catalog->products[$parentId]['attributes'][] = [
+                'id' => $attributeId,
+                'name' => 'BLVariant',
+                'slug' => 'pa_blvariant',
+                'position' => 3,
+                'visible' => true,
+                'variation' => true,
+                'options' => $options,
+            ];
+            if ($options === ['s-m', 'm-l']) {
+                $catalog->products[$parentId]['default_attributes'][] = [
+                    'id' => $attributeId,
+                    'name' => 'BLVariant',
+                    'option' => 'm-l',
+                ];
+            }
+
+            $optionIndex = 0;
+
+            foreach ($catalog->variations[$parentId] as &$variation) {
+                $option = $options === ['s-m', 'm-l']
+                    ? (str_ends_with((string) $variation['sku'], '-SM') ? 's-m' : 'm-l')
+                    : (string) ($options[$optionIndex] ?? '');
+                $variation['attributes'][] = [
+                    'id' => $attributeId,
+                    'name' => 'BLVariant',
+                    'option' => $option,
+                ];
+                $optionIndex++;
+            }
+            unset($variation);
+        }
+    }
+
     private function product(string $sku, string $name, array $attributes): Product
     {
         return Product::query()->create([
@@ -5990,6 +6276,27 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                         'menu_order' => 20,
                     ],
                 ]);
+            }
+
+            if (in_array($path, [
+                '/wp-json/wc/v3/products/attributes/7/terms',
+                '/wp-json/wc/v3/products/attributes/11/terms',
+            ], true) && $request->method() === 'GET') {
+                $english = str_contains($path, '/attributes/11/');
+                $parentId = $english ? 223 : 123;
+                $attributeId = $english ? 11 : 7;
+                $attribute = collect($catalog->products[$parentId]['attributes'] ?? [])
+                    ->firstWhere('id', $attributeId);
+
+                return Http::response(collect((array) ($attribute['options'] ?? []))
+                    ->values()
+                    ->map(fn (mixed $option, int $index): array => [
+                        'id' => ($attributeId * 10) + $index + 1,
+                        'name' => (string) $option,
+                        'slug' => mb_strtolower(str_replace('/', '-', (string) $option)),
+                        'menu_order' => ($index + 1) * 10,
+                    ])
+                    ->all());
             }
 
             if (in_array($path, [

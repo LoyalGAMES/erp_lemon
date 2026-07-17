@@ -163,26 +163,14 @@ final class WooCommerceSizeDictionaryOrder
                         ->unique(fn (string $value): string => $this->aliasIdentity($value))
                         ->values()
                         ->all(),
-                    'rank' => $this->canonicalRank($canonical['source']),
                     'source_index' => $canonical['source_index'],
                 ];
             })
-            ->sort(function (array $left, array $right): int {
-                if ($left['rank'] === null && $right['rank'] === null) {
-                    return $left['source_index'] <=> $right['source_index'];
-                }
-
-                if ($left['rank'] === null) {
-                    return 1;
-                }
-
-                if ($right['rank'] === null) {
-                    return -1;
-                }
-
-                return $left['rank'] <=> $right['rank']
-                    ?: $left['source_index'] <=> $right['source_index'];
-            })
+            // The order configured in ERP is authoritative. Do not silently
+            // rearrange familiar labels (for example S/M before M/L): users
+            // may deliberately configure a different commercial sequence,
+            // and Woo terms, parent options and children must all mirror it.
+            ->sortBy('source_index')
             ->values();
 
         return $rows->map(fn (array $row, int $index): array => [
@@ -247,14 +235,17 @@ final class WooCommerceSizeDictionaryOrder
      */
     public function menuOrders(array $options): array
     {
-        $orders = $this->entries()
-            ->flatMap(fn (array $entry): Collection => collect([
-                ...$entry['source_aliases'],
-                ...$entry['localized_aliases'],
-            ])->mapWithKeys(fn (string $alias): array => [
-                $this->key($alias) => $entry['menu_order'],
-            ]))
-            ->all();
+        $orders = [];
+
+        foreach ($this->entries() as $entry) {
+            foreach ([...$entry['source_aliases'], ...$entry['localized_aliases']] as $alias) {
+                // PHP/Laravel reindexes numeric keys during flatMap/collapse.
+                // Build the lookup explicitly so clothing sizes such as `36`
+                // keep their dictionary identity and menu order.
+                $orders[$this->key($alias)] = $entry['menu_order'];
+            }
+        }
+
         $missing = collect($options)
             ->map(fn (mixed $option): string => trim((string) $option))
             ->filter(fn (string $option): bool => $option !== '')
@@ -357,81 +348,6 @@ final class WooCommerceSizeDictionaryOrder
             Str::slug($value),
             Str::slug($separatorAware),
         ])->filter()->unique()->values()->all();
-    }
-
-    private function canonicalRank(string $value): ?int
-    {
-        $value = mb_strtoupper(trim((string) preg_replace('/\s+/u', '', $value)));
-        $value = str_replace(['–', '—', '-'], '/', $value);
-
-        if (in_array($value, [
-            'ONESIZE',
-            'ONE/SIZE',
-            'UNI',
-            'UNIWERSALNY',
-            'UNIWERSALNA',
-        ], true)) {
-            return 0;
-        }
-
-        $tokenRanks = collect(explode('/', $value))
-            ->map(fn (string $token): ?int => $this->canonicalTokenRank($token));
-
-        if ($tokenRanks->isNotEmpty()
-            && ! $tokenRanks->contains(fn (?int $rank): bool => $rank === null)
-        ) {
-            return (int) round($tokenRanks->average());
-        }
-
-        if (preg_match('/^(\d+(?:[.,]\d+)?)(?:\/(\d+(?:[.,]\d+)?))?$/', $value, $matches) === 1) {
-            $from = (float) str_replace(',', '.', $matches[1]);
-            $to = isset($matches[2]) ? (float) str_replace(',', '.', $matches[2]) : $from;
-
-            return 10_000 + (int) round($from * 100) + (int) round($to);
-        }
-
-        return null;
-    }
-
-    private function canonicalTokenRank(string $token): ?int
-    {
-        if ($token === 'S') {
-            return 500;
-        }
-
-        if ($token === 'M') {
-            return 600;
-        }
-
-        if ($token === 'L') {
-            return 700;
-        }
-
-        if ($token === 'XS') {
-            return 400;
-        }
-
-        if (preg_match('/^X{2,6}S$/', $token) === 1) {
-            return 400 - ((substr_count($token, 'X') - 1) * 100);
-        }
-
-        if (preg_match('/^([2-6])XS$/', $token, $matches) === 1) {
-            return 400 - (((int) $matches[1] - 1) * 100);
-        }
-
-        if ($token === 'XL') {
-            return 800;
-        }
-
-        if (preg_match('/^X{2,6}L$/', $token) === 1) {
-            return 800 + ((substr_count($token, 'X') - 1) * 100);
-        }
-
-        if (preg_match('/^([2-9])XL$/', $token, $matches) === 1) {
-            return 800 + (((int) $matches[1] - 1) * 100);
-        }
-
-        return null;
     }
 
     private function attributeKey(string $value): string

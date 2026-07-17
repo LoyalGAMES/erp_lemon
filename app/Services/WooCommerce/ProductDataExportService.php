@@ -2112,23 +2112,99 @@ final class ProductDataExportService
                     return null;
                 }
 
+                [$sourceOptions, $localizedOptions] = $this->parameterAttributeOptions(
+                    $row,
+                    $value,
+                    $language,
+                );
+
                 return [
                     'source_name' => trim((string) ($row['name'] ?? $name)),
-                    'source_options' => [trim((string) ($row['value'] ?? $value))],
+                    'source_options' => $sourceOptions,
                     'source_option_orders' => $this->parameterOptionMenuOrders(
                         $row,
-                        [trim((string) ($row['value'] ?? $value))],
+                        $sourceOptions,
                     ),
                     'source_position' => $this->parameterAttributePosition($row, $index),
                     'source_index' => $index,
                     'name' => $name,
                     'visible' => true,
                     'variation' => (bool) ($row['variation'] ?? false),
-                    'options' => [$value],
+                    'options' => $localizedOptions,
                 ];
             })
             ->filter()
             ->pipe(fn (Collection $attributes): array => $this->withCanonicalAttributePositions($attributes));
+    }
+
+    /**
+     * A historical direct Size parameter stores a parent's complete option
+     * list in one scalar (`M/L, S/M` or `36 | 37 | 38`). It is aggregate ERP
+     * data, not one Woo taxonomy term. Split only direct Size aliases here;
+     * values of unrelated attributes such as an informational colour remain
+     * untouched because their punctuation can be meaningful catalog content.
+     *
+     * @param  array<string,mixed>  $parameter
+     * @return array{0:list<string>,1:list<string>}
+     */
+    private function parameterAttributeOptions(
+        array $parameter,
+        string $localizedValue,
+        string $language,
+    ): array {
+        $sourceValue = trim((string) ($parameter['value'] ?? $localizedValue));
+        $isDirectSize = collect([
+            $parameter['name'] ?? null,
+            $parameter['name_en'] ?? null,
+            $parameter['slug'] ?? null,
+        ])
+            ->map(fn (mixed $name): string => trim((string) $name))
+            ->filter()
+            ->contains(fn (string $name): bool => $this->variantAxisNames->isDirectSizeAlias($name));
+
+        if (! $isDirectSize) {
+            return [[$sourceValue], [$localizedValue]];
+        }
+
+        $sourceOptions = $this->variantAxisNames->optionTokens([$sourceValue]);
+        $localizedOptions = $this->variantAxisNames->optionTokens([$localizedValue]);
+
+        if ($sourceOptions->isEmpty()) {
+            return [[$sourceValue], [$localizedValue]];
+        }
+
+        $language = mb_strtolower(trim($language)) ?: 'pl';
+
+        if ($language !== 'pl' && $localizedValue === $sourceValue) {
+            $dictionary = collect();
+
+            foreach ($this->sizeOrder->entries($language) as $entry) {
+                foreach ((array) $entry['source_aliases'] as $alias) {
+                    $dictionary->put(
+                        $this->sizeOrder->key((string) $alias),
+                        (string) $entry['localized'],
+                    );
+                }
+            }
+
+            $fromDictionary = $sourceOptions
+                ->map(fn (string $option): string => trim((string) $dictionary->get(
+                    $this->sizeOrder->key($option),
+                    '',
+                )));
+
+            if ($fromDictionary->every(fn (string $option): bool => $option !== '')) {
+                $localizedOptions = $fromDictionary;
+            }
+        }
+
+        if ($localizedOptions->count() !== $sourceOptions->count()) {
+            throw new RuntimeException(
+                'Lista wartości Rozmiar/Size ma inną liczbę pozycji w wersji źródłowej i tłumaczeniu.',
+            );
+        }
+
+        return [$sourceOptions->values()->all(), $localizedOptions->values()->all()];
     }
 
     /**
