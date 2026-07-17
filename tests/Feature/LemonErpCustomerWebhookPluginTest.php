@@ -67,13 +67,27 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $this->assertStringContainsString('storefront size cache upgrade tests passed', $process->getOutput());
     }
 
+    public function test_polylang_product_meta_isolation_contract_harness_passes(): void
+    {
+        $process = new Process([PHP_BINARY, base_path('tools/test-lemon-erp-polylang-product-meta.php')]);
+        $process->setTimeout(30);
+        $process->run();
+
+        $this->assertSame(
+            0,
+            $process->getExitCode(),
+            $process->getErrorOutput().$process->getOutput(),
+        );
+        $this->assertStringContainsString('Polylang product meta isolation tests passed', $process->getOutput());
+    }
+
     public function test_downloadable_plugin_contains_integration_modules(): void
     {
         $packages = app(LemonErpWooCommercePluginPackageService::class);
         $package = $packages->build();
         $zip = new ZipArchive;
 
-        $this->assertSame('0.5.6', $package['version']);
+        $this->assertSame('0.5.7', $package['version']);
         $this->assertTrue($zip->open($package['path']) === true);
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-customer-webhook.php'),
@@ -92,6 +106,9 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         );
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-storefront-size-cache-upgrade.php'),
+        );
+        $this->assertNotFalse(
+            $zip->locateName('lemon-erp-woocommerce/includes/class-polylang-product-meta.php'),
         );
         $cachePurgeModule = $zip->getFromName(
             'lemon-erp-woocommerce/includes/class-storefront-size-cache-upgrade.php',
@@ -139,19 +156,30 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             'Lemon_Erp_Global_Attribute_Taxonomies::register();',
             $mainFile,
         );
+        $this->assertStringContainsString(
+            'Lemon_Erp_Polylang_Product_Meta::register();',
+            $mainFile,
+        );
         $this->assertStringNotContainsString('Lemon_Erp_Storefront_Variation_Attributes', $mainFile);
         $this->assertStringContainsString(
             '(new Lemon_Erp_Storefront_Size_Cache_Upgrade)->hooks();',
             $mainFile,
         );
         $taxonomyRegistration = strpos($mainFile, 'Lemon_Erp_Global_Attribute_Taxonomies::register();');
+        $localizedMetaRegistration = strpos($mainFile, 'Lemon_Erp_Polylang_Product_Meta::register();');
         $pluginsLoadedHook = strpos($mainFile, "add_action('plugins_loaded'");
         $this->assertIsInt($taxonomyRegistration);
+        $this->assertIsInt($localizedMetaRegistration);
         $this->assertIsInt($pluginsLoadedHook);
         $this->assertLessThan(
             $pluginsLoadedHook,
             $taxonomyRegistration,
             'The Polylang taxonomy filter must be registered before plugins_loaded.',
+        );
+        $this->assertLessThan(
+            $pluginsLoadedHook,
+            $localizedMetaRegistration,
+            'The Polylang metadata filter must be registered before plugins_loaded.',
         );
         $this->assertStringContainsString(
             "'product_translation_link_endpoint' => '/wp-json/wc-lemon-erp/v1/catalog/products/translations'",
@@ -167,7 +195,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             '/wp-json/wc-lemon-erp/v1/catalog/products/translations',
             $readme,
         );
-        $this->assertStringContainsString('Wersja `0.5.6`', $readme);
+        $this->assertStringContainsString('Wersja `0.5.7`', $readme);
         $zip->close();
     }
 }
