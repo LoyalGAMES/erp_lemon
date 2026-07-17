@@ -2065,6 +2065,7 @@ final class WooCommerceImportService
                 'sold_individually' => (bool) ($item['sold_individually'] ?? false),
             ],
             'custom_label' => $this->customLabels($item),
+            'shipping' => $this->shippingConfiguration($item),
             'related_products' => [
                 'upsell_ids' => array_values((array) ($item['upsell_ids'] ?? [])),
                 'cross_sell_ids' => array_values((array) ($item['cross_sell_ids'] ?? [])),
@@ -2107,6 +2108,41 @@ final class WooCommerceImportService
             'bg_color' => $this->nullableString($this->metaValue($item, ['_lemon_product_label_bg_color'])),
             'text_color' => $this->nullableString($this->metaValue($item, ['_lemon_product_label_text_color'])),
         ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     * @return array{days:?int,text:?string,preorder:bool}
+     */
+    private function shippingConfiguration(array $item): array
+    {
+        $days = $this->metaValueWithParentFallback($item, 'lemon_shipping_days');
+        $text = $this->metaValueWithParentFallback($item, 'lemon_shipping_text');
+        $preorder = $this->metaValueWithParentFallback($item, 'lemon_preorder');
+
+        return [
+            'days' => is_numeric($days) && (int) $days >= 0 ? (int) $days : null,
+            'text' => $this->nullableString($text),
+            'preorder' => mb_strtolower(trim((string) $preorder)) === 'yes',
+        ];
+    }
+
+    /**
+     * WooCommerce variations may omit these metadata keys. In that case the
+     * storefront uses the parent product configuration, so the ERP import
+     * stores the same effective value.
+     *
+     * @param  array<string, mixed>  $item
+     */
+    private function metaValueWithParentFallback(array $item, string $key): mixed
+    {
+        $value = $this->metaValue($item, [$key]);
+
+        if ($value !== null || ! isset($item['variation_id'])) {
+            return $value;
+        }
+
+        return $this->metaValue(['meta_data' => $item['parent_meta_data'] ?? []], [$key]);
     }
 
     /**

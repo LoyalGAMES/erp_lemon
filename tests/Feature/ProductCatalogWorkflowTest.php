@@ -476,6 +476,9 @@ class ProductCatalogWorkflowTest extends TestCase
             'sale_price_starts_at' => '2026-06-01',
             'sale_price_ends_at' => '2026-06-30',
             'warehouse_location' => 'A-02-01',
+            'lemon_shipping_days' => '11',
+            'lemon_shipping_text' => 'Planowana wysyłka: {date} ({days} dni)',
+            'lemon_preorder' => '1',
             'description_pl' => '<p>Opis z ERP</p>',
             'short_description_en' => '<p>Short ERP</p>',
             'related_upsell_skus' => "SKU-UP-1\nSKU-UP-2",
@@ -508,6 +511,9 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertTrue(data_get($product->attributes, 'master.parameters.0.variation'));
         $this->assertNull(data_get($product->attributes, 'master.stock.quantity'));
         $this->assertSame('A-02-01', data_get($product->attributes, 'master.stock.location'));
+        $this->assertSame(11, data_get($product->attributes, 'master.shipping.days'));
+        $this->assertSame('Planowana wysyłka: {date} ({days} dni)', data_get($product->attributes, 'master.shipping.text'));
+        $this->assertTrue(data_get($product->attributes, 'master.shipping.preorder'));
         $this->assertSame('catalog', data_get($product->attributes, 'master.catalog_visibility'));
         $this->assertSame('variable', data_get($product->attributes, 'master.product_type'));
         $this->assertSame('Rozmiar', data_get($product->attributes, 'master.variant_attribute'));
@@ -995,6 +1001,8 @@ class ProductCatalogWorkflowTest extends TestCase
             ->assertSee('data-product-tab="warianty"', false)
             ->assertSee('Status publikacji w sklepie')
             ->assertSee('Data publikacji w sklepie')
+            ->assertSee('Dni kalendarzowe do wysyłki')
+            ->assertSee('Produkt dostępny w przedsprzedaży')
             ->assertSee('product-category-checklist', false)
             ->assertSee('Dodaj zdjęcia z komputera');
 

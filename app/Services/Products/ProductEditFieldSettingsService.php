@@ -10,6 +10,15 @@ final class ProductEditFieldSettingsService
 {
     private const KEY = 'product_edit_visible_fields';
 
+    private const SCHEMA_VERSION = 2;
+
+    /** @var list<string> */
+    private const VERSION_2_FIELDS = [
+        'lemon_shipping_days',
+        'lemon_shipping_text',
+        'lemon_preorder',
+    ];
+
     /**
      * @return array<string, bool>
      */
@@ -21,6 +30,10 @@ final class ProductEditFieldSettingsService
         }
 
         $selected = $this->expandLegacyFields((array) $stored['visible_fields']);
+
+        if ((int) ($stored['schema_version'] ?? 1) < self::SCHEMA_VERSION) {
+            $selected = array_values(array_unique([...$selected, ...self::VERSION_2_FIELDS]));
+        }
 
         return collect($this->keys())
             ->mapWithKeys(fn (string $key): array => [$key => in_array($key, $selected, true)])
@@ -74,6 +87,9 @@ final class ProductEditFieldSettingsService
             ['key' => 'custom_label_en', 'label' => 'Custom label (EN)', 'section' => 'Informacje'],
             ['key' => 'custom_label_bg_color', 'label' => 'Tło etykiety', 'section' => 'Informacje'],
             ['key' => 'custom_label_text_color', 'label' => 'Kolor tekstu etykiety', 'section' => 'Informacje'],
+            ['key' => 'lemon_shipping_days', 'label' => 'Dni do wysyłki', 'section' => 'Informacje'],
+            ['key' => 'lemon_shipping_text', 'label' => 'Tekst terminu wysyłki', 'section' => 'Informacje'],
+            ['key' => 'lemon_preorder', 'label' => 'Przedsprzedaż', 'section' => 'Informacje'],
             ['key' => 'description_pl', 'label' => 'Opis PL', 'section' => 'Informacje'],
             ['key' => 'description_en', 'label' => 'Opis EN', 'section' => 'Informacje'],
             ['key' => 'short_description_pl', 'label' => 'Krótki opis PL', 'section' => 'Informacje'],
@@ -102,7 +118,10 @@ final class ProductEditFieldSettingsService
 
         AppSetting::query()->updateOrCreate(
             ['key' => self::KEY],
-            ['value' => ['visible_fields' => $selected]],
+            ['value' => [
+                'schema_version' => self::SCHEMA_VERSION,
+                'visible_fields' => $selected,
+            ]],
         );
 
         return collect($allowed)

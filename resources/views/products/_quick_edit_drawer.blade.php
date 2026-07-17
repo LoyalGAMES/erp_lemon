@@ -259,6 +259,17 @@
                     <label>Tekst etykiety
                         <input name="custom_label_text_color" type="color" value="{{ $quickMasterField('custom_label_text_color', 'custom_label.text_color', '#ffffff') ?: '#ffffff' }}">
                     </label>
+                    <label>Dni kalendarzowe do wysyłki
+                        <input name="lemon_shipping_days" type="number" step="1" min="0" value="{{ $quickMasterField('lemon_shipping_days', 'shipping.days') }}" placeholder="np. 11">
+                    </label>
+                    <label>Tekst terminu wysyłki
+                        <input name="lemon_shipping_text" value="{{ $quickMasterField('lemon_shipping_text', 'shipping.text') }}" placeholder="Planowana wysyłka: {date}">
+                        <small>Znaczniki: <code>{date}</code>, <code>{days}</code>.</small>
+                    </label>
+                    <label>Przedsprzedaż
+                        <input type="hidden" name="lemon_preorder" value="0">
+                        <span class="product-quick-toggle-row"><input name="lemon_preorder" type="checkbox" value="1" @checked(old('lemon_preorder', data_get($quickMaster, 'shipping.preorder', false)))> Włączona</span>
+                    </label>
                 </div>
                 <div class="product-rich-field">
                     <div class="product-rich-label">Opis PL HTML</div>

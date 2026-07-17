@@ -3383,6 +3383,7 @@ final class WooCommerceClient
                 $variation['parent_permalink'] = $parentProduct['permalink'] ?? null;
                 $variation['parent_images'] = $parentProduct['images'] ?? [];
                 $variation['parent_image'] = data_get($parentProduct, 'images.0');
+                $variation['parent_meta_data'] = $parentProduct['meta_data'] ?? [];
                 $variation['id'] = $productId;
                 $variation['parent_name'] = $parentProduct['name'] ?? null;
                 $variation['name'] = $this->variationDisplayName($parentProduct, $variation);

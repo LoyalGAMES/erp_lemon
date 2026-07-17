@@ -13,6 +13,28 @@ class ProductEditorConfigurationTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_new_shipping_fields_are_visible_for_an_existing_editor_configuration(): void
+    {
+        AppSetting::query()->create([
+            'key' => 'product_edit_visible_fields',
+            'value' => ['visible_fields' => ['name', 'unit', 'vat_rate']],
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-LEGACY-CONFIG',
+            'name' => 'Produkt ze starą konfiguracją',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $this->get(route('products.edit', $product))
+            ->assertOk()
+            ->assertSee('name="lemon_shipping_days"', false)
+            ->assertSee('name="lemon_shipping_text"', false)
+            ->assertSee('name="lemon_preorder"', false);
+    }
+
     public function test_product_field_visibility_is_configurable_and_hidden_values_are_preserved(): void
     {
         $product = Product::query()->create([
@@ -30,6 +52,11 @@ class ProductEditorConfigurationTest extends TestCase
                         'upsell_skus' => ['SKU-UPSELL'],
                         'cross_sell_skus' => ['SKU-CROSS'],
                     ],
+                    'shipping' => [
+                        'days' => 11,
+                        'text' => 'Planowana wysyłka: {date}',
+                        'preorder' => true,
+                    ],
                 ],
             ],
         ]);
@@ -38,7 +65,9 @@ class ProductEditorConfigurationTest extends TestCase
             ->assertOk()
             ->assertSee('Widoczne pola w edycji produktu')
             ->assertSee('Tagi')
-            ->assertSee('Nazwa dostawcy');
+            ->assertSee('Nazwa dostawcy')
+            ->assertSee('Dni do wysyłki')
+            ->assertSee('Przedsprzedaż');
 
         $this->get(route('products.edit', $product))
             ->assertOk()
@@ -74,5 +103,8 @@ class ProductEditorConfigurationTest extends TestCase
         $this->assertSame(['ukryty-tag'], data_get($product->attributes, 'master.tags'));
         $this->assertSame(['SKU-UPSELL'], data_get($product->attributes, 'master.related_products.upsell_skus'));
         $this->assertSame(['SKU-CROSS'], data_get($product->attributes, 'master.related_products.cross_sell_skus'));
+        $this->assertSame(11, data_get($product->attributes, 'master.shipping.days'));
+        $this->assertSame('Planowana wysyłka: {date}', data_get($product->attributes, 'master.shipping.text'));
+        $this->assertTrue(data_get($product->attributes, 'master.shipping.preorder'));
     }
 }

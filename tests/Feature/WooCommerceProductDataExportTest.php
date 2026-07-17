@@ -108,11 +108,20 @@ class WooCommerceProductDataExportTest extends TestCase
         $job = Bus::dispatchedAfterResponse(ExportWooCommerceProductDataJob::class)->sole();
         $job->handle(app(ProductDataExportService::class));
 
-        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
-            && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123'
-            && $request['catalog_visibility'] === 'hidden'
-            && ! array_key_exists('low_stock_amount', $request->data())
-            && $request['images'][0]['src'] === 'https://shop.test/wp-content/uploads/legacy.jpg');
+        Http::assertSent(function ($request): bool {
+            if ($request->method() !== 'PUT' || $request->url() !== 'https://shop.test/wp-json/wc/v3/products/123') {
+                return false;
+            }
+
+            $meta = collect($request['meta_data'])->pluck('value', 'key');
+
+            return $request['catalog_visibility'] === 'hidden'
+                && ! array_key_exists('low_stock_amount', $request->data())
+                && $request['images'][0]['src'] === 'https://shop.test/wp-content/uploads/legacy.jpg'
+                && $meta['lemon_shipping_days'] === ''
+                && $meta['lemon_shipping_text'] === ''
+                && $meta['lemon_preorder'] === 'no';
+        });
         $this->assertNull(data_get(
             ProductChannelMapping::query()->where('product_id', $product->id)->firstOrFail()->metadata,
             'product_data_export.pending_token',
@@ -3768,6 +3777,11 @@ class WooCommerceProductDataExportTest extends TestCase
                         'bg_color' => '#112233',
                         'text_color' => '#ffffff',
                     ],
+                    'shipping' => [
+                        'days' => 11,
+                        'text' => 'Planowana wysyłka: {date}',
+                        'preorder' => true,
+                    ],
                     'content' => [
                         'pl' => ['name' => 'Produkt PL', 'description' => '<p>Opis PL</p>', 'additional_description' => 'Krótki PL'],
                         'en' => ['name' => 'Product EN', 'description' => '<p>Description EN</p>', 'additional_description' => 'Short EN'],
@@ -3817,7 +3831,10 @@ class WooCommerceProductDataExportTest extends TestCase
                 && $request['low_stock_amount'] === 3
                 && $request['sold_individually'] === true
                 && $meta['_lemon_product_label_text'] === 'Nowość'
-                && $meta['_lemon_product_label_bg_color'] === '#112233';
+                && $meta['_lemon_product_label_bg_color'] === '#112233'
+                && $meta['lemon_shipping_days'] === '11'
+                && $meta['lemon_shipping_text'] === 'Planowana wysyłka: {date}'
+                && $meta['lemon_preorder'] === 'yes';
         });
         Http::assertSent(function ($request): bool {
             if ($request->method() !== 'PUT' || $request->url() !== 'https://shop.test/wp-json/wc/v3/products/124?lang=en') {
@@ -3829,7 +3846,9 @@ class WooCommerceProductDataExportTest extends TestCase
             return $request['name'] === 'Product EN'
                 && $request['description'] === '<p>Description EN</p>'
                 && $request['short_description'] === 'Short EN'
-                && $meta['_lemon_product_label_text'] === 'New';
+                && $meta['_lemon_product_label_text'] === 'New'
+                && $meta['lemon_shipping_days'] === '11'
+                && $meta['lemon_preorder'] === 'yes';
         });
     }
 

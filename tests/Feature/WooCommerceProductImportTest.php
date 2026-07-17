@@ -66,6 +66,9 @@ class WooCommerceProductImportTest extends TestCase
                         'stock_quantity' => 4,
                         'stock_status' => 'instock',
                         'menu_order' => 37,
+                        'meta_data' => [
+                            ['key' => 'lemon_preorder', 'value' => 'no'],
+                        ],
                         'attributes' => [
                             ['name' => 'Kolor', 'option' => 'Czarny'],
                             ['name' => 'Rozmiar', 'option' => 'm'],
@@ -87,6 +90,11 @@ class WooCommerceProductImportTest extends TestCase
                             'status' => 'publish',
                             'date_created' => '2026-07-08T14:20:00',
                             'permalink' => 'https://shop.test/produkt/koszula-vivien-biala',
+                            'meta_data' => [
+                                ['key' => 'lemon_shipping_days', 'value' => '11'],
+                                ['key' => 'lemon_shipping_text', 'value' => 'Planowana wysyłka: {date}'],
+                                ['key' => 'lemon_preorder', 'value' => 'yes'],
+                            ],
                             'attributes' => [
                                 [
                                     'name' => 'Kolor',
@@ -169,6 +177,9 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('S | M', collect(data_get($parent->attributes, 'master.parameters'))
             ->firstWhere('name', 'Rozmiar')['value']);
         $this->assertSame('2026-07-08T14:20', data_get($parent->attributes, 'master.publication_date'));
+        $this->assertSame(11, data_get($parent->attributes, 'master.shipping.days'));
+        $this->assertSame('Planowana wysyłka: {date}', data_get($parent->attributes, 'master.shipping.text'));
+        $this->assertTrue(data_get($parent->attributes, 'master.shipping.preorder'));
         $this->assertSame(2, Product::query()->count());
         $this->assertSame('Koszula VIVIEN Biala - M', $product->name);
         $this->assertSame('Rozmiar', data_get($product->attributes, 'master.variant_attribute'));
@@ -179,6 +190,9 @@ class WooCommerceProductImportTest extends TestCase
             ->firstOrFail()
             ->values);
         $this->assertSame([], data_get($product->attributes, 'master.media'));
+        $this->assertSame(11, data_get($product->attributes, 'master.shipping.days'));
+        $this->assertSame('Planowana wysyłka: {date}', data_get($product->attributes, 'master.shipping.text'));
+        $this->assertFalse(data_get($product->attributes, 'master.shipping.preorder'));
         $this->assertSame('https://shop.test/wp-content/uploads/koszula-vivien.jpg', $product->imageUrl());
         $this->assertSame('https://shop.test/produkt/koszula-vivien-biala', $product->externalProductUrl());
         $this->assertSame('https://shop.test/wp-content/uploads/koszula-vivien.jpg', $product->attributes['woocommerce_parent_image']['src']);
@@ -1335,6 +1349,9 @@ class WooCommerceProductImportTest extends TestCase
                             ['key' => '_lemon_product_label_text', 'value' => $language === 'en' ? 'New' : 'Nowość'],
                             ['key' => '_lemon_product_label_bg_color', 'value' => '#112233'],
                             ['key' => '_lemon_product_label_text_color', 'value' => '#ffffff'],
+                            ['key' => 'lemon_shipping_days', 'value' => '7'],
+                            ['key' => 'lemon_shipping_text', 'value' => 'Wysyłka: {date}'],
+                            ['key' => 'lemon_preorder', 'value' => 'yes'],
                         ],
                         'upsell_ids' => [111],
                         'cross_sell_ids' => [222],
@@ -1384,6 +1401,9 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertTrue(data_get($product->attributes, 'master.inventory.sold_individually'));
         $this->assertSame('Nowość', data_get($product->attributes, 'master.custom_label.pl'));
         $this->assertSame('New', data_get($product->attributes, 'master.custom_label.en'));
+        $this->assertSame(7, data_get($product->attributes, 'master.shipping.days'));
+        $this->assertSame('Wysyłka: {date}', data_get($product->attributes, 'master.shipping.text'));
+        $this->assertTrue(data_get($product->attributes, 'master.shipping.preorder'));
         $this->assertNull(data_get($product->attributes, 'master.stock.quantity'));
         $this->assertEquals(299.0, data_get($product->attributes, 'master.prices.sale_price_pln'));
         $this->assertSame('Rozmiar', data_get($product->attributes, 'master.parameters.0.name'));

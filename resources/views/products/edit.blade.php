@@ -388,6 +388,18 @@
                     <label @class(['product-edit-field-hidden' => ! $showField('custom_label_text_color')])>Kolor tekstu etykiety
                         <input name="custom_label_text_color" type="color" value="{{ $masterField('custom_label_text_color', 'custom_label.text_color', '#ffffff') ?: '#ffffff' }}">
                     </label>
+                    <label @class(['product-edit-field-hidden' => ! $showField('lemon_shipping_days')])>Dni kalendarzowe do wysyłki
+                        <input name="lemon_shipping_days" type="number" step="1" min="0" value="{{ $masterField('lemon_shipping_days', 'shipping.days') }}" placeholder="np. 11">
+                        <small>Puste pole wyłącza komunikat o planowanej wysyłce.</small>
+                    </label>
+                    <label @class(['product-edit-field-hidden' => ! $showField('lemon_shipping_text')])>Tekst terminu wysyłki
+                        <input name="lemon_shipping_text" value="{{ $masterField('lemon_shipping_text', 'shipping.text') }}" placeholder="Planowana wysyłka: {date}">
+                        <small>Możesz użyć znaczników <code>{date}</code> i <code>{days}</code>.</small>
+                    </label>
+                    <label @class(['product-edit-field-hidden' => ! $showField('lemon_preorder')])>Przedsprzedaż
+                        <input type="hidden" name="lemon_preorder" value="0">
+                        <span class="toggle-row"><input name="lemon_preorder" type="checkbox" value="1" @checked(old('lemon_preorder', data_get($master, 'shipping.preorder', false)))> Produkt dostępny w przedsprzedaży</span>
+                    </label>
                 </div>
                 <div @class(['product-rich-field', 'product-edit-field-hidden' => ! $showField('description_pl')])>
                     <div class="product-rich-label">Opis PL HTML</div>

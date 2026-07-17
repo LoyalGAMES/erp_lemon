@@ -988,6 +988,9 @@ class ProductController extends Controller
         $preserve('custom_label_en', 'custom_label_en', data_get($master, 'custom_label.en'));
         $preserve('custom_label_bg_color', 'custom_label_bg_color', data_get($master, 'custom_label.bg_color'));
         $preserve('custom_label_text_color', 'custom_label_text_color', data_get($master, 'custom_label.text_color'));
+        $preserve('lemon_shipping_days', 'lemon_shipping_days', data_get($master, 'shipping.days'));
+        $preserve('lemon_shipping_text', 'lemon_shipping_text', data_get($master, 'shipping.text'));
+        $preserve('lemon_preorder', 'lemon_preorder', data_get($master, 'shipping.preorder', false) ? 1 : 0);
 
         $preserve('description_pl', 'description_pl', data_get($master, 'content.pl.description'));
         $preserve('description_en', 'description_en', data_get($master, 'content.en.description'));
@@ -1406,6 +1409,9 @@ class ProductController extends Controller
             'custom_label_en' => ['nullable', 'string', 'max:120'],
             'custom_label_bg_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
             'custom_label_text_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
+            'lemon_shipping_days' => ['nullable', 'integer', 'min:0'],
+            'lemon_shipping_text' => ['nullable', 'string', 'max:1000'],
+            'lemon_preorder' => ['nullable', 'boolean'],
             'name_en' => ['nullable', 'string', 'max:255'],
             'description_pl' => ['nullable', 'string'],
             'description_en' => ['nullable', 'string'],
@@ -1522,6 +1528,19 @@ class ProductController extends Controller
                 'en' => $this->nullableString($validated['custom_label_en'] ?? data_get($existingMaster, 'custom_label.en')),
                 'bg_color' => $this->nullableString($validated['custom_label_bg_color'] ?? data_get($existingMaster, 'custom_label.bg_color')),
                 'text_color' => $this->nullableString($validated['custom_label_text_color'] ?? data_get($existingMaster, 'custom_label.text_color')),
+            ],
+            'shipping' => [
+                'days' => array_key_exists('lemon_shipping_days', $validated)
+                    ? ($this->nullableString($validated['lemon_shipping_days']) === null
+                        ? null
+                        : (int) $validated['lemon_shipping_days'])
+                    : data_get($existingMaster, 'shipping.days'),
+                'text' => array_key_exists('lemon_shipping_text', $validated)
+                    ? $this->nullableString($validated['lemon_shipping_text'])
+                    : $this->nullableString(data_get($existingMaster, 'shipping.text')),
+                'preorder' => $request->has('lemon_preorder')
+                    ? $request->boolean('lemon_preorder')
+                    : (bool) data_get($existingMaster, 'shipping.preorder', false),
             ],
             'content' => [
                 'pl' => [

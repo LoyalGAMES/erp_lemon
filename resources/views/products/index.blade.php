@@ -621,6 +621,14 @@
                     <label>Tekst etykiety
                         <input name="custom_label_text_color" type="color" value="{{ old('custom_label_text_color', '#ffffff') }}">
                     </label>
+                    <label>Dni kalendarzowe do wysyłki
+                        <input name="lemon_shipping_days" type="number" step="1" min="0" value="{{ old('lemon_shipping_days') }}" placeholder="np. 11">
+                    </label>
+                    <label>Tekst terminu wysyłki
+                        <input name="lemon_shipping_text" value="{{ old('lemon_shipping_text') }}" placeholder="Planowana wysyłka: {date}">
+                        <small>Znaczniki: <code>{date}</code>, <code>{days}</code>.</small>
+                    </label>
+                    <label class="toggle-row"><input type="hidden" name="lemon_preorder" value="0"><input name="lemon_preorder" type="checkbox" value="1" @checked(old('lemon_preorder'))> Przedsprzedaż</label>
                 </div>
                 <div class="product-rich-field">
                     <div class="product-rich-label">Opis PL HTML</div>

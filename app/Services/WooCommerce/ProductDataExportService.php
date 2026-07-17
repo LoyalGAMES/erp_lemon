@@ -2020,6 +2020,7 @@ final class ProductDataExportService
             $meta,
             [['key' => '_ean', 'value' => $product->ean ?: '']],
             $this->customProductLabelMetaData($product, $language, $master),
+            $this->shippingMetaData($master),
         );
     }
 
@@ -2039,6 +2040,24 @@ final class ProductDataExportService
             ['key' => '_lemon_product_label_text', 'value' => (string) data_get($master, "custom_label.{$language}", '')],
             ['key' => '_lemon_product_label_bg_color', 'value' => (string) data_get($master, 'custom_label.bg_color', '')],
             ['key' => '_lemon_product_label_text_color', 'value' => (string) data_get($master, 'custom_label.text_color', '')],
+        ];
+    }
+
+    /**
+     * Always send all three keys so clearing a value in ERP also clears stale
+     * WooCommerce metadata left by an earlier product export.
+     *
+     * @param  array<string, mixed>  $master
+     * @return list<array{key:string,value:string}>
+     */
+    private function shippingMetaData(array $master): array
+    {
+        $days = data_get($master, 'shipping.days');
+
+        return [
+            ['key' => 'lemon_shipping_days', 'value' => $days === null || $days === '' ? '' : (string) (int) $days],
+            ['key' => 'lemon_shipping_text', 'value' => (string) data_get($master, 'shipping.text', '')],
+            ['key' => 'lemon_preorder', 'value' => data_get($master, 'shipping.preorder', false) ? 'yes' : 'no'],
         ];
     }
 
