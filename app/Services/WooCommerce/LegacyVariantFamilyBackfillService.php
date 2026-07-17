@@ -437,6 +437,155 @@ final class LegacyVariantFamilyBackfillService
         return $result;
     }
 
+    /**
+     * Flush the narrow custom-theme label repair while deployment maintenance
+     * guarantees that no web request or old queue worker can write the same
+     * products concurrently.
+     *
+     * @return array{scanned:int,succeeded:int,failed:int,results:list<array{product_id:int,sku:string,status:string,error:?string}>}
+     */
+    public function syncPendingCustomProductLabels(int $limit = 100): array
+    {
+        $productIds = ProductChannelMapping::query()
+            ->where(function ($query): void {
+                $query
+                    ->whereNull('external_variation_id')
+                    ->orWhereIn('external_variation_id', ['', '0'])
+                    ->orWhereRaw("TRIM(external_variation_id) = ''");
+            })
+            ->where(
+                'metadata->product_data_export->legacy_variant_backfill->reason',
+                self::REASON,
+            )
+            ->whereIn(
+                'metadata->product_data_export->legacy_variant_backfill->revision',
+                [
+                    self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
+                    self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
+                ],
+            )
+            ->whereIn(
+                'metadata->product_data_export->legacy_variant_backfill->status',
+                ['pending', 'queued'],
+            )
+            ->orderBy('id')
+            ->pluck('product_id')
+            ->map(fn (mixed $productId): int => (int) $productId)
+            ->unique()
+            ->take(max(1, $limit))
+            ->values();
+        $result = [
+            'scanned' => $productIds->count(),
+            'succeeded' => 0,
+            'failed' => 0,
+            'results' => [],
+        ];
+        $exporter = app(ProductDataExportService::class);
+
+        foreach ($productIds as $productId) {
+            $product = Product::query()
+                ->with('channelMappings.salesChannel')
+                ->find($productId);
+
+            if (! $product instanceof Product) {
+                continue;
+            }
+
+            try {
+                $exporter->exportCustomLabels($product);
+                $this->markCustomProductLabelsCompleted($product->id);
+                $result['succeeded']++;
+                $result['results'][] = [
+                    'product_id' => (int) $product->id,
+                    'sku' => (string) $product->sku,
+                    'status' => 'success',
+                    'error' => null,
+                ];
+            } catch (Throwable $exception) {
+                report($exception);
+                $this->markCustomProductLabelsFailed($product->id, $exception);
+                $result['failed']++;
+                $result['results'][] = [
+                    'product_id' => (int) $product->id,
+                    'sku' => (string) $product->sku,
+                    'status' => 'failed',
+                    'error' => $exception->getMessage(),
+                ];
+            }
+        }
+
+        return $result;
+    }
+
+    private function markCustomProductLabelsCompleted(int $productId): void
+    {
+        DB::transaction(function () use ($productId): void {
+            ProductChannelMapping::query()
+                ->where('product_id', $productId)
+                ->lockForUpdate()
+                ->get()
+                ->each(function (ProductChannelMapping $mapping): void {
+                    $metadata = (array) $mapping->metadata;
+                    $revision = trim((string) data_get(
+                        $metadata,
+                        self::BACKFILL_PATH.'.revision',
+                    ));
+
+                    if (data_get($metadata, self::BACKFILL_PATH.'.reason') !== self::REASON
+                        || ! self::isCustomProductLabelsRevision($revision)
+                    ) {
+                        return;
+                    }
+
+                    $queuedRevision = trim((string) data_get(
+                        $metadata,
+                        self::BACKFILL_PATH.'.queued_revision',
+                    ));
+
+                    if (self::isCustomProductLabelsRevision($queuedRevision)) {
+                        data_forget($metadata, 'product_data_export.pending_token');
+                        data_forget($metadata, 'product_data_export.requested_at');
+                    }
+
+                    data_set($metadata, self::BACKFILL_PATH.'.status', 'completed');
+                    data_set($metadata, self::BACKFILL_PATH.'.completed_at', now()->toISOString());
+                    data_forget($metadata, self::BACKFILL_PATH.'.next_attempt_at');
+                    data_forget($metadata, self::BACKFILL_PATH.'.failed_at');
+                    data_forget($metadata, self::BACKFILL_PATH.'.error');
+                    $mapping->forceFill(['metadata' => $metadata])->save();
+                });
+        });
+    }
+
+    private function markCustomProductLabelsFailed(int $productId, Throwable $exception): void
+    {
+        DB::transaction(function () use ($productId, $exception): void {
+            ProductChannelMapping::query()
+                ->where('product_id', $productId)
+                ->lockForUpdate()
+                ->get()
+                ->each(function (ProductChannelMapping $mapping) use ($exception): void {
+                    $metadata = (array) $mapping->metadata;
+                    $revision = trim((string) data_get(
+                        $metadata,
+                        self::BACKFILL_PATH.'.revision',
+                    ));
+
+                    if (data_get($metadata, self::BACKFILL_PATH.'.reason') !== self::REASON
+                        || ! self::isCustomProductLabelsRevision($revision)
+                    ) {
+                        return;
+                    }
+
+                    data_set($metadata, self::BACKFILL_PATH.'.status', 'pending');
+                    data_set($metadata, self::BACKFILL_PATH.'.failed_at', now()->toISOString());
+                    data_set($metadata, self::BACKFILL_PATH.'.next_attempt_at', now()->addMinutes(15)->toISOString());
+                    data_set($metadata, self::BACKFILL_PATH.'.error', $exception->getMessage());
+                    $mapping->forceFill(['metadata' => $metadata])->save();
+                });
+        });
+    }
+
     /** @return iterable<int, ProductChannelMapping> */
     private function pendingMappingCandidates(?string $revision): iterable
     {

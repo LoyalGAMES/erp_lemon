@@ -224,6 +224,54 @@ final class WooCommerceCustomProductLabelBackfillMigrationTest extends TestCase
         ]);
     }
 
+    public function test_deployment_sync_flushes_pending_label_meta_without_waiting_for_dispatcher(): void
+    {
+        Http::fake(Http::response(['id' => 4382]));
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-LABEL-DEPLOY',
+            'name' => 'Woo label deploy',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Woo label deploy',
+            'base_url' => 'https://label-deploy.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl']]],
+        ]);
+        $mapping = $this->mapping(
+            $this->product('LABEL-DEPLOY', [
+                'pl' => 'PREORDER',
+                'en' => 'PREORDER',
+                'bg_color' => '#191d1e',
+                'text_color' => '#ffffff',
+            ]),
+            $channel,
+            '4382',
+        );
+        $this->runMigration();
+
+        $result = app(LegacyVariantFamilyBackfillService::class)
+            ->syncPendingCustomProductLabels();
+
+        $this->assertSame(1, $result['scanned']);
+        $this->assertSame(1, $result['succeeded']);
+        $this->assertSame(0, $result['failed']);
+        $this->assertSame('completed', data_get(
+            $mapping->refresh()->metadata,
+            'product_data_export.legacy_variant_backfill.status',
+        ));
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://label-deploy.test/wp-json/wc/v3/products/4382'
+            && collect($request['meta_data'])->pluck('value', 'key')->all() === [
+                '_lemon_product_label_text' => 'PREORDER',
+                '_lemon_product_label_bg_color' => '#191d1e',
+                '_lemon_product_label_text_color' => '#ffffff',
+            ]);
+    }
+
     private function product(string $sku, array $label, string $source = 'erp'): Product
     {
         return Product::query()->create([

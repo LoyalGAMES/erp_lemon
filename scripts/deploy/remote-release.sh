@@ -501,6 +501,18 @@ else
     echo 'Błąd: pominięto naprawę osi wariantów, ponieważ globalna kolejność rozmiarów nie została potwierdzona.' >&2
 fi
 
+# Custom labels belong to Lemon Elementor Theme and are only three product
+# meta fields. Flush their narrow corrective revision synchronously while the
+# application is still in maintenance and every old queue worker has exited.
+# A Woo outage is reported but does not make an otherwise healthy ERP release
+# unrecoverable; the durable pending state remains available for a later retry.
+if ! (
+    cd "$release_path"
+    "$php_bin" artisan erp:sync-pending-woocommerce-product-labels-during-maintenance --limit=100
+); then
+    echo 'Błąd: bezpośrednia synchronizacja labeli motywu WooCommerce nie zakończyła się w pełni; stan oczekujący pozostawiono do ponowienia.' >&2
+fi
+
 if [[ "$bootstrap_mode" == 'legacy-directory' ]]; then
     legacy_release="${releases_root}/legacy-${release_id}"
     [[ ! -e "$legacy_release" ]] || fail 'katalog legacy dla bootstrapu już istnieje.'

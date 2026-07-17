@@ -95,6 +95,35 @@ Artisan::command('erp:dispatch-legacy-variant-backfill {--limit=10 : Maximum num
     return $result['failed'] > 0 ? 1 : 0;
 })->purpose('Queue durable full WooCommerce exports for historical catalog repairs.');
 
+Artisan::command('erp:sync-pending-woocommerce-product-labels-during-maintenance {--limit=100 : Maximum number of labeled products to update}', function (): int {
+    if (! app()->isDownForMaintenance()) {
+        $this->error('Bezpośrednia synchronizacja labeli wymaga trybu maintenance.');
+
+        return 1;
+    }
+
+    $result = app(LegacyVariantFamilyBackfillService::class)
+        ->syncPendingCustomProductLabels(max(1, (int) $this->option('limit')));
+
+    $this->table(
+        ['product', 'sku', 'status', 'error'],
+        collect($result['results'])->map(fn (array $row): array => [
+            $row['product_id'],
+            $row['sku'],
+            $row['status'],
+            $row['error'] ?? '-',
+        ])->all(),
+    );
+    $this->info(sprintf(
+        'Woo custom product label sync: scanned=%d, succeeded=%d, failed=%d.',
+        $result['scanned'],
+        $result['succeeded'],
+        $result['failed'],
+    ));
+
+    return $result['failed'] > 0 ? 1 : 0;
+})->purpose('Synchronously update Lemon theme product-label meta during deployment maintenance.');
+
 Artisan::command('erp:dispatch-woo-owned-variant-axis-repair {--limit=10 : Maximum number of Woo-owned historical families to queue} {--stale-minutes=120 : Replace an abandoned repair reservation after this many minutes}', function (): int {
     $result = app(WooOwnedVariantAxisRepairService::class)->dispatchPending(
         max(1, (int) $this->option('limit')),

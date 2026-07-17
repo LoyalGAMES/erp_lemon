@@ -541,14 +541,17 @@ SLEEP
     variant_axis_verify_line="$(grep -nF ' erp:verify-woo-owned-variant-axis-repair' "$deploy_log" | head -n 1 | cut -d: -f1)"
     size_order_sync_line="$(grep -nF ' erp:sync-woocommerce-global-size-order-during-maintenance ' "$deploy_log" | head -n 1 | cut -d: -f1)"
     size_order_verify_line="$(grep -nF ' erp:verify-woocommerce-global-size-order-sync ' "$deploy_log" | head -n 1 | cut -d: -f1)"
-    [[ -n "$maintenance_line" && -n "$queue_restart_line" && -n "$worker_wait_line" && -n "$migration_line" && -n "$variant_axis_repair_line" && -n "$variant_axis_verify_line" && -n "$size_order_sync_line" && -n "$size_order_verify_line" ]] ||
+    product_label_sync_line="$(grep -nF ' erp:sync-pending-woocommerce-product-labels-during-maintenance ' "$deploy_log" | head -n 1 | cut -d: -f1)"
+    [[ -n "$maintenance_line" && -n "$queue_restart_line" && -n "$worker_wait_line" && -n "$migration_line" && -n "$variant_axis_repair_line" && -n "$variant_axis_verify_line" && -n "$size_order_sync_line" && -n "$size_order_verify_line" && -n "$product_label_sync_line" ]] ||
         fail 'deploy nie zarejestrował pełnej sekwencji restart-worker-migracja.'
-    (( maintenance_line < queue_restart_line && queue_restart_line < worker_wait_line && worker_wait_line < migration_line && migration_line < size_order_sync_line && size_order_sync_line < size_order_verify_line && size_order_verify_line < variant_axis_repair_line && variant_axis_repair_line < variant_axis_verify_line )) ||
+    (( maintenance_line < queue_restart_line && queue_restart_line < worker_wait_line && worker_wait_line < migration_line && migration_line < size_order_sync_line && size_order_sync_line < size_order_verify_line && size_order_verify_line < variant_axis_repair_line && variant_axis_repair_line < variant_axis_verify_line && variant_axis_verify_line < product_label_sync_line )) ||
         fail 'naprawa osi wariantów ruszyła przed migracją, workerem albo potwierdzeniem globalnej kolejności rozmiarów.'
     [[ "$(grep -Fc ' erp:repair-woo-owned-variant-axes-during-maintenance' "$deploy_log")" -eq 1 && "$(grep -Fc ' erp:verify-woo-owned-variant-axis-repair' "$deploy_log")" -eq 1 ]] ||
         fail 'deploy nie wykonał dokładnie jednej synchronicznej naprawy osi wariantów i jej warunku końcowego.'
     [[ "$(grep -Fc ' erp:sync-woocommerce-global-size-order-during-maintenance ' "$deploy_log")" -eq 1 && "$(grep -Fc ' erp:verify-woocommerce-global-size-order-sync ' "$deploy_log")" -eq 1 ]] ||
         fail 'deploy nie wykonał dokładnie jednej świeżej synchronicznej naprawy i weryfikacji.'
+    [[ "$(grep -Fc ' erp:sync-pending-woocommerce-product-labels-during-maintenance ' "$deploy_log")" -eq 1 ]] ||
+        fail 'deploy nie wykonał dokładnie jednej bezpośredniej synchronizacji labeli motywu.'
     grep -F ' erp:sync-woocommerce-global-size-order-during-maintenance ' "$deploy_log" | grep -Fq -- "--trigger=deploy_${second_release}" ||
         fail 'synchroniczna naprawa nie zapisała triggera bieżącego release.'
     grep -F ' erp:verify-woocommerce-global-size-order-sync ' "$deploy_log" | grep -Fq -- "--trigger=deploy_${second_release}" ||
