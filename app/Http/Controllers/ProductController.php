@@ -571,19 +571,32 @@ class ProductController extends Controller
             return $updated;
         });
 
-        $queued = collect($updatedProductIds)
-            ->filter(fn (int $productId): bool => $this->queueWooCommerceDataExport(
-                Product::query()->findOrFail($productId),
-            ))
+        $queued = Product::query()
+            ->whereIn('id', $updatedProductIds)
+            ->get()
+            ->filter(fn (Product $product): bool => $this->queueWooCommerceDataExport($product))
             ->count();
         $count = count($updatedProductIds);
         $productLabel = $this->polishProductCountLabel($count);
         $mappedProductLabel = $queued === 1 ? 'zmapowanego produktu' : 'zmapowanych produktów';
+        $returnFilters = collect((array) ($validated['filters'] ?? []))
+            ->only(['q', 'channel', 'warehouse', 'stock', 'type', 'category', 'status', 'import_issue'])
+            ->reject(fn (mixed $value): bool => $value === null || $value === '')
+            ->all();
+        $returnRoute = filter_var(
+            data_get($validated, 'filters.favorites', false),
+            FILTER_VALIDATE_BOOLEAN,
+        ) ? 'products.favorites' : 'products.index';
 
-        return back()->with(
+        return redirect()->route($returnRoute, $returnFilters)->with(
             'status',
             "Zmieniono grupowo {$count} {$productLabel}. Synchronizację WooCommerce uruchomiono dla {$queued} {$mappedProductLabel}.",
         );
+    }
+
+    public function bulkRedirect(): RedirectResponse
+    {
+        return redirect()->route('products.index');
     }
 
     public function duplicate(

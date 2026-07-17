@@ -17,7 +17,6 @@
     <div class="product-bulk-modal-card" role="dialog" aria-modal="true" aria-labelledby="product-bulk-modal-title">
         <form method="POST" action="{{ route('products.bulk.update') }}" data-product-bulk-form>
             @csrf
-            @method('PUT')
             <div data-product-bulk-selection-inputs></div>
             @foreach (['q', 'channel', 'warehouse', 'stock', 'type', 'category', 'status'] as $filter)
                 <input type="hidden" name="filters[{{ $filter }}]" value="{{ $filters[$filter] }}">

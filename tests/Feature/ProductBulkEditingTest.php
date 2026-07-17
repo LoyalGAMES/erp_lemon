@@ -39,6 +39,12 @@ class ProductBulkEditingTest extends TestCase
             ->assertSee('value="'.$second->id.'" data-product-select', false);
     }
 
+    public function test_accidental_get_to_bulk_endpoint_returns_to_product_catalog_instead_of_404(): void
+    {
+        $this->get('/products/bulk')
+            ->assertRedirect(route('products.index'));
+    }
+
     public function test_bulk_update_changes_only_applied_fields_for_selected_products_and_queues_mapped_products(): void
     {
         Bus::fake();
@@ -95,7 +101,7 @@ class ProductBulkEditingTest extends TestCase
             'stock_sync_enabled' => true,
         ]);
 
-        $this->put(route('products.bulk.update'), [
+        $this->post(route('products.bulk.update'), [
             'selection_mode' => 'selected',
             'product_ids' => [$first->id, $second->id],
             'apply' => [
@@ -119,7 +125,7 @@ class ProductBulkEditingTest extends TestCase
                 'lemon_preorder' => '0',
             ],
         ])
-            ->assertRedirect()
+            ->assertRedirect(route('products.index'))
             ->assertSessionHas('status', 'Zmieniono grupowo 2 produkty. Synchronizację WooCommerce uruchomiono dla 1 zmapowanego produktu.');
 
         $first->refresh();
@@ -167,7 +173,7 @@ class ProductBulkEditingTest extends TestCase
             'shipping' => ['days' => 4],
         ]);
 
-        $this->put(route('products.bulk.update'), [
+        $this->post(route('products.bulk.update'), [
             'selection_mode' => 'all_filtered',
             'excluded_ids' => [$excluded->id],
             'filters' => ['q' => 'Kolekcja lato'],
@@ -180,7 +186,7 @@ class ProductBulkEditingTest extends TestCase
                 'lemon_shipping_text' => 'Wysyłka za {days} dni: {date}',
             ],
         ])
-            ->assertRedirect()
+            ->assertRedirect(route('products.index', ['q' => 'Kolekcja lato']))
             ->assertSessionHas('status', 'Zmieniono grupowo 1 produkt. Synchronizację WooCommerce uruchomiono dla 0 zmapowanych produktów.');
 
         $included->refresh();
@@ -218,7 +224,7 @@ class ProductBulkEditingTest extends TestCase
             'shipping' => ['text' => 'Stary termin'],
         ]);
 
-        $this->put(route('products.bulk.update'), [
+        $this->post(route('products.bulk.update'), [
             'selection_mode' => 'selected',
             'product_ids' => [$product->id],
             'apply' => [
@@ -245,7 +251,7 @@ class ProductBulkEditingTest extends TestCase
                 'custom_label_text_color' => '#fedcba',
                 'lemon_shipping_text' => '',
             ],
-        ])->assertRedirect();
+        ])->assertRedirect(route('products.index'));
 
         $master = $product->fresh()->masterData();
 
@@ -286,7 +292,7 @@ class ProductBulkEditingTest extends TestCase
             'sort_order' => 1,
         ]);
 
-        $this->put(route('products.bulk.update'), [
+        $this->post(route('products.bulk.update'), [
             'selection_mode' => 'selected',
             'product_ids' => [$parent->id],
             'apply' => [
@@ -297,7 +303,7 @@ class ProductBulkEditingTest extends TestCase
                 'lemon_shipping_days' => '21',
                 'lemon_preorder' => '1',
             ],
-        ])->assertRedirect();
+        ])->assertRedirect(route('products.index'));
 
         $variant->refresh();
         $this->assertSame(21, data_get($variant->masterData(), 'shipping.days'));
