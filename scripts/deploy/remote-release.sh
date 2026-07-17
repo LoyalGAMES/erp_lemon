@@ -200,6 +200,8 @@ secure_runtime_permissions() {
 wait_for_queue_workers() {
     local timeout_seconds="${QUEUE_DRAIN_TIMEOUT_SECONDS:-920}"
     local deadline
+    local polls_since_restart=0
+    local restart_every_polls=15
 
     [[ "$timeout_seconds" =~ ^[1-9][0-9]*$ ]] ||
         fail 'QUEUE_DRAIN_TIMEOUT_SECONDS musi być dodatnią liczbą całkowitą.'
@@ -210,9 +212,23 @@ wait_for_queue_workers() {
     # process title. The deploy account is dedicated to this application;
     # wait for all of its Laravel queue workers after queue:restart instead of
     # allowing an old full catalog export to overlap a data migration.
+    #
+    # A background worker can race with the first queue:restart: it may boot
+    # after that cache timestamp is written but after maintenance mode already
+    # prevents it from taking a job. Such an idle worker will wait forever and
+    # never observe the older restart timestamp. Refresh the graceful restart
+    # signal every 30 seconds. Running jobs still finish their current job;
+    # late idle workers observe a newer timestamp and exit cleanly.
     while pgrep -u "$(id -u)" -f -- '(^|[[:space:]/])artisan[[:space:]]+queue:work([[:space:]]|$)' >/dev/null; do
         (( SECONDS < deadline )) ||
             fail "workery kolejki nie zakończyły pracy w ciągu ${timeout_seconds} sekund."
+
+        (( polls_since_restart += 1 ))
+        if (( polls_since_restart >= restart_every_polls )); then
+            "$php_bin" "$deploy_path/artisan" queue:restart
+            polls_since_restart=0
+        fi
+
         sleep 2
     done
 }

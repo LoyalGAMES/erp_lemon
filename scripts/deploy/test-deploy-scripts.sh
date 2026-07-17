@@ -516,7 +516,10 @@ SLEEP
     create_fake_release "$second_release"
     deploy_log="$temporary_directory/deploy-order.log"
     pgrep_state="$temporary_directory/pgrep-state"
-    printf '%s\n' '1' >"$pgrep_state"
+    # Simulate a scheduler race: a worker remains visible after the initial
+    # queue:restart and must receive a newer graceful restart timestamp while
+    # the deploy waits in maintenance mode.
+    printf '%s\n' '16' >"$pgrep_state"
     PATH="$temporary_directory/bin:$PATH" \
         PHP_BIN="$temporary_directory/bin/fake-php" \
         COMPOSER_BIN="$temporary_directory/bin/fake-composer" \
@@ -537,6 +540,7 @@ SLEEP
     queue_restart_line="$(grep -nF ' queue:restart' "$deploy_log" | head -n 1 | cut -d: -f1)"
     worker_wait_line="$(grep -nF 'pgrep ' "$deploy_log" | head -n 1 | cut -d: -f1)"
     migration_line="$(grep -nF 'php artisan migrate --force' "$deploy_log" | head -n 1 | cut -d: -f1)"
+    queue_restart_count_before_migration="$(head -n "$((migration_line - 1))" "$deploy_log" | grep -Fc ' queue:restart')"
     variant_axis_repair_line="$(grep -nF ' erp:repair-woo-owned-variant-axes-during-maintenance' "$deploy_log" | head -n 1 | cut -d: -f1)"
     variant_axis_verify_line="$(grep -nF ' erp:verify-woo-owned-variant-axis-repair' "$deploy_log" | head -n 1 | cut -d: -f1)"
     size_order_sync_line="$(grep -nF ' erp:sync-woocommerce-global-size-order-during-maintenance ' "$deploy_log" | head -n 1 | cut -d: -f1)"
@@ -546,6 +550,8 @@ SLEEP
         fail 'deploy nie zarejestrował pełnej sekwencji restart-worker-migracja.'
     (( maintenance_line < queue_restart_line && queue_restart_line < worker_wait_line && worker_wait_line < migration_line && migration_line < size_order_sync_line && size_order_sync_line < size_order_verify_line && size_order_verify_line < variant_axis_repair_line && variant_axis_repair_line < variant_axis_verify_line && variant_axis_verify_line < product_label_sync_line )) ||
         fail 'naprawa osi wariantów ruszyła przed migracją, workerem albo potwierdzeniem globalnej kolejności rozmiarów.'
+    (( queue_restart_count_before_migration >= 2 )) ||
+        fail 'deploy nie ponowił bezpiecznego restartu dla workera uruchomionego po pierwszym sygnale.'
     [[ "$(grep -Fc ' erp:repair-woo-owned-variant-axes-during-maintenance' "$deploy_log")" -eq 1 && "$(grep -Fc ' erp:verify-woo-owned-variant-axis-repair' "$deploy_log")" -eq 1 ]] ||
         fail 'deploy nie wykonał dokładnie jednej synchronicznej naprawy osi wariantów i jej warunku końcowego.'
     [[ "$(grep -Fc ' erp:sync-woocommerce-global-size-order-during-maintenance ' "$deploy_log")" -eq 1 && "$(grep -Fc ' erp:verify-woocommerce-global-size-order-sync ' "$deploy_log")" -eq 1 ]] ||
