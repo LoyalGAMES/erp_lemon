@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_17_000038';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000039';
+
+    public const PREVIOUS_ERP_SIZE_CONFIGURATION_ORDER_REVISION = 'woo_erp_size_variant_axis_2026_07_17_000038';
 
     public const PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_REVISION = 'woo_erp_size_variant_axis_2026_07_17_000037';
 
@@ -65,6 +67,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_ERP_SIZE_CONFIGURATION_ORDER_REVISION,
             self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_REVISION,
             self::PREVIOUS_EXACT_CHILD_ASSIGNMENT_AUDIT_REVISION,
             self::PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION,
@@ -3596,7 +3599,7 @@ final class WooOwnedVariantAxisRepairService
 
     /**
      * @return array{
-     *   targets:list<array{integration:WordpressIntegration,sales_channel_id:int,external_product_id:string,language:string,is_primary:bool,discovered?:bool}>,
+     *   targets:list<array{integration:WordpressIntegration,sales_channel_id:int,external_product_id:string,language:string,is_primary:bool,discovered?:bool,contract?:bool}>,
      *   error:?string,
      *   retryable:bool,
      *   allow_full_export:bool
@@ -3636,15 +3639,6 @@ final class WooOwnedVariantAxisRepairService
             $primaryLanguage = $this->language(
                 data_get($mapping->metadata, 'language', 'pl'),
             );
-            $targets->push([
-                'integration' => $integration,
-                'sales_channel_id' => (int) $mapping->sales_channel_id,
-                'external_product_id' => $externalProductId,
-                'language' => $primaryLanguage,
-                'is_primary' => true,
-                'discovered' => false,
-            ]);
-
             $requiredLanguages = collect([
                 ...$integration->productImportLanguages(),
                 ...$integration->productExportLanguages(),
@@ -3672,6 +3666,16 @@ final class WooOwnedVariantAxisRepairService
                     'allow_full_export' => false,
                 ];
             }
+
+            $targets->push([
+                'integration' => $integration,
+                'sales_channel_id' => (int) $mapping->sales_channel_id,
+                'external_product_id' => $externalProductId,
+                'language' => $primaryLanguage,
+                'is_primary' => true,
+                'discovered' => false,
+                'contract' => $discovery['contract'],
+            ]);
 
             if ($discovery['contract']) {
                 // The plugin contract is the only outbound translation
@@ -3709,6 +3713,7 @@ final class WooOwnedVariantAxisRepairService
                         'language' => $this->language($alias->language ?? 'en'),
                         'is_primary' => false,
                         'discovered' => false,
+                        'contract' => false,
                     ]);
                 });
         }
@@ -3774,6 +3779,17 @@ final class WooOwnedVariantAxisRepairService
             $missing = $requiredLanguages->diff($availableLanguages)->values();
 
             if ($missing->isNotEmpty()) {
+                // A complete plugin contract with no ID for a configured
+                // language proves that the translated Woo product simply does
+                // not exist yet. Repairing the existing contract family is
+                // safe; the normal follow-up export will create any missing
+                // language from the now-canonical local Size axis.
+                if ($integrationTargets->every(
+                    fn (array $target): bool => (bool) ($target['contract'] ?? false),
+                )) {
+                    continue;
+                }
+
                 return [
                     'targets' => $targets->all(),
                     'error' => 'Brak mapowania istniejącej wersji '.mb_strtoupper($missing->implode(', '))
@@ -3803,7 +3819,7 @@ final class WooOwnedVariantAxisRepairService
      * @param  list<string>  $missingLanguages
      * @return array{
      *   contract:bool,
-     *   targets:list<array{integration:WordpressIntegration,sales_channel_id:int,external_product_id:string,language:string,is_primary:bool,discovered:bool}>,
+     *   targets:list<array{integration:WordpressIntegration,sales_channel_id:int,external_product_id:string,language:string,is_primary:bool,discovered:bool,contract:bool}>,
      *   error:?string
      * }
      */
@@ -3861,10 +3877,12 @@ final class WooOwnedVariantAxisRepairService
             ->unique()
             ->values();
 
+        $mapLanguages = collect(array_keys($map))->sort()->values();
+
         if ($actualLanguage !== $primaryLanguage
             || ($map[$primaryLanguage] ?? 0) !== (int) $primaryExternalId
             || count(array_unique(array_values($map))) !== count($map)
-            || collect(array_keys($map))->sort()->values()->all() !== $requiredLanguages->all()
+            || $mapLanguages->diff($requiredLanguages)->isNotEmpty()
             || trim((string) $primary['lemon_erp_translation_group']) !== $this->translationGroup('product', $map)
         ) {
             return [
@@ -3876,7 +3894,9 @@ final class WooOwnedVariantAxisRepairService
 
         $targets = [];
 
-        foreach ($missingLanguages as $language) {
+        foreach ($missingLanguages->filter(
+            fn (string $language): bool => array_key_exists($language, $map),
+        ) as $language) {
             $externalId = (string) ($map[$language] ?? '');
 
             if (! ctype_digit($externalId) || (int) $externalId <= 0 || $externalId === $primaryExternalId) {
@@ -3894,6 +3914,7 @@ final class WooOwnedVariantAxisRepairService
                 'language' => $language,
                 'is_primary' => false,
                 'discovered' => true,
+                'contract' => true,
             ];
         }
 
@@ -5312,7 +5333,7 @@ final class WooOwnedVariantAxisRepairService
     private function orderedExistingSizeOptionNames(array $options): array
     {
         $dictionaryOrder = $this->sizeDictionaryOrder(ProductVariantAxisNameResolver::SIZE);
-        $ranked = collect($options)
+        $ranked = $this->localOptionValues($options)
             ->map(fn (mixed $option, int $index): array => [
                 'name' => trim((string) $option),
                 'index' => $index,
@@ -5508,7 +5529,50 @@ final class WooOwnedVariantAxisRepairService
 
         $generic = $genericAttributes->first();
         $sourceSize = $sizeAttributes->first();
+        $variationGeneric = $genericAttributes->first(
+            fn (array $attribute): bool => (bool) ($attribute['variation'] ?? false),
+        );
+        $sourceSizeKeys = is_array($sourceSize)
+            ? $this->localOptionValues($sourceSize['options'] ?? [])
+                ->map(fn (string $option): string => $this->canonicalSizeOptionKey(
+                    ProductVariantAxisNameResolver::SIZE,
+                    $option,
+                ))
+                ->filter()
+                ->unique()
+                ->sort()
+                ->values()
+                ->all()
+            : [];
+        $variationGenericKeys = is_array($variationGeneric)
+            ? $this->localOptionValues($variationGeneric['options'] ?? [])
+                ->map(fn (string $option): string => $this->canonicalSizeOptionKey(
+                    ProductVariantAxisNameResolver::SIZE,
+                    $option,
+                ))
+                ->filter()
+                ->unique()
+                ->sort()
+                ->values()
+                ->all()
+            : [];
+
+        // The live variation axis is the authoritative source of child
+        // assignments. Historical imports often left an informational global
+        // Size attribute beside `wariant`/`BLVariant`, sometimes with one
+        // aggregate option such as `M/L, S/M`. Treat that Size attribute as
+        // the destination, not as evidence capable of overriding the axis
+        // that actually owns the existing variations.
         $sourceAxis = is_array($sourceSize) ? $sourceSize : $generic;
+
+        if (is_array($variationGeneric)
+            && is_array($sourceSize)
+            && ! (bool) ($sourceSize['variation'] ?? false)
+            && $variationGenericKeys !== []
+            && $variationGenericKeys !== $sourceSizeKeys
+        ) {
+            $sourceAxis = $variationGeneric;
+        }
 
         if (! is_array($sourceAxis)) {
             return $this->unsafePlan('Nie można jednoznacznie wskazać źródłowej osi rozmiaru.');
@@ -5570,7 +5634,7 @@ final class WooOwnedVariantAxisRepairService
         $canonicalOptions = $this->orderedSizeOptions(
             $sizeName,
             [
-                ...(array) ($sourceAxis['options'] ?? []),
+                ...$this->localOptionValues($sourceAxis['options'] ?? [])->all(),
                 ...$supplementalCanonicalOptions,
             ],
         );
@@ -5590,7 +5654,7 @@ final class WooOwnedVariantAxisRepairService
         }
 
         if ($requiresGlobalSize && is_array($resolvedGlobalSize)) {
-            $resolvedByKey = collect((array) ($resolvedGlobalSize['options'] ?? []))
+            $resolvedByKey = $this->localOptionValues($resolvedGlobalSize['options'] ?? [])
                 ->map(fn (mixed $option): string => trim((string) $option))
                 ->filter()
                 ->mapWithKeys(fn (string $option): array => [
@@ -5617,7 +5681,7 @@ final class WooOwnedVariantAxisRepairService
             $canonicalKeys = $canonicalByKey->keys()->sort()->values()->all();
 
             foreach ($genericAttributes as $genericAttribute) {
-                $genericKeys = collect((array) ($genericAttribute['options'] ?? []))
+                $genericKeys = $this->localOptionValues($genericAttribute['options'] ?? [])
                     ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey(
                         $sizeName,
                         (string) $option,
@@ -5990,12 +6054,12 @@ final class WooOwnedVariantAxisRepairService
             return [];
         }
 
-        $existingKeys = collect((array) ($sourceSize['options'] ?? []))
+        $existingKeys = $this->localOptionValues($sourceSize['options'] ?? [])
             ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey($sizeName, (string) $option))
             ->filter()
             ->unique()
             ->values();
-        $genericKeys = collect((array) ($generic['options'] ?? []))
+        $genericKeys = $this->localOptionValues($generic['options'] ?? [])
             ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey($sizeName, (string) $option))
             ->filter()
             ->unique()
@@ -6874,7 +6938,7 @@ final class WooOwnedVariantAxisRepairService
     private function orderedSizeOptions(string $attribute, array $options): array
     {
         $dictionaryOrder = $this->sizeDictionaryOrder($attribute);
-        $ranked = collect($options)
+        $ranked = $this->localOptionValues($options)
             ->map(fn (mixed $option): string => $this->canonicalSizeOption(
                 $attribute,
                 (string) $option,

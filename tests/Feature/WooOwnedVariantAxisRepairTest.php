@@ -280,6 +280,32 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
     }
 
+    public function test_the_live_legacy_variation_axis_overrides_an_aggregate_informational_size_option(): void
+    {
+        [$parent, $catalog] = $this->family();
+
+        foreach ([123, 223] as $parentId) {
+            foreach ($catalog->products[$parentId]['attributes'] as &$attribute) {
+                if ((int) ($attribute['id'] ?? 0) === 1) {
+                    $attribute['options'] = ['M/L, S/M'];
+                }
+            }
+            unset($attribute);
+        }
+
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+
+        foreach ([123, 223] as $parentId) {
+            $size = collect($catalog->products[$parentId]['attributes'])->firstWhere('id', 1);
+            $this->assertSame(['S/M', 'M/L'], $size['options'] ?? null);
+            $this->assertTrue((bool) ($size['variation'] ?? false));
+        }
+    }
+
     public function test_multiple_legacy_axes_with_conflicting_blvariant_values_require_manual_review_without_writes(): void
     {
         [$parent, $catalog] = $this->family();
@@ -374,6 +400,33 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 === 'erp_size_configuration_order_2026_07_17_000038',
         );
         Http::assertNothingSent();
+    }
+
+    public function test_aggregate_size_followup_migration_requeues_only_unresolved_previous_revision_families(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_ERP_SIZE_CONFIGURATION_ORDER_REVISION,
+            'status' => 'manual_review',
+            'result' => ['reason' => 'historical aggregate'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000039_requeue_aggregate_size_and_partial_translation_axes.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
     }
 
     public function test_it_accepts_only_the_variation_names_woocommerce_regenerates_from_the_repaired_axis(): void
@@ -3907,7 +3960,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
     }
 
-    public function test_it_rejects_empty_parent_size_terms_before_any_write(): void
+    public function test_it_rebuilds_empty_informational_size_terms_from_the_complete_legacy_variation_axis(): void
     {
         [$parent, $catalog] = $this->family();
 
@@ -3921,9 +3974,9 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
 
         $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
 
-        $this->assertSame('manual_review', $result['status']);
-        $this->assertStringContainsString('nie zawiera żadnej jednoznacznej wartości', $result['reason']);
-        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        $this->assertSame(['S/M', 'M/L'], collect($catalog->products[123]['attributes'])
+            ->firstWhere('id', 1)['options']);
     }
 
     public function test_it_aborts_before_writing_when_legacy_and_size_defaults_conflict(): void
@@ -4012,6 +4065,35 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame(['S/M', 'M/L'], collect($catalog->products[223]['attributes'])
             ->firstWhere('id', 1)['options']);
         $this->assertSame([['id' => 1, 'option' => 'S/M']], $catalog->variations[223][224]['attributes']);
+    }
+
+    public function test_a_complete_polish_only_contract_repairs_the_existing_product_without_inventing_an_english_target(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        ProductChannelAlias::query()->where('language', 'en')->delete();
+        $catalog->products[123]['lemon_erp_translations'] = ['pl' => 123];
+        $catalog->products[123]['lemon_erp_translation_group'] = 'product:123';
+
+        foreach ([124, 125] as $variationId) {
+            $catalog->variations[123][$variationId]['lemon_erp_translations'] = [
+                'pl' => $variationId,
+            ];
+            $catalog->variations[123][$variationId]['lemon_erp_translation_group'] = "variation:{$variationId}";
+            $catalog->variations[123][$variationId]['lemon_erp_parent_translations'] = ['pl' => 123];
+            $catalog->variations[123][$variationId]['lemon_erp_parent_translation_group'] = 'product:123';
+        }
+
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        $this->assertSame(1, $result['targets']);
+        $this->assertSame(['S/M', 'M/L'], collect($catalog->products[123]['attributes'])
+            ->firstWhere('id', 1)['options']);
+        $this->assertSame(['M/L', 'S/M'], collect($catalog->products[223]['attributes'])
+            ->firstWhere('id', 1)['options']);
     }
 
     public function test_the_primary_catalog_contract_discovers_and_persists_missing_english_family_aliases(): void
