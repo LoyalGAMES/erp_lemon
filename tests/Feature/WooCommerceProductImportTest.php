@@ -1350,7 +1350,9 @@ class WooCommerceProductImportTest extends TestCase
                             ['key' => '_lemon_product_label_bg_color', 'value' => '#112233'],
                             ['key' => '_lemon_product_label_text_color', 'value' => '#ffffff'],
                             ['key' => 'lemon_shipping_days', 'value' => '7'],
-                            ['key' => 'lemon_shipping_text', 'value' => 'Wysyłka: {date}'],
+                            ['key' => 'lemon_shipping_text', 'value' => $language === 'en'
+                                ? 'Planned shipping: {date}'
+                                : 'Wysyłka: {date}'],
                             ['key' => 'lemon_preorder', 'value' => 'yes'],
                         ],
                         'upsell_ids' => [111],
@@ -1403,6 +1405,7 @@ class WooCommerceProductImportTest extends TestCase
         $this->assertSame('New', data_get($product->attributes, 'master.custom_label.en'));
         $this->assertSame(7, data_get($product->attributes, 'master.shipping.days'));
         $this->assertSame('Wysyłka: {date}', data_get($product->attributes, 'master.shipping.text'));
+        $this->assertSame('Planned shipping: {date}', data_get($product->attributes, 'master.shipping.text_en'));
         $this->assertTrue(data_get($product->attributes, 'master.shipping.preorder'));
         $this->assertNull(data_get($product->attributes, 'master.stock.quantity'));
         $this->assertEquals(299.0, data_get($product->attributes, 'master.prices.sale_price_pln'));

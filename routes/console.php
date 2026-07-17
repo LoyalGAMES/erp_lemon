@@ -116,14 +116,14 @@ Artisan::command('erp:sync-pending-woocommerce-product-labels-during-maintenance
         ])->all(),
     );
     $this->info(sprintf(
-        'Woo custom product label sync: scanned=%d, succeeded=%d, failed=%d.',
+        'Woo custom storefront metadata sync: scanned=%d, succeeded=%d, failed=%d.',
         $result['scanned'],
         $result['succeeded'],
         $result['failed'],
     ));
 
     return $result['failed'] > 0 ? 1 : 0;
-})->purpose('Synchronously update Lemon theme product-label meta during deployment maintenance.');
+})->purpose('Synchronously update Lemon theme storefront meta during deployment maintenance.');
 
 Artisan::command('erp:sync-pending-woocommerce-storefront-metadata-during-maintenance {--limit=50 : Maximum number of recent pending or failed products to update}', function (): int {
     if (! app()->isDownForMaintenance()) {

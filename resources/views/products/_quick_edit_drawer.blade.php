@@ -262,8 +262,12 @@
                     <label>Dni kalendarzowe do wysyłki
                         <input name="lemon_shipping_days" type="number" step="1" min="0" value="{{ $quickMasterField('lemon_shipping_days', 'shipping.days') }}" placeholder="np. 11">
                     </label>
-                    <label>Tekst terminu wysyłki
+                    <label>Tekst terminu wysyłki (PL)
                         <input name="lemon_shipping_text" value="{{ $quickMasterField('lemon_shipping_text', 'shipping.text') }}" placeholder="Planowana wysyłka: {date}">
+                        <small>Znaczniki: <code>{date}</code>, <code>{days}</code>.</small>
+                    </label>
+                    <label>Tekst terminu wysyłki (EN)
+                        <input name="lemon_shipping_text_en" value="{{ $quickMasterField('lemon_shipping_text_en', 'shipping.text_en') }}" placeholder="Planned shipping: {date}">
                         <small>Znaczniki: <code>{date}</code>, <code>{days}</code>.</small>
                     </label>
                     <label>Przedsprzedaż

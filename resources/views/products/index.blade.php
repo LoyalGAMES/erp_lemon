@@ -679,8 +679,12 @@
                     <label>Dni kalendarzowe do wysyłki
                         <input name="lemon_shipping_days" type="number" step="1" min="0" value="{{ old('lemon_shipping_days') }}" placeholder="np. 11">
                     </label>
-                    <label>Tekst terminu wysyłki
+                    <label>Tekst terminu wysyłki (PL)
                         <input name="lemon_shipping_text" value="{{ old('lemon_shipping_text') }}" placeholder="Planowana wysyłka: {date}">
+                        <small>Znaczniki: <code>{date}</code>, <code>{days}</code>.</small>
+                    </label>
+                    <label>Tekst terminu wysyłki (EN)
+                        <input name="lemon_shipping_text_en" value="{{ old('lemon_shipping_text_en') }}" placeholder="Planned shipping: {date}">
                         <small>Znaczniki: <code>{date}</code>, <code>{days}</code>.</small>
                     </label>
                     <label class="toggle-row"><input type="hidden" name="lemon_preorder" value="0"><input name="lemon_preorder" type="checkbox" value="1" @checked(old('lemon_preorder'))> Przedsprzedaż</label>

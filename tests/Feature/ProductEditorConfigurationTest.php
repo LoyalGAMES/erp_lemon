@@ -32,6 +32,7 @@ class ProductEditorConfigurationTest extends TestCase
             ->assertOk()
             ->assertSee('name="lemon_shipping_days"', false)
             ->assertSee('name="lemon_shipping_text"', false)
+            ->assertSee('name="lemon_shipping_text_en"', false)
             ->assertSee('name="lemon_preorder"', false);
     }
 
@@ -55,6 +56,7 @@ class ProductEditorConfigurationTest extends TestCase
                     'shipping' => [
                         'days' => 11,
                         'text' => 'Planowana wysyłka: {date}',
+                        'text_en' => 'Planned shipping: {date}',
                         'preorder' => true,
                     ],
                 ],
@@ -105,6 +107,7 @@ class ProductEditorConfigurationTest extends TestCase
         $this->assertSame(['SKU-CROSS'], data_get($product->attributes, 'master.related_products.cross_sell_skus'));
         $this->assertSame(11, data_get($product->attributes, 'master.shipping.days'));
         $this->assertSame('Planowana wysyłka: {date}', data_get($product->attributes, 'master.shipping.text'));
+        $this->assertSame('Planned shipping: {date}', data_get($product->attributes, 'master.shipping.text_en'));
         $this->assertTrue(data_get($product->attributes, 'master.shipping.preorder'));
     }
 }

@@ -478,6 +478,7 @@ class ProductCatalogWorkflowTest extends TestCase
             'warehouse_location' => 'A-02-01',
             'lemon_shipping_days' => '11',
             'lemon_shipping_text' => 'Planowana wysyłka: {date} ({days} dni)',
+            'lemon_shipping_text_en' => 'Planned shipping: {date} ({days} days)',
             'lemon_preorder' => '1',
             'description_pl' => '<p>Opis z ERP</p>',
             'short_description_en' => '<p>Short ERP</p>',
@@ -513,6 +514,7 @@ class ProductCatalogWorkflowTest extends TestCase
         $this->assertSame('A-02-01', data_get($product->attributes, 'master.stock.location'));
         $this->assertSame(11, data_get($product->attributes, 'master.shipping.days'));
         $this->assertSame('Planowana wysyłka: {date} ({days} dni)', data_get($product->attributes, 'master.shipping.text'));
+        $this->assertSame('Planned shipping: {date} ({days} days)', data_get($product->attributes, 'master.shipping.text_en'));
         $this->assertTrue(data_get($product->attributes, 'master.shipping.preorder'));
         $this->assertSame('catalog', data_get($product->attributes, 'master.catalog_visibility'));
         $this->assertSame('variable', data_get($product->attributes, 'master.product_type'));

@@ -49,6 +49,8 @@ final class LegacyVariantFamilyBackfillService
 
     public const CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION = 'custom_product_labels_meta_sync_2026_07_17_000035';
 
+    public const STOREFRONT_TRANSLATIONS_SYNC_REVISION = 'storefront_translations_meta_sync_2026_07_17_000036';
+
     public const PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION = 'custom_product_labels_catalog_sync_2026_07_17_000034';
 
     public const PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000032';
@@ -69,6 +71,7 @@ final class LegacyVariantFamilyBackfillService
     public static function isCustomProductLabelsRevision(?string $revision): bool
     {
         return in_array($revision, [
+            self::STOREFRONT_TRANSLATIONS_SYNC_REVISION,
             self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
             self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
         ], true);
@@ -255,6 +258,7 @@ final class LegacyVariantFamilyBackfillService
 
         try {
             if (in_array($reservation['revision'], [
+                self::STOREFRONT_TRANSLATIONS_SYNC_REVISION,
                 self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                 self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                 self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
@@ -314,6 +318,7 @@ final class LegacyVariantFamilyBackfillService
         // catalog backfill. Dispatch its revision first, then continue the
         // normal newest-first queue without visiting the same mapping twice.
         foreach ([
+            self::STOREFRONT_TRANSLATIONS_SYNC_REVISION,
             self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
             self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
             self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
@@ -400,6 +405,7 @@ final class LegacyVariantFamilyBackfillService
 
                 try {
                     if (in_array($reservation['revision'], [
+                        self::STOREFRONT_TRANSLATIONS_SYNC_REVISION,
                         self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                         self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                         self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
@@ -438,9 +444,9 @@ final class LegacyVariantFamilyBackfillService
     }
 
     /**
-     * Flush the narrow custom-theme label repair while deployment maintenance
-     * guarantees that no web request or old queue worker can write the same
-     * products concurrently.
+     * Flush narrow custom-theme storefront metadata repairs while deployment
+     * maintenance guarantees that no web request or old queue worker can
+     * write the same products concurrently.
      *
      * @return array{scanned:int,succeeded:int,failed:int,results:list<array{product_id:int,sku:string,status:string,error:?string}>}
      */
@@ -460,6 +466,7 @@ final class LegacyVariantFamilyBackfillService
             ->whereIn(
                 'metadata->product_data_export->legacy_variant_backfill->revision',
                 [
+                    self::STOREFRONT_TRANSLATIONS_SYNC_REVISION,
                     self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                     self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                 ],
@@ -815,8 +822,9 @@ final class LegacyVariantFamilyBackfillService
                 return false;
             }
 
-            // Product labels are custom theme post meta. Updating them does
-            // not require translation-link or variant-axis plugin features.
+            // Storefront labels, shipping text and preorder state are custom
+            // theme post meta. Updating them does not require translation-link
+            // or variant-axis plugin features.
             if (self::isCustomProductLabelsRevision($revision)) {
                 continue;
             }

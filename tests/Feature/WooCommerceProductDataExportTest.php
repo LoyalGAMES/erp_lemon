@@ -3780,6 +3780,7 @@ class WooCommerceProductDataExportTest extends TestCase
                     'shipping' => [
                         'days' => 11,
                         'text' => 'Planowana wysyłka: {date}',
+                        'text_en' => 'Planned shipping: {date}',
                         'preorder' => true,
                     ],
                     'content' => [
@@ -3848,6 +3849,7 @@ class WooCommerceProductDataExportTest extends TestCase
                 && $request['short_description'] === 'Short EN'
                 && $meta['_lemon_product_label_text'] === 'New'
                 && $meta['lemon_shipping_days'] === '11'
+                && $meta['lemon_shipping_text'] === 'Planned shipping: {date}'
                 && $meta['lemon_preorder'] === 'yes';
         });
     }

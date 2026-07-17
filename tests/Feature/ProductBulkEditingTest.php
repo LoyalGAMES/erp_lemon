@@ -33,6 +33,7 @@ class ProductBulkEditingTest extends TestCase
             ->assertSee('data-product-bulk-modal', false)
             ->assertSee('name="apply[category_ids]"', false)
             ->assertSee('name="apply[retail_price_pln]"', false)
+            ->assertSee('name="apply[lemon_shipping_text_en]"', false)
             ->assertSee('name="apply[lemon_preorder]"', false)
             ->assertSee('Produkt dostępny w przedsprzedaży')
             ->assertSee('value="'.$first->id.'" data-product-select', false)
@@ -69,6 +70,7 @@ class ProductBulkEditingTest extends TestCase
             'shipping' => [
                 'days' => 3,
                 'text' => 'Zachowaj tekst: {date}',
+                'text_en' => 'Keep text: {date}',
                 'preorder' => true,
             ],
             'inventory' => ['backorders' => 'no'],
@@ -147,6 +149,7 @@ class ProductBulkEditingTest extends TestCase
         $this->assertSame(75.0, (float) data_get($first->masterData(), 'prices.sale_price_pln'));
         $this->assertSame('Keep EN', data_get($first->masterData(), 'custom_label.en'));
         $this->assertSame('Zachowaj tekst: {date}', data_get($first->masterData(), 'shipping.text'));
+        $this->assertSame('Keep text: {date}', data_get($first->masterData(), 'shipping.text_en'));
         $this->assertSame('Second EN', data_get($second->masterData(), 'custom_label.en'));
         $this->assertSame('Drugi tekst', data_get($second->masterData(), 'shipping.text'));
         $this->assertTrue($untouched->is_active);
@@ -180,10 +183,12 @@ class ProductBulkEditingTest extends TestCase
             'apply' => [
                 'lemon_shipping_days' => '1',
                 'lemon_shipping_text' => '1',
+                'lemon_shipping_text_en' => '1',
             ],
             'changes' => [
                 'lemon_shipping_days' => '14',
                 'lemon_shipping_text' => 'Wysyłka za {days} dni: {date}',
+                'lemon_shipping_text_en' => 'Shipping in {days} days: {date}',
             ],
         ])
             ->assertRedirect(route('products.index', ['q' => 'Kolekcja lato']))
@@ -195,6 +200,7 @@ class ProductBulkEditingTest extends TestCase
 
         $this->assertSame(14, data_get($included->masterData(), 'shipping.days'));
         $this->assertSame('Wysyłka za {days} dni: {date}', data_get($included->masterData(), 'shipping.text'));
+        $this->assertSame('Shipping in {days} days: {date}', data_get($included->masterData(), 'shipping.text_en'));
         $this->assertSame(3, data_get($excluded->masterData(), 'shipping.days'));
         $this->assertSame(4, data_get($outsideFilter->masterData(), 'shipping.days'));
         Bus::assertNotDispatched(ExportWooCommerceProductDataJob::class);

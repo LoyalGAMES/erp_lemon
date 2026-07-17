@@ -193,9 +193,17 @@
                         </div>
 
                         <div class="product-bulk-field" data-product-bulk-field>
-                            <label class="product-bulk-apply"><input name="apply[lemon_shipping_text]" type="checkbox" value="1" data-product-bulk-apply @checked($bulkApplies('lemon_shipping_text'))> Zmień tekst terminu wysyłki</label>
-                            <label>Tekst terminu wysyłki
+                            <label class="product-bulk-apply"><input name="apply[lemon_shipping_text]" type="checkbox" value="1" data-product-bulk-apply @checked($bulkApplies('lemon_shipping_text'))> Zmień tekst terminu wysyłki (PL)</label>
+                            <label>Tekst terminu wysyłki (PL)
                                 <input name="changes[lemon_shipping_text]" value="{{ old('changes.lemon_shipping_text') }}" maxlength="1000" placeholder="Planowana wysyłka: {date}" data-product-bulk-value @disabled(! $bulkApplies('lemon_shipping_text'))>
+                            </label>
+                            <small>Obsługiwane znaczniki: <code>{date}</code> i <code>{days}</code>.</small>
+                        </div>
+
+                        <div class="product-bulk-field" data-product-bulk-field>
+                            <label class="product-bulk-apply"><input name="apply[lemon_shipping_text_en]" type="checkbox" value="1" data-product-bulk-apply @checked($bulkApplies('lemon_shipping_text_en'))> Zmień tekst terminu wysyłki (EN)</label>
+                            <label>Tekst terminu wysyłki (EN)
+                                <input name="changes[lemon_shipping_text_en]" value="{{ old('changes.lemon_shipping_text_en') }}" maxlength="1000" placeholder="Planned shipping: {date}" data-product-bulk-value @disabled(! $bulkApplies('lemon_shipping_text_en'))>
                             </label>
                             <small>Obsługiwane znaczniki: <code>{date}</code> i <code>{days}</code>.</small>
                         </div>

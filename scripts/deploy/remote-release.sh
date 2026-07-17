@@ -511,7 +511,7 @@ if ! (
     cd "$release_path"
     "$php_bin" artisan erp:sync-pending-woocommerce-product-labels-during-maintenance --limit=100
 ); then
-    echo 'Błąd: bezpośrednia synchronizacja labeli motywu WooCommerce nie zakończyła się w pełni; stan oczekujący pozostawiono do ponowienia.' >&2
+    echo 'Błąd: bezpośrednia synchronizacja metadanych motywu WooCommerce nie zakończyła się w pełni; stan oczekujący pozostawiono do ponowienia.' >&2
 fi
 
 # A normal product save can already have a durable full export reservation or

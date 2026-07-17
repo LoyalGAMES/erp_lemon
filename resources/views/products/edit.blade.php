@@ -392,8 +392,12 @@
                         <input name="lemon_shipping_days" type="number" step="1" min="0" value="{{ $masterField('lemon_shipping_days', 'shipping.days') }}" placeholder="np. 11">
                         <small>Puste pole wyłącza komunikat o planowanej wysyłce.</small>
                     </label>
-                    <label @class(['product-edit-field-hidden' => ! $showField('lemon_shipping_text')])>Tekst terminu wysyłki
+                    <label @class(['product-edit-field-hidden' => ! $showField('lemon_shipping_text')])>Tekst terminu wysyłki (PL)
                         <input name="lemon_shipping_text" value="{{ $masterField('lemon_shipping_text', 'shipping.text') }}" placeholder="Planowana wysyłka: {date}">
+                        <small>Możesz użyć znaczników <code>{date}</code> i <code>{days}</code>.</small>
+                    </label>
+                    <label @class(['product-edit-field-hidden' => ! $showField('lemon_shipping_text_en')])>Tekst terminu wysyłki (EN)
+                        <input name="lemon_shipping_text_en" value="{{ $masterField('lemon_shipping_text_en', 'shipping.text_en') }}" placeholder="Planned shipping: {date}">
                         <small>Możesz użyć znaczników <code>{date}</code> i <code>{days}</code>.</small>
                     </label>
                     <label @class(['product-edit-field-hidden' => ! $showField('lemon_preorder')])>Przedsprzedaż

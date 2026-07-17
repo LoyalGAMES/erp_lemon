@@ -2112,17 +2112,33 @@ final class WooCommerceImportService
 
     /**
      * @param  array<string, mixed>  $item
-     * @return array{days:?int,text:?string,preorder:bool}
+     * @return array{days:?int,text:?string,text_en:?string,preorder:bool}
      */
     private function shippingConfiguration(array $item): array
     {
         $days = $this->metaValueWithParentFallback($item, 'lemon_shipping_days');
-        $text = $this->metaValueWithParentFallback($item, 'lemon_shipping_text');
         $preorder = $this->metaValueWithParentFallback($item, 'lemon_preorder');
+        $primaryLanguage = $this->normalizeLanguage($item['erp_import_language'] ?? 'pl');
+        $texts = [
+            $primaryLanguage => $this->nullableString(
+                $this->metaValueWithParentFallback($item, 'lemon_shipping_text'),
+            ),
+        ];
+
+        foreach ((array) ($item['erp_translations'] ?? []) as $language => $translatedItem) {
+            if (! is_array($translatedItem)) {
+                continue;
+            }
+
+            $texts[$this->normalizeLanguage($language)] = $this->nullableString(
+                $this->metaValueWithParentFallback($translatedItem, 'lemon_shipping_text'),
+            );
+        }
 
         return [
             'days' => is_numeric($days) && (int) $days >= 0 ? (int) $days : null,
-            'text' => $this->nullableString($text),
+            'text' => $texts['pl'] ?? null,
+            'text_en' => $texts['en'] ?? null,
             'preorder' => mb_strtolower(trim((string) $preorder)) === 'yes',
         ];
     }

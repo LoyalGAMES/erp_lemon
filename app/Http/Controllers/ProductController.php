@@ -73,6 +73,7 @@ class ProductController extends Controller
         'custom_label_text_color',
         'lemon_shipping_days',
         'lemon_shipping_text',
+        'lemon_shipping_text_en',
         'lemon_preorder',
     ];
 
@@ -491,6 +492,7 @@ class ProductController extends Controller
             'changes.custom_label_text_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
             'changes.lemon_shipping_days' => ['nullable', 'integer', 'min:0'],
             'changes.lemon_shipping_text' => ['nullable', 'string', 'max:1000'],
+            'changes.lemon_shipping_text_en' => ['nullable', 'string', 'max:1000'],
             'changes.lemon_preorder' => ['nullable', 'boolean'],
         ]);
         $apply = collect(array_keys((array) ($validated['apply'] ?? [])))
@@ -1162,6 +1164,7 @@ class ProductController extends Controller
         $preserve('custom_label_text_color', 'custom_label_text_color', data_get($master, 'custom_label.text_color'));
         $preserve('lemon_shipping_days', 'lemon_shipping_days', data_get($master, 'shipping.days'));
         $preserve('lemon_shipping_text', 'lemon_shipping_text', data_get($master, 'shipping.text'));
+        $preserve('lemon_shipping_text_en', 'lemon_shipping_text_en', data_get($master, 'shipping.text_en'));
         $preserve('lemon_preorder', 'lemon_preorder', data_get($master, 'shipping.preorder', false) ? 1 : 0);
 
         $preserve('description_pl', 'description_pl', data_get($master, 'content.pl.description'));
@@ -1583,6 +1586,7 @@ class ProductController extends Controller
             'custom_label_text_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
             'lemon_shipping_days' => ['nullable', 'integer', 'min:0'],
             'lemon_shipping_text' => ['nullable', 'string', 'max:1000'],
+            'lemon_shipping_text_en' => ['nullable', 'string', 'max:1000'],
             'lemon_preorder' => ['nullable', 'boolean'],
             'name_en' => ['nullable', 'string', 'max:255'],
             'description_pl' => ['nullable', 'string'],
@@ -1710,6 +1714,9 @@ class ProductController extends Controller
                 'text' => array_key_exists('lemon_shipping_text', $validated)
                     ? $this->nullableString($validated['lemon_shipping_text'])
                     : $this->nullableString(data_get($existingMaster, 'shipping.text')),
+                'text_en' => array_key_exists('lemon_shipping_text_en', $validated)
+                    ? $this->nullableString($validated['lemon_shipping_text_en'])
+                    : $this->nullableString(data_get($existingMaster, 'shipping.text_en')),
                 'preorder' => $request->has('lemon_preorder')
                     ? $request->boolean('lemon_preorder')
                     : (bool) data_get($existingMaster, 'shipping.preorder', false),
@@ -2692,6 +2699,7 @@ class ProductController extends Controller
             'custom_label_bg_color' => 'custom_label.bg_color',
             'custom_label_text_color' => 'custom_label.text_color',
             'lemon_shipping_text' => 'shipping.text',
+            'lemon_shipping_text_en' => 'shipping.text_en',
         ] as $field => $path) {
             if (in_array($field, $apply, true)) {
                 data_set($master, $path, $this->nullableString($changes[$field] ?? null));

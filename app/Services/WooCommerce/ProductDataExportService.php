@@ -281,14 +281,14 @@ final class ProductDataExportService
                 ->mapWithKeys(fn (string $language): array => [$language => [
                     'meta_data' => array_merge(
                         $this->customProductLabelMetaData($product, $language, $master),
-                        $this->shippingMetaData($master),
+                        $this->shippingMetaData($master, $language),
                     ),
                 ]])
                 ->all();
             $primaryPayload = (array) ($payloadsByLanguage['pl'] ?? [
                 'meta_data' => array_merge(
                     $this->customProductLabelMetaData($product, 'pl', $master),
-                    $this->shippingMetaData($master),
+                    $this->shippingMetaData($master, 'pl'),
                 ),
             ]);
             $primaryResponse = $this->client->updateProductDataByIds(
@@ -2052,7 +2052,7 @@ final class ProductDataExportService
             $meta,
             [['key' => '_ean', 'value' => $product->ean ?: '']],
             $this->customProductLabelMetaData($product, $language, $master),
-            $this->shippingMetaData($master),
+            $this->shippingMetaData($master, $language),
         );
     }
 
@@ -2082,13 +2082,15 @@ final class ProductDataExportService
      * @param  array<string, mixed>  $master
      * @return list<array{key:string,value:string}>
      */
-    private function shippingMetaData(array $master): array
+    private function shippingMetaData(array $master, string $language = 'pl'): array
     {
         $days = data_get($master, 'shipping.days');
+        $language = mb_strtolower(trim($language)) ?: 'pl';
+        $textPath = $language === 'en' ? 'shipping.text_en' : 'shipping.text';
 
         return [
             ['key' => 'lemon_shipping_days', 'value' => $days === null || $days === '' ? '' : (string) (int) $days],
-            ['key' => 'lemon_shipping_text', 'value' => (string) data_get($master, 'shipping.text', '')],
+            ['key' => 'lemon_shipping_text', 'value' => (string) data_get($master, $textPath, '')],
             ['key' => 'lemon_preorder', 'value' => data_get($master, 'shipping.preorder', false) ? 'yes' : 'no'],
         ];
     }
