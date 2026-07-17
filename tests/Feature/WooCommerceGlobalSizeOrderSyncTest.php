@@ -16,6 +16,7 @@ use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Observers\ProductParameterDefinitionObserver;
 use App\Services\WooCommerce\WooCommerceGlobalSizeOrderSyncService;
+use App\Services\WooCommerce\WooCommerceSizeDictionaryOrder;
 use Illuminate\Contracts\Events\ShouldHandleEventsAfterCommit;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
@@ -188,6 +189,39 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $this->assertSame(10, $terms[21]['menu_order']);
         $this->assertSame(20, $terms[22]['menu_order']);
         $this->assertSame('menu_order', $attribute['order_by']);
+    }
+
+    public function test_it_coalesces_a_historical_source_that_translates_to_an_existing_canonical_size(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            'values_en' => ['S/M', 'M/L'],
+            'is_variant' => true,
+            'sort_order' => 10,
+        ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiary',
+            'name_en' => 'Sizes',
+            'slug' => 'rozmiary',
+            'input_type' => 'select',
+            'values' => ['Small/Medium', 'Medium/Large'],
+            'values_en' => ['S/M', 'M/L'],
+            'is_variant' => true,
+            'sort_order' => 20,
+        ]);
+
+        $entries = app(WooCommerceSizeDictionaryOrder::class)
+            ->entries('en');
+
+        $this->assertSame(['S/M', 'M/L'], $entries->pluck('source')->all());
+        $this->assertSame(['S/M', 'M/L'], $entries->pluck('localized')->all());
+        $this->assertSame([10, 20], $entries->pluck('menu_order')->all());
+        $this->assertContains('Small/Medium', $entries->first()['source_aliases']);
+        $this->assertContains('Medium/Large', $entries->last()['source_aliases']);
     }
 
     public function test_colliding_woo_slugs_in_the_size_union_abort_before_the_first_remote_mutation(): void

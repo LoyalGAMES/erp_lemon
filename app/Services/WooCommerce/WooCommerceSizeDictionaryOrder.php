@@ -135,6 +135,7 @@ final class WooCommerceSizeDictionaryOrder
             ])
             ->filter(fn (array $row): bool => $row['identity'] !== '');
 
+        $rows = $this->coalesceEquivalentRows($rows);
         $this->assertUnambiguousRows($rows);
 
         $rows = $rows
@@ -289,6 +290,55 @@ final class WooCommerceSizeDictionaryOrder
             (string) preg_replace('/\s+/u', ' ', trim($value)),
             'UTF-8',
         );
+    }
+
+    /**
+     * Historical dictionaries can use a translated label as their source
+     * value (for example `Medium/Large`) while another dictionary owns the
+     * canonical source `M/L`. A shared semantic alias proves that these rows
+     * describe one option; merge them into the first, canonical owner before
+     * checking for genuine multi-owner conflicts and Woo slug collisions.
+     *
+     * @param  Collection<int,array{source:string,localized:string,all_localized:list<string>,identity:string,source_index:int}>  $rows
+     * @return Collection<int,array{source:string,localized:string,all_localized:list<string>,identity:string,source_index:int}>
+     */
+    private function coalesceEquivalentRows(Collection $rows): Collection
+    {
+        $owners = [];
+
+        return $rows->map(function (array $row) use (&$owners): array {
+            $aliases = collect([
+                $row['source'],
+                $row['localized'],
+                ...$row['all_localized'],
+            ])
+                ->map(fn (mixed $alias): string => trim((string) $alias))
+                ->filter()
+                ->map(fn (string $alias): string => $this->key($alias))
+                ->filter()
+                ->unique()
+                ->values();
+            $matchedOwners = $aliases
+                ->map(fn (string $alias): ?string => $owners[$alias] ?? null)
+                ->filter()
+                ->unique()
+                ->values();
+
+            if ($matchedOwners->count() > 1) {
+                throw new RuntimeException(
+                    "Słownik rozmiarów ERP zawiera niejednoznaczną wartość `{$row['source']}`.",
+                );
+            }
+
+            $owner = (string) ($matchedOwners->first() ?? $row['identity']);
+            $row['identity'] = $owner;
+
+            foreach ($aliases as $alias) {
+                $owners[$alias] = $owner;
+            }
+
+            return $row;
+        });
     }
 
     /**
