@@ -11,8 +11,10 @@ use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
 use App\Services\WooCommerce\ProductDataExportService;
+use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Carbon\CarbonImmutable;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -133,7 +135,7 @@ final class WooCommerceCustomProductLabelBackfillMigrationTest extends TestCase
         Http::assertNothingSent();
     }
 
-    public function test_label_backfill_updates_only_theme_meta_on_polish_and_english_products(): void
+    public function test_label_backfill_updates_only_storefront_meta_on_polish_and_english_products(): void
     {
         Http::fake(function ($request) {
             if ($request->method() === 'PUT') {
@@ -165,6 +167,11 @@ final class WooCommerceCustomProductLabelBackfillMigrationTest extends TestCase
             'text_color' => '#ffffff',
         ]);
         $attributes = (array) $product->attributes;
+        data_set($attributes, 'master.shipping', [
+            'days' => 11,
+            'text' => 'Planowana wysyłka: {date}',
+            'preorder' => true,
+        ]);
         data_set($attributes, 'woocommerce_translations.en', [
             'product_id' => '500535',
             'variation_id' => null,
@@ -205,6 +212,9 @@ final class WooCommerceCustomProductLabelBackfillMigrationTest extends TestCase
                 '_lemon_product_label_text' => 'PREORDER',
                 '_lemon_product_label_bg_color' => '#191d1e',
                 '_lemon_product_label_text_color' => '#ffffff',
+                'lemon_shipping_days' => '11',
+                'lemon_shipping_text' => 'Planowana wysyłka: {date}',
+                'lemon_preorder' => 'yes',
             ], collect($request['meta_data'])->pluck('value', 'key')->all());
         }
 
@@ -269,6 +279,148 @@ final class WooCommerceCustomProductLabelBackfillMigrationTest extends TestCase
                 '_lemon_product_label_text' => 'PREORDER',
                 '_lemon_product_label_bg_color' => '#191d1e',
                 '_lemon_product_label_text_color' => '#ffffff',
+                'lemon_shipping_days' => '',
+                'lemon_shipping_text' => '',
+                'lemon_preorder' => 'no',
+            ]);
+    }
+
+    public function test_blocked_full_export_still_updates_storefront_configuration_once(): void
+    {
+        Http::fake(Http::response(['id' => 4382]));
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-STOREFRONT-BLOCKED',
+            'name' => 'Woo storefront blocked',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Woo storefront blocked',
+            'base_url' => 'https://storefront-blocked.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl']]],
+        ]);
+        $product = $this->product('BLS6A4E3B15CDF1D', [
+            'pl' => 'PRZEDSPRZEDAŻ',
+            'en' => 'PREORDER',
+            'bg_color' => '#191d1e',
+            'text_color' => '#ffffff',
+        ]);
+        $attributes = (array) $product->attributes;
+        data_set($attributes, 'master.shipping', [
+            'days' => 11,
+            'text' => 'Planowana wysyłka: {date}',
+            'preorder' => true,
+        ]);
+        $product->forceFill(['attributes' => $attributes])->save();
+        $token = 'blocked-storefront-token';
+        $mapping = $this->mapping($product, $channel, '4382');
+        $metadata = [
+            'product_data_export' => [
+                'pending_token' => $token,
+                'requested_at' => now()->toISOString(),
+            ],
+        ];
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::REVISION,
+            'status' => 'queued',
+            'pending_token' => 'axis-repair-token',
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+        $axisRepair = app(WooOwnedVariantAxisRepairService::class);
+        $this->assertTrue($axisRepair->blocksFullExport($product));
+
+        $job = new ExportWooCommerceProductDataJob($product->id, $token);
+        $job->handle(app(ProductDataExportService::class), $axisRepair);
+        $job->handle(app(ProductDataExportService::class), $axisRepair);
+
+        $requests = Http::recorded()
+            ->map(fn (array $record) => $record[0])
+            ->filter(fn ($request): bool => $request->method() === 'PUT')
+            ->values();
+        $this->assertCount(1, $requests);
+        $this->assertSame(['meta_data'], array_keys($requests->first()->data()));
+        $this->assertSame([
+            '_lemon_product_label_text' => 'PRZEDSPRZEDAŻ',
+            '_lemon_product_label_bg_color' => '#191d1e',
+            '_lemon_product_label_text_color' => '#ffffff',
+            'lemon_shipping_days' => '11',
+            'lemon_shipping_text' => 'Planowana wysyłka: {date}',
+            'lemon_preorder' => 'yes',
+        ], collect($requests->first()['meta_data'])->pluck('value', 'key')->all());
+        $this->assertSame($token, data_get(
+            $mapping->refresh()->metadata,
+            'product_data_export.pending_token',
+        ));
+        $this->assertSame($token, data_get(
+            $mapping->metadata,
+            'product_data_export.storefront_metadata.synced_token',
+        ));
+    }
+
+    public function test_deployment_repairs_storefront_metadata_for_a_recent_failed_full_export(): void
+    {
+        Http::fake(Http::response(['id' => 4382]));
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C-STOREFRONT-DEPLOY',
+            'name' => 'Woo storefront deploy repair',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'Woo storefront deploy repair',
+            'base_url' => 'https://storefront-deploy.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl']]],
+        ]);
+        $product = $this->product('BLS6A4E3B15CDF1D', [
+            'pl' => 'PRZEDSPRZEDAŻ',
+            'en' => 'PREORDER',
+            'bg_color' => '#191d1e',
+            'text_color' => '#ffffff',
+        ]);
+        $attributes = (array) $product->attributes;
+        data_set($attributes, 'master.shipping', [
+            'days' => 11,
+            'text' => 'Planowana wysyłka: {date}',
+            'preorder' => true,
+        ]);
+        $product->forceFill(['attributes' => $attributes])->save();
+        $mapping = $this->mapping($product, $channel, '4382');
+        $mapping->forceFill(['metadata' => [
+            'product_data_export' => [
+                'failed_at' => now()->toISOString(),
+                'error' => 'unrelated historical attribute ambiguity',
+            ],
+        ]])->save();
+        Artisan::call('down', ['--retry' => 60]);
+
+        try {
+            $exitCode = Artisan::call(
+                'erp:sync-pending-woocommerce-storefront-metadata-during-maintenance',
+                ['--limit' => 50],
+            );
+            $output = Artisan::output();
+        } finally {
+            Artisan::call('up');
+        }
+
+        $this->assertSame(0, $exitCode, $output);
+        $this->assertStringContainsString('BLS6A4E3B15CDF1D', $output);
+        $this->assertStringContainsString('scanned=1, succeeded=1, failed=0', $output);
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && $request->url() === 'https://storefront-deploy.test/wp-json/wc/v3/products/4382'
+            && collect($request['meta_data'])->pluck('value', 'key')->all() === [
+                '_lemon_product_label_text' => 'PRZEDSPRZEDAŻ',
+                '_lemon_product_label_bg_color' => '#191d1e',
+                '_lemon_product_label_text_color' => '#ffffff',
+                'lemon_shipping_days' => '11',
+                'lemon_shipping_text' => 'Planowana wysyłka: {date}',
+                'lemon_preorder' => 'yes',
             ]);
     }
 

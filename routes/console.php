@@ -16,6 +16,7 @@ use App\Services\Payments\PayuRefundService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippedOrderWooSyncService;
 use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
+use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceProductCreationRecoveryService;
 use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Illuminate\Foundation\Inspiring;
@@ -123,6 +124,117 @@ Artisan::command('erp:sync-pending-woocommerce-product-labels-during-maintenance
 
     return $result['failed'] > 0 ? 1 : 0;
 })->purpose('Synchronously update Lemon theme product-label meta during deployment maintenance.');
+
+Artisan::command('erp:sync-pending-woocommerce-storefront-metadata-during-maintenance {--limit=50 : Maximum number of recent pending or failed products to update}', function (): int {
+    if (! app()->isDownForMaintenance()) {
+        $this->error('Bezpośrednia synchronizacja konfiguracji sklepowej wymaga trybu maintenance.');
+
+        return 1;
+    }
+
+    $limit = max(1, (int) $this->option('limit'));
+    $baseQuery = static fn () => ProductChannelMapping::query()
+        ->whereNotNull('external_product_id')
+        ->where('external_product_id', '!=', '')
+        ->whereHas('salesChannel', fn ($query) => $query
+            ->where('type', 'woocommerce')
+            ->where('is_active', true));
+    $productIds = $baseQuery()
+        ->whereNotNull('metadata->product_data_export->pending_token')
+        ->orderByDesc('updated_at')
+        ->orderByDesc('id')
+        ->pluck('product_id')
+        ->map(fn (mixed $productId): int => (int) $productId)
+        ->unique()
+        ->take($limit)
+        ->values();
+
+    if ($productIds->count() < $limit) {
+        $failedProductIds = $baseQuery()
+            ->whereNotNull('metadata->product_data_export->error')
+            ->when($productIds->isNotEmpty(), fn ($query) => $query->whereNotIn('product_id', $productIds->all()))
+            ->orderByDesc('updated_at')
+            ->orderByDesc('id')
+            ->pluck('product_id')
+            ->map(fn (mixed $productId): int => (int) $productId)
+            ->unique()
+            ->take($limit - $productIds->count());
+        $productIds = $productIds->concat($failedProductIds)->values();
+    }
+
+    $result = [
+        'scanned' => 0,
+        'succeeded' => 0,
+        'failed' => 0,
+        'results' => [],
+    ];
+    $exporter = app(ProductDataExportService::class);
+
+    foreach ($productIds as $productId) {
+        $product = Product::query()
+            ->with('channelMappings.salesChannel')
+            ->find($productId);
+
+        if (! $product instanceof Product || $product->masterSource() !== 'erp') {
+            continue;
+        }
+
+        $result['scanned']++;
+
+        try {
+            $exporter->exportStorefrontMetadata($product);
+
+            DB::transaction(function () use ($product): void {
+                ProductChannelMapping::query()
+                    ->where('product_id', $product->id)
+                    ->lockForUpdate()
+                    ->get()
+                    ->each(function (ProductChannelMapping $mapping): void {
+                        $metadata = (array) $mapping->metadata;
+                        $token = trim((string) data_get($metadata, 'product_data_export.pending_token', ''));
+
+                        if ($token === '') {
+                            return;
+                        }
+
+                        data_set(
+                            $metadata,
+                            ProductDataExportService::STOREFRONT_METADATA_SYNC_PATH.'.synced_token',
+                            $token,
+                        );
+                        data_set(
+                            $metadata,
+                            ProductDataExportService::STOREFRONT_METADATA_SYNC_PATH.'.synced_at',
+                            now()->toISOString(),
+                        );
+                        $mapping->forceFill(['metadata' => $metadata])->save();
+                    });
+            });
+
+            $result['succeeded']++;
+            $result['results'][] = [$product->id, $product->sku, 'success', '-'];
+        } catch (Throwable $exception) {
+            report($exception);
+            $result['failed']++;
+            $result['results'][] = [
+                $product->id,
+                $product->sku,
+                'failed',
+                str($exception->getMessage())->limit(180)->toString(),
+            ];
+        }
+    }
+
+    $this->table(['product', 'sku', 'status', 'error'], $result['results']);
+    $this->info(sprintf(
+        'Woo storefront metadata sync: scanned=%d, succeeded=%d, failed=%d.',
+        $result['scanned'],
+        $result['succeeded'],
+        $result['failed'],
+    ));
+
+    return $result['failed'] > 0 ? 1 : 0;
+})->purpose('Synchronously update labels, shipping and preorder meta for recent pending Woo exports.');
 
 Artisan::command('erp:dispatch-woo-owned-variant-axis-repair {--limit=10 : Maximum number of Woo-owned historical families to queue} {--stale-minutes=120 : Replace an abandoned repair reservation after this many minutes}', function (): int {
     $result = app(WooOwnedVariantAxisRepairService::class)->dispatchPending(

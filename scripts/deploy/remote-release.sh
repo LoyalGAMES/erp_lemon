@@ -501,9 +501,10 @@ else
     echo 'Błąd: pominięto naprawę osi wariantów, ponieważ globalna kolejność rozmiarów nie została potwierdzona.' >&2
 fi
 
-# Custom labels belong to Lemon Elementor Theme and are only three product
-# meta fields. Flush their narrow corrective revision synchronously while the
-# application is still in maintenance and every old queue worker has exited.
+# Custom storefront settings belong to Lemon Elementor Theme and are only six
+# product meta fields. Flush their narrow corrective revisions synchronously
+# while the application is still in maintenance and every old queue worker has
+# exited.
 # A Woo outage is reported but does not make an otherwise healthy ERP release
 # unrecoverable; the durable pending state remains available for a later retry.
 if ! (
@@ -511,6 +512,17 @@ if ! (
     "$php_bin" artisan erp:sync-pending-woocommerce-product-labels-during-maintenance --limit=100
 ); then
     echo 'Błąd: bezpośrednia synchronizacja labeli motywu WooCommerce nie zakończyła się w pełni; stan oczekujący pozostawiono do ponowienia.' >&2
+fi
+
+# A normal product save can already have a durable full export reservation or
+# failure from the previous release. Repair the newest such products now so
+# their label, shipping date and preorder configuration reaches WooCommerce
+# without waiting for historical catalog/attribute work.
+if ! (
+    cd "$release_path"
+    "$php_bin" artisan erp:sync-pending-woocommerce-storefront-metadata-during-maintenance --limit=50
+); then
+    echo 'Błąd: część oczekujących konfiguracji sklepowych WooCommerce nie została wysłana; pełny eksport pozostawiono do ponowienia.' >&2
 fi
 
 if [[ "$bootstrap_mode" == 'legacy-directory' ]]; then

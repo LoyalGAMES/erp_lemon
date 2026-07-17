@@ -25,6 +25,8 @@ use RuntimeException;
 
 final class ProductDataExportService
 {
+    public const STOREFRONT_METADATA_SYNC_PATH = 'product_data_export.storefront_metadata';
+
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly ProductDescriptionSanitizer $descriptionSanitizer,
@@ -235,23 +237,34 @@ final class ProductDataExportService
     }
 
     /**
-     * Update only the custom post meta consumed by Lemon Elementor Theme.
-     * This deliberately avoids catalog, attribute and variant-axis work so a
-     * label correction cannot be blocked by an unrelated full-export repair.
+     * Backward-compatible entry point for the historical label backfill.
      *
      * @return array{exported:int,results:list<array<string,mixed>>}
      */
     public function exportCustomLabels(Product $product): array
     {
+        return $this->exportStorefrontMetadata($product);
+    }
+
+    /**
+     * Update only custom storefront metadata consumed by Lemon Elementor
+     * Theme. This deliberately avoids catalog, attribute and variant-axis
+     * work so label, shipping-date and preorder settings cannot be blocked by
+     * an unrelated full-export repair.
+     *
+     * @return array{exported:int,results:list<array<string,mixed>>}
+     */
+    public function exportStorefrontMetadata(Product $product): array
+    {
         $product->loadMissing('channelMappings.salesChannel');
-        $mappings = $product->channelMappings
-            ->filter(fn (ProductChannelMapping $mapping): bool => ! filled($mapping->external_variation_id));
+        $mappings = $product->channelMappings;
 
         if ($mappings->isEmpty()) {
-            throw new RuntimeException('Produkt nie ma mapowania produktu nadrzędnego do WooCommerce.');
+            throw new RuntimeException('Produkt nie ma mapowania do WooCommerce.');
         }
 
         $results = [];
+        $master = $product->masterData();
 
         foreach ($mappings as $mapping) {
             $integration = WordpressIntegration::query()
@@ -262,24 +275,33 @@ final class ProductDataExportService
                 throw new RuntimeException("Brak aktywnej integracji WooCommerce dla kanału {$mapping->salesChannel?->code}.");
             }
 
+            $isVariation = filled($mapping->external_variation_id)
+                && trim((string) $mapping->external_variation_id) !== '0';
             $payloadsByLanguage = collect($integration->productExportLanguages())
-                ->mapWithKeys(fn (string $language): array => [
-                    $language => ['meta_data' => $this->customProductLabelMetaData($product, $language)],
-                ])
+                ->mapWithKeys(fn (string $language): array => [$language => [
+                    'meta_data' => array_merge(
+                        $this->customProductLabelMetaData($product, $language, $master),
+                        $this->shippingMetaData($master),
+                    ),
+                ]])
                 ->all();
             $primaryPayload = (array) ($payloadsByLanguage['pl'] ?? [
-                'meta_data' => $this->customProductLabelMetaData($product, 'pl'),
+                'meta_data' => array_merge(
+                    $this->customProductLabelMetaData($product, 'pl', $master),
+                    $this->shippingMetaData($master),
+                ),
             ]);
             $primaryResponse = $this->client->updateProductDataByIds(
                 $integration,
                 (string) $mapping->external_product_id,
-                null,
+                $isVariation ? (string) $mapping->external_variation_id : null,
                 $primaryPayload,
                 'pl',
             );
             $targets = [[
                 'language' => 'pl',
                 'product_id' => (string) $mapping->external_product_id,
+                'variation_id' => $isVariation ? (string) $mapping->external_variation_id : null,
                 'status' => 'updated',
             ]];
             $missingPayloads = [];
@@ -293,9 +315,14 @@ final class ProductDataExportService
                 }
 
                 $externalProductId = trim((string) data_get($references, "{$language}.product_id", ''));
+                $externalVariationId = $isVariation
+                    ? trim((string) data_get($references, "{$language}.variation_id", ''))
+                    : '';
 
-                if ($externalProductId === '') {
-                    $missingPayloads[$language] = $payload;
+                if ($externalProductId === '' || ($isVariation && $externalVariationId === '')) {
+                    if (! $isVariation) {
+                        $missingPayloads[$language] = $payload;
+                    }
 
                     continue;
                 }
@@ -303,13 +330,14 @@ final class ProductDataExportService
                 $this->client->updateProductDataByIds(
                     $integration,
                     $externalProductId,
-                    null,
+                    $isVariation ? $externalVariationId : null,
                     $payload,
                     $language,
                 );
                 $targets[] = [
                     'language' => $language,
                     'product_id' => $externalProductId,
+                    'variation_id' => $isVariation ? $externalVariationId : null,
                     'status' => 'updated',
                 ];
             }
@@ -348,8 +376,10 @@ final class ProductDataExportService
                 'direction' => 'out',
                 'operation' => 'export_product_labels',
                 'status' => 'success',
-                'external_resource' => 'product',
-                'external_id' => (string) $mapping->external_product_id,
+                'external_resource' => $isVariation ? 'product_variation' : 'product',
+                'external_id' => $isVariation
+                    ? (string) $mapping->external_variation_id
+                    : (string) $mapping->external_product_id,
                 'request_payload' => $payloadsByLanguage,
                 'response_payload' => [
                     'id' => $primaryResponse['id'] ?? null,
@@ -362,7 +392,9 @@ final class ProductDataExportService
 
             $results[] = [
                 'channel' => $mapping->salesChannel?->code,
-                'external_id' => (string) $mapping->external_product_id,
+                'external_id' => $isVariation
+                    ? (string) $mapping->external_variation_id
+                    : (string) $mapping->external_product_id,
                 'response' => $primaryResponse,
                 'translations' => array_values(array_filter(
                     $targets,

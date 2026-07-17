@@ -92,21 +92,39 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
             }
 
             if ($this->isCustomProductLabelsSync($product)) {
-                $exporter->exportCustomLabels($product);
+                $this->exportStorefrontMetadataIfNeeded($product, $exporter);
                 $this->clearCurrentSyncToken();
 
                 return;
             }
 
             if (($axisRepair ?? app(WooOwnedVariantAxisRepairService::class))->blocksFullExport($product)) {
+                $this->exportStorefrontMetadataIfNeeded($product, $exporter);
+
                 // Keep the current export token and let the queue retry after
-                // both the remote and local family axes are canonical.
+                // both the remote and local family axes are canonical. Safe
+                // storefront metadata has already reached WooCommerce.
                 $this->release(60);
 
                 return;
             }
 
-            $exporter->export($product);
+            try {
+                $exporter->export($product);
+            } catch (Throwable $fullExportException) {
+                // Catalog preparation can fail before WooCommerce receives
+                // any request (for example on an unrelated historical
+                // attribute ambiguity). Do not make labels, shipping dates or
+                // preorder configuration wait for that broad repair.
+                try {
+                    $this->exportStorefrontMetadataIfNeeded($product, $exporter);
+                } catch (Throwable $storefrontMetadataException) {
+                    report($storefrontMetadataException);
+                }
+
+                throw $fullExportException;
+            }
+
             $this->clearCurrentSyncToken();
         } catch (Throwable $exception) {
             if ($this->job?->getConnectionName() === 'sync' && $this->syncToken !== null) {
@@ -151,6 +169,52 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
             ));
 
             return LegacyVariantFamilyBackfillService::isCustomProductLabelsRevision($revision);
+        });
+    }
+
+    private function exportStorefrontMetadataIfNeeded(
+        Product $product,
+        ProductDataExportService $exporter,
+    ): void {
+        $eligibleMappings = $product->channelMappings->filter(
+            fn (ProductChannelMapping $mapping): bool => filled($mapping->external_product_id),
+        );
+
+        if ($eligibleMappings->isEmpty()) {
+            return;
+        }
+
+        if ($this->syncToken !== null && $eligibleMappings->every(
+            fn (ProductChannelMapping $mapping): bool => data_get(
+                $mapping->metadata,
+                ProductDataExportService::STOREFRONT_METADATA_SYNC_PATH.'.synced_token',
+            ) === $this->syncToken,
+        )) {
+            return;
+        }
+
+        $exporter->exportStorefrontMetadata($product);
+
+        if ($this->syncToken === null) {
+            return;
+        }
+
+        DB::transaction(function (): void {
+            ProductChannelMapping::query()
+                ->where('product_id', $this->productId)
+                ->lockForUpdate()
+                ->get()
+                ->each(function (ProductChannelMapping $mapping): void {
+                    $metadata = (array) $mapping->metadata;
+
+                    if (data_get($metadata, 'product_data_export.pending_token') !== $this->syncToken) {
+                        return;
+                    }
+
+                    data_set($metadata, ProductDataExportService::STOREFRONT_METADATA_SYNC_PATH.'.synced_token', $this->syncToken);
+                    data_set($metadata, ProductDataExportService::STOREFRONT_METADATA_SYNC_PATH.'.synced_at', now()->toISOString());
+                    $mapping->forceFill(['metadata' => $metadata])->save();
+                });
         });
     }
 
