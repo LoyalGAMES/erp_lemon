@@ -97,7 +97,7 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $this->assertSame($requestCount + 3, Http::recorded()->count());
     }
 
-    public function test_it_semantically_orders_raw_dictionary_pairs_in_both_languages_without_mutating_the_definition(): void
+    public function test_it_uses_the_exact_erp_dictionary_order_in_both_languages_without_mutating_the_definition(): void
     {
         $definition = ProductParameterDefinition::query()->create([
             'name' => 'Rozmiar',
@@ -131,10 +131,10 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
 
         $this->assertSame('synchronized', $result['status']);
         $this->assertSame(8, $result['matched_terms']);
-        foreach ([13 => 10, 11 => 20, 12 => 30, 14 => 40] as $termId => $menuOrder) {
+        foreach ([11 => 10, 12 => 20, 13 => 30, 14 => 40] as $termId => $menuOrder) {
             $this->assertSame($menuOrder, $terms[$termId]['menu_order']);
         }
-        foreach ([23 => 10, 21 => 20, 22 => 30, 24 => 40] as $termId => $menuOrder) {
+        foreach ([21 => 10, 22 => 20, 23 => 30, 24 => 40] as $termId => $menuOrder) {
             $this->assertSame($menuOrder, $terms[$termId]['menu_order']);
         }
         $this->assertSame($definitionBefore, (array) DB::table('product_parameter_definitions')
@@ -345,9 +345,9 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $this->assertSame('menu_order', $attributes[1]['order_by']);
         $this->assertSame('name', $attributes[9]['order_by']);
         $this->assertSame('S/M', $terms[58]['name']);
-        $this->assertSame(20, $terms[58]['menu_order']);
+        $this->assertSame(10, $terms[58]['menu_order']);
         $this->assertSame('M/L', $terms[57]['name']);
-        $this->assertSame(30, $terms[57]['menu_order']);
+        $this->assertSame(20, $terms[57]['menu_order']);
         $this->assertNotEmpty($mutations);
         $this->assertTrue(collect($mutations)->every(
             fn (array $mutation): bool => str_starts_with(
@@ -531,9 +531,9 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
         $this->assertSame('synchronized', $result['status']);
         $this->assertSame(4, $result['matched_terms']);
         $this->assertSame('S/M', $terms[58]['name']);
-        $this->assertSame(10, $terms[58]['menu_order']);
+        $this->assertSame(20, $terms[58]['menu_order']);
         $this->assertSame('M/L', $terms[57]['name']);
-        $this->assertSame(20, $terms[57]['menu_order']);
+        $this->assertSame(10, $terms[57]['menu_order']);
         $this->assertSame('menu_order', $attribute['order_by']);
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
     }

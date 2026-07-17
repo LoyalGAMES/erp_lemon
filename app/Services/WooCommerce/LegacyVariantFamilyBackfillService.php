@@ -45,13 +45,17 @@ final class LegacyVariantFamilyBackfillService
 
     public const ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION = 'attribute_positions_and_live_stock_2026_07_16_000023';
 
-    public const CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000033';
+    public const CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'erp_size_configuration_order_catalog_sync_2026_07_17_000038';
 
     public const CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION = 'custom_product_labels_meta_sync_2026_07_17_000035';
 
     public const STOREFRONT_TRANSLATIONS_SYNC_REVISION = 'storefront_translations_meta_sync_2026_07_17_000036';
 
     public const PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION = 'custom_product_labels_catalog_sync_2026_07_17_000034';
+
+    public const PREVIOUS_EXACT_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000033';
+
+    public const PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_CATALOG_SYNC_REVISION = 'multiple_legacy_size_axes_catalog_sync_2026_07_17_000037';
 
     public const PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000032';
 
@@ -263,6 +267,8 @@ final class LegacyVariantFamilyBackfillService
                 self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                 self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
                 self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+                self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_CATALOG_SYNC_REVISION,
+                self::PREVIOUS_EXACT_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                 self::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                 self::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                 self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
@@ -323,6 +329,8 @@ final class LegacyVariantFamilyBackfillService
             self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
             self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
             self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_CATALOG_SYNC_REVISION,
+            self::PREVIOUS_EXACT_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
             self::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
             self::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
             self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
@@ -410,6 +418,8 @@ final class LegacyVariantFamilyBackfillService
                         self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                         self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
                         self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+                        self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_CATALOG_SYNC_REVISION,
+                        self::PREVIOUS_EXACT_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                         self::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                         self::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                         self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,

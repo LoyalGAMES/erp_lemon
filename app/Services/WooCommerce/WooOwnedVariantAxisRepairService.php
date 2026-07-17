@@ -31,7 +31,11 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_16_000033';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_17_000038';
+
+    public const PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_REVISION = 'woo_erp_size_variant_axis_2026_07_17_000037';
+
+    public const PREVIOUS_EXACT_CHILD_ASSIGNMENT_AUDIT_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000033';
 
     public const PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION = 'woo_erp_size_variant_axis_2026_07_16_000032';
 
@@ -61,6 +65,8 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_REVISION,
+            self::PREVIOUS_EXACT_CHILD_ASSIGNMENT_AUDIT_REVISION,
             self::PREVIOUS_BLANK_CHILD_ASSIGNMENT_AUDIT_REVISION,
             self::PREVIOUS_CHILD_ASSIGNMENT_AUDIT_REVISION,
             self::PREVIOUS_EXACT_DEFAULT_REPAIR_REVISION,
@@ -2055,6 +2061,45 @@ final class WooOwnedVariantAxisRepairService
     {
         return $this->isWooOwnedVariantRootCandidate($product)
             || $this->isErpOwnedVariantRootCandidate($product);
+    }
+
+    /**
+     * Re-audit only families that locally expose at least two distinct legacy
+     * generic aliases (for example `wariant` and `BLVariant`) next to Size.
+     * Every populated representation must prove the exact same dictionary-
+     * backed option set before the family is allowed into the remote repair.
+     */
+    public function isMultipleLegacySizeAxisCandidate(Product $product): bool
+    {
+        $product->loadMissing(['variantChildren', 'parentRelations']);
+
+        if (! $this->isSizeVariantRootCandidate($product)
+            || ! $this->hasParentDuplicatedGenericAndSizeAxisEvidence($product)
+        ) {
+            return false;
+        }
+
+        $aliases = collect([
+            ...(array) data_get($product->masterData(), 'parameters', []),
+            ...(array) data_get($product->attributes, 'woocommerce_attributes', []),
+        ])
+            ->filter(fn (mixed $row): bool => is_array($row))
+            ->map(function (array $row): string {
+                foreach ([$row['name'] ?? null, $row['slug'] ?? null] as $name) {
+                    $name = trim((string) $name);
+
+                    if ($name !== '' && $this->legacySizeAxis->isLegacyGeneric($name)) {
+                        return $this->attributeKey($name);
+                    }
+                }
+
+                return '';
+            })
+            ->filter()
+            ->unique()
+            ->values();
+
+        return $aliases->count() > 1;
     }
 
     /**
@@ -5449,12 +5494,12 @@ final class WooOwnedVariantAxisRepairService
             ->filter(fn (array $attribute): bool => $this->isSizeAttribute($attribute))
             ->values();
 
-        if ($genericAttributes->count() > 1) {
-            return $this->unsafePlan('Rodzic zawiera kilka tekstowych osi wariantu.');
-        }
-
         if ($sizeAttributes->count() > 1) {
             return $this->unsafePlan('Rodzic zawiera kilka atrybutów Rozmiar/Size.');
+        }
+
+        if ($genericAttributes->count() > 1 && $sizeAttributes->isEmpty()) {
+            return $this->unsafePlan('Rodzic zawiera kilka tekstowych osi wariantu bez globalnego Rozmiaru/Size.');
         }
 
         if ($genericAttributes->isEmpty() && $sizeAttributes->isEmpty()) {
@@ -5498,13 +5543,13 @@ final class WooOwnedVariantAxisRepairService
 
         $sizeId = (int) ($size['id'] ?? 0);
 
-        $otherVariationAxis = $attributes->contains(function (array $attribute) use ($generic, $sourceSize): bool {
+        $otherVariationAxis = $attributes->contains(function (array $attribute) use ($sourceSize): bool {
             if (! (bool) ($attribute['variation'] ?? false)) {
                 return false;
             }
 
             return (! is_array($sourceSize) || ! $this->sameAttribute($attribute, $sourceSize))
-                && (! is_array($generic) || ! $this->sameAttribute($attribute, $generic));
+                && ! $this->isGenericAttribute($attribute);
         });
 
         if ($otherVariationAxis) {
@@ -5568,25 +5613,31 @@ final class WooOwnedVariantAxisRepairService
                 ]);
         }
 
-        if (is_array($generic) && is_array($sourceSize)) {
-            $genericKeys = collect((array) ($generic['options'] ?? []))
-                ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey(
-                    $sizeName,
-                    (string) $option,
-                ))
-                ->filter()
-                ->unique()
-                ->sort()
-                ->values();
+        if ($genericAttributes->isNotEmpty()) {
+            $canonicalKeys = $canonicalByKey->keys()->sort()->values()->all();
 
-            if ($genericKeys->isNotEmpty()
-                && $genericKeys->all() !== $canonicalByKey->keys()->sort()->values()->all()
-            ) {
-                return $this->unsafePlan('Tekstowy wariant i globalny rozmiar mają inne wartości.');
+            foreach ($genericAttributes as $genericAttribute) {
+                $genericKeys = collect((array) ($genericAttribute['options'] ?? []))
+                    ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey(
+                        $sizeName,
+                        (string) $option,
+                    ))
+                    ->filter()
+                    ->unique()
+                    ->sort()
+                    ->values();
+
+                if (($genericAttributes->count() > 1 && $genericKeys->isEmpty())
+                    || ($genericKeys->isNotEmpty() && $genericKeys->all() !== $canonicalKeys)
+                ) {
+                    return $this->unsafePlan('Tekstowe osie wariantu i globalny rozmiar mają inne wartości.');
+                }
             }
 
-            if (! (bool) ($generic['variation'] ?? false)
-                && ! (bool) ($size['variation'] ?? false)
+            if (! $genericAttributes->contains(
+                fn (array $attribute): bool => (bool) ($attribute['variation'] ?? false),
+            )
+                && (! is_array($sourceSize) || ! (bool) ($size['variation'] ?? false))
             ) {
                 return $this->unsafePlan('Ani tekstowy wariant, ani globalny rozmiar nie jest osią wariantową.');
             }
@@ -5733,14 +5784,15 @@ final class WooOwnedVariantAxisRepairService
             return $this->unsafePlan('Naprawa nie rozwiązała istniejącego globalnego atrybutu Rozmiar/Size.');
         }
 
+        $insertedSize = false;
         $finalAttributes = $attributes
             ->map(function (array $attribute) use (
-                $generic,
                 $sourceSize,
                 $size,
                 $orderedOptions,
+                &$insertedSize,
             ): ?array {
-                $isGeneric = is_array($generic) && $this->sameAttribute($attribute, $generic);
+                $isGeneric = $this->isGenericAttribute($attribute);
                 $isSourceSize = is_array($sourceSize) && $this->sameAttribute($attribute, $sourceSize);
 
                 if ($isGeneric && is_array($sourceSize)) {
@@ -5748,6 +5800,11 @@ final class WooOwnedVariantAxisRepairService
                 }
 
                 if ($isGeneric || $isSourceSize) {
+                    if ($insertedSize) {
+                        return null;
+                    }
+
+                    $insertedSize = true;
                     $serialized = $this->serializeParentAttribute($size);
                     $serialized['variation'] = true;
                     $serialized['options'] = $orderedOptions;
@@ -6866,10 +6923,10 @@ final class WooOwnedVariantAxisRepairService
     }
 
     /**
-     * Submit child assignments in the canonical Size dictionary order. This
-     * mirrors the successful manual S/M-then-M/L repair and makes our write
-     * sequence deterministic without claiming that Woo's later DISTINCT
-     * attribute query guarantees any physical database row order.
+     * Submit child assignments in the exact Size order configured in ERP.
+     * This keeps the write sequence deterministic without claiming that
+     * Woo's later DISTINCT attribute query guarantees any physical database
+     * row order.
      *
      * @param  array<int|string,array<string,mixed>>  $payloads
      * @return array<int|string,array<string,mixed>>

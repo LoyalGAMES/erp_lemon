@@ -6,6 +6,7 @@ namespace App\Services\WooCommerce;
 
 use App\Models\ProductChannelMapping;
 use App\Models\WordpressIntegration;
+use App\Services\Products\ProductVariantAxisNameResolver;
 use Carbon\CarbonInterface;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\RequestException;
@@ -37,6 +38,10 @@ final class WooCommerceClient
 
     /** @var array<string, true> */
     private array $linkedGlobalProductAttributeTermTranslations = [];
+
+    public function __construct(
+        private readonly ProductVariantAxisNameResolver $variantAxisNames,
+    ) {}
 
     public function test(WordpressIntegration $integration): array
     {
@@ -1274,6 +1279,8 @@ final class WooCommerceClient
             throw new RuntimeException('Nie można utworzyć globalnego atrybutu WooCommerce bez nazwy źródłowej.');
         }
 
+        $this->assertAtomicSizeOptions($sourceName, $options);
+
         $optionPairs = collect($options)
             ->map(function (mixed $option, int $index) use ($sourceOptions, $menuOrders): array {
                 $localized = trim((string) $option);
@@ -1444,6 +1451,8 @@ final class WooCommerceClient
                 'Uzupełnienie wartości istniejącego globalnego atrybutu wymaga prawidłowego ID i nazwy.',
             );
         }
+
+        $this->assertAtomicSizeOptions($sourceName, $options);
 
         $attribute = collect($this->globalProductAttributes($integration))
             ->first(fn (array $candidate): bool => (int) ($candidate['id'] ?? 0) === $attributeId);
@@ -1987,6 +1996,26 @@ final class WooCommerceClient
         }
 
         return $term;
+    }
+
+    /** @param list<string> $options */
+    private function assertAtomicSizeOptions(string $sourceName, array $options): void
+    {
+        if (! $this->variantAxisNames->isDirectSizeAlias($sourceName)) {
+            return;
+        }
+
+        $aggregate = collect($options)->first(
+            fn (mixed $option): bool => $this->variantAxisNames
+                ->optionTokens([(string) $option])
+                ->count() > 1,
+        );
+
+        if ($aggregate !== null) {
+            throw new RuntimeException(
+                "Rozmiar/Size zawiera zbiorczą wartość `{$aggregate}`; eksport nie utworzy z niej jednego termu WooCommerce.",
+            );
+        }
     }
 
     /**
