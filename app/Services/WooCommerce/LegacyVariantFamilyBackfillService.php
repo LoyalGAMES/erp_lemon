@@ -47,6 +47,8 @@ final class LegacyVariantFamilyBackfillService
 
     public const CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000033';
 
+    public const CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION = 'custom_product_labels_catalog_sync_2026_07_17_000034';
+
     public const PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000032';
 
     public const PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION = 'child_size_assignment_catalog_sync_2026_07_16_000031';
@@ -243,6 +245,7 @@ final class LegacyVariantFamilyBackfillService
 
         try {
             if (in_array($reservation['revision'], [
+                self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                 self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
                 self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                 self::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
@@ -300,6 +303,7 @@ final class LegacyVariantFamilyBackfillService
         // catalog backfill. Dispatch its revision first, then continue the
         // normal newest-first queue without visiting the same mapping twice.
         foreach ([
+            self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
             self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
             self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
             self::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
@@ -384,6 +388,7 @@ final class LegacyVariantFamilyBackfillService
 
                 try {
                     if (in_array($reservation['revision'], [
+                        self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
                         self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
                         self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
                         self::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
