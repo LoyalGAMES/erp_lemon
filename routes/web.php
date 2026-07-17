@@ -119,6 +119,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::put('/products/configuration/parameters/{parameter}', [ProductConfigurationController::class, 'updateParameter'])->name('products.parameters.update');
         Route::delete('/products/configuration/parameters/{parameter}', [ProductConfigurationController::class, 'destroyParameter'])->name('products.parameters.destroy');
         Route::post('/products', [ProductController::class, 'store'])->name('products.store');
+        Route::put('/products/bulk', [ProductController::class, 'bulkUpdate'])->name('products.bulk.update');
         Route::get('/products/{product}/edit', [ProductController::class, 'edit'])->name('products.edit');
         Route::put('/products/{product}', [ProductController::class, 'update'])->name('products.update');
         Route::post('/products/{product}/duplicate', [ProductController::class, 'duplicate'])->name('products.duplicate');

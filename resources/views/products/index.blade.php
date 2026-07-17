@@ -25,8 +25,12 @@
         .product-storefront-badge, .product-stock-verification-badge { display: inline-flex; margin-left: 7px; border-radius: 999px; padding: 3px 7px; font-size: 10px; font-weight: 850; vertical-align: middle; }
         .product-storefront-badge { background: rgba(207, 54, 54, .1); color: var(--red); }
         .product-stock-verification-badge { background: #fff4e8; color: #8b5b34; }
-        .product-cell { display: grid; grid-template-columns: 34px 62px minmax(260px, 1fr); gap: 12px; align-items: center; white-space: normal; }
-        .product-cell.variant { padding-left: 42px; grid-template-columns: 34px 48px minmax(220px, 1fr); }
+        .product-cell { display: grid; grid-template-columns: 28px 34px 62px minmax(260px, 1fr); gap: 12px; align-items: center; white-space: normal; }
+        .product-cell.variant { padding-left: 42px; grid-template-columns: 28px 34px 48px minmax(220px, 1fr); }
+        .product-select-control, .product-select-spacer { width: 28px; min-height: 34px; display: grid; place-items: center; }
+        .product-select-control { cursor: pointer; }
+        .product-select-control input, .catalog-select-heading input { width: 18px; height: 18px; margin: 0; accent-color: var(--green-dark); cursor: pointer; }
+        .catalog-select-heading { display: flex; align-items: center; gap: 10px; }
         .product-thumb-button { width: 58px; height: 72px; border: 1px solid var(--border); border-radius: 8px; padding: 0; overflow: hidden; background: #f4f1ef; cursor: pointer; display: grid; place-items: center; color: var(--muted); font-weight: 850; font-size: 11px; }
         .product-cell.variant .product-thumb-button { width: 44px; height: 56px; }
         .product-thumb-button img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -75,6 +79,44 @@
         .pagination-page.active { color: var(--green-dark); background: var(--green-soft); border-color: rgba(134, 115, 100, .34); }
         .pagination-page.disabled { opacity: .45; pointer-events: none; }
         .pagination-summary { color: var(--muted); font-size: 12px; }
+        .product-bulk-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 16px; border-bottom: 1px solid var(--border); background: rgba(134, 115, 100, .055); }
+        .product-bulk-selection, .product-bulk-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .product-bulk-count { min-width: 116px; color: var(--text); font-size: 13px; font-weight: 820; }
+        .product-bulk-mode { color: var(--muted); font-size: 12px; }
+        .product-bulk-toolbar .button { min-height: 36px; display: inline-flex; align-items: center; justify-content: center; }
+        .product-bulk-modal { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 24px; background: rgba(37, 31, 26, .68); }
+        .product-bulk-modal[hidden] { display: none; }
+        html.product-bulk-modal-open, html.product-bulk-modal-open body { overflow: hidden; }
+        .product-bulk-modal-card { width: min(1080px, 97vw); max-height: 94vh; overflow: hidden; border-radius: 11px; background: var(--surface); box-shadow: 0 28px 80px rgba(0, 0, 0, .35); }
+        .product-bulk-modal-card form { max-height: 94vh; display: flex; flex-direction: column; }
+        .product-bulk-modal-header, .product-bulk-modal-footer { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 18px; }
+        .product-bulk-modal-header { border-bottom: 1px solid var(--border); }
+        .product-bulk-modal-header h2 { margin: 0; font-size: 19px; }
+        .product-bulk-modal-header p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+        .product-bulk-modal-close { width: 38px; height: 38px; flex: 0 0 38px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--muted); font: inherit; font-size: 24px; cursor: pointer; }
+        .product-bulk-modal-body { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 16px 18px 20px; }
+        .product-bulk-help { margin-bottom: 14px; border-radius: 8px; padding: 10px 12px; background: var(--green-soft); color: var(--green-dark); font-size: 12px; line-height: 1.5; }
+        .product-bulk-errors { margin-bottom: 14px; }
+        .product-bulk-errors ul { margin: 7px 0 0; padding-left: 20px; }
+        .product-bulk-section { display: grid; gap: 10px; }
+        .product-bulk-section + .product-bulk-section { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--border); }
+        .product-bulk-section h3 { margin: 0; font-size: 15px; }
+        .product-bulk-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+        .product-bulk-field { min-width: 0; display: grid; align-content: start; gap: 8px; border: 1px solid var(--border); border-radius: 9px; padding: 11px; background: #fffdfb; }
+        .product-bulk-field.wide { grid-column: 1 / -1; }
+        .product-bulk-field > label:not(.product-bulk-apply) { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+        .product-bulk-field input:not([type="checkbox"]), .product-bulk-field select { width: 100%; min-width: 0; }
+        .product-bulk-field small { color: var(--muted); font-size: 11px; line-height: 1.4; }
+        .product-bulk-apply { display: flex; align-items: center; gap: 7px; color: var(--text); font-size: 13px; font-weight: 820; cursor: pointer; }
+        .product-bulk-apply input { width: 17px; height: 17px; margin: 0; accent-color: var(--green-dark); }
+        .product-bulk-category-list { max-height: 190px; overflow-y: auto; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 5px; margin: 0; border: 0; padding: 0; }
+        .product-bulk-category-list label { min-width: 0; display: flex; align-items: flex-start; gap: 8px; border-radius: 7px; padding: 7px 8px; background: var(--surface-soft); cursor: pointer; }
+        .product-bulk-category-list label span { min-width: 0; display: grid; gap: 2px; }
+        .product-bulk-category-list label strong { overflow-wrap: anywhere; font-size: 12px; }
+        .product-bulk-category-list label small { overflow-wrap: anywhere; }
+        .product-bulk-category-list:disabled, .product-bulk-field [data-product-bulk-value]:disabled { opacity: .55; cursor: not-allowed; }
+        .product-bulk-modal-footer { border-top: 1px solid var(--border); background: var(--surface-soft); }
+        .product-bulk-modal-footer > span { color: var(--muted); font-size: 11px; }
         .image-modal { position: fixed; inset: 0; z-index: 90; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(37, 31, 26, .72); }
         .image-modal.open { display: flex; }
         .image-modal-card { max-width: min(760px, 94vw); max-height: 92vh; background: var(--surface); border-radius: 8px; overflow: hidden; box-shadow: 0 24px 70px rgba(0, 0, 0, .32); }
@@ -138,8 +180,9 @@
             .products-table [data-product-card="variant"] [data-product-card-section="stock"]::before { content: "Stan wariantu"; }
             .products-table [data-product-card-section="actions"]::before { content: "Akcje"; }
             .products-table [data-product-card="variant"] [data-product-card-section="identity"]::before { content: "Wariant"; display: inline-flex; margin-bottom: 8px; border-radius: 999px; padding: 3px 7px; background: var(--green-soft); color: var(--green-dark); font-size: 10px; font-weight: 850; letter-spacing: .03em; text-transform: uppercase; }
-            .products-table .product-cell, .products-table .product-cell.variant { grid-template-columns: 44px 58px minmax(0, 1fr); gap: 8px; padding-left: 0; align-items: start; }
-            .products-table .product-cell.variant { grid-template-columns: 44px 48px minmax(0, 1fr); }
+            .products-table .product-cell, .products-table .product-cell.variant { grid-template-columns: 32px 44px 58px minmax(0, 1fr); gap: 8px; padding-left: 0; align-items: start; }
+            .products-table .product-cell.variant { grid-template-columns: 32px 44px 48px minmax(0, 1fr); }
+            .products-table .product-select-control, .products-table .product-select-spacer { width: 32px; min-height: 44px; }
             .products-table .product-cell > :last-child { min-width: 0; }
             .products-table .favorite-button { width: 44px; height: 44px; }
             .products-table .product-title { display: block; overflow-wrap: anywhere; line-height: 1.35; }
@@ -159,6 +202,10 @@
             .products-table [data-product-card-section="actions"] .inline-actions form { width: 100%; display: block; }
             .products-table [data-product-card-section="actions"] .inline-actions .button { width: 100%; min-width: 0; min-height: 44px; padding-inline: 6px; }
             .product-import-issue-items { min-width: 0; }
+            .product-bulk-toolbar { align-items: stretch; flex-direction: column; padding: 10px; }
+            .product-bulk-selection, .product-bulk-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .product-bulk-count, .product-bulk-mode { grid-column: 1 / -1; }
+            .product-bulk-toolbar .button { width: 100%; min-height: 42px; white-space: normal; }
         }
         @media (max-width: 900px) {
             .product-mobile-filter-trigger { display: inline-flex; margin-bottom: 12px; }
@@ -201,6 +248,14 @@
             .stock-modal-body .stock-readonly-panel .stock-adjust-field .stock-adjust-error { min-height: 0; margin-top: 4px; }
             .stock-modal-body .stock-readonly-panel .stock-adjust-action { grid-column: 1 / -1; }
             .stock-modal-body .stock-readonly-panel .stock-adjust-action .button { width: 100%; min-height: 48px; font-size: 14px; }
+            .product-bulk-modal { align-items: end; padding: max(8px, env(safe-area-inset-top)) 0 0; }
+            .product-bulk-modal-card, .product-bulk-modal-card form { width: 100%; max-height: calc(100dvh - 8px); border-radius: 14px 14px 0 0; }
+            .product-bulk-modal-header, .product-bulk-modal-footer { padding: 12px; }
+            .product-bulk-modal-footer { align-items: stretch; flex-direction: column; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+            .product-bulk-modal-footer .inline-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .product-bulk-modal-footer .button { width: 100%; min-height: 44px; }
+            .product-bulk-modal-body { padding: 12px; }
+            .product-bulk-grid, .product-bulk-category-list { grid-template-columns: 1fr; }
         }
     </style>
 @endpush
@@ -708,11 +763,28 @@
             <span>Produkty w systemie</span>
             <span>{{ $productRows->total() }} produktów głównych / {{ $productsCount }} SKU</span>
         </div>
+        <div class="product-bulk-toolbar" data-product-bulk-toolbar>
+            <div class="product-bulk-selection">
+                <strong class="product-bulk-count" data-product-selected-count>Wybrano: 0</strong>
+                <button class="button secondary" type="button" data-product-select-page>Zaznacz wszystkie na tej stronie</button>
+                <button class="button secondary" type="button" data-product-select-all>Zaznacz wszystkie na wszystkich stronach ({{ $productRows->total() }})</button>
+                <button class="button secondary" type="button" data-product-selection-clear disabled>Wyczyść zaznaczenie</button>
+                <span class="product-bulk-mode" data-product-selection-mode>Wybierasz pojedyncze produkty.</span>
+            </div>
+            <div class="product-bulk-actions">
+                <button class="button" type="button" data-product-bulk-open disabled>Edytuj wybrane</button>
+            </div>
+        </div>
         <div class="table-scroll" data-product-list-scroll>
             <table class="dense-table product-catalog-table" data-product-list-table>
                 <thead>
                     <tr>
-                        <th>Towar</th>
+                        <th>
+                            <label class="catalog-select-heading">
+                                <input type="checkbox" data-product-page-toggle aria-label="Zaznacz wszystkie produkty na tej stronie">
+                                <span>Towar</span>
+                            </label>
+                        </th>
                         <th>VAT / cena</th>
                         <th>Stan</th>
                         <th>Kanały</th>
@@ -741,6 +813,9 @@
                         <tr @class(['parent-row', 'product-import-issue-row' => $isImportIssueProduct]) data-product-card="parent" data-product-id="{{ $product->id }}">
                             <td data-product-card-section="identity">
                                 <div class="product-cell">
+                                    <label class="product-select-control">
+                                        <input type="checkbox" value="{{ $product->id }}" data-product-select aria-label="Zaznacz produkt {{ $product->name }}">
+                                    </label>
                                     <form method="POST" action="{{ route('products.favorite.toggle', $product) }}">
                                         @csrf
                                         <button
@@ -888,6 +963,7 @@
                             <tr @class(['variant-row', 'product-import-issue-row' => $importIssue]) data-variant-parent="{{ $rowKey }}" data-product-card="variant" data-product-id="{{ $variant->id }}" data-parent-product-id="{{ $product->id }}" @if (! $importIssue) hidden @endif>
                                 <td data-product-card-section="identity">
                                     <div class="product-cell variant">
+                                        <span class="product-select-spacer" aria-hidden="true"></span>
                                         <form method="POST" action="{{ route('products.favorite.toggle', $variant) }}">
                                             @csrf
                                             <button
@@ -1032,6 +1108,8 @@
         </div>
     </article>
 
+    @include('products._bulk_edit_modal')
+
     <div class="image-modal" data-product-image-modal aria-hidden="true">
         <div class="image-modal-card">
             <div class="image-modal-header">
@@ -1060,6 +1138,193 @@
 
 @push('scripts')
     <script>
+        const productBulkModal = document.querySelector('[data-product-bulk-modal]');
+        const productBulkForm = document.querySelector('[data-product-bulk-form]');
+        const productBulkSelectionInputs = document.querySelector('[data-product-bulk-selection-inputs]');
+        const productBulkCheckboxes = Array.from(document.querySelectorAll('[data-product-select]'));
+        const productBulkPageToggle = document.querySelector('[data-product-page-toggle]');
+        const productBulkSelectedCount = document.querySelector('[data-product-selected-count]');
+        const productBulkModeDescription = document.querySelector('[data-product-selection-mode]');
+        const productBulkOpenButton = document.querySelector('[data-product-bulk-open]');
+        const productBulkClearButton = document.querySelector('[data-product-selection-clear]');
+        const productBulkSelectPageButton = document.querySelector('[data-product-select-page]');
+        const productBulkSelectAllButton = document.querySelector('[data-product-select-all]');
+        const productBulkTotal = {{ (int) $productRows->total() }};
+        let productBulkSelectionMode = @json(old('selection_mode', 'selected')) === 'all_filtered' ? 'all_filtered' : 'selected';
+        const productBulkSelectedIds = new Set(@json(array_values((array) old('product_ids', []))).map((id) => String(id)));
+        const productBulkExcludedIds = new Set(@json(array_values((array) old('excluded_ids', []))).map((id) => String(id)));
+        let productBulkRestoreFocus = null;
+
+        function productBulkSelectionCount() {
+            return productBulkSelectionMode === 'all_filtered'
+                ? Math.max(0, productBulkTotal - productBulkExcludedIds.size)
+                : productBulkSelectedIds.size;
+        }
+
+        function productBulkProductLabel(count) {
+            if (count === 1) return 'produkt';
+
+            const lastTwoDigits = count % 100;
+            const lastDigit = count % 10;
+
+            return lastDigit >= 2 && lastDigit <= 4 && (lastTwoDigits < 12 || lastTwoDigits > 14)
+                ? 'produkty'
+                : 'produktów';
+        }
+
+        function renderProductBulkSelectionInputs() {
+            if (!productBulkSelectionInputs) return;
+
+            const fields = [];
+            const mode = document.createElement('input');
+            mode.type = 'hidden';
+            mode.name = 'selection_mode';
+            mode.value = productBulkSelectionMode;
+            fields.push(mode);
+
+            const ids = productBulkSelectionMode === 'all_filtered' ? productBulkExcludedIds : productBulkSelectedIds;
+            const name = productBulkSelectionMode === 'all_filtered' ? 'excluded_ids[]' : 'product_ids[]';
+
+            ids.forEach((id) => {
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = name;
+                input.value = id;
+                fields.push(input);
+            });
+
+            productBulkSelectionInputs.replaceChildren(...fields);
+        }
+
+        function syncProductBulkSelection() {
+            productBulkCheckboxes.forEach((checkbox) => {
+                const id = String(checkbox.value);
+                checkbox.checked = productBulkSelectionMode === 'all_filtered'
+                    ? !productBulkExcludedIds.has(id)
+                    : productBulkSelectedIds.has(id);
+            });
+
+            const checkedOnPage = productBulkCheckboxes.filter((checkbox) => checkbox.checked).length;
+            const count = productBulkSelectionCount();
+
+            if (productBulkPageToggle) {
+                productBulkPageToggle.checked = productBulkCheckboxes.length > 0 && checkedOnPage === productBulkCheckboxes.length;
+                productBulkPageToggle.indeterminate = checkedOnPage > 0 && checkedOnPage < productBulkCheckboxes.length;
+            }
+
+            if (productBulkSelectedCount) {
+                productBulkSelectedCount.textContent = `Wybrano: ${count}`;
+            }
+
+            if (productBulkModeDescription) {
+                productBulkModeDescription.textContent = productBulkSelectionMode === 'all_filtered'
+                    ? `Wybrane są wszystkie produkty pasujące do bieżących filtrów${productBulkExcludedIds.size ? ` z wyjątkiem ${productBulkExcludedIds.size}` : ''}.`
+                    : 'Wybierasz pojedyncze produkty z tej strony.';
+            }
+
+            if (productBulkOpenButton) productBulkOpenButton.disabled = count === 0;
+            if (productBulkClearButton) productBulkClearButton.disabled = count === 0;
+            if (productBulkSelectPageButton) productBulkSelectPageButton.disabled = productBulkCheckboxes.length === 0;
+            if (productBulkSelectAllButton) productBulkSelectAllButton.disabled = productBulkTotal === 0;
+            renderProductBulkSelectionInputs();
+        }
+
+        function setProductBulkCheckbox(checkbox, checked) {
+            const id = String(checkbox.value);
+
+            if (productBulkSelectionMode === 'all_filtered') {
+                checked ? productBulkExcludedIds.delete(id) : productBulkExcludedIds.add(id);
+            } else {
+                checked ? productBulkSelectedIds.add(id) : productBulkSelectedIds.delete(id);
+            }
+        }
+
+        function openProductBulkModal(trigger = null) {
+            if (!productBulkModal || productBulkSelectionCount() === 0) return;
+
+            productBulkRestoreFocus = trigger;
+            renderProductBulkSelectionInputs();
+            const countTarget = productBulkModal.querySelector('[data-product-bulk-modal-count]');
+            const count = productBulkSelectionCount();
+            if (countTarget) countTarget.textContent = `${count} ${productBulkProductLabel(count)}`;
+            productBulkModal.hidden = false;
+            productBulkModal.setAttribute('aria-hidden', 'false');
+            document.documentElement.classList.add('product-bulk-modal-open');
+            productBulkModal.querySelector('[data-product-bulk-close]')?.focus({ preventScroll: true });
+        }
+
+        function closeProductBulkModal(restoreFocus = true) {
+            if (!productBulkModal || productBulkModal.hidden) return;
+
+            productBulkModal.hidden = true;
+            productBulkModal.setAttribute('aria-hidden', 'true');
+            document.documentElement.classList.remove('product-bulk-modal-open');
+
+            if (restoreFocus) productBulkRestoreFocus?.focus({ preventScroll: true });
+        }
+
+        productBulkCheckboxes.forEach((checkbox) => {
+            checkbox.addEventListener('change', () => {
+                setProductBulkCheckbox(checkbox, checkbox.checked);
+                syncProductBulkSelection();
+            });
+        });
+
+        productBulkPageToggle?.addEventListener('change', () => {
+            productBulkCheckboxes.forEach((checkbox) => setProductBulkCheckbox(checkbox, productBulkPageToggle.checked));
+            syncProductBulkSelection();
+        });
+
+        productBulkSelectPageButton?.addEventListener('click', () => {
+            productBulkCheckboxes.forEach((checkbox) => setProductBulkCheckbox(checkbox, true));
+            syncProductBulkSelection();
+        });
+
+        productBulkSelectAllButton?.addEventListener('click', () => {
+            productBulkSelectionMode = 'all_filtered';
+            productBulkSelectedIds.clear();
+            productBulkExcludedIds.clear();
+            syncProductBulkSelection();
+        });
+
+        productBulkClearButton?.addEventListener('click', () => {
+            productBulkSelectionMode = 'selected';
+            productBulkSelectedIds.clear();
+            productBulkExcludedIds.clear();
+            syncProductBulkSelection();
+        });
+
+        productBulkOpenButton?.addEventListener('click', () => openProductBulkModal(productBulkOpenButton));
+        productBulkModal?.querySelectorAll('[data-product-bulk-close]').forEach((button) => {
+            button.addEventListener('click', () => closeProductBulkModal());
+        });
+        productBulkModal?.addEventListener('click', (event) => {
+            if (event.target === productBulkModal) closeProductBulkModal();
+        });
+
+        document.querySelectorAll('[data-product-bulk-apply]').forEach((checkbox) => {
+            const field = checkbox.closest('[data-product-bulk-field]');
+            const values = Array.from(field?.querySelectorAll('[data-product-bulk-value]') || []);
+            const sync = () => values.forEach((value) => { value.disabled = !checkbox.checked; });
+            checkbox.addEventListener('change', sync);
+            sync();
+        });
+
+        productBulkForm?.addEventListener('submit', (event) => {
+            renderProductBulkSelectionInputs();
+            const count = productBulkSelectionCount();
+
+            if (!window.confirm(`Zastosować wybrane zmiany do ${count} ${count === 1 ? 'produktu' : 'produktów'}?`)) {
+                event.preventDefault();
+            }
+        });
+
+        syncProductBulkSelection();
+
+        if (productBulkModal?.dataset.openOnLoad === '1' && productBulkSelectionCount() > 0) {
+            openProductBulkModal(productBulkOpenButton);
+        }
+
         const productLookupUrl = @json($productLookupUrl);
         const productLookupDatalist = document.getElementById('product-lookup-options');
         let productLookupTimer = null;
@@ -1251,6 +1516,7 @@
         });
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') {
+                closeProductBulkModal();
                 const modal = document.querySelector('[data-stock-modal]:not([hidden])');
                 closeStockModal(modal);
                 closeProductImageModal();
@@ -1258,7 +1524,8 @@
             }
 
             if (event.key === 'Tab') {
-                const modal = document.querySelector('[data-stock-modal]:not([hidden])');
+                const modal = document.querySelector('[data-product-bulk-modal]:not([hidden])')
+                    || document.querySelector('[data-stock-modal]:not([hidden])');
 
                 if (!modal) return;
 

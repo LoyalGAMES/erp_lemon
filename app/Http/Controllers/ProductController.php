@@ -55,6 +55,27 @@ class ProductController extends Controller
 {
     private const PRODUCT_LIST_PER_PAGE = 30;
 
+    /** @var list<string> */
+    private const BULK_EDIT_FIELDS = [
+        'category_ids',
+        'retail_price_pln',
+        'sale_price_pln',
+        'is_active',
+        'catalog_visibility',
+        'publication_date',
+        'publication_status',
+        'sale_price_starts_at',
+        'sale_price_ends_at',
+        'backorders',
+        'custom_label_pl',
+        'custom_label_en',
+        'custom_label_bg_color',
+        'custom_label_text_color',
+        'lemon_shipping_days',
+        'lemon_shipping_text',
+        'lemon_preorder',
+    ];
+
     public function index(Request $request, ProductImportIssueService $importIssues): View
     {
         $isFavorites = $request->routeIs('products.favorites');
@@ -425,6 +446,144 @@ class ProductController extends Controller
         return $identifierError !== null
             ? $redirect->with('warning', $identifierError)
             : $redirect;
+    }
+
+    public function bulkUpdate(
+        Request $request,
+        AuditLogService $audit,
+        ProductImportIssueService $importIssues,
+        ProductVariantInheritanceService $variantInheritance,
+    ): RedirectResponse {
+        $allowedFields = implode(',', self::BULK_EDIT_FIELDS);
+        $validated = $request->validateWithBag('bulk', [
+            'selection_mode' => ['required', 'string', 'in:selected,all_filtered'],
+            'product_ids' => ['nullable', 'array', 'max:5000'],
+            'product_ids.*' => ['integer', 'distinct'],
+            'excluded_ids' => ['nullable', 'array', 'max:5000'],
+            'excluded_ids.*' => ['integer', 'distinct'],
+            'filters' => ['nullable', 'array'],
+            'filters.q' => ['nullable', 'string', 'max:255'],
+            'filters.channel' => ['nullable', 'string', 'max:100'],
+            'filters.warehouse' => ['nullable', 'integer'],
+            'filters.stock' => ['nullable', 'string', 'in:available,reserved,out_of_stock,no_stock'],
+            'filters.type' => ['nullable', 'string', 'in:with_variants,without_variants'],
+            'filters.category' => ['nullable', 'string', 'max:255'],
+            'filters.status' => ['nullable', 'string', 'in:active,inactive,publish,draft'],
+            'filters.favorites' => ['nullable', 'boolean'],
+            'filters.import_issue' => ['nullable', 'integer'],
+            'apply' => ['required', "array:{$allowedFields}", 'min:1'],
+            'apply.*' => ['accepted'],
+            'changes' => ['nullable', 'array'],
+            'changes.category_ids' => ['nullable', 'array'],
+            'changes.category_ids.*' => ['integer', 'distinct', 'exists:product_categories,id'],
+            'changes.retail_price_pln' => ['nullable', 'numeric', 'min:0'],
+            'changes.sale_price_pln' => ['nullable', 'numeric', 'min:0'],
+            'changes.is_active' => ['nullable', 'boolean'],
+            'changes.catalog_visibility' => ['nullable', 'string', 'in:visible,catalog,search,hidden'],
+            'changes.publication_date' => ['nullable', 'date'],
+            'changes.publication_status' => ['nullable', 'string', 'in:publish,draft,pending,private'],
+            'changes.sale_price_starts_at' => ['nullable', 'date'],
+            'changes.sale_price_ends_at' => ['nullable', 'date'],
+            'changes.backorders' => ['nullable', 'string', 'in:no,notify,yes'],
+            'changes.custom_label_pl' => ['nullable', 'string', 'max:120'],
+            'changes.custom_label_en' => ['nullable', 'string', 'max:120'],
+            'changes.custom_label_bg_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
+            'changes.custom_label_text_color' => ['nullable', 'string', 'regex:/^#[0-9a-fA-F]{6}$/'],
+            'changes.lemon_shipping_days' => ['nullable', 'integer', 'min:0'],
+            'changes.lemon_shipping_text' => ['nullable', 'string', 'max:1000'],
+            'changes.lemon_preorder' => ['nullable', 'boolean'],
+        ]);
+        $apply = collect(array_keys((array) ($validated['apply'] ?? [])))
+            ->intersect(self::BULK_EDIT_FIELDS)
+            ->values()
+            ->all();
+        $changes = (array) ($validated['changes'] ?? []);
+        $requiredValues = [
+            'is_active',
+            'catalog_visibility',
+            'publication_status',
+            'backorders',
+            'custom_label_bg_color',
+            'custom_label_text_color',
+            'lemon_preorder',
+        ];
+
+        foreach ($requiredValues as $field) {
+            if (in_array($field, $apply, true)
+                && (! array_key_exists($field, $changes) || $changes[$field] === null || $changes[$field] === '')
+            ) {
+                throw ValidationException::withMessages([
+                    "changes.{$field}" => 'Wybierz wartość dla zaznaczonego pola.',
+                ])->errorBag('bulk');
+            }
+        }
+
+        $selection = $this->bulkProductSelectionQuery($validated, $importIssues);
+        $productIds = $selection
+            ->pluck('products.id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->unique()
+            ->values();
+
+        if ($productIds->isEmpty()) {
+            throw ValidationException::withMessages([
+                'selection_mode' => 'Zaznacz co najmniej jeden produkt do edycji.',
+            ])->errorBag('bulk');
+        }
+
+        $categoryData = $this->bulkCategoryData($apply, $changes);
+        $selectionMode = (string) $validated['selection_mode'];
+        $updatedProductIds = DB::transaction(function () use ($productIds, $apply, $changes, $categoryData, $selectionMode, $audit, $variantInheritance): array {
+            $updated = [];
+
+            Product::query()
+                ->whereIn('id', $productIds->all())
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get()
+                ->each(function (Product $product) use (&$updated, $apply, $changes, $categoryData, $selectionMode, $audit, $variantInheritance): void {
+                    $master = $product->masterData();
+                    $this->assertBulkProductChangeIsValid($product, $master, $apply, $changes);
+                    $before = [
+                        'is_active' => (bool) $product->is_active,
+                        'master' => $master,
+                    ];
+                    $master = $this->bulkUpdatedMasterData($master, $apply, $changes, $categoryData);
+
+                    if (in_array('is_active', $apply, true)) {
+                        $product->is_active = filter_var($changes['is_active'], FILTER_VALIDATE_BOOLEAN);
+                    }
+
+                    $attributes = (array) $product->attributes;
+                    $attributes['master'] = $master;
+                    $product->forceFill(['attributes' => $attributes])->save();
+                    $variantInheritance->synchronizeFamily($product);
+                    $audit->record('product.bulk_updated', $product, $before, [
+                        'is_active' => (bool) $product->is_active,
+                        'master' => $master,
+                    ], [
+                        'applied_fields' => $apply,
+                        'selection_mode' => $selectionMode,
+                    ]);
+                    $updated[] = (int) $product->id;
+                });
+
+            return $updated;
+        });
+
+        $queued = collect($updatedProductIds)
+            ->filter(fn (int $productId): bool => $this->queueWooCommerceDataExport(
+                Product::query()->findOrFail($productId),
+            ))
+            ->count();
+        $count = count($updatedProductIds);
+        $productLabel = $this->polishProductCountLabel($count);
+        $mappedProductLabel = $queued === 1 ? 'zmapowanego produktu' : 'zmapowanych produktów';
+
+        return back()->with(
+            'status',
+            "Zmieniono grupowo {$count} {$productLabel}. Synchronizację WooCommerce uruchomiono dla {$queued} {$mappedProductLabel}.",
+        );
     }
 
     public function duplicate(
@@ -2349,6 +2508,226 @@ class ProductController extends Controller
     }
 
     /**
+     * @param  array<string, mixed>  $validated
+     */
+    private function bulkProductSelectionQuery(
+        array $validated,
+        ProductImportIssueService $importIssues,
+    ): Builder {
+        $products = $this->productFamilyQuery();
+
+        if (($validated['selection_mode'] ?? null) === 'selected') {
+            return $products->whereIn('products.id', collect((array) ($validated['product_ids'] ?? []))
+                ->map(fn (mixed $id): int => (int) $id)
+                ->filter()
+                ->unique()
+                ->all());
+        }
+
+        $filterInput = (array) ($validated['filters'] ?? []);
+        $filters = $this->normalizedProductFilters(
+            $filterInput,
+            filter_var($filterInput['favorites'] ?? false, FILTER_VALIDATE_BOOLEAN),
+        );
+        $importIssue = $importIssues->resolve($filterInput['import_issue'] ?? null);
+        $this->applyProductListFilters($products, $filters, $importIssue);
+        $excludedIds = collect((array) ($validated['excluded_ids'] ?? []))
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter()
+            ->unique()
+            ->all();
+
+        return $excludedIds === [] ? $products : $products->whereNotIn('products.id', $excludedIds);
+    }
+
+    /**
+     * @param  list<string>  $apply
+     * @param  array<string, mixed>  $changes
+     * @return array{ids:list<int>,names:list<string>,legacy:?string}
+     */
+    private function bulkCategoryData(array $apply, array $changes): array
+    {
+        if (! in_array('category_ids', $apply, true)) {
+            return ['ids' => [], 'names' => [], 'legacy' => null];
+        }
+
+        $ids = collect((array) ($changes['category_ids'] ?? []))
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter()
+            ->unique()
+            ->values();
+        $categories = $ids->isEmpty()
+            ? collect()
+            : ProductCategory::query()
+                ->whereIn('id', $ids->all())
+                ->get()
+                ->sortBy(fn (ProductCategory $category): int|false => $ids->search($category->id));
+        $names = $categories
+            ->map(fn (ProductCategory $category): string => $category->path ?: $category->name)
+            ->values()
+            ->all();
+
+        return [
+            'ids' => $ids->all(),
+            'names' => $names,
+            'legacy' => $names[0] ?? null,
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $master
+     * @param  list<string>  $apply
+     * @param  array<string, mixed>  $changes
+     */
+    private function assertBulkProductChangeIsValid(
+        Product $product,
+        array $master,
+        array $apply,
+        array $changes,
+    ): void {
+        $retailPrice = in_array('retail_price_pln', $apply, true)
+            ? $this->nullableFloat($changes['retail_price_pln'] ?? null)
+            : $this->nullableFloat(data_get($master, 'prices.retail_price_pln'));
+        $salePrice = in_array('sale_price_pln', $apply, true)
+            ? $this->nullableFloat($changes['sale_price_pln'] ?? null)
+            : $this->nullableFloat(data_get($master, 'prices.sale_price_pln'));
+
+        if ($salePrice !== null && ($retailPrice === null || $salePrice > $retailPrice)) {
+            throw ValidationException::withMessages([
+                'changes.sale_price_pln' => "Produkt {$product->sku}: cena promocyjna nie może być wyższa od ceny regularnej.",
+            ])->errorBag('bulk');
+        }
+
+        $startsAt = in_array('sale_price_starts_at', $apply, true)
+            ? $this->nullableDateString($changes['sale_price_starts_at'] ?? null)
+            : $this->nullableDateString(data_get($master, 'prices.sale_price_starts_at'));
+        $endsAt = in_array('sale_price_ends_at', $apply, true)
+            ? $this->nullableDateString($changes['sale_price_ends_at'] ?? null)
+            : $this->nullableDateString(data_get($master, 'prices.sale_price_ends_at'));
+
+        if ($startsAt !== null && $endsAt !== null && $endsAt < $startsAt) {
+            throw ValidationException::withMessages([
+                'changes.sale_price_ends_at' => "Produkt {$product->sku}: data końca promocji nie może być wcześniejsza od daty rozpoczęcia.",
+            ])->errorBag('bulk');
+        }
+    }
+
+    /**
+     * @param  array<string, mixed>  $master
+     * @param  list<string>  $apply
+     * @param  array<string, mixed>  $changes
+     * @param  array{ids:list<int>,names:list<string>,legacy:?string}  $categoryData
+     * @return array<string, mixed>
+     */
+    private function bulkUpdatedMasterData(
+        array $master,
+        array $apply,
+        array $changes,
+        array $categoryData,
+    ): array {
+        $master['source'] = 'erp';
+
+        if (in_array('category_ids', $apply, true)) {
+            $master['category_ids'] = $categoryData['ids'];
+            $master['categories'] = $categoryData['names'];
+            $master['category'] = $categoryData['legacy'];
+        }
+
+        $prices = (array) data_get($master, 'prices', []);
+
+        if (in_array('retail_price_pln', $apply, true)) {
+            $retailPrice = $this->nullableFloat($changes['retail_price_pln'] ?? null);
+            $prices['retail_price_pln'] = $retailPrice;
+            $prices['price_eur'] = $this->convertedPrice($retailPrice, 'EUR');
+            $prices['price_gbp'] = $this->convertedPrice($retailPrice, 'GBP');
+            $prices['price_usd'] = $this->convertedPrice($retailPrice, 'USD');
+        }
+
+        if (in_array('sale_price_pln', $apply, true)) {
+            $prices['sale_price_pln'] = $this->nullableFloat($changes['sale_price_pln'] ?? null);
+        }
+
+        if (in_array('sale_price_starts_at', $apply, true)) {
+            $prices['sale_price_starts_at'] = $this->nullableDateString($changes['sale_price_starts_at'] ?? null);
+        }
+
+        if (in_array('sale_price_ends_at', $apply, true)) {
+            $prices['sale_price_ends_at'] = $this->nullableDateString($changes['sale_price_ends_at'] ?? null);
+        }
+
+        $master['prices'] = $prices;
+
+        if (in_array('catalog_visibility', $apply, true)) {
+            $master['catalog_visibility'] = (string) $changes['catalog_visibility'];
+        }
+
+        if (in_array('publication_date', $apply, true)) {
+            $master['publication_date'] = $this->nullableDateTimeString($changes['publication_date'] ?? null);
+        }
+
+        if (in_array('publication_status', $apply, true)) {
+            $master['publication_status'] = (string) $changes['publication_status'];
+        }
+
+        if (in_array('backorders', $apply, true)) {
+            data_set($master, 'inventory.backorders', (string) $changes['backorders']);
+        }
+
+        foreach ([
+            'custom_label_pl' => 'custom_label.pl',
+            'custom_label_en' => 'custom_label.en',
+            'custom_label_bg_color' => 'custom_label.bg_color',
+            'custom_label_text_color' => 'custom_label.text_color',
+            'lemon_shipping_text' => 'shipping.text',
+        ] as $field => $path) {
+            if (in_array($field, $apply, true)) {
+                data_set($master, $path, $this->nullableString($changes[$field] ?? null));
+            }
+        }
+
+        if (in_array('lemon_shipping_days', $apply, true)) {
+            data_set(
+                $master,
+                'shipping.days',
+                $this->nullableString($changes['lemon_shipping_days'] ?? null) === null
+                    ? null
+                    : (int) $changes['lemon_shipping_days'],
+            );
+        }
+
+        if (in_array('lemon_preorder', $apply, true)) {
+            data_set(
+                $master,
+                'shipping.preorder',
+                filter_var($changes['lemon_preorder'], FILTER_VALIDATE_BOOLEAN),
+            );
+        }
+
+        return $master;
+    }
+
+    private function productFamilyQuery(): Builder
+    {
+        return Product::query()
+            ->where('is_translation', false)
+            ->whereDoesntHave('parentRelations', fn (Builder $relations) => $relations->where('relation_type', 'variant'));
+    }
+
+    private function polishProductCountLabel(int $count): string
+    {
+        if ($count === 1) {
+            return 'produkt';
+        }
+
+        $lastTwoDigits = $count % 100;
+        $lastDigit = $count % 10;
+
+        return $lastDigit >= 2 && $lastDigit <= 4 && ($lastTwoDigits < 12 || $lastTwoDigits > 14)
+            ? 'produkty'
+            : 'produktów';
+    }
+
+    /**
      * Loads only the current page of product families. The old implementation
      * hydrated every SKU, every balance and every channel mapping before slicing
      * the collection in PHP.
@@ -2358,10 +2737,8 @@ class ProductController extends Controller
      */
     private function productListRows(array $filters, ?array $importIssue = null): LengthAwarePaginator
     {
-        $products = Product::query()
+        $products = $this->productFamilyQuery()
             ->select($this->productListColumns())
-            ->where('is_translation', false)
-            ->whereDoesntHave('parentRelations', fn (Builder $relations) => $relations->where('relation_type', 'variant'))
             ->with([
                 'stockBalances' => fn ($balances) => $balances->select([
                     'id',
@@ -2744,23 +3121,32 @@ class ProductController extends Controller
      */
     private function productFilters(Request $request, bool $favorites = false): array
     {
-        $warehouseId = (string) ($request->query('warehouse') ?? '');
+        return $this->normalizedProductFilters((array) $request->query(), $favorites);
+    }
+
+    /**
+     * @param  array<string, mixed>  $input
+     * @return array{q:string,channel:string,warehouse:string,stock:string,type:string,category:string,status:string,favorites:bool}
+     */
+    private function normalizedProductFilters(array $input, bool $favorites = false): array
+    {
+        $warehouseId = (string) ($input['warehouse'] ?? '');
 
         return [
-            'q' => $this->nullableString($request->query('q')) ?? '',
-            'channel' => $this->nullableString($request->query('channel')) ?? '',
+            'q' => $this->nullableString($input['q'] ?? null) ?? '',
+            'channel' => $this->nullableString($input['channel'] ?? null) ?? '',
             'warehouse' => ctype_digit($warehouseId) && Warehouse::query()->whereKey((int) $warehouseId)->exists()
                 ? $warehouseId
                 : '',
-            'stock' => in_array($request->query('stock'), ['available', 'reserved', 'out_of_stock', 'no_stock'], true)
-                ? (string) $request->query('stock')
+            'stock' => in_array($input['stock'] ?? null, ['available', 'reserved', 'out_of_stock', 'no_stock'], true)
+                ? (string) $input['stock']
                 : '',
-            'type' => in_array($request->query('type'), ['with_variants', 'without_variants'], true)
-                ? (string) $request->query('type')
+            'type' => in_array($input['type'] ?? null, ['with_variants', 'without_variants'], true)
+                ? (string) $input['type']
                 : '',
-            'category' => $this->nullableString($request->query('category')) ?? '',
-            'status' => in_array($request->query('status'), ['active', 'inactive', 'publish', 'draft'], true)
-                ? (string) $request->query('status')
+            'category' => $this->nullableString($input['category'] ?? null) ?? '',
+            'status' => in_array($input['status'] ?? null, ['active', 'inactive', 'publish', 'draft'], true)
+                ? (string) $input['status']
                 : '',
             'favorites' => $favorites,
         ];
