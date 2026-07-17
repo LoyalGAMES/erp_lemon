@@ -91,6 +91,13 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
                 return;
             }
 
+            if ($this->isCustomProductLabelsSync($product)) {
+                $exporter->exportCustomLabels($product);
+                $this->clearCurrentSyncToken();
+
+                return;
+            }
+
             if (($axisRepair ?? app(WooOwnedVariantAxisRepairService::class))->blocksFullExport($product)) {
                 // Keep the current export token and let the queue retry after
                 // both the remote and local family axes are canonical.
@@ -124,6 +131,27 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
                 'product_data_export.pending_token',
             ) === $this->syncToken,
         );
+    }
+
+    private function isCustomProductLabelsSync(Product $product): bool
+    {
+        if ($this->syncToken === null) {
+            return false;
+        }
+
+        return $product->channelMappings->contains(function (ProductChannelMapping $mapping): bool {
+            if (data_get($mapping->metadata, 'product_data_export.pending_token') !== $this->syncToken) {
+                return false;
+            }
+
+            $revision = trim((string) data_get(
+                $mapping->metadata,
+                'product_data_export.legacy_variant_backfill.queued_revision',
+                data_get($mapping->metadata, 'product_data_export.legacy_variant_backfill.revision'),
+            ));
+
+            return LegacyVariantFamilyBackfillService::isCustomProductLabelsRevision($revision);
+        });
     }
 
     private function clearCurrentSyncToken(): void

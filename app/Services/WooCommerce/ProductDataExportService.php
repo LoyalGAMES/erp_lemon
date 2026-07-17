@@ -235,6 +235,149 @@ final class ProductDataExportService
     }
 
     /**
+     * Update only the custom post meta consumed by Lemon Elementor Theme.
+     * This deliberately avoids catalog, attribute and variant-axis work so a
+     * label correction cannot be blocked by an unrelated full-export repair.
+     *
+     * @return array{exported:int,results:list<array<string,mixed>>}
+     */
+    public function exportCustomLabels(Product $product): array
+    {
+        $product->loadMissing('channelMappings.salesChannel');
+        $mappings = $product->channelMappings
+            ->filter(fn (ProductChannelMapping $mapping): bool => ! filled($mapping->external_variation_id));
+
+        if ($mappings->isEmpty()) {
+            throw new RuntimeException('Produkt nie ma mapowania produktu nadrzędnego do WooCommerce.');
+        }
+
+        $results = [];
+
+        foreach ($mappings as $mapping) {
+            $integration = WordpressIntegration::query()
+                ->where('sales_channel_id', $mapping->sales_channel_id)
+                ->first();
+
+            if (! $integration instanceof WordpressIntegration) {
+                throw new RuntimeException("Brak aktywnej integracji WooCommerce dla kanału {$mapping->salesChannel?->code}.");
+            }
+
+            $payloadsByLanguage = collect($integration->productExportLanguages())
+                ->mapWithKeys(fn (string $language): array => [
+                    $language => ['meta_data' => $this->customProductLabelMetaData($product, $language)],
+                ])
+                ->all();
+            $primaryPayload = (array) ($payloadsByLanguage['pl'] ?? [
+                'meta_data' => $this->customProductLabelMetaData($product, 'pl'),
+            ]);
+            $primaryResponse = $this->client->updateProductDataByIds(
+                $integration,
+                (string) $mapping->external_product_id,
+                null,
+                $primaryPayload,
+                'pl',
+            );
+            $targets = [[
+                'language' => 'pl',
+                'product_id' => (string) $mapping->external_product_id,
+                'status' => 'updated',
+            ]];
+            $missingPayloads = [];
+            $references = $this->translationReferences($product, (int) $mapping->sales_channel_id);
+
+            foreach ($payloadsByLanguage as $language => $payload) {
+                $language = mb_strtolower(trim((string) $language));
+
+                if ($language === '' || $language === 'pl') {
+                    continue;
+                }
+
+                $externalProductId = trim((string) data_get($references, "{$language}.product_id", ''));
+
+                if ($externalProductId === '') {
+                    $missingPayloads[$language] = $payload;
+
+                    continue;
+                }
+
+                $this->client->updateProductDataByIds(
+                    $integration,
+                    $externalProductId,
+                    null,
+                    $payload,
+                    $language,
+                );
+                $targets[] = [
+                    'language' => $language,
+                    'product_id' => $externalProductId,
+                    'status' => 'updated',
+                ];
+            }
+
+            if ($missingPayloads !== []) {
+                $discovered = $this->client->updateDiscoveredProductTranslations(
+                    $integration,
+                    $mapping,
+                    (string) $product->sku,
+                    $missingPayloads,
+                );
+
+                foreach ($discovered as $target) {
+                    $language = mb_strtolower(trim((string) ($target['language'] ?? '')));
+                    $externalProductId = trim((string) ($target['product_id'] ?? ''));
+
+                    if ($language === '' || $externalProductId === '') {
+                        continue;
+                    }
+
+                    $this->saveTranslationReference(
+                        $product,
+                        (int) $mapping->sales_channel_id,
+                        $language,
+                        $externalProductId,
+                        null,
+                        (string) $product->sku,
+                    );
+                    $targets[] = $target;
+                }
+            }
+
+            IntegrationSyncLog::query()->create([
+                'sales_channel_id' => $mapping->sales_channel_id,
+                'wordpress_integration_id' => $integration->id,
+                'direction' => 'out',
+                'operation' => 'export_product_labels',
+                'status' => 'success',
+                'external_resource' => 'product',
+                'external_id' => (string) $mapping->external_product_id,
+                'request_payload' => $payloadsByLanguage,
+                'response_payload' => [
+                    'id' => $primaryResponse['id'] ?? null,
+                    'targets' => $targets,
+                ],
+                'attempts' => 1,
+                'started_at' => now(),
+                'finished_at' => now(),
+            ]);
+
+            $results[] = [
+                'channel' => $mapping->salesChannel?->code,
+                'external_id' => (string) $mapping->external_product_id,
+                'response' => $primaryResponse,
+                'translations' => array_values(array_filter(
+                    $targets,
+                    fn (array $target): bool => ($target['language'] ?? 'pl') !== 'pl',
+                )),
+            ];
+        }
+
+        return [
+            'exported' => count($results),
+            'results' => $results,
+        ];
+    }
+
+    /**
      * @return array{mapping:ProductChannelMapping,response:array<string,mixed>,payload:array<string,mixed>,variant_mappings:list<ProductChannelMapping>,variant_responses:list<array<string,mixed>>,translation_responses:list<array<string,mixed>>}
      */
     public function create(Product $product, WordpressIntegration $integration): array
@@ -1873,12 +2016,30 @@ final class ProductDataExportService
             ->values()
             ->all();
 
-        return array_merge($meta, [
-            ['key' => '_ean', 'value' => $product->ean ?: ''],
+        return array_merge(
+            $meta,
+            [['key' => '_ean', 'value' => $product->ean ?: '']],
+            $this->customProductLabelMetaData($product, $language, $master),
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $master
+     * @return list<array{key:string,value:string}>
+     */
+    private function customProductLabelMetaData(
+        Product $product,
+        string $language,
+        ?array $master = null,
+    ): array {
+        $master ??= $product->masterData();
+        $language = mb_strtolower(trim($language)) ?: 'pl';
+
+        return [
             ['key' => '_lemon_product_label_text', 'value' => (string) data_get($master, "custom_label.{$language}", '')],
             ['key' => '_lemon_product_label_bg_color', 'value' => (string) data_get($master, 'custom_label.bg_color', '')],
             ['key' => '_lemon_product_label_text_color', 'value' => (string) data_get($master, 'custom_label.text_color', '')],
-        ]);
+        ];
     }
 
     /**
