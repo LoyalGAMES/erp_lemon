@@ -307,8 +307,8 @@ final class WooCommerceSizeDictionaryOrder
         $owners = [];
 
         return $rows->map(function (array $row) use (&$owners): array {
-            $aliases = collect([
-                $row['source'],
+            $sourceKey = $this->key((string) $row['source']);
+            $localizedAliases = collect([
                 $row['localized'],
                 ...$row['all_localized'],
             ])
@@ -318,22 +318,44 @@ final class WooCommerceSizeDictionaryOrder
                 ->filter()
                 ->unique()
                 ->values();
-            $matchedOwners = $aliases
+            $matchedOwners = $localizedAliases
                 ->map(fn (string $alias): ?string => $owners[$alias] ?? null)
                 ->filter()
                 ->unique()
                 ->values();
+            $sourceOwner = $owners[$sourceKey] ?? null;
 
-            if ($matchedOwners->count() > 1) {
-                throw new RuntimeException(
-                    "Słownik rozmiarów ERP zawiera niejednoznaczną wartość `{$row['source']}`.",
-                );
+            // An already known source value is authoritative. Historical
+            // value_en arrays were sometimes reordered independently from
+            // values, making e.g. source `S` point at localized `M/L`. Such a
+            // translation must not move S into another canonical identity.
+            $owner = (string) ($sourceOwner
+                ?? ($matchedOwners->count() === 1
+                    ? $matchedOwners->first()
+                    : $row['identity']));
+            $safeLocalizedAliases = $localizedAliases
+                ->filter(function (string $alias) use ($owners, $owner): bool {
+                    $aliasOwner = $owners[$alias] ?? null;
+
+                    return $aliasOwner === null || $aliasOwner === $owner;
+                })
+                ->values();
+            $localizedKey = $this->key((string) $row['localized']);
+
+            if (! $safeLocalizedAliases->contains($localizedKey)) {
+                $row['localized'] = $row['source'];
             }
 
-            $owner = (string) ($matchedOwners->first() ?? $row['identity']);
+            $row['all_localized'] = collect($row['all_localized'])
+                ->filter(fn (mixed $alias): bool => $safeLocalizedAliases->contains(
+                    $this->key((string) $alias),
+                ))
+                ->values()
+                ->all();
             $row['identity'] = $owner;
+            $owners[$sourceKey] = $owner;
 
-            foreach ($aliases as $alias) {
+            foreach ($safeLocalizedAliases as $alias) {
                 $owners[$alias] = $owner;
             }
 

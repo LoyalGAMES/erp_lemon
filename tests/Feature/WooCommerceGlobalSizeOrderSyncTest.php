@@ -213,6 +213,18 @@ final class WooCommerceGlobalSizeOrderSyncTest extends TestCase
             'is_variant' => true,
             'sort_order' => 20,
         ]);
+        ProductParameterDefinition::query()->create([
+            'name' => 'Size',
+            'name_en' => 'Historical Size',
+            'slug' => 'size',
+            'input_type' => 'select',
+            'values' => ['S/M', 'M/L'],
+            // Historical PL/EN arrays were independently reordered. The
+            // canonical source identity must win over these crossed aliases.
+            'values_en' => ['M/L', 'S/M'],
+            'is_variant' => true,
+            'sort_order' => 30,
+        ]);
 
         $entries = app(WooCommerceSizeDictionaryOrder::class)
             ->entries('en');
