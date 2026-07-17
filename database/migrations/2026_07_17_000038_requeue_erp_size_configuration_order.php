@@ -65,7 +65,17 @@ return new class extends Migration
 
                     $visited[$product->id] = true;
 
-                    if ($repair->isChildSizeAssignmentAuditCandidate($product)) {
+                    try {
+                        $candidate = $repair->isChildSizeAssignmentAuditCandidate($product);
+                    } catch (DomainException) {
+                        // A dirty historical dictionary must not leave the
+                        // whole application in maintenance mode. The live
+                        // order synchronizer remains fail-closed and records
+                        // the exact conflict for manual cleanup.
+                        $candidate = false;
+                    }
+
+                    if ($candidate) {
                         $repair->markPending($product);
                     }
                 }
