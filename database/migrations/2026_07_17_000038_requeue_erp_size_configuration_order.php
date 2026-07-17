@@ -67,7 +67,7 @@ return new class extends Migration
 
                     try {
                         $candidate = $repair->isChildSizeAssignmentAuditCandidate($product);
-                    } catch (DomainException) {
+                    } catch (Throwable) {
                         // A dirty historical dictionary must not leave the
                         // whole application in maintenance mode. The live
                         // order synchronizer remains fail-closed and records
