@@ -117,8 +117,10 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
         $this->assertSame(0, $result['current_candidates']);
         $this->assertSame(2, $result['missed_products']);
         $this->assertSame(1, $result['exact_remote_products']);
+        $this->assertSame(1, $result['migration_safe_remote_products']);
         $this->assertSame(0, $result['conflicting_remote_products']);
         $this->assertSame(1, $result['exact_remote_roots']);
+        $this->assertSame(1, $result['migration_safe_remote_roots']);
         $mapped = collect($result['rows'])->firstWhere('external_product_id', '4380');
         $this->assertSame([$localProduct->id], $mapped['owner_root_ids'] ?? null);
         $this->assertSame([], $mapped['candidate_root_ids'] ?? null);
@@ -126,7 +128,7 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
         $this->assertSame(['36'], $mapped['legacy_options'] ?? null);
 
         $marked = app(WooLegacyVariantAxisRemoteAuditService::class)
-            ->markExactRemoteRepairCandidates($result);
+            ->markSafeRemoteRepairCandidates($result);
         $this->assertSame([
             'eligible_roots' => 1,
             'marked_roots' => 1,
@@ -149,6 +151,49 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
             $metadata,
             WooOwnedVariantAxisRepairService::REMOTE_EVIDENCE_PATH.'.verified',
         ));
+    }
+
+    public function test_remote_audit_treats_the_dictionary_backed_live_legacy_axis_as_authoritative(): void
+    {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['S', 'M', 'S/M', 'M/L'],
+            'values_en' => ['S', 'M', 'S/M', 'M/L'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
+        $method = new \ReflectionMethod(
+            WooLegacyVariantAxisRemoteAuditService::class,
+            'remoteSizeEvidence',
+        );
+        $service = app(WooLegacyVariantAxisRemoteAuditService::class);
+        $legacy = ['options' => ['M', 'S']];
+
+        $legacyOnly = $method->invoke($service, $legacy, collect());
+        $this->assertTrue($legacyOnly['verified']);
+        $this->assertSame('legacy_only', $legacyOnly['mode']);
+        $this->assertSame(['s', 'm'], $legacyOnly['option_keys']);
+
+        $informationalConflict = $method->invoke($service, $legacy, collect([[
+            'id' => 1,
+            'variation' => false,
+            'options' => ['S/M', 'M/L'],
+        ]]));
+        $this->assertTrue($informationalConflict['verified']);
+        $this->assertSame('legacy_over_informational_size', $informationalConflict['mode']);
+        $this->assertSame(['s', 'm'], $informationalConflict['option_keys']);
+
+        $twoActiveAxes = $method->invoke($service, $legacy, collect([[
+            'id' => 1,
+            'variation' => true,
+            'options' => ['S/M', 'M/L'],
+        ]]));
+        $this->assertFalse($twoActiveAxes['verified']);
+        $this->assertNull($twoActiveAxes['mode']);
     }
 
     /** @return array<string,mixed> */

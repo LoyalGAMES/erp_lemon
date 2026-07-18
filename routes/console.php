@@ -285,6 +285,11 @@ Artisan::command('erp:inspect-woo-owned-variant-axis-repair {--limit=30 : Maximu
     $this->table(
         ['product', 'sku', 'woo', 'status', 'queue', 'next_attempt', 'error/reason'],
         $mappings
+            ->sortBy(fn (ProductChannelMapping $mapping): string => sprintf(
+                '%d|%s',
+                data_get($mapping->metadata, $statePath.'.status') === 'completed' ? 1 : 0,
+                (string) $mapping->updated_at,
+            ))
             ->take($limit)
             ->map(function (ProductChannelMapping $mapping) use ($statePath): array {
                 $state = (array) data_get($mapping->metadata, $statePath, []);

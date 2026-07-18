@@ -36,6 +36,9 @@ final class RepairWooOwnedVariantAxesDuringMaintenanceCommand extends Command
             if (isset($family['error'])) {
                 $this->error($line.' '.$family['error']);
             } else {
+                if (isset($family['reason']) && trim((string) $family['reason']) !== '') {
+                    $line .= ' '.trim((string) $family['reason']);
+                }
                 $this->line($line);
             }
         }

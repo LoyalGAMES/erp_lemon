@@ -42,8 +42,10 @@ final class WooLegacyVariantAxisRemoteAuditService
      *   current_candidates:int,
      *   missed_products:int,
      *   exact_remote_products:int,
+     *   migration_safe_remote_products:int,
      *   conflicting_remote_products:int,
      *   exact_remote_roots:int,
+     *   migration_safe_remote_roots:int,
      *   rows:list<array<string,mixed>>
      * }
      */
@@ -182,6 +184,10 @@ final class WooLegacyVariantAxisRemoteAuditService
         $currentCandidates = $rows->filter(fn (array $row): bool => count($row['candidate_root_ids']) === 1);
         $exactRemote = $rows->filter(fn (array $row): bool => data_get(
             $row,
+            'remote_evidence.mode',
+        ) === 'parallel_exact' && count($row['owner_root_ids']) === 1);
+        $migrationSafeRemote = $rows->filter(fn (array $row): bool => data_get(
+            $row,
             'remote_evidence.verified',
         ) === true && count($row['owner_root_ids']) === 1);
         $conflictingRemote = $rows->reject(fn (array $row): bool => data_get(
@@ -203,8 +209,13 @@ final class WooLegacyVariantAxisRemoteAuditService
             'current_candidates' => $currentCandidates->count(),
             'missed_products' => $rows->count() - $currentCandidates->count(),
             'exact_remote_products' => $exactRemote->count(),
+            'migration_safe_remote_products' => $migrationSafeRemote->count(),
             'conflicting_remote_products' => $conflictingRemote->count(),
             'exact_remote_roots' => $exactRemote
+                ->flatMap(fn (array $row): array => $row['owner_root_ids'])
+                ->unique()
+                ->count(),
+            'migration_safe_remote_roots' => $migrationSafeRemote
                 ->flatMap(fn (array $row): array => $row['owner_root_ids'])
                 ->unique()
                 ->count(),
@@ -214,14 +225,15 @@ final class WooLegacyVariantAxisRemoteAuditService
 
     /**
      * Persist a fail-closed remote evidence envelope and queue only roots for
-     * which every still-legacy language parent has the same exact, dictionary-
-     * backed Size/wariant option set. `repair()` will independently refetch
-     * parents and every child before its first PUT.
+     * which every still-legacy language parent has a dictionary-backed active
+     * legacy Size axis. The active child-owning axis is authoritative over a
+     * stale informational Size row. `repair()` independently refetches every
+     * parent and child before its first PUT.
      *
      * @param  array{rows:list<array<string,mixed>>}  $audit
      * @return array{eligible_roots:int,marked_roots:int,marked_mappings:int,skipped_roots:int}
      */
-    public function markExactRemoteRepairCandidates(array $audit): array
+    public function markSafeRemoteRepairCandidates(array $audit): array
     {
         $grouped = collect($audit['rows'])
             ->filter(fn (array $row): bool => count($row['owner_root_ids']) === 1)
@@ -247,6 +259,7 @@ final class WooLegacyVariantAxisRemoteAuditService
                     'external_product_id' => (string) $row['external_product_id'],
                     'attribute_id' => (int) $row['attribute_id'],
                     'size_attribute_id' => (int) data_get($row, 'remote_evidence.size_attribute_id'),
+                    'evidence_mode' => (string) data_get($row, 'remote_evidence.mode'),
                     'option_keys' => (array) data_get($row, 'remote_evidence.option_keys', []),
                 ])
                 ->sortBy(fn (array $target): string => $target['sales_channel_id'].'|'.$target['external_product_id'])
@@ -363,14 +376,15 @@ final class WooLegacyVariantAxisRemoteAuditService
     /**
      * @param  array<string,mixed>  $legacyAxis
      * @param  Collection<int,array<string,mixed>>  $sizeAxes
-     * @return array{verified:bool,reason:?string,size_attribute_id:?int,option_keys:list<string>}
+     * @return array{verified:bool,mode:?string,reason:?string,size_attribute_id:?int,option_keys:list<string>}
      */
     private function remoteSizeEvidence(array $legacyAxis, Collection $sizeAxes): array
     {
-        if ($sizeAxes->count() !== 1) {
+        if ($sizeAxes->count() > 1) {
             return [
                 'verified' => false,
-                'reason' => 'Produkt nie ma dokładnie jednego globalnego atrybutu Rozmiar/Size.',
+                'mode' => null,
+                'reason' => 'Produkt ma kilka globalnych atrybutów Rozmiar/Size.',
                 'size_attribute_id' => null,
                 'option_keys' => [],
             ];
@@ -382,46 +396,84 @@ final class WooLegacyVariantAxisRemoteAuditService
             ->filter()
             ->unique(fn (string $option): string => $this->sizeOrder->key($option))
             ->values();
-        $sizeOptions = collect((array) ($sizeAxis['options'] ?? []))
-            ->map(fn (mixed $option): string => trim((string) $option))
-            ->filter()
-            ->unique(fn (string $option): string => $this->sizeOrder->key($option))
-            ->values();
-
-        if ($legacyOptions->isEmpty() || $sizeOptions->isEmpty()) {
+        if ($legacyOptions->isEmpty()) {
             return [
                 'verified' => false,
-                'reason' => 'Oś wariantowa albo Rozmiar nie zawiera wartości.',
-                'size_attribute_id' => (int) ($sizeAxis['id'] ?? 0),
+                'mode' => null,
+                'reason' => 'Aktywna historyczna oś wariantowa nie zawiera wartości.',
+                'size_attribute_id' => is_array($sizeAxis) ? (int) ($sizeAxis['id'] ?? 0) : null,
                 'option_keys' => [],
             ];
         }
 
         try {
             $this->sizeOrder->menuOrders($legacyOptions->all());
-            $this->sizeOrder->menuOrders($sizeOptions->all());
         } catch (Throwable $exception) {
             return [
                 'verified' => false,
+                'mode' => null,
                 'reason' => $exception->getMessage(),
-                'size_attribute_id' => (int) ($sizeAxis['id'] ?? 0),
+                'size_attribute_id' => is_array($sizeAxis) ? (int) ($sizeAxis['id'] ?? 0) : null,
                 'option_keys' => [],
             ];
         }
 
         $legacyKeys = $legacyOptions
             ->map(fn (string $option): string => $this->sizeOrder->key($option))
-            ->sort()
+            ->sortBy(fn (string $key): int => $this->sizeOrder->menuOrders([$key])[0])
             ->values();
+        $safe = [
+            'verified' => true,
+            'mode' => 'legacy_only',
+            'reason' => null,
+            'size_attribute_id' => is_array($sizeAxis) ? (int) ($sizeAxis['id'] ?? 0) : null,
+            'option_keys' => $legacyKeys->all(),
+        ];
+
+        if (! is_array($sizeAxis)) {
+            return $safe;
+        }
+
+        $sizeOptions = collect((array) ($sizeAxis['options'] ?? []))
+            ->map(fn (mixed $option): string => trim((string) $option))
+            ->filter()
+            ->unique(fn (string $option): string => $this->sizeOrder->key($option))
+            ->values();
+
+        if ($sizeOptions->isEmpty()) {
+            return [...$safe, 'mode' => 'legacy_with_empty_size'];
+        }
+
+        try {
+            $this->sizeOrder->menuOrders($sizeOptions->all());
+        } catch (Throwable) {
+            if (($sizeAxis['variation'] ?? null) === true) {
+                return [
+                    'verified' => false,
+                    'mode' => null,
+                    'reason' => 'Aktywny Rozmiar zawiera wartości spoza słownika ERP.',
+                    'size_attribute_id' => (int) ($sizeAxis['id'] ?? 0),
+                    'option_keys' => [],
+                ];
+            }
+
+            return [...$safe, 'mode' => 'legacy_over_informational_size'];
+        }
+
         $sizeKeys = $sizeOptions
             ->map(fn (string $option): string => $this->sizeOrder->key($option))
             ->sort()
             ->values();
 
-        if ($legacyKeys->all() !== $sizeKeys->all()) {
+        if ($legacyKeys->sort()->values()->all() !== $sizeKeys->all()) {
+            if (($sizeAxis['variation'] ?? null) !== true) {
+                return [...$safe, 'mode' => 'legacy_over_informational_size'];
+            }
+
             return [
                 'verified' => false,
-                'reason' => 'Wariant i Rozmiar mają różne zbiory wartości.',
+                'mode' => null,
+                'reason' => 'Wariant i aktywny Rozmiar mają różne zbiory wartości.',
                 'size_attribute_id' => (int) ($sizeAxis['id'] ?? 0),
                 'option_keys' => [],
             ];
@@ -429,13 +481,10 @@ final class WooLegacyVariantAxisRemoteAuditService
 
         return [
             'verified' => true,
+            'mode' => 'parallel_exact',
             'reason' => null,
             'size_attribute_id' => (int) ($sizeAxis['id'] ?? 0),
-            'option_keys' => $sizeOptions
-                ->sortBy(fn (string $option): int => $this->sizeOrder->menuOrders([$option])[0])
-                ->map(fn (string $option): string => $this->sizeOrder->key($option))
-                ->values()
-                ->all(),
+            'option_keys' => $legacyKeys->all(),
         ];
     }
 

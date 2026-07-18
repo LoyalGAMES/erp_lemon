@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000056';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000057';
+
+    public const PREVIOUS_EXACT_REMOTE_EVIDENCE_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000056';
 
     public const PREVIOUS_REMOTE_CATALOG_DISCOVERY_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000055';
 
@@ -103,6 +105,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_EXACT_REMOTE_EVIDENCE_REVISION,
             self::PREVIOUS_REMOTE_CATALOG_DISCOVERY_REVISION,
             self::PREVIOUS_STALE_TRANSLATED_VARIATION_ALIAS_REVISION,
             self::PREVIOUS_TRANSLATION_ID_DIAGNOSTIC_REVISION,
@@ -172,6 +175,9 @@ final class WooOwnedVariantAxisRepairService
         'upsell_ids',
         'cross_sell_ids',
     ];
+
+    /** @var Collection<int,ProductParameterDefinition>|null */
+    private ?Collection $protectedParameterDefinitions = null;
 
     public function __construct(
         private readonly WooCommerceClient $client,
@@ -395,10 +401,10 @@ final class WooOwnedVariantAxisRepairService
                 throw $exception;
             }
 
-            // The live parent has an exact dictionary-backed Size/wariant
-            // bijection recorded by the remote audit. Let the multilingual
-            // remote preflight derive child assignments instead of trusting a
-            // stale or incomplete local import snapshot.
+            // The live parent has a dictionary-backed active legacy Size axis
+            // recorded by the remote audit. Let the multilingual remote
+            // preflight derive child assignments instead of trusting a stale
+            // or incomplete local import snapshot.
             $variationOptionHints = [];
         }
 
@@ -4610,7 +4616,9 @@ final class WooOwnedVariantAxisRepairService
                 $localSku = mb_strtoupper(trim((string) $variant->sku));
                 $remoteSku = mb_strtoupper(trim((string) data_get($remote, 'sku', '')));
 
-                if (! is_array($remote) || $localSku === '' || $remoteSku !== $localSku) {
+                if (! is_array($remote)
+                    || ($localSku !== '' && $remoteSku !== '' && $remoteSku !== $localSku)
+                ) {
                     return sprintf(
                         'WooCommerce %s #%s: mapowanie wariacji #%s nie wskazuje dokładnie SKU %s.',
                         mb_strtoupper($language),
@@ -4717,7 +4725,10 @@ final class WooOwnedVariantAxisRepairService
         $localParentSku = $skuKey($product->sku);
         $remoteParentSku = $skuKey($parent['sku'] ?? '');
 
-        if ($localParentSku === '' || $remoteParentSku !== $localParentSku) {
+        if ($localParentSku !== ''
+            && $remoteParentSku !== ''
+            && $remoteParentSku !== $localParentSku
+        ) {
             return 'Identyfikator SKU rodzica nie zgadza się z mapowaniem ERP.';
         }
 
@@ -4734,7 +4745,10 @@ final class WooOwnedVariantAxisRepairService
             ->values()
             ->all();
 
-        if ($localVariationSkus === [] || $remoteVariationSkus !== $localVariationSkus) {
+        if ($localVariationSkus !== []
+            && $remoteVariationSkus !== []
+            && $remoteVariationSkus !== $localVariationSkus
+        ) {
             return 'Zestaw SKU wariantów nie zgadza się z rodziną ERP.';
         }
 
@@ -7934,11 +7948,7 @@ final class WooOwnedVariantAxisRepairService
             'non_target_attributes' => collect((array) ($parent['attributes'] ?? []))
                 ->filter(fn (mixed $attribute): bool => is_array($attribute))
                 ->reject($isTargetAttribute)
-                ->map(fn (array $attribute): array => collect([
-                    'id', 'name', 'slug', 'position', 'visible', 'variation', 'options',
-                ])->mapWithKeys(fn (string $field): array => [
-                    $field => array_key_exists($field, $attribute) ? $attribute[$field] : null,
-                ])->all())
+                ->map(fn (array $attribute): array => $this->protectedNonTargetAttribute($attribute))
                 ->values()
                 ->all(),
             'non_target_defaults' => collect((array) ($parent['default_attributes'] ?? []))
@@ -7961,6 +7971,101 @@ final class WooOwnedVariantAxisRepairService
                 ->sortKeys()
                 ->all(),
         ];
+    }
+
+    /**
+     * Woo/Polylang can return both translated term labels after an otherwise
+     * axis-only parent update (for example `Jasny szary` and `Light grey`), or
+     * swap their response order between language-scoped reads. For a positive
+     * global, non-variation attribute compare the semantic ERP dictionary
+     * identities as a set. A genuinely different option remains protected;
+     * only duplicate labels belonging to the same configured translation row
+     * coalesce.
+     *
+     * @param  array<string,mixed>  $attribute
+     * @return array<string,mixed>
+     */
+    private function protectedNonTargetAttribute(array $attribute): array
+    {
+        $protected = collect([
+            'id', 'name', 'slug', 'position', 'visible', 'variation', 'options',
+        ])->mapWithKeys(fn (string $field): array => [
+            $field => array_key_exists($field, $attribute) ? $attribute[$field] : null,
+        ])->all();
+
+        if ((int) ($attribute['id'] ?? 0) <= 0
+            || ($attribute['variation'] ?? null) !== false
+            || ! is_array($attribute['options'] ?? null)
+        ) {
+            return $protected;
+        }
+
+        $attributeKeys = collect([
+            $attribute['name'] ?? null,
+            $attribute['slug'] ?? null,
+        ])
+            ->map(fn (mixed $name): string => $this->attributeKey((string) $name))
+            ->filter()
+            ->unique();
+        $definition = ($this->protectedParameterDefinitions ??= ProductParameterDefinition::query()
+            ->orderBy('id')
+            ->get())
+            ->first(function (ProductParameterDefinition $candidate) use ($attributeKeys): bool {
+                return collect([
+                    $candidate->name,
+                    $candidate->name_en,
+                    $candidate->slug,
+                ])
+                    ->map(fn (mixed $name): string => $this->attributeKey((string) $name))
+                    ->filter()
+                    ->contains(fn (string $key): bool => $attributeKeys->contains($key));
+            });
+
+        if (! $definition instanceof ProductParameterDefinition) {
+            return $protected;
+        }
+
+        $englishValues = collect((array) $definition->values_en)->values();
+        $aliases = collect((array) $definition->values)
+            ->values()
+            ->flatMap(function (mixed $polish, int $index) use ($englishValues): array {
+                $polish = trim((string) $polish);
+                $english = trim((string) $englishValues->get($index, ''));
+                $canonical = $this->protectedOptionKey($polish !== '' ? $polish : $english);
+
+                if ($canonical === '') {
+                    return [];
+                }
+
+                return collect([$polish, $english])
+                    ->filter()
+                    ->mapWithKeys(fn (string $label): array => [
+                        $this->protectedOptionKey($label) => $canonical,
+                    ])
+                    ->all();
+            });
+        $protected['options'] = collect($attribute['options'])
+            ->map(fn (mixed $option): string => trim((string) $option))
+            ->filter()
+            ->map(function (string $option) use ($aliases): string {
+                $key = $this->protectedOptionKey($option);
+
+                return (string) ($aliases->get($key) ?? 'raw:'.$key);
+            })
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+
+        return $protected;
+    }
+
+    private function protectedOptionKey(string $option): string
+    {
+        return mb_strtolower(
+            (string) preg_replace('/\s+/u', ' ', trim($option)),
+            'UTF-8',
+        );
     }
 
     /**

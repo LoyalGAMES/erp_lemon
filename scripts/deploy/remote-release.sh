@@ -291,6 +291,7 @@ migration_completed=0
 bootstrap_moved=0
 size_order_sync_verified=0
 variant_axis_repair_verified=0
+variant_axis_state_verified=0
 previous_release=''
 rollback_release=''
 legacy_release=''
@@ -489,9 +490,9 @@ else
 fi
 
 # Audit the live legacy taxonomy independently of local ERP mappings. Persist
-# candidates only when every still-legacy language parent has an exact,
-# dictionary-backed Size/wariant option bijection; the repair still performs a
-# full parent/child preflight before its first mutation.
+# candidates only when every still-legacy language parent has a dictionary-
+# backed active legacy Size axis; the repair still performs a full
+# multilingual parent/child preflight before its first mutation.
 if ! (
     cd "$release_path"
     "$php_bin" artisan erp:audit-woo-legacy-variant-axes-during-maintenance \
@@ -521,13 +522,29 @@ if [[ "$size_order_sync_verified" -eq 1 ]]; then
         "$php_bin" artisan erp:verify-woo-owned-variant-axis-repair
     ); then
         if [[ "$variant_axis_repair_succeeded" -eq 1 ]]; then
-            variant_axis_repair_verified=1
+            variant_axis_state_verified=1
         fi
     else
         echo 'Błąd: bieżąca rewizja naprawy osi wariantów WooCommerce ma nierozwiązane rodziny.' >&2
     fi
 else
     echo 'Błąd: pominięto naprawę osi wariantów, ponieważ globalna kolejność rozmiarów nie została potwierdzona.' >&2
+fi
+
+# The durable local revision is not the catalog-wide terminal condition. Query
+# the live legacy taxonomies again after all writes and require zero products
+# whose active variation axis is wariant/BLVariant.
+if (
+    cd "$release_path"
+    "$php_bin" artisan erp:audit-woo-legacy-variant-axes-during-maintenance \
+        --require-no-active-legacy \
+        --limit=100
+); then
+    if [[ "$variant_axis_state_verified" -eq 1 ]]; then
+        variant_axis_repair_verified=1
+    fi
+else
+    echo 'Błąd: zdalny katalog nadal zawiera aktywne historyczne osie wariantów.' >&2
 fi
 
 # Custom storefront settings belong to Lemon Elementor Theme and are only six

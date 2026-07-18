@@ -29,7 +29,7 @@ final class WooOwnedVariantAxisDeploymentGate
      *     processed:int,
      *     skipped:int,
      *     exceptions:int,
-     *     results:list<array{product_id:int,status:string,error?:string}>,
+     *     results:list<array{product_id:int,status:string,reason?:string,error?:string}>,
      *     postcondition:array<string,mixed>
      * }
      */
@@ -98,10 +98,17 @@ final class WooOwnedVariantAxisDeploymentGate
                     ))->handle($this->repair, $this->backfill);
                 }
 
-                $results[] = [
+                $result = [
                     'product_id' => $productId,
                     'status' => $this->familyStatus($productId),
                 ];
+                $reason = $this->familyReason($productId);
+
+                if ($reason !== null) {
+                    $result['reason'] = $reason;
+                }
+
+                $results[] = $result;
             } catch (Throwable $exception) {
                 $exceptions++;
                 report($exception);
@@ -223,6 +230,27 @@ final class WooOwnedVariantAxisDeploymentGate
             ->values();
 
         return $statuses->isEmpty() ? 'missing' : $statuses->implode(',');
+    }
+
+    private function familyReason(int $productId): ?string
+    {
+        $reason = $this->currentRevisionMappings()
+            ->where('product_id', $productId)
+            ->get(['metadata'])
+            ->map(function (ProductChannelMapping $mapping): string {
+                $state = (array) data_get(
+                    $mapping->metadata,
+                    WooOwnedVariantAxisRepairService::STATE_PATH,
+                    [],
+                );
+
+                return trim((string) ($state['error'] ?? data_get($state, 'result.reason', '')));
+            })
+            ->filter()
+            ->unique()
+            ->implode(' | ');
+
+        return $reason !== '' ? $reason : null;
     }
 
     private function canonicalTranslationRebuildToken(int $productId): ?string

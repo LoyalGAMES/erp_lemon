@@ -181,6 +181,37 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
     }
 
+    public function test_exact_variation_id_mappings_preserve_a_legacy_family_whose_remote_skus_are_blank(): void
+    {
+        [$parent, $catalog] = $this->family();
+
+        foreach ($catalog->products as &$remoteParent) {
+            $remoteParent['sku'] = '';
+        }
+        unset($remoteParent);
+
+        foreach ($catalog->variations as &$remoteVariations) {
+            foreach ($remoteVariations as &$remoteVariation) {
+                $remoteVariation['sku'] = '';
+            }
+            unset($remoteVariation);
+        }
+        unset($remoteVariations);
+
+        $this->fakeCatalog($catalog);
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('repaired', $result['status']);
+        $this->assertSame([124, 125], array_keys($catalog->variations[123]));
+        $this->assertSame([224, 225], array_keys($catalog->variations[223]));
+        $this->assertSame(3, $catalog->variations[123][124]['stock_quantity']);
+        $this->assertSame(3, $catalog->variations[223][224]['stock_quantity']);
+        $this->assertSame([[
+            'id' => 1,
+            'option' => 'S/M',
+        ]], $catalog->variations[123][124]['attributes']);
+    }
+
     public function test_it_collapses_wariant_and_blvariant_duplicates_into_size_without_recreating_variations_or_stock(): void
     {
         [$parent, $catalog] = $this->family();
@@ -3951,6 +3982,45 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertStringNotContainsString('variations.124.name', $delta);
         $this->assertStringNotContainsString('SECRET', $delta);
         $this->assertStringNotContainsString('987654', $delta);
+    }
+
+    public function test_protected_snapshot_coalesces_only_configured_translated_global_term_aliases(): void
+    {
+        [, $catalog] = $this->family();
+        ProductParameterDefinition::query()->create([
+            'name' => 'Kolor',
+            'name_en' => 'Color',
+            'slug' => 'kolor',
+            'input_type' => 'select',
+            'values' => ['Jasny szary', 'Czerwony'],
+            'values_en' => ['Light grey', 'Red'],
+            'is_variant' => false,
+            'is_required' => false,
+            'sort_order' => 20,
+        ]);
+        $before = unserialize(serialize($catalog->products[123]));
+        $before['attributes'][] = [
+            'id' => 3,
+            'name' => 'Kolor',
+            'slug' => 'pa_kolor',
+            'position' => 3,
+            'visible' => true,
+            'variation' => false,
+            'options' => ['Light grey'],
+        ];
+        $translatedDuplicate = unserialize(serialize($before));
+        $translatedDuplicate['attributes'][3]['options'] = ['Jasny szary', 'Light grey'];
+        $differentColor = unserialize(serialize($before));
+        $differentColor['attributes'][3]['options'] = ['Czerwony'];
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'protectedSnapshot',
+        );
+        $service = app(WooOwnedVariantAxisRepairService::class);
+
+        $beforeHash = $method->invoke($service, $before, []);
+        $this->assertSame($beforeHash, $method->invoke($service, $translatedDuplicate, []));
+        $this->assertNotSame($beforeHash, $method->invoke($service, $differentColor, []));
     }
 
     #[DataProvider('nonOrderParentDriftProvider')]
