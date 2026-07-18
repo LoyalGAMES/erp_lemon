@@ -263,6 +263,57 @@ final class WooCommerceVariationTranslationRecoveryTest extends TestCase
         ]);
     }
 
+    public function test_polish_child_mislabeled_as_english_is_ignored_and_rebuilt_under_the_english_parent(): void
+    {
+        $family = $this->family('STALE-EN-ALIAS');
+        ProductChannelAlias::query()->create([
+            'product_id' => $family['variant']->id,
+            'sales_channel_id' => $family['channel']->id,
+            'external_product_id' => '123',
+            'external_variation_id' => '456',
+            'external_key' => ProductChannelAlias::externalKey('123', '456'),
+            'external_sku' => $family['variant']->sku,
+            'language' => 'en',
+            'metadata' => ['source' => 'stale_import'],
+        ]);
+
+        Http::fake(function (Request $request) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($path === '/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities') {
+                return Http::response($this->readyCapabilities());
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/124/variations'
+            ) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'POST'
+                && $request->url() === 'https://shop.test/wp-json/wc/v3/products/124/variations?lang=en'
+            ) {
+                return Http::response(['id' => 457, 'sku' => $request['sku']], 201);
+            }
+
+            return $this->successfulFamilyResponse($request, true);
+        });
+
+        app(ProductDataExportService::class)->export($family['parent']);
+
+        $this->assertCount(1, $this->englishVariationCreateRequests());
+        $link = $this->variationLinkRequests()->sole();
+        $this->assertSame(['en' => 457, 'pl' => 456], $link['translations']);
+        $this->assertSame(['en' => 124, 'pl' => 123], $link['parents']);
+        $this->assertDatabaseHas('product_channel_aliases', [
+            'product_id' => $family['variant']->id,
+            'sales_channel_id' => $family['channel']->id,
+            'external_product_id' => '124',
+            'external_variation_id' => '457',
+            'language' => 'en',
+        ]);
+    }
+
     /**
      * @return array{channel:SalesChannel,integration:WordpressIntegration,parent:Product,variant:Product,variant_mapping:ProductChannelMapping}
      */

@@ -1395,9 +1395,24 @@ final class ProductDataExportService
             );
             $payload = $this->globalizeProductAttributes($integration, $payload, $language);
             $variantReference = $variantReferences[$language] ?? null;
-            $translatedVariationId = is_array($variantReference)
+            $referencedParentId = is_array($variantReference)
+                ? trim((string) ($variantReference['product_id'] ?? ''))
+                : '';
+            $referencedVariationId = is_array($variantReference)
                 ? trim((string) ($variantReference['variation_id'] ?? ''))
                 : '';
+
+            // Old imports sometimes stored a Polish child post as the EN
+            // alias. WordPress post IDs are global, so a translated child must
+            // belong to the exact translated parent and differ from the PL
+            // variation ID. Treat an invalid alias as absent; the token-aware
+            // discovery/create path below will recover the real EN child
+            // without modifying or duplicating the Polish variation.
+            $translatedVariationId = $referencedParentId === $translatedParentId
+                && ctype_digit($referencedVariationId)
+                && $referencedVariationId !== (string) $primaryMapping->external_variation_id
+                    ? $referencedVariationId
+                    : '';
             $creationToken = $this->pendingVariantTranslationCreationToken(
                 $primaryMapping,
                 $language,
