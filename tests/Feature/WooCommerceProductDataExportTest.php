@@ -37,6 +37,70 @@ class WooCommerceProductDataExportTest extends TestCase
 {
     use RefreshDatabase;
 
+    public function test_canonical_translation_handoff_prefers_its_exact_parent_alias(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'EXACT-HANDOFF-ALIAS',
+            'name' => 'Exact handoff alias',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'EXACT-HANDOFF-PARENT',
+            'name' => 'Exact handoff parent',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+            ]],
+        ]);
+        $attributes = (array) $product->attributes;
+        data_set($attributes, 'master.'.WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_EXACT_TRANSLATION_HANDOFF_ALIAS_REVISION,
+            'canonical_full_export_handoff_at' => now()->toISOString(),
+            'rebuild_simple_translations' => [[
+                'language' => 'en',
+                'external_product_id' => '223',
+            ]],
+        ]);
+        $product->forceFill(['attributes' => $attributes])->save();
+        ProductChannelMapping::query()->create([
+            'product_id' => $product->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '123',
+            'external_sku' => $product->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        foreach (['123' => 'stale_import', '223' => 'verified_contract'] as $externalId => $source) {
+            $externalId = (string) $externalId;
+            ProductChannelAlias::query()->create([
+                'product_id' => $product->id,
+                'sales_channel_id' => $channel->id,
+                'external_product_id' => $externalId,
+                'external_variation_id' => null,
+                'external_key' => ProductChannelAlias::externalKey($externalId, null),
+                'external_sku' => $product->sku,
+                'language' => 'en',
+                'metadata' => ['source' => $source],
+            ]);
+        }
+
+        $references = (new \ReflectionMethod(
+            ProductDataExportService::class,
+            'translationReferences',
+        ))->invoke(
+            app(ProductDataExportService::class),
+            $product,
+            $channel->id,
+        );
+
+        $this->assertSame('223', data_get($references, 'en.product_id'));
+        $this->assertNull(data_get($references, 'en.variation_id'));
+    }
+
     public function test_saving_legacy_product_dispatches_immediate_and_durable_export_without_losing_images(): void
     {
         Bus::fake();

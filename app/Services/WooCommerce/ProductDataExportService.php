@@ -1103,6 +1103,7 @@ final class ProductDataExportService
      */
     private function translationReferences(Product $product, int $salesChannelId): array
     {
+        $canonicalHandoffTargets = $this->canonicalTranslationHandoffTargets($product);
         $aliases = ProductChannelAlias::query()
             ->where('product_id', $product->id)
             ->where('sales_channel_id', $salesChannelId)
@@ -1114,12 +1115,30 @@ final class ProductDataExportService
         if ($aliases->isNotEmpty()) {
             return $aliases
                 ->groupBy(fn (ProductChannelAlias $alias): string => (string) $alias->language)
-                ->mapWithKeys(function (Collection $languageAliases, string $language): array {
+                ->mapWithKeys(function (Collection $languageAliases, string $language) use (
+                    $canonicalHandoffTargets,
+                ): array {
                     // A merge alias remains useful for historical inbound
                     // identities. If a current contract alias for the same
                     // language also exists, it must be the sole translation
                     // reference used to build parent/variation endpoints.
-                    $alias = $languageAliases->first(
+                    $language = mb_strtolower(trim($language));
+                    $handoffProductId = $canonicalHandoffTargets[$language] ?? null;
+                    $alias = $handoffProductId === null
+                        ? null
+                        : $languageAliases->first(
+                            fn (ProductChannelAlias $candidate): bool => trim((string) $candidate->external_product_id)
+                                === $handoffProductId
+                                && blank($candidate->external_variation_id),
+                        );
+
+                    if ($handoffProductId !== null && ! $alias instanceof ProductChannelAlias) {
+                        throw new RuntimeException(
+                            "Brak aktywnego aliasu {$language} dla zweryfikowanego produktu WooCommerce #{$handoffProductId}.",
+                        );
+                    }
+
+                    $alias ??= $languageAliases->first(
                         fn (ProductChannelAlias $candidate): bool => blank($candidate->source_product_id)
                             && data_get($candidate->metadata, 'product_merge') === null,
                     ) ?? $languageAliases->first();
@@ -1163,6 +1182,44 @@ final class ProductDataExportService
                 'sku' => filled($reference['sku'] ?? null) ? (string) $reference['sku'] : null,
             ])
             ->all();
+    }
+
+    /** @return array<string,string> */
+    private function canonicalTranslationHandoffTargets(Product $product): array
+    {
+        $handoff = (array) data_get(
+            $product->masterData(),
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+
+        if (! WooOwnedVariantAxisRepairService::isSynchronizedRevision($handoff['revision'] ?? null)
+            || blank($handoff['canonical_full_export_handoff_at'] ?? null)
+        ) {
+            return [];
+        }
+
+        $targets = [];
+
+        foreach ((array) ($handoff['rebuild_simple_translations'] ?? []) as $target) {
+            if (! is_array($target)) {
+                throw new RuntimeException('Zweryfikowane przekazanie odbudowy tłumaczenia ma niepoprawny cel.');
+            }
+
+            $language = mb_strtolower(trim((string) ($target['language'] ?? '')));
+            $externalProductId = trim((string) ($target['external_product_id'] ?? ''));
+
+            if (preg_match('/^[a-z][a-z0-9_-]*$/', $language) !== 1
+                || preg_match('/^[1-9]\d*$/', $externalProductId) !== 1
+                || isset($targets[$language])
+            ) {
+                throw new RuntimeException('Zweryfikowane przekazanie odbudowy tłumaczenia nie jest jednoznaczne.');
+            }
+
+            $targets[$language] = $externalProductId;
+        }
+
+        return $targets;
     }
 
     /**
