@@ -309,6 +309,81 @@ Artisan::command('erp:inspect-woo-owned-variant-axis-repair {--limit=30 : Maximu
             ->values()
             ->all(),
     );
+    $mappings
+        ->filter(fn (ProductChannelMapping $mapping): bool => data_get(
+            $mapping->metadata,
+            $statePath.'.status',
+        ) !== 'completed')
+        ->each(function (ProductChannelMapping $mapping): void {
+            $root = Product::query()
+                ->with([
+                    'channelMappings',
+                    'channelAliases',
+                    'stockBalances',
+                    'variantChildren.channelMappings',
+                    'variantChildren.channelAliases',
+                    'variantChildren.stockBalances',
+                    'variantChildren.variantParents.channelMappings',
+                ])
+                ->find($mapping->product_id);
+
+            if (! $root instanceof Product) {
+                return;
+            }
+
+            $identity = static fn (mixed $record): string => trim(
+                (string) $record->external_product_id,
+            ).(filled($record->external_variation_id)
+                ? '#'.trim((string) $record->external_variation_id)
+                : '');
+            $detail = [
+                'root' => [
+                    'id' => (int) $root->id,
+                    'sku' => trim((string) $root->sku),
+                    'name' => trim((string) $root->name),
+                    'active' => (bool) $root->is_active,
+                    'master_source' => $root->masterSource(),
+                    'stock_verification_required' => $root->requiresStockVerification(),
+                    'mappings' => $root->channelMappings->map($identity)->values()->all(),
+                    'aliases' => $root->channelAliases->map($identity)->values()->all(),
+                ],
+                'children' => $root->variantChildren->map(
+                    function (Product $child) use ($identity): array {
+                        return [
+                            'id' => (int) $child->id,
+                            'sku' => trim((string) $child->sku),
+                            'name' => trim((string) $child->name),
+                            'active' => (bool) $child->is_active,
+                            'master_source' => $child->masterSource(),
+                            'stock_verification_required' => $child->requiresStockVerification(),
+                            'relation_option' => data_get($child->pivot?->metadata, 'variant_option'),
+                            'mappings' => $child->channelMappings->map($identity)->values()->all(),
+                            'aliases' => $child->channelAliases->map($identity)->values()->all(),
+                            'parents' => $child->variantParents->map(fn (Product $parent): array => [
+                                'id' => (int) $parent->id,
+                                'sku' => trim((string) $parent->sku),
+                                'mappings' => $parent->channelMappings->map($identity)->values()->all(),
+                            ])->values()->all(),
+                            'balances' => $child->stockBalances->map(fn (mixed $balance): array => [
+                                'warehouse_id' => (int) $balance->warehouse_id,
+                                'on_hand' => (float) $balance->quantity_on_hand,
+                                'reserved' => (float) $balance->quantity_reserved,
+                                'available' => (float) $balance->quantity_available,
+                            ])->values()->all(),
+                            'merged_into' => data_get(
+                                $child->attributes,
+                                'master.translation_merge.merged_into_product_id',
+                            ),
+                        ];
+                    },
+                )->values()->all(),
+            ];
+
+            $this->line(
+                'Woo-owned unresolved family detail: '
+                .(json_encode($detail, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '-'),
+            );
+        });
     $this->info(sprintf(
         'Woo-owned axis diagnostics: matching=%d, queued_jobs=%d, failed_jobs=%d, sync_success=%d, sync_failed=%d, revision=%s.',
         $mappings->count(),

@@ -39,6 +39,9 @@ final class WooCommerceClient
     /** @var array<string, true> */
     private array $linkedGlobalProductAttributeTermTranslations = [];
 
+    /** @var array<string, array<string, mixed>> */
+    private array $resolvedGlobalProductAttributeTerms = [];
+
     public function __construct(
         private readonly ProductVariantAxisNameResolver $variantAxisNames,
     ) {}
@@ -1584,6 +1587,15 @@ final class WooCommerceClient
                 }
 
                 if (! is_array($sourceTerm)) {
+                    $sourceTerm = $this->rememberedGlobalProductAttributeTerm(
+                        $integration,
+                        $attributeId,
+                        $pair['source'],
+                        'pl',
+                    );
+                }
+
+                if (! is_array($sourceTerm)) {
                     throw new RuntimeException(
                         "WooCommerce nie zawiera źródłowej polskiej wartości {$pair['source']} globalnego atrybutu #{$attributeId}.",
                     );
@@ -1599,6 +1611,13 @@ final class WooCommerceClient
                 $language,
                 $excludedTargetTermIds,
                 $pair['menu_order'],
+            );
+            $this->rememberGlobalProductAttributeTerm(
+                $integration,
+                $attributeId,
+                $pair['localized'],
+                $language,
+                $term,
             );
             $resolvedOptions[] = trim((string) ($term['name'] ?? $pair['localized']))
                 ?: $pair['localized'];
@@ -2361,6 +2380,59 @@ final class WooCommerceClient
     private function globalProductAttributeIntegrationKey(WordpressIntegration $integration): string
     {
         return (string) ($integration->getKey() ?: $integration->base_url);
+    }
+
+    /** @param array<string, mixed> $term */
+    private function rememberGlobalProductAttributeTerm(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $option,
+        ?string $language,
+        array $term,
+    ): void {
+        if ((int) ($term['id'] ?? 0) <= 0) {
+            return;
+        }
+
+        $this->resolvedGlobalProductAttributeTerms[
+            $this->globalProductAttributeTermMemoryKey(
+                $integration,
+                $attributeId,
+                $option,
+                $language,
+            )
+        ] = $term;
+    }
+
+    /** @return array<string, mixed>|null */
+    private function rememberedGlobalProductAttributeTerm(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $option,
+        ?string $language,
+    ): ?array {
+        return $this->resolvedGlobalProductAttributeTerms[
+            $this->globalProductAttributeTermMemoryKey(
+                $integration,
+                $attributeId,
+                $option,
+                $language,
+            )
+        ] ?? null;
+    }
+
+    private function globalProductAttributeTermMemoryKey(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $option,
+        ?string $language,
+    ): string {
+        return implode('|', [
+            $this->globalProductAttributeIntegrationKey($integration),
+            $attributeId,
+            mb_strtolower(trim((string) $language)),
+            mb_strtolower(trim($option)),
+        ]);
     }
 
     private function globalProductAttributeSlug(string $name): string
