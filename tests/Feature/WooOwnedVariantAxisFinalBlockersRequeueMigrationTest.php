@@ -174,6 +174,47 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
         );
     }
 
+    public function test_term_family_probe_migration_requeues_only_the_persisting_exact_conflict(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'TERM-PROBE-AXIS',
+            'name' => 'Term probe axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $conflict = $this->mapping(
+            $channel,
+            'TERM-PROBE-CONFLICT',
+            'WooCommerce EN #500316: WordPress nie powiązał tłumaczeń wartości globalnego atrybutu: Wartość atrybutu 110014 należy już do innej rodziny tłumaczeń.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_TERM_TRANSLATION_CONFLICT_PROBE_REVISION,
+        );
+        $unrelated = $this->mapping(
+            $channel,
+            'TERM-PROBE-UNRELATED',
+            'WordPress nie potwierdził kompletnej rodziny tłumaczeń.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_TERM_TRANSLATION_CONFLICT_PROBE_REVISION,
+        );
+        $unrelatedBefore = $unrelated->metadata;
+
+        $this->runTermFamilyProbeMigration();
+
+        $state = (array) data_get(
+            $conflict->refresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision']);
+        $this->assertSame('pending', $state['status']);
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::PREVIOUS_TERM_TRANSLATION_CONFLICT_PROBE_REVISION,
+            data_get($state, 'previous.revision'),
+        );
+        $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
+        $this->assertSame(
+            ['pending' => 1],
+            app(WooOwnedVariantAxisDeploymentGate::class)->postcondition()['statuses'],
+        );
+    }
+
     private function mapping(
         SalesChannel $channel,
         string $suffix,
@@ -233,6 +274,13 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
     {
         (require database_path(
             'migrations/2026_07_18_000058_requeue_existing_woo_term_translation_family.php',
+        ))->up();
+    }
+
+    private function runTermFamilyProbeMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_18_000059_requeue_woo_term_translation_conflict_probe.php',
         ))->up();
     }
 }

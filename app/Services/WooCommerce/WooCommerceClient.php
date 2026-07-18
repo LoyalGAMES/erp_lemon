@@ -1483,10 +1483,34 @@ final class WooCommerceClient
             $resolvedTermIds[] = (int) $term['id'];
 
             if (is_array($sourceTerm)) {
-                $this->linkGlobalProductAttributeTermTranslations($integration, $attributeId, [
-                    'pl' => (int) $sourceTerm['id'],
-                    $language => (int) $term['id'],
-                ]);
+                try {
+                    $this->linkGlobalProductAttributeTermTranslations($integration, $attributeId, [
+                        'pl' => (int) $sourceTerm['id'],
+                        $language => (int) $term['id'],
+                    ]);
+                } catch (ProductAttributeTermTranslationConflictException $exception) {
+                    $linkedSourceTerm = $this->findExistingGlobalProductAttributeSourceTermByLinkProbe(
+                        $integration,
+                        $attributeId,
+                        $pair['source'],
+                        'pl',
+                        $term,
+                        $language,
+                        [(int) $sourceTerm['id']],
+                    );
+
+                    if (! is_array($linkedSourceTerm)) {
+                        throw $exception;
+                    }
+
+                    $this->rememberGlobalProductAttributeTerm(
+                        $integration,
+                        $attributeId,
+                        $pair['source'],
+                        'pl',
+                        $linkedSourceTerm,
+                    );
+                }
             }
         }
 
@@ -1656,10 +1680,34 @@ final class WooCommerceClient
             $resolvedTermIds[] = (int) $term['id'];
 
             if (is_array($sourceTerm)) {
-                $this->linkGlobalProductAttributeTermTranslations($integration, $attributeId, [
-                    'pl' => (int) $sourceTerm['id'],
-                    $language => (int) $term['id'],
-                ]);
+                try {
+                    $this->linkGlobalProductAttributeTermTranslations($integration, $attributeId, [
+                        'pl' => (int) $sourceTerm['id'],
+                        $language => (int) $term['id'],
+                    ]);
+                } catch (ProductAttributeTermTranslationConflictException $exception) {
+                    $linkedSourceTerm = $this->findExistingGlobalProductAttributeSourceTermByLinkProbe(
+                        $integration,
+                        $attributeId,
+                        $pair['source'],
+                        'pl',
+                        $term,
+                        $language,
+                        [(int) $sourceTerm['id']],
+                    );
+
+                    if (! is_array($linkedSourceTerm)) {
+                        throw $exception;
+                    }
+
+                    $this->rememberGlobalProductAttributeTerm(
+                        $integration,
+                        $attributeId,
+                        $pair['source'],
+                        'pl',
+                        $linkedSourceTerm,
+                    );
+                }
             }
         }
 
@@ -1785,6 +1833,87 @@ final class WooCommerceClient
         }
 
         return $source;
+    }
+
+    /**
+     * Resolve a Polylang family when Woo's ordinary term responses omit the
+     * `translations` field. A conflict response is non-mutating: the plugin
+     * validates every requested term family before it writes anything. We can
+     * therefore probe only exact source candidates and accept the sole pair
+     * that WordPress confirms as already linked.
+     *
+     * @param  array<string,mixed>  $targetTerm
+     * @param  list<int>  $excludedSourceTermIds
+     * @return array<string,mixed>|null
+     */
+    private function findExistingGlobalProductAttributeSourceTermByLinkProbe(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $sourceOption,
+        string $sourceLanguage,
+        array $targetTerm,
+        string $targetLanguage,
+        array $excludedSourceTermIds = [],
+    ): ?array {
+        $sourceLanguage = mb_strtolower(trim($sourceLanguage));
+        $targetLanguage = mb_strtolower(trim($targetLanguage));
+        $targetTermId = (int) ($targetTerm['id'] ?? 0);
+
+        if ($targetTermId <= 0 || $sourceLanguage === '' || $targetLanguage === '') {
+            return null;
+        }
+
+        $normalizedSourceName = mb_strtolower(trim($sourceOption));
+        $baseSlug = $this->globalProductAttributeTermSlug($sourceOption);
+        $localizedSlug = $this->globalProductAttributeTermSlug($sourceOption, $sourceLanguage);
+        $excludedSourceTermIds[] = $targetTermId;
+
+        $candidates = collect(array_merge(
+            $this->globalProductAttributeTerms($integration, $attributeId, $sourceLanguage),
+            $this->globalProductAttributeTerms($integration, $attributeId, 'all'),
+        ))
+            ->filter(function (array $candidate) use (
+                $normalizedSourceName,
+                $baseSlug,
+                $localizedSlug,
+                $sourceLanguage,
+                $excludedSourceTermIds,
+            ): bool {
+                $candidateId = (int) ($candidate['id'] ?? 0);
+                $candidateSlug = Str::slug((string) ($candidate['slug'] ?? ''));
+                $isExactSource = mb_strtolower(trim((string) ($candidate['name'] ?? '')))
+                        === $normalizedSourceName
+                    || in_array($candidateSlug, [$baseSlug, $localizedSlug], true)
+                    || Str::startsWith($candidateSlug, $localizedSlug.'-');
+
+                return $candidateId > 0
+                    && ! in_array($candidateId, $excludedSourceTermIds, true)
+                    && $isExactSource
+                    && (! $this->globalProductAttributeTermHasLanguageIdentity($candidate)
+                        || $this->globalProductAttributeTermMatchesLanguage(
+                            $candidate,
+                            $sourceLanguage,
+                        ));
+            })
+            ->unique(fn (array $candidate): int => (int) $candidate['id'])
+            ->sortBy(fn (array $candidate): int => (int) $candidate['id'])
+            ->values();
+
+        foreach ($candidates as $candidate) {
+            try {
+                $this->linkGlobalProductAttributeTermTranslations($integration, $attributeId, [
+                    $sourceLanguage => (int) $candidate['id'],
+                    $targetLanguage => $targetTermId,
+                ]);
+
+                return $candidate;
+            } catch (ProductAttributeTermTranslationConflictException) {
+                // This exact candidate belongs to another/no family. The
+                // plugin rejected the complete map before performing writes.
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -3260,6 +3389,12 @@ final class WooCommerceClient
 
         if (in_array($status, [401, 403], true)) {
             throw new RuntimeException('WordPress odrzucił powiązanie tłumaczeń wartości globalnego atrybutu. Sprawdź uprawnienia manage_woocommerce i manage_product_terms użytkownika kluczy REST.');
+        }
+
+        if ($code === 'lemon_erp_attribute_term_translation_conflict' && $message !== '') {
+            throw new ProductAttributeTermTranslationConflictException(
+                "WordPress nie powiązał tłumaczeń wartości globalnego atrybutu: {$message}",
+            );
         }
 
         if ($message !== '') {
