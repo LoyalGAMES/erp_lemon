@@ -81,6 +81,35 @@ final class LegacyVariantFamilyBackfillService
         ], true);
     }
 
+    public static function isCriticalExportRevision(?string $revision): bool
+    {
+        if (in_array($revision, [
+            self::STOREFRONT_TRANSLATIONS_SYNC_REVISION,
+            self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
+            self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
+            self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
+            self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_CATALOG_SYNC_REVISION,
+            self::PREVIOUS_EXACT_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            self::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            self::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
+            self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
+            self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
+        ], true)) {
+            return true;
+        }
+
+        if (! is_string($revision)
+            || ! str_contains($revision, ':missing-translation:')
+        ) {
+            return false;
+        }
+
+        [$repairRevision] = explode(':missing-translation:', $revision, 2);
+
+        return WooOwnedVariantAxisRepairService::isSynchronizedRevision($repairRevision);
+    }
+
     /**
      * Mark a mapped product family for a durable full export. This method only
      * writes local state; migrations can call it without performing HTTP or
@@ -261,19 +290,7 @@ final class LegacyVariantFamilyBackfillService
         }
 
         try {
-            if (in_array($reservation['revision'], [
-                self::STOREFRONT_TRANSLATIONS_SYNC_REVISION,
-                self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
-                self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
-                self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
-                self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
-                self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_CATALOG_SYNC_REVISION,
-                self::PREVIOUS_EXACT_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
-                self::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
-                self::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
-                self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
-                self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
-            ], true)) {
+            if (self::isCriticalExportRevision($reservation['revision'])) {
                 ExportWooCommerceProductDataJob::dispatch(
                     $reservation['product_id'],
                     $reservation['token'],
@@ -412,19 +429,7 @@ final class LegacyVariantFamilyBackfillService
                 }
 
                 try {
-                    if (in_array($reservation['revision'], [
-                        self::STOREFRONT_TRANSLATIONS_SYNC_REVISION,
-                        self::CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
-                        self::PREVIOUS_CUSTOM_PRODUCT_LABELS_CATALOG_SYNC_REVISION,
-                        self::ATTRIBUTE_POSITIONS_AND_LIVE_STOCK_REVISION,
-                        self::CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
-                        self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_CATALOG_SYNC_REVISION,
-                        self::PREVIOUS_EXACT_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
-                        self::PREVIOUS_BLANK_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
-                        self::PREVIOUS_CHILD_SIZE_ASSIGNMENT_CATALOG_SYNC_REVISION,
-                        self::WOO_OWNED_POST_AXIS_CATALOG_SYNC_REVISION,
-                        self::LEGACY_SIZE_PARENT_TERM_ORDER_FOLLOWUP_REVISION,
-                    ], true)) {
+                    if (self::isCriticalExportRevision($reservation['revision'])) {
                         ExportWooCommerceProductDataJob::dispatch(
                             $reservation['product_id'],
                             $reservation['token'],

@@ -833,6 +833,138 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('pending', $state['status'] ?? null);
     }
 
+    public function test_prioritized_translation_rebuild_migration_promotes_its_existing_export_job(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $targets = [[
+            'language' => 'en',
+            'external_product_id' => '223',
+        ]];
+        $token = 'interrupted-translation-export-token';
+        $queuedRevision = WooOwnedVariantAxisRepairService::PREVIOUS_POST_SIMPLE_TRANSLATION_EXPORT_VERIFICATION_REVISION
+            .':missing-translation:original-repair-token';
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_PRIORITIZED_TRANSLATION_VARIATION_REBUILD_REVISION,
+            'status' => 'pending',
+            'result' => [
+                'status' => 'deferred',
+                'allow_full_export' => true,
+                'rebuild_simple_translations' => $targets,
+            ],
+        ]);
+        data_set($metadata, 'product_data_export', [
+            'pending_token' => $token,
+            'requested_at' => now()->toISOString(),
+            'legacy_variant_backfill' => [
+                'status' => 'queued',
+                'reason' => LegacyVariantFamilyBackfillService::REASON,
+                'revision' => $queuedRevision,
+                'queued_revision' => $queuedRevision,
+                'queued_at' => now()->toISOString(),
+            ],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+        $this->markCanonicalTranslationRebuildHandoff($parent, $targets);
+        $jobId = DB::table('jobs')->insertGetId([
+            'queue' => 'default',
+            'payload' => json_encode([
+                'displayName' => ExportWooCommerceProductDataJob::class,
+                'data' => ['command' => 'serialized:'.$token],
+            ]),
+            'attempts' => 0,
+            'reserved_at' => null,
+            'available_at' => now()->addHour()->timestamp,
+            'created_at' => now()->timestamp,
+        ]);
+
+        (require database_path(
+            'migrations/2026_07_18_000051_prioritize_interrupted_translation_variation_rebuild.php',
+        ))->up();
+
+        $mapping->refresh();
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, data_get(
+            $mapping->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.revision',
+        ));
+        $this->assertSame('pending', data_get(
+            $mapping->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.status',
+        ));
+        $this->assertSame($token, data_get(
+            $mapping->metadata,
+            'product_data_export.pending_token',
+        ));
+        $this->assertSame(
+            LegacyVariantFamilyBackfillService::CRITICAL_EXPORT_QUEUE,
+            DB::table('jobs')->where('id', $jobId)->value('queue'),
+        );
+        $this->assertLessThanOrEqual(
+            now()->timestamp,
+            (int) DB::table('jobs')->where('id', $jobId)->value('available_at'),
+        );
+    }
+
+    public function test_prioritized_translation_rebuild_migration_releases_an_orphaned_export_token(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $targets = [[
+            'language' => 'en',
+            'external_product_id' => '223',
+        ]];
+        $token = 'orphaned-translation-export-token';
+        $queuedRevision = WooOwnedVariantAxisRepairService::PREVIOUS_POST_SIMPLE_TRANSLATION_EXPORT_VERIFICATION_REVISION
+            .':missing-translation:stopped-release-token';
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_PRIORITIZED_TRANSLATION_VARIATION_REBUILD_REVISION,
+            'status' => 'pending',
+            'result' => [
+                'status' => 'deferred',
+                'allow_full_export' => true,
+                'rebuild_simple_translations' => $targets,
+            ],
+        ]);
+        data_set($metadata, 'product_data_export', [
+            'pending_token' => $token,
+            'requested_at' => now()->toISOString(),
+            'legacy_variant_backfill' => [
+                'status' => 'queued',
+                'reason' => LegacyVariantFamilyBackfillService::REASON,
+                'revision' => $queuedRevision,
+                'queued_revision' => $queuedRevision,
+                'queued_at' => now()->toISOString(),
+            ],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+        $this->markCanonicalTranslationRebuildHandoff($parent, $targets);
+
+        (require database_path(
+            'migrations/2026_07_18_000051_prioritize_interrupted_translation_variation_rebuild.php',
+        ))->up();
+
+        $mapping->refresh();
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, data_get(
+            $mapping->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.revision',
+        ));
+        $this->assertNull(data_get($mapping->metadata, 'product_data_export.pending_token'));
+        $this->assertSame('pending', data_get(
+            $mapping->metadata,
+            'product_data_export.legacy_variant_backfill.status',
+        ));
+        $this->assertNull(data_get(
+            $mapping->metadata,
+            'product_data_export.legacy_variant_backfill.queued_revision',
+        ));
+    }
+
     public function test_transition_diagnostic_names_missing_disabled_and_changed_axes(): void
     {
         $this->family();
@@ -5756,6 +5888,11 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('active', app(LegacyVariantFamilyBackfillService::class)
             ->queueProductRevision($parent, $revision));
         Bus::assertDispatchedTimes(ExportWooCommerceProductDataJob::class, 1);
+        Bus::assertDispatched(
+            ExportWooCommerceProductDataJob::class,
+            fn (ExportWooCommerceProductDataJob $job): bool => $job->queue
+                === LegacyVariantFamilyBackfillService::CRITICAL_EXPORT_QUEUE,
+        );
     }
 
     public function test_successful_axis_repair_queues_a_critical_catalog_export_for_term_order_and_inherited_data(): void
@@ -7049,6 +7186,22 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             $catalog->variations[$parentId][$variationId]['lemon_erp_parent_translations'] = ['pl' => 123, 'en' => 223];
             $catalog->variations[$parentId][$variationId]['lemon_erp_parent_translation_group'] = 'product:123|223';
         }
+    }
+
+    /**
+     * @param  list<array{language:string,external_product_id:string}>  $targets
+     */
+    private function markCanonicalTranslationRebuildHandoff(Product $parent, array $targets): void
+    {
+        $attributes = (array) $parent->attributes;
+        $master = $parent->masterData();
+        data_set($master, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_POST_SIMPLE_TRANSLATION_EXPORT_VERIFICATION_REVISION,
+            'canonical_full_export_handoff_at' => now()->toISOString(),
+            'rebuild_simple_translations' => $targets,
+        ]);
+        $attributes['master'] = $master;
+        $parent->forceFill(['attributes' => $attributes])->save();
     }
 
     private function fakeCatalog(object $catalog, ?callable $intercept = null): void
