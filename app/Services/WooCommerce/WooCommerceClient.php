@@ -1866,6 +1866,8 @@ final class WooCommerceClient
         $normalizedSourceName = mb_strtolower(trim($sourceOption));
         $baseSlug = $this->globalProductAttributeTermSlug($sourceOption);
         $localizedSlug = $this->globalProductAttributeTermSlug($sourceOption, $sourceLanguage);
+        $sourceSlugPattern = '/^'.preg_quote($baseSlug, '/').'(?:-(?:'
+            .preg_quote($sourceLanguage, '/').'(?:-\d+)?|\d+))?$/';
         $excludedSourceTermIds[] = $targetTermId;
 
         $candidates = collect(array_merge(
@@ -1876,15 +1878,19 @@ final class WooCommerceClient
                 $normalizedSourceName,
                 $baseSlug,
                 $localizedSlug,
+                $sourceSlugPattern,
                 $sourceLanguage,
                 $excludedSourceTermIds,
             ): bool {
                 $candidateId = (int) ($candidate['id'] ?? 0);
                 $candidateSlug = Str::slug((string) ($candidate['slug'] ?? ''));
+                $candidateNameSlug = Str::slug((string) ($candidate['name'] ?? ''));
                 $isExactSource = mb_strtolower(trim((string) ($candidate['name'] ?? '')))
                         === $normalizedSourceName
                     || in_array($candidateSlug, [$baseSlug, $localizedSlug], true)
-                    || Str::startsWith($candidateSlug, $localizedSlug.'-');
+                    || Str::startsWith($candidateSlug, $localizedSlug.'-')
+                    || preg_match($sourceSlugPattern, $candidateSlug) === 1
+                    || preg_match($sourceSlugPattern, $candidateNameSlug) === 1;
 
                 return $candidateId > 0
                     && ! in_array($candidateId, $excludedSourceTermIds, true)

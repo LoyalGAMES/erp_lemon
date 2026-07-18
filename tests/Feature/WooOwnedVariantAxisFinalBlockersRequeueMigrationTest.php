@@ -215,6 +215,43 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
         );
     }
 
+    public function test_numeric_source_term_migration_requeues_only_the_persisting_exact_conflict(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'NUMERIC-TERM-AXIS',
+            'name' => 'Numeric term axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $conflict = $this->mapping(
+            $channel,
+            'NUMERIC-TERM-CONFLICT',
+            'WooCommerce EN #500316: WordPress nie powiązał tłumaczeń wartości globalnego atrybutu: Wartość atrybutu 110014 należy już do innej rodziny tłumaczeń.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_NUMERIC_SOURCE_TERM_SLUG_REVISION,
+        );
+        $unrelated = $this->mapping(
+            $channel,
+            'NUMERIC-TERM-UNRELATED',
+            'WordPress nie potwierdził kompletnej rodziny tłumaczeń.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_NUMERIC_SOURCE_TERM_SLUG_REVISION,
+        );
+        $unrelatedBefore = $unrelated->metadata;
+
+        $this->runNumericSourceTermMigration();
+
+        $state = (array) data_get(
+            $conflict->refresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision']);
+        $this->assertSame('pending', $state['status']);
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::PREVIOUS_NUMERIC_SOURCE_TERM_SLUG_REVISION,
+            data_get($state, 'previous.revision'),
+        );
+        $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
+    }
+
     private function mapping(
         SalesChannel $channel,
         string $suffix,
@@ -281,6 +318,13 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
     {
         (require database_path(
             'migrations/2026_07_18_000059_requeue_woo_term_translation_conflict_probe.php',
+        ))->up();
+    }
+
+    private function runNumericSourceTermMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_18_000060_requeue_numeric_woo_term_translation_sibling.php',
         ))->up();
     }
 }

@@ -2065,8 +2065,8 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 return Http::response([
                     [
                         'id' => 11,
-                        'name' => 'XS',
-                        'slug' => 'xs-pl',
+                        'name' => 'XS PL',
+                        'slug' => 'xs-2',
                         'lang' => 'pl',
                     ],
                     [
