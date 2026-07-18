@@ -14,6 +14,8 @@ use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
+use App\Models\StockBalance;
+use App\Models\Warehouse;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\CanonicalTranslationRebuildExecutor;
 use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
@@ -34,6 +36,182 @@ use Tests\TestCase;
 final class WooOwnedVariantAxisRepairTest extends TestCase
 {
     use RefreshDatabase;
+
+    public function test_it_consolidates_exact_synthetic_duplicate_variants_without_doubling_erp_stock(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Magazyn',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $legacyRoot = Product::query()->create([
+            'sku' => 'WC-B2C-PARENT-3497',
+            'name' => 'Buty RAJA Brązowe lico',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp']],
+        ]);
+        $canonicalRoot = Product::query()->create([
+            'sku' => 'WC-B2C-PARENT-700024',
+            'name' => 'Buty RAJA Brązowe lico',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => ['source' => 'erp']],
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $legacyRoot->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '3497',
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $canonicalRoot->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '700024',
+            'stock_sync_enabled' => true,
+        ]);
+        $pairs = [
+            ['36', 'BLS683FED08569B3', 'WC-B2C-VARIANT-3522', '720015', '3522'],
+            ['37', 'BLS683FED088910F', 'WC-B2C-VARIANT-3523', '720016', '3523'],
+        ];
+
+        foreach ($pairs as $index => [$size, $erpSku, $syntheticSku, $canonicalId, $legacyId]) {
+            $attributes = ['master' => [
+                'source' => 'woocommerce_import',
+                'product_type' => 'variation',
+                'variant_attribute' => 'Rozmiar',
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'value' => $size,
+                    'variation' => true,
+                ]],
+            ]];
+            $canonical = Product::query()->create([
+                'sku' => $erpSku,
+                'name' => "Buty RAJA Brązowe lico - {$size}",
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => $attributes,
+            ]);
+            $synthetic = Product::query()->create([
+                'sku' => $syntheticSku,
+                'name' => "Buty RAJA Brązowe lico - {$size}",
+                'unit' => 'szt',
+                'vat_rate' => 23,
+                'quantity_precision' => 0,
+                'is_active' => true,
+                'attributes' => $attributes,
+            ]);
+
+            foreach ([$legacyRoot, $canonicalRoot] as $parent) {
+                ProductRelation::query()->create([
+                    'parent_product_id' => $parent->id,
+                    'child_product_id' => $canonical->id,
+                    'relation_type' => 'variant',
+                    'sort_order' => ($index + 1) * 10,
+                ]);
+            }
+            ProductRelation::query()->create([
+                'parent_product_id' => $legacyRoot->id,
+                'child_product_id' => $synthetic->id,
+                'relation_type' => 'variant',
+                'sort_order' => ($index + 1) * 10,
+            ]);
+            ProductChannelMapping::query()->create([
+                'product_id' => $canonical->id,
+                'sales_channel_id' => $channel->id,
+                'external_product_id' => '700024',
+                'external_variation_id' => $canonicalId,
+                'external_sku' => $erpSku,
+                'stock_sync_enabled' => true,
+            ]);
+            ProductChannelMapping::query()->create([
+                'product_id' => $synthetic->id,
+                'sales_channel_id' => $channel->id,
+                'external_product_id' => '3497',
+                'external_variation_id' => $legacyId,
+                'stock_sync_enabled' => true,
+            ]);
+
+            foreach ([$canonical, $synthetic] as $variant) {
+                StockBalance::query()->create([
+                    'warehouse_id' => $warehouse->id,
+                    'product_id' => $variant->id,
+                    'quantity_on_hand' => 5,
+                    'quantity_reserved' => 0,
+                    'quantity_available' => 5,
+                ]);
+            }
+        }
+
+        $primary = [
+            'target' => [
+                'integration' => $integration,
+                'sales_channel_id' => $channel->id,
+                'external_product_id' => '3497',
+                'language' => 'pl',
+                'is_primary' => true,
+            ],
+            'variations' => [
+                ['id' => 3522],
+                ['id' => 3523],
+            ],
+        ];
+        $service = app(WooOwnedVariantAxisRepairService::class);
+        $consolidated = (new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'consolidateExactSyntheticDuplicateVariants',
+        ))->invoke($service, $legacyRoot, [$primary]);
+
+        $this->assertInstanceOf(Product::class, $consolidated);
+        $this->assertCount(2, $consolidated->variantChildren);
+        $this->assertTrue($consolidated->variantChildren->every(
+            fn (Product $variant): bool => ! $variant->isSyntheticWooSku(),
+        ));
+        $this->assertSame(10.0, (float) StockBalance::query()
+            ->whereIn('product_id', $consolidated->variantChildren->pluck('id'))
+            ->sum('quantity_on_hand'));
+        $this->assertSame(
+            ['3522', '3523'],
+            $consolidated->variantChildren
+                ->flatMap(fn (Product $variant) => $variant->channelAliases)
+                ->pluck('external_variation_id')
+                ->sort(SORT_NATURAL)
+                ->values()
+                ->all(),
+        );
+        $this->assertSame(
+            ['3522', '3523'],
+            (new \ReflectionMethod(
+                WooOwnedVariantAxisRepairService::class,
+                'primaryMappedVariationIds',
+            ))->invoke($service, $consolidated, $primary),
+        );
+        $this->assertSame(2, Product::query()
+            ->whereIn('sku', collect($pairs)->pluck(2))
+            ->where('is_active', false)
+            ->count());
+    }
 
     public function test_import_and_axis_repair_share_the_same_integration_catalog_lock(): void
     {
@@ -1615,7 +1793,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 return Http::response([[
                     'id' => 11,
                     'name' => 'XS',
-                    'slug' => 'xs-pl',
+                    'slug' => 'xs-pl-2',
                 ]]);
             }
 

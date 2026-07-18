@@ -3549,6 +3549,116 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertNotSent(fn ($request): bool => $request->method() === 'POST');
     }
 
+    public function test_shared_erp_variant_exports_to_the_exact_parent_alias_without_overwriting_its_primary_mapping(): void
+    {
+        $this->createDefaultSizeDictionary(['36']);
+        $this->fakeWooWithGlobalAttributes(function ($request) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'PUT' && $path === '/wp-json/wc/v3/products/3497') {
+                return Http::response([
+                    'id' => 3497,
+                    'sku' => '',
+                    'type' => 'variable',
+                ]);
+            }
+
+            if ($request->method() === 'PUT'
+                && $path === '/wp-json/wc/v3/products/3497/variations/3522'
+            ) {
+                return Http::response([
+                    'id' => 3522,
+                    'sku' => '',
+                    'attributes' => $request['attributes'],
+                ]);
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'settings' => ['product_export' => ['languages' => ['pl']]],
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'WC-B2C-PARENT-3497',
+            'name' => 'Buty RAJA Brązowe lico',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'content' => ['pl' => ['name' => 'Buty RAJA Brązowe lico']],
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'value' => '36',
+                    'variation' => true,
+                ]],
+            ]],
+        ]);
+        $variant = $this->createVariantProduct('BLS683FED08569B3', '36', 499.00);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '3497',
+            'stock_sync_enabled' => true,
+        ]);
+        $primaryMapping = ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '700024',
+            'external_variation_id' => '720015',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $alias = ProductChannelAlias::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '3497',
+            'external_variation_id' => '3522',
+            'external_key' => ProductChannelAlias::externalKey('3497', '3522'),
+            'external_sku' => null,
+            'language' => 'pl',
+            'metadata' => ['source' => 'exact_synthetic_variant_duplicate'],
+        ]);
+
+        app(ProductDataExportService::class)->export($parent);
+
+        $this->assertSame('700024', $primaryMapping->fresh()->external_product_id);
+        $this->assertSame('720015', $primaryMapping->fresh()->external_variation_id);
+        $this->assertSame('success', data_get(
+            $alias->fresh()->metadata,
+            'product_data_export.last_export_status',
+        ));
+        Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
+            && (string) parse_url($request->url(), PHP_URL_PATH)
+                === '/wp-json/wc/v3/products/3497/variations/3522'
+            && ! array_key_exists('sku', $request->data()));
+        Http::assertNotSent(fn ($request): bool => str_contains(
+            (string) parse_url($request->url(), PHP_URL_PATH),
+            '/products/700024/variations/720015',
+        ));
+    }
+
     public function test_detached_variant_is_deleted_from_polish_and_english_woocommerce_products(): void
     {
         Http::fake(function ($request) {

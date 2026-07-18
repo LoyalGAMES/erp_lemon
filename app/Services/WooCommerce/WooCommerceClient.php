@@ -2446,8 +2446,10 @@ final class WooCommerceClient
 
     /**
      * Recover a term created by Woo before Polylang assigned its language.
-     * Only ERP's exact language-suffixed slug is accepted; a name-only match
-     * or a term explicitly assigned to another language remains unsafe.
+     * Prefer ERP's language-suffixed slug. WordPress may append a numeric
+     * suffix when a deleted term left a slug reservation, so one otherwise
+     * unassigned exact-name candidate is also safe. A term explicitly
+     * assigned to another language remains unsafe.
      *
      * @return array<string,mixed>|null
      */
@@ -2459,13 +2461,24 @@ final class WooCommerceClient
     ): ?array {
         $language = mb_strtolower(trim($language));
         $slug = $this->globalProductAttributeTermSlug($option, $language);
+        $baseSlug = $this->globalProductAttributeTermSlug($option);
+        $normalizedName = mb_strtolower(trim($option));
         $matches = collect($this->globalProductAttributeTerms(
             $integration,
             $attributeId,
             'all',
         ))
             ->filter(fn (array $term): bool => (int) ($term['id'] ?? 0) > 0
-                && Str::slug((string) ($term['slug'] ?? '')) === $slug)
+                && mb_strtolower(trim((string) ($term['name'] ?? ''))) === $normalizedName
+                && (
+                    collect([$baseSlug, $slug])->contains(
+                        Str::slug((string) ($term['slug'] ?? '')),
+                    )
+                    || Str::startsWith(
+                        Str::slug((string) ($term['slug'] ?? '')),
+                        $slug.'-',
+                    )
+                ))
             ->reject(fn (array $term): bool => $this->globalProductAttributeTermHasLanguageIdentity($term)
                 && ! $this->globalProductAttributeTermMatchesLanguage($term, $language))
             ->unique(fn (array $term): int => (int) $term['id'])

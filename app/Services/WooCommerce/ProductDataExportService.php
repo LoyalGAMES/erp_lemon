@@ -18,8 +18,8 @@ use App\Services\Products\ProductVariantAxisNameResolver;
 use App\Services\Products\ProductVariantInheritanceService;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use Carbon\CarbonImmutable;
-use Illuminate\Support\Collection;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -1241,18 +1241,62 @@ final class ProductDataExportService
                 ->where('product_id', $variant->id)
                 ->where('sales_channel_id', $salesChannelId)
                 ->first();
+            $aliasTarget = null;
+            $targetMapping = $mapping;
+
+            if ($mapping instanceof ProductChannelMapping
+                && filled($mapping->external_variation_id)
+                && trim((string) $mapping->external_product_id) !== $externalProductId
+            ) {
+                $aliasTargets = ProductChannelAlias::query()
+                    ->where('product_id', $variant->id)
+                    ->where('sales_channel_id', $salesChannelId)
+                    ->where('external_product_id', $externalProductId)
+                    ->whereNotNull('external_variation_id')
+                    ->get()
+                    ->filter(fn (ProductChannelAlias $alias): bool => $alias->isOutboundSyncEnabled())
+                    ->values();
+                $aliasTarget = $aliasTargets->count() === 1 ? $aliasTargets->first() : null;
+
+                if (! $aliasTarget instanceof ProductChannelAlias
+                    || blank($aliasTarget->external_variation_id)
+                ) {
+                    throw new RuntimeException(
+                        "Wariant {$variant->sku} jest zmapowany do innego rodzica WooCommerce i nie ma dokładnego aliasu pod produktem #{$externalProductId}.",
+                    );
+                }
+
+                $targetMapping = new ProductChannelMapping([
+                    'product_id' => $variant->id,
+                    'sales_channel_id' => $salesChannelId,
+                    'external_product_id' => $aliasTarget->external_product_id,
+                    'external_variation_id' => $aliasTarget->external_variation_id,
+                    'external_sku' => $aliasTarget->external_sku,
+                    'stock_sync_enabled' => true,
+                ]);
+            }
 
             $payload = $this->variationPayload($product, $variant, $salesChannelId);
             $payload = $this->globalizeProductAttributes($integration, $payload, 'pl');
             $operation = 'export_product_variation_data';
 
-            if ($mapping instanceof ProductChannelMapping && filled($mapping->external_variation_id)) {
-                $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $variant, $mapping);
+            if ($targetMapping instanceof ProductChannelMapping
+                && filled($targetMapping->external_variation_id)
+            ) {
+                $payload = $this->preserveRemoteSkuWhenDuplicated($payload, $variant, $targetMapping);
+
+                if ($aliasTarget instanceof ProductChannelAlias) {
+                    // The alias can intentionally preserve a blank historical
+                    // Woo SKU while the canonical mapping owns the ERP SKU.
+                    unset($payload['sku']);
+                }
 
                 try {
-                    $response = $this->client->updateProductData($integration, $mapping, $payload);
+                    $response = $this->client->updateProductData($integration, $targetMapping, $payload);
                 } catch (RequestException $exception) {
-                    if (! $this->isDeletedWooVariationResponse($exception)) {
+                    if ($aliasTarget instanceof ProductChannelAlias
+                        || ! $this->isDeletedWooVariationResponse($exception)
+                    ) {
                         throw $exception;
                     }
 
@@ -1294,10 +1338,15 @@ final class ProductDataExportService
                         ],
                     ],
                 );
+                $targetMapping = $mapping;
             }
 
-            $this->updateMappingAfterExport($mapping, $variant, $payload, $response);
-            $translationResults = $syncTranslations
+            if ($aliasTarget instanceof ProductChannelAlias) {
+                $this->updateAliasAfterExport($aliasTarget, $payload, $response);
+            } else {
+                $this->updateMappingAfterExport($mapping, $variant, $payload, $response);
+            }
+            $translationResults = $syncTranslations && ! $aliasTarget instanceof ProductChannelAlias
                 ? $this->syncVariantTranslations(
                     $product,
                     $variant,
@@ -1315,7 +1364,7 @@ final class ProductDataExportService
                 'operation' => $operation,
                 'status' => 'success',
                 'external_resource' => 'product_variation',
-                'external_id' => $mapping->external_variation_id ?? $mapping->external_product_id,
+                'external_id' => $targetMapping->external_variation_id ?? $targetMapping->external_product_id,
                 'request_payload' => $payload,
                 'response_payload' => [
                     'id' => $response['id'] ?? null,
@@ -1330,13 +1379,34 @@ final class ProductDataExportService
 
             $results[] = [
                 'sku' => $variant->sku,
-                'external_id' => $mapping->external_variation_id ?? $mapping->external_product_id,
+                'external_id' => $targetMapping->external_variation_id ?? $targetMapping->external_product_id,
                 'response' => $response,
                 'translations' => $translationResults,
             ];
         }
 
         return $results;
+    }
+
+    /** @param array<string,mixed> $payload @param array<string,mixed> $response */
+    private function updateAliasAfterExport(
+        ProductChannelAlias $alias,
+        array $payload,
+        array $response,
+    ): void {
+        DB::transaction(function () use ($alias, $payload, $response): void {
+            $locked = ProductChannelAlias::query()->lockForUpdate()->findOrFail($alias->id);
+            $metadata = (array) $locked->metadata;
+            data_set($metadata, 'product_data_export', [
+                'last_exported_at' => now()->toISOString(),
+                'last_export_status' => 'success',
+                'payload_hash' => $this->payloadHash($payload),
+                'response_id' => $response['id'] ?? null,
+            ]);
+            $locked->forceFill(['metadata' => $metadata])->save();
+        }, 3);
+
+        $alias->refresh();
     }
 
     private function isDeletedWooVariationResponse(RequestException $exception): bool

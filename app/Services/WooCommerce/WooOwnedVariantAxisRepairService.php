@@ -10,8 +10,10 @@ use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
+use App\Models\StockReservation;
 use App\Models\WordpressIntegration;
 use App\Services\Products\LegacySizeVariantAxisResolver;
+use App\Services\Products\ProductTranslationMergeService;
 use App\Services\Products\ProductVariantAxisNameResolver;
 use App\Services\Products\ProductVariantOptionNormalizer;
 use Carbon\CarbonImmutable;
@@ -190,6 +192,7 @@ final class WooOwnedVariantAxisRepairService
         private readonly ProductVariantOptionNormalizer $variantOptions,
         private readonly LegacySizeVariantAxisResolver $legacySizeAxis,
         private readonly WooCommerceSizeDictionaryOrder $sizeOrder,
+        private readonly ProductTranslationMergeService $translationMerge,
     ) {}
 
     public function markPending(Product $product): int
@@ -674,6 +677,29 @@ final class WooOwnedVariantAxisRepairService
         }
 
         $identity = $this->remoteIdentity($product, $plans);
+
+        if ($identity['error'] === 'Polskie warianty nie odpowiadają dokładnie wariantom rodziny ERP.') {
+            try {
+                $consolidated = $this->consolidateExactSyntheticDuplicateVariants(
+                    $product,
+                    $plans,
+                );
+            } catch (Throwable $exception) {
+                return [
+                    'status' => 'manual_review',
+                    'targets' => count($plans),
+                    'mutations' => 0,
+                    'reason' => 'Bezpieczne scalenie zdublowanych wariantów ERP nie powiodło się: '
+                        .$exception->getMessage(),
+                    'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
+                ];
+            }
+
+            if ($consolidated instanceof Product) {
+                $product = $consolidated;
+                $identity = $this->remoteIdentity($product, $plans);
+            }
+        }
 
         if ($identity['error'] !== null) {
             return [
@@ -1985,6 +2011,21 @@ final class WooOwnedVariantAxisRepairService
                     ->pluck('external_variation_id')
                     ->map(fn (mixed $id): string => trim((string) $id))
                     ->filter()
+                    ->unique()
+                    ->values();
+                $aliasVariationIds = ProductChannelAlias::query()
+                    ->where('product_id', $relation->child_product_id)
+                    ->where('sales_channel_id', $primarySalesChannelId)
+                    ->where('external_product_id', $primaryExternalProductId)
+                    ->whereNotNull('external_variation_id')
+                    ->lockForUpdate()
+                    ->get()
+                    ->filter(fn (ProductChannelAlias $alias): bool => $alias->isOutboundSyncEnabled())
+                    ->pluck('external_variation_id')
+                    ->map(fn (mixed $id): string => trim((string) $id))
+                    ->filter();
+                $mappedVariationIds = $mappedVariationIds
+                    ->concat($aliasVariationIds)
                     ->unique()
                     ->values();
                 $remote = $mappedVariationIds->count() === 1
@@ -4727,17 +4768,29 @@ final class WooOwnedVariantAxisRepairService
             $salesChannelId,
             $externalProductId,
         ): ?string {
-            $matches = $child->channelMappings
+            $mapped = $child->channelMappings
                 ->filter(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $salesChannelId
                     && trim((string) $mapping->external_product_id) === $externalProductId
                     && trim((string) $mapping->external_variation_id) !== '')
+                ->pluck('external_variation_id');
+            $aliased = $child->channelAliases
+                ->filter(fn (ProductChannelAlias $alias): bool => (int) $alias->sales_channel_id === $salesChannelId
+                    && trim((string) $alias->external_product_id) === $externalProductId
+                    && trim((string) $alias->external_variation_id) !== ''
+                    && $alias->isOutboundSyncEnabled())
+                ->pluck('external_variation_id');
+            $matches = $mapped
+                ->concat($aliased)
+                ->map(fn (mixed $id): string => trim((string) $id))
+                ->filter()
+                ->unique()
                 ->values();
 
             if ($matches->count() !== 1) {
                 return null;
             }
 
-            return trim((string) $matches->first()->external_variation_id);
+            return (string) $matches->first();
         });
 
         if ($ids->contains(null)
@@ -4752,6 +4805,212 @@ final class WooOwnedVariantAxisRepairService
             ->sort(SORT_NATURAL)
             ->values()
             ->all();
+    }
+
+    /**
+     * Consolidate only the exact historical shape proven in production: every
+     * live Woo variation has one synthetic imported row and one same-name ERP
+     * row shared with its canonical second parent. Equal on-hand snapshots and
+     * zero reservations on the synthetic side prove that the rows describe
+     * one physical item; the ERP row remains canonical and the old Woo ID
+     * becomes an outbound stock alias.
+     *
+     * @param  list<array<string,mixed>>  $plans
+     */
+    private function consolidateExactSyntheticDuplicateVariants(
+        Product $product,
+        array $plans,
+    ): ?Product {
+        $primary = collect($plans)->first(
+            fn (array $entry): bool => (bool) data_get($entry, 'target.is_primary', false),
+        );
+
+        if (! is_array($primary)) {
+            return null;
+        }
+
+        $salesChannelId = (int) data_get($primary, 'target.sales_channel_id', 0);
+        $externalProductId = trim((string) data_get(
+            $primary,
+            'target.external_product_id',
+            '',
+        ));
+        $remoteVariationIds = collect((array) ($primary['variations'] ?? []))
+            ->pluck('id')
+            ->map(fn (mixed $id): string => trim((string) $id))
+            ->filter(fn (string $id): bool => ctype_digit($id) && (int) $id > 0)
+            ->unique()
+            ->sort(SORT_NATURAL)
+            ->values();
+
+        if ($salesChannelId <= 0
+            || $externalProductId === ''
+            || $remoteVariationIds->isEmpty()
+        ) {
+            return null;
+        }
+
+        $product->load([
+            'variantChildren.channelMappings',
+            'variantChildren.channelAliases',
+            'variantChildren.stockBalances',
+            'variantChildren.variantParents.channelMappings',
+        ]);
+        $children = $product->variantChildren;
+
+        if ($children->count() !== $remoteVariationIds->count() * 2) {
+            return null;
+        }
+
+        $normalizedName = static fn (Product $child): string => mb_strtolower(trim(
+            preg_replace('/\s+/u', ' ', (string) $child->name) ?? (string) $child->name,
+        ));
+        $groups = $children->groupBy($normalizedName);
+
+        if ($groups->count() !== $remoteVariationIds->count()
+            || $groups->contains(fn (Collection $group): bool => $group->count() !== 2)
+        ) {
+            return null;
+        }
+
+        $pairs = collect();
+
+        foreach ($groups as $group) {
+            $synthetic = $group->first(fn (Product $child): bool => $child->isSyntheticWooSku());
+            $canonical = $group->first(fn (Product $child): bool => ! $child->isSyntheticWooSku());
+
+            if (! $synthetic instanceof Product || ! $canonical instanceof Product) {
+                return null;
+            }
+
+            $syntheticMappings = $synthetic->channelMappings
+                ->filter(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $salesChannelId
+                    && trim((string) $mapping->external_product_id) === $externalProductId
+                    && $remoteVariationIds->contains(trim((string) $mapping->external_variation_id)))
+                ->values();
+            $canonicalMappings = $canonical->channelMappings
+                ->filter(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $salesChannelId
+                    && trim((string) $mapping->external_product_id) !== $externalProductId
+                    && ctype_digit(trim((string) $mapping->external_variation_id))
+                    && (int) $mapping->external_variation_id > 0)
+                ->values();
+
+            if ($syntheticMappings->count() !== 1
+                || $canonicalMappings->count() !== 1
+                || $canonical->channelMappings->contains(
+                    fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $salesChannelId
+                        && trim((string) $mapping->external_product_id) === $externalProductId,
+                )
+                || $canonical->channelAliases->contains(
+                    fn (ProductChannelAlias $alias): bool => (int) $alias->sales_channel_id === $salesChannelId
+                        && trim((string) $alias->external_product_id) === $externalProductId,
+                )
+            ) {
+                return null;
+            }
+
+            /** @var ProductChannelMapping $canonicalMapping */
+            $canonicalMapping = $canonicalMappings->first();
+            $canonicalParentProven = $canonical->variantParents->contains(
+                fn (Product $parent): bool => (int) $parent->id !== (int) $product->id
+                    && $parent->channelMappings->contains(
+                        fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $salesChannelId
+                            && trim((string) $mapping->external_product_id)
+                                === trim((string) $canonicalMapping->external_product_id),
+                    ),
+            );
+            $syntheticHasAnotherParent = $synthetic->variantParents->contains(
+                fn (Product $parent): bool => (int) $parent->id !== (int) $product->id,
+            );
+
+            if (! $canonicalParentProven || $syntheticHasAnotherParent) {
+                return null;
+            }
+
+            $canonicalOnHand = $canonical->stockBalances
+                ->mapWithKeys(fn (mixed $balance): array => [
+                    (int) $balance->warehouse_id => number_format(
+                        (float) $balance->quantity_on_hand,
+                        4,
+                        '.',
+                        '',
+                    ),
+                ])->sortKeys()->all();
+            $syntheticOnHand = $synthetic->stockBalances
+                ->mapWithKeys(fn (mixed $balance): array => [
+                    (int) $balance->warehouse_id => number_format(
+                        (float) $balance->quantity_on_hand,
+                        4,
+                        '.',
+                        '',
+                    ),
+                ])->sortKeys()->all();
+
+            if ($canonicalOnHand === []
+                || $canonicalOnHand !== $syntheticOnHand
+                || $synthetic->stockBalances->contains(
+                    fn (mixed $balance): bool => (float) $balance->quantity_reserved !== 0.0,
+                )
+                || StockReservation::query()
+                    ->where('product_id', $synthetic->id)
+                    ->where('status', 'active')
+                    ->exists()
+            ) {
+                return null;
+            }
+
+            $pairs->push([
+                'canonical' => $canonical,
+                'synthetic' => $synthetic,
+                'mapping' => $syntheticMappings->first(),
+            ]);
+        }
+
+        $provenRemoteIds = $pairs
+            ->map(fn (array $pair): string => trim((string) $pair['mapping']->external_variation_id))
+            ->sort(SORT_NATURAL)
+            ->values();
+
+        if ($provenRemoteIds->all() !== $remoteVariationIds->all()) {
+            return null;
+        }
+
+        DB::transaction(function () use ($pairs, $primary): void {
+            foreach ($pairs as $pair) {
+                /** @var ProductChannelMapping $mapping */
+                $mapping = $pair['mapping'];
+                $this->translationMerge->merge(
+                    $pair['canonical'],
+                    $pair['synthetic'],
+                    [
+                        'source' => 'woo_owned_variant_axis_repair',
+                        'reason' => 'exact_synthetic_variant_duplicate',
+                        'language' => $this->language(data_get($primary, 'target.language', 'pl')),
+                        'sales_channel_id' => (int) $mapping->sales_channel_id,
+                        'external_product_id' => (string) $mapping->external_product_id,
+                        'external_variation_id' => (string) $mapping->external_variation_id,
+                        'external_sku' => $mapping->external_sku,
+                    ],
+                );
+            }
+        }, 3);
+
+        $fresh = Product::query()->with([
+            'channelMappings.salesChannel',
+            'channelAliases',
+            'variantChildren.channelMappings',
+            'variantChildren.channelAliases',
+            'parentRelations',
+        ])->find($product->id);
+
+        if (! $fresh instanceof Product
+            || $fresh->variantChildren->count() !== $remoteVariationIds->count()
+            || $fresh->variantChildren->contains(fn (Product $child): bool => $child->isSyntheticWooSku())
+        ) {
+            throw new RuntimeException('Scalenie nie pozostawiło dokładnej kanonicznej rodziny wariantów ERP.');
+        }
+
+        return $fresh;
     }
 
     /**
@@ -4776,12 +5035,20 @@ final class WooOwnedVariantAxisRepairService
 
             foreach ($product->variantChildren as $variant) {
                 if ((bool) $target['is_primary']) {
-                    $identities = $variant->channelMappings
+                    $mappedIdentities = $variant->channelMappings
                         ->filter(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $channelId
                             && trim((string) $mapping->external_product_id) === $parentId
                             && ctype_digit(trim((string) $mapping->external_variation_id))
                             && (int) $mapping->external_variation_id > 0)
                         ->map(fn (ProductChannelMapping $mapping): string => trim((string) $mapping->external_variation_id));
+                    $aliasIdentities = $variant->channelAliases
+                        ->filter(fn (ProductChannelAlias $alias): bool => (int) $alias->sales_channel_id === $channelId
+                            && trim((string) $alias->external_product_id) === $parentId
+                            && $alias->isOutboundSyncEnabled()
+                            && ctype_digit(trim((string) $alias->external_variation_id))
+                            && (int) $alias->external_variation_id > 0)
+                        ->map(fn (ProductChannelAlias $alias): string => trim((string) $alias->external_variation_id));
+                    $identities = $mappedIdentities->concat($aliasIdentities);
                 } else {
                     $identities = $variant->channelAliases
                         ->filter(fn (ProductChannelAlias $alias): bool => (int) $alias->sales_channel_id === $channelId
