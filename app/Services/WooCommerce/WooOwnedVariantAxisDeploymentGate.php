@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services\WooCommerce;
 
 use App\Jobs\RepairWooOwnedVariantAxisJob;
+use App\Models\Product;
 use App\Models\ProductChannelMapping;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Collection;
@@ -15,6 +16,7 @@ final class WooOwnedVariantAxisDeploymentGate
     public function __construct(
         private readonly WooOwnedVariantAxisRepairService $repair,
         private readonly LegacyVariantFamilyBackfillService $backfill,
+        private readonly CanonicalTranslationRebuildExecutor $translationRebuild,
     ) {}
 
     /**
@@ -76,6 +78,26 @@ final class WooOwnedVariantAxisDeploymentGate
                 // follow-up export and audit semantics without waiting for the
                 // once-per-minute scheduler or bypassing a live catalog writer.
                 $job->handle($this->repair, $this->backfill);
+
+                $syncToken = $this->canonicalTranslationRebuildToken($productId);
+
+                if ($syncToken !== null) {
+                    $this->translationRebuild->run($productId, $syncToken);
+                    $verification = $this->repair
+                        ->reserveForIsolatedSynchronousRepair($productId);
+
+                    if (($verification['status'] ?? null) !== 'reserved') {
+                        throw new \RuntimeException(
+                            "Translated variation rebuild for family {$productId} could not be reserved for verification.",
+                        );
+                    }
+
+                    (new RepairWooOwnedVariantAxisJob(
+                        (int) $verification['product_id'],
+                        (string) $verification['token'],
+                    ))->handle($this->repair, $this->backfill);
+                }
+
                 $results[] = [
                     'product_id' => $productId,
                     'status' => $this->familyStatus($productId),
@@ -201,5 +223,60 @@ final class WooOwnedVariantAxisDeploymentGate
             ->values();
 
         return $statuses->isEmpty() ? 'missing' : $statuses->implode(',');
+    }
+
+    private function canonicalTranslationRebuildToken(int $productId): ?string
+    {
+        $product = Product::query()->find($productId);
+
+        if (! $product instanceof Product) {
+            return null;
+        }
+
+        $mapping = $this->currentRevisionMappings()
+            ->where('product_id', $productId)
+            ->orderBy('id')
+            ->first();
+
+        if (! $mapping instanceof ProductChannelMapping) {
+            return null;
+        }
+
+        $state = (array) data_get(
+            $mapping->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $targets = (array) data_get($state, 'result.rebuild_simple_translations', []);
+        $handoff = (array) data_get(
+            $product->masterData(),
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+
+        if (($state['status'] ?? null) !== 'pending'
+            || data_get($state, 'result.status') !== 'deferred'
+            || data_get($state, 'result.allow_full_export') !== true
+            || $targets === []
+            || ! WooOwnedVariantAxisRepairService::isSynchronizedRevision($handoff['revision'] ?? null)
+            || blank($handoff['canonical_full_export_handoff_at'] ?? null)
+            || (array) ($handoff['rebuild_simple_translations'] ?? []) !== $targets
+        ) {
+            return null;
+        }
+
+        $tokens = ProductChannelMapping::query()
+            ->where('product_id', $productId)
+            ->get(['metadata'])
+            ->map(fn (ProductChannelMapping $productMapping): string => trim((string) data_get(
+                $productMapping->metadata,
+                'product_data_export.pending_token',
+                '',
+            )))
+            ->filter()
+            ->unique()
+            ->values();
+
+        return $tokens->count() === 1 ? $tokens->first() : null;
     }
 }

@@ -15,6 +15,7 @@ use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
+use App\Services\WooCommerce\CanonicalTranslationRebuildExecutor;
 use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
 use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceImportService;
@@ -5470,6 +5471,123 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
         Http::assertSent(fn (Request $request): bool => $request->method() === 'PUT');
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
+    }
+
+    public function test_deployment_gate_synchronously_rebuilds_and_reverifies_a_marked_empty_translation(): void
+    {
+        Bus::fake([ExportWooCommerceProductDataJob::class]);
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        $englishVariations = $catalog->variations[223];
+        ProductChannelAlias::query()
+            ->where('product_id', '!=', $parent->id)
+            ->where('language', 'en')
+            ->delete();
+        $catalog->products[223]['type'] = 'simple';
+        $catalog->products[223]['attributes'] = [];
+        $catalog->products[223]['default_attributes'] = [];
+        $catalog->variations[223] = [];
+        $this->fakeCatalog($catalog);
+        $repair = app(WooOwnedVariantAxisRepairService::class);
+        $deferred = $repair->repair($parent->fresh());
+        $this->assertSame('deferred', $deferred['status']);
+        $this->assertTrue($deferred['allow_full_export']);
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $syncToken = 'synchronous-translation-rebuild-token';
+        $queuedRevision = WooOwnedVariantAxisRepairService::PREVIOUS_PRIORITIZED_TRANSLATION_VARIATION_REBUILD_REVISION
+            .':missing-translation:queued-repair-token';
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_SYNCHRONOUS_TRANSLATION_VARIATION_REBUILD_REVISION,
+            'status' => 'pending',
+            'result' => $deferred,
+        ]);
+        data_set($metadata, 'product_data_export', [
+            'pending_token' => $syncToken,
+            'requested_at' => now()->toISOString(),
+            'legacy_variant_backfill' => [
+                'status' => 'queued',
+                'reason' => LegacyVariantFamilyBackfillService::REASON,
+                'revision' => $queuedRevision,
+                'queued_revision' => $queuedRevision,
+                'queued_at' => now()->toISOString(),
+            ],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        (require database_path(
+            'migrations/2026_07_18_000052_finish_translation_variation_rebuild_synchronously.php',
+        ))->up();
+
+        $executor = $this->mock(CanonicalTranslationRebuildExecutor::class);
+        $executor->shouldReceive('run')
+            ->once()
+            ->with($parent->id, $syncToken)
+            ->andReturnUsing(function () use (
+                $catalog,
+                $englishVariations,
+                $mapping,
+                $syncToken,
+            ): void {
+                $catalog->products[223]['type'] = 'variable';
+                $catalog->products[223]['attributes'] = [[
+                    'id' => 1,
+                    'name' => 'Size',
+                    'slug' => 'pa_rozmiar',
+                    'position' => 0,
+                    'visible' => true,
+                    'variation' => true,
+                    'options' => ['S/M', 'M/L'],
+                ]];
+                $catalog->products[223]['default_attributes'] = [[
+                    'id' => 1,
+                    'name' => 'Size',
+                    'option' => 'M/L',
+                ]];
+                $catalog->variations[223] = $englishVariations;
+
+                foreach ([224 => ['S/M', 10], 225 => ['M/L', 20]] as $variationId => [$option, $menuOrder]) {
+                    $catalog->variations[223][$variationId]['attributes'] = [[
+                        'id' => 1,
+                        'name' => 'Size',
+                        'option' => $option,
+                    ]];
+                    $catalog->variations[223][$variationId]['menu_order'] = $menuOrder;
+                }
+
+                $metadata = (array) $mapping->fresh()->metadata;
+
+                if (data_get($metadata, 'product_data_export.pending_token') === $syncToken) {
+                    data_forget($metadata, 'product_data_export.pending_token');
+                    data_forget($metadata, 'product_data_export.requested_at');
+                    $mapping->forceFill(['metadata' => $metadata])->save();
+                }
+            });
+        Artisan::call('down', ['--retry' => 60]);
+
+        try {
+            $exitCode = Artisan::call('erp:repair-woo-owned-variant-axes-during-maintenance');
+            $output = Artisan::output();
+        } finally {
+            Artisan::call('up');
+        }
+
+        $this->assertSame(0, $exitCode, $output);
+        $this->assertStringContainsString('family '.$parent->id.': completed', $output);
+        $this->assertStringContainsString('statuses=completed=1, unresolved=0', $output);
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame('completed', $state['status'] ?? null);
+        $this->assertContains(data_get($state, 'result.status'), ['repaired', 'already_canonical']);
+        $this->assertCount(2, ProductChannelAlias::query()
+            ->where('language', 'en')
+            ->whereNotNull('external_variation_id')
+            ->get());
     }
 
     public function test_deployment_gate_refuses_to_take_a_reservation_outside_maintenance(): void
