@@ -5090,6 +5090,91 @@ class WooCommerceProductDataExportTest extends TestCase
             && str_contains($request->url(), '/products/attributes'));
     }
 
+    public function test_global_attribute_resolution_prefers_exact_taxonomy_slug_over_duplicate_display_name(): void
+    {
+        Http::fake(function ($request) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET' && $path === '/wp-json/wc/v3/products/attributes') {
+                return Http::response([
+                    [
+                        'id' => 6,
+                        'name' => 'Historyczna oś wariantów',
+                        'slug' => 'pa_wariant',
+                        'order_by' => 'menu_order',
+                    ],
+                    [
+                        'id' => 7,
+                        'name' => 'wariant',
+                        'slug' => 'pa_stary-wariant',
+                        'order_by' => 'menu_order',
+                    ],
+                ]);
+            }
+
+            if ($request->method() === 'GET' && $path === '/wp-json/wc/v3/products/attributes/6/terms') {
+                return Http::response([[
+                    'id' => 61,
+                    'name' => '37',
+                    'slug' => '37',
+                ]]);
+            }
+
+            return Http::response([], 404);
+        });
+        $integration = $this->createGlobalTermIntegration(['pl']);
+
+        $resolved = app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+            $integration,
+            'wariant',
+            ['37'],
+            'pl',
+        );
+
+        $this->assertSame(6, $resolved['id']);
+        $this->assertSame(['37'], $resolved['options']);
+        Http::assertNotSent(fn ($request): bool => str_contains(
+            $request->url(),
+            '/products/attributes/7/terms',
+        ));
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
+            && str_contains($request->url(), '/products/attributes'));
+    }
+
+    public function test_global_attribute_resolution_keeps_duplicate_name_only_matches_ambiguous(): void
+    {
+        Http::fake(function ($request) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET' && $path === '/wp-json/wc/v3/products/attributes') {
+                return Http::response([
+                    ['id' => 7, 'name' => 'wariant', 'slug' => 'pa_stary-wariant'],
+                    ['id' => 8, 'name' => 'Wariant', 'slug' => 'pa_inny-wariant'],
+                ]);
+            }
+
+            return Http::response([], 404);
+        });
+        $integration = $this->createGlobalTermIntegration(['pl']);
+
+        try {
+            app(WooCommerceClient::class)->ensureGlobalProductAttribute(
+                $integration,
+                'wariant',
+                ['37'],
+                'pl',
+            );
+            $this->fail('Dwa dopasowania wyłącznie po nazwie muszą pozostać niejednoznaczne.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'kilka globalnych atrybutów pasujących do wariant',
+                $exception->getMessage(),
+            );
+        }
+
+        Http::assertNotSent(fn ($request): bool => $request->method() !== 'GET');
+    }
+
     public function test_global_attribute_syncs_canonical_term_order_for_polish_and_english_idempotently(): void
     {
         $attribute = [

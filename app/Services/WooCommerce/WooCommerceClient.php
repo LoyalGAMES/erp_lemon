@@ -1913,18 +1913,30 @@ final class WooCommerceClient
     ): ?array {
         $slug = $this->globalProductAttributeSlug($sourceName);
         $normalizedName = mb_strtolower(trim($sourceName));
-        $matches = collect($this->globalProductAttributes($integration))
-            ->filter(function (array $attribute) use ($slug, $normalizedName): bool {
-                $candidateSlug = $this->normalizeGlobalProductAttributeSlug(
-                    (string) ($attribute['slug'] ?? ''),
-                );
-                $candidateName = mb_strtolower(trim((string) ($attribute['name'] ?? '')));
-
-                return $candidateSlug === $slug || $candidateName === $normalizedName;
-            })
+        $attributes = collect($this->globalProductAttributes($integration))
             ->filter(fn (array $attribute): bool => (int) ($attribute['id'] ?? 0) > 0)
             ->unique(fn (array $attribute): int => (int) $attribute['id'])
             ->values();
+        $slugMatches = $attributes
+            ->filter(fn (array $attribute): bool => $this->normalizeGlobalProductAttributeSlug(
+                (string) ($attribute['slug'] ?? ''),
+            ) === $slug)
+            ->values();
+
+        // The registered taxonomy slug is WooCommerce's stable identity. A
+        // display name is mutable and may be reused by an unrelated legacy
+        // attribute, so one exact slug must win over name-only candidates.
+        if ($slugMatches->count() === 1) {
+            return $slugMatches->first();
+        }
+
+        $matches = $slugMatches->isNotEmpty()
+            ? $slugMatches
+            : $attributes
+                ->filter(fn (array $attribute): bool => mb_strtolower(trim(
+                    (string) ($attribute['name'] ?? ''),
+                )) === $normalizedName)
+                ->values();
 
         if ($matches->count() > 1) {
             throw new RuntimeException(
@@ -2838,8 +2850,7 @@ final class WooCommerceClient
     private function validatedProductTranslationMap(
         array $translations,
         string $resource = 'produktów',
-    ): array
-    {
+    ): array {
         $normalized = [];
 
         foreach ($translations as $language => $productId) {
