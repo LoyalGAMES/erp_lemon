@@ -743,6 +743,34 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('pending', $state['status'] ?? null);
     }
 
+    public function test_simple_translation_rebuild_migration_requeues_an_unresolved_previous_revision_family(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_SIMPLE_TRANSLATION_REBUILD_REVISION,
+            'status' => 'manual_review',
+            'result' => ['reason' => 'EN parent is a simple product'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000048_requeue_simple_translation_rebuild.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+    }
+
     public function test_transition_diagnostic_names_missing_disabled_and_changed_axes(): void
     {
         $this->family();
@@ -4773,6 +4801,44 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             && str_contains((string) parse_url($request->url(), PHP_URL_PATH), '/products/223'));
         $this->assertSame([['id' => 1, 'name' => 'Size', 'option' => 'S/M']], $catalog->variations[223][224]['attributes']);
         $this->assertSame([['id' => 1, 'name' => 'Size', 'option' => 'M/L']], $catalog->variations[223][225]['attributes']);
+    }
+
+    public function test_reciprocal_simple_english_translation_is_handed_to_canonical_full_export(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        ProductChannelAlias::query()
+            ->where('product_id', '!=', $parent->id)
+            ->where('language', 'en')
+            ->delete();
+        $catalog->products[223]['type'] = 'simple';
+        $catalog->products[223]['attributes'] = [];
+        $catalog->products[223]['default_attributes'] = [];
+        $catalog->variations[223] = [];
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('deferred', $result['status']);
+        $this->assertTrue($result['allow_full_export']);
+        $this->assertSame([[
+            'language' => 'en',
+            'external_product_id' => '223',
+        ]], $result['rebuild_simple_translations']);
+        $this->assertStringContainsString('EN #223', $result['reason']);
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::REVISION,
+            data_get(
+                $parent->fresh()->masterData(),
+                WooOwnedVariantAxisRepairService::STATE_PATH.'.revision',
+            ),
+        );
+        $this->assertNotNull(data_get(
+            $parent->fresh()->masterData(),
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.canonical_full_export_handoff_at',
+        ));
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
     }
 
     public function test_contract_discovery_rejects_a_non_reciprocal_english_family_before_any_write(): void

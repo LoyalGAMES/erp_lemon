@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000047';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000048';
+
+    public const PREVIOUS_SIMPLE_TRANSLATION_REBUILD_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000047';
 
     public const PREVIOUS_TRANSITION_ID_ONLY_OPTIONS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000046';
 
@@ -83,6 +85,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_SIMPLE_TRANSLATION_REBUILD_REVISION,
             self::PREVIOUS_TRANSITION_ID_ONLY_OPTIONS_REVISION,
             self::PREVIOUS_TRANSITION_STRUCTURE_DIAGNOSTIC_REVISION,
             self::PREVIOUS_TRANSITION_CONFIRMATION_REVISION,
@@ -532,6 +535,39 @@ final class WooOwnedVariantAxisRepairService
                     );
                 })
                 ->all();
+        }
+
+        $simpleTranslationTargets = $this->recoverableSimpleTranslationTargets(
+            $product,
+            $plans,
+        );
+
+        if ($simpleTranslationTargets !== []) {
+            // A full product export is the only operation allowed to convert
+            // an existing translated `simple` product to `variable` and to
+            // create its missing translated children with inherited prices
+            // and stock. The exact parent contract, primary child bijection
+            // and local Size evidence have already been verified. Persist a
+            // narrow hand-off marker so that this one explicitly allowed
+            // export emits canonical Size instead of preserving the mapped
+            // legacy axis; the pending repair state still blocks every other
+            // broad export until the rebuilt family passes remote verification.
+            $this->markCanonicalFullExportHandoff($product, $simpleTranslationTargets);
+
+            return [
+                'status' => 'deferred',
+                'targets' => count($targetResolution['targets']),
+                'mutations' => 0,
+                'reason' => sprintf(
+                    'Zweryfikowane tłumaczenie %s jest produktem prostym bez wariantów; pełny eksport odbuduje je jako rodzinę wariantową opartą o Rozmiar.',
+                    collect($simpleTranslationTargets)
+                        ->map(fn (array $target): string => mb_strtoupper($target['language']).' #'.$target['external_product_id'])
+                        ->implode(', '),
+                ),
+                'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
+                'allow_full_export' => true,
+                'rebuild_simple_translations' => $simpleTranslationTargets,
+            ];
         }
 
         foreach ($plans as $entry) {
@@ -3996,6 +4032,176 @@ final class WooOwnedVariantAxisRepairService
         }
 
         return ['contract' => true, 'targets' => $targets, 'error' => null];
+    }
+
+    /**
+     * Prove the one recoverable shape in which the translated parent exists
+     * but was historically created as `simple`: all parent Polylang contract
+     * identities are reciprocal, the primary variable family is a complete
+     * local/remote bijection, and the simple translation has no children that
+     * could be overwritten or orphaned.
+     *
+     * @param  list<array<string,mixed>>  $plans
+     * @return list<array{language:string,external_product_id:string}>
+     */
+    private function recoverableSimpleTranslationTargets(Product $product, array $plans): array
+    {
+        $entries = collect($plans);
+        $unsafe = $entries->filter(fn (array $entry): bool => data_get(
+            $entry,
+            'plan.status',
+        ) === 'unsafe');
+        $simple = $unsafe->filter(fn (array $entry): bool => data_get(
+            $entry,
+            'plan.reason',
+        ) === 'Produkt nie jest produktem wariantowym.');
+
+        if ($simple->isEmpty() || $simple->count() !== $unsafe->count()) {
+            return [];
+        }
+
+        foreach ($entries->groupBy(fn (array $entry): int => (int) $entry['target']['integration']->id) as $integrationEntries) {
+            $integrationSimple = $integrationEntries->filter(
+                fn (array $entry): bool => $simple->contains($entry),
+            );
+
+            if ($integrationSimple->isEmpty()) {
+                continue;
+            }
+
+            $primary = $integrationEntries->first(
+                fn (array $entry): bool => (bool) data_get($entry, 'target.is_primary', false),
+            );
+            $expectedParents = $integrationEntries
+                ->mapWithKeys(fn (array $entry): array => [
+                    $this->language($entry['target']['language']) => (int) ($entry['parent']['id'] ?? 0),
+                ])
+                ->sortKeys()
+                ->all();
+
+            if (! is_array($primary)
+                || data_get($primary, 'plan.status') === 'unsafe'
+                || (string) data_get($primary, 'parent.type') !== 'variable'
+                || (array) ($primary['variations'] ?? []) === []
+                || $integrationEntries->contains(fn (array $entry): bool => ! (bool) data_get(
+                    $entry,
+                    'target.contract',
+                    false,
+                ))
+            ) {
+                return [];
+            }
+
+            $parentGroups = collect();
+
+            foreach ($integrationEntries as $entry) {
+                $language = $this->language($entry['target']['language']);
+
+                if ($this->contractItemError(
+                    $entry['parent'],
+                    $language,
+                    'product',
+                    $expectedParents,
+                ) !== null) {
+                    return [];
+                }
+
+                $parentGroups->push(trim((string) data_get(
+                    $entry,
+                    'parent.lemon_erp_translation_group',
+                    '',
+                )));
+            }
+
+            if ($parentGroups->contains('') || $parentGroups->unique()->count() !== 1) {
+                return [];
+            }
+
+            if ($integrationSimple->contains(fn (array $entry): bool =>
+                (bool) data_get($entry, 'target.is_primary', false)
+                || (string) data_get($entry, 'parent.type') !== 'simple'
+                || (array) ($entry['variations'] ?? []) !== []
+            )) {
+                return [];
+            }
+
+            $primaryExternalId = trim((string) data_get(
+                $primary,
+                'target.external_product_id',
+                '',
+            ));
+            $localParentSku = mb_strtoupper(trim((string) $product->sku));
+            $remoteParentSku = mb_strtoupper(trim((string) data_get(
+                $primary,
+                'parent.sku',
+                '',
+            )));
+            $syntheticParentSku = $primaryExternalId !== ''
+                && $localParentSku === 'WC-B2C-PARENT-'.mb_strtoupper($primaryExternalId);
+            $localSkus = $product->variantChildren
+                ->pluck('sku')
+                ->map(fn (mixed $sku): string => mb_strtoupper(trim((string) $sku)))
+                ->filter()
+                ->sort()
+                ->values()
+                ->all();
+            $primarySkus = collect((array) ($primary['variations'] ?? []))
+                ->pluck('sku')
+                ->map(fn (mixed $sku): string => mb_strtoupper(trim((string) $sku)))
+                ->filter()
+                ->sort()
+                ->values()
+                ->all();
+            $remoteVariationIds = collect((array) ($primary['variations'] ?? []))
+                ->pluck('id')
+                ->map(fn (mixed $id): string => trim((string) $id))
+                ->filter()
+                ->unique()
+                ->sort(SORT_NATURAL)
+                ->values()
+                ->all();
+            $mappedVariationIds = $this->primaryMappedVariationIds($product, $primary);
+
+            if (($remoteParentSku !== $localParentSku && ! $syntheticParentSku)
+                || $localSkus === []
+                || ($primarySkus !== $localSkus
+                    && ($mappedVariationIds === [] || $mappedVariationIds !== $remoteVariationIds))
+            ) {
+                return [];
+            }
+        }
+
+        return $simple
+            ->map(fn (array $entry): array => [
+                'language' => $this->language($entry['target']['language']),
+                'external_product_id' => trim((string) $entry['target']['external_product_id']),
+            ])
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  list<array{language:string,external_product_id:string}>  $targets
+     */
+    private function markCanonicalFullExportHandoff(Product $product, array $targets): void
+    {
+        DB::transaction(function () use ($product, $targets): void {
+            $root = Product::query()->lockForUpdate()->find($product->id);
+
+            if (! $root instanceof Product) {
+                throw new RuntimeException('Rodzina ERP zniknęła przed przekazaniem odbudowy tłumaczenia.');
+            }
+
+            $attributes = (array) $root->attributes;
+            $master = $root->masterData();
+            data_set($master, self::STATE_PATH, [
+                'revision' => self::REVISION,
+                'canonical_full_export_handoff_at' => now()->toISOString(),
+                'rebuild_simple_translations' => $targets,
+            ]);
+            $attributes['master'] = $master;
+            $root->forceFill(['attributes' => $attributes])->save();
+        }, 3);
     }
 
     /**
