@@ -2010,13 +2010,14 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 === '/wp-json/wc/v3/products/attributes/1/terms');
     }
 
-    public function test_english_size_option_recovers_its_existing_polish_family_when_woo_omits_translation_fields(): void
+    public function test_english_size_option_replaces_a_term_mislinked_to_polish_m_l_without_accepting_that_family(): void
     {
         $this->family();
         $integration = WordpressIntegration::query()->firstOrFail();
         $linkAttempts = [];
+        $targetRenamed = false;
 
-        Http::fake(function (Request $request) use (&$linkAttempts): mixed {
+        Http::fake(function (Request $request) use (&$linkAttempts, &$targetRenamed): mixed {
             $path = (string) parse_url($request->url(), PHP_URL_PATH);
             parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
 
@@ -2038,7 +2039,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             ) {
                 return Http::response([[
                     'id' => 22,
-                    'name' => 'XS',
+                    'name' => $targetRenamed ? 'M/L' : 'XS',
                     'slug' => 'xs-en',
                     'lang' => 'en',
                 ]]);
@@ -2064,9 +2065,9 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             ) {
                 return Http::response([
                     [
-                        'id' => 11,
-                        'name' => 'XS PL',
-                        'slug' => 'xs-2',
+                        'id' => 57,
+                        'name' => 'M/L',
+                        'slug' => 'm-l',
                         'lang' => 'pl',
                     ],
                     [
@@ -2077,11 +2078,40 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                     ],
                     [
                         'id' => 22,
-                        'name' => 'XS',
+                        'name' => $targetRenamed ? 'M/L' : 'XS',
                         'slug' => 'xs-en',
                         'lang' => 'en',
                     ],
                 ]);
+            }
+
+            if ($request->method() === 'PUT'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms/22'
+                && $request['name'] === 'M/L'
+            ) {
+                $targetRenamed = true;
+
+                return Http::response([
+                    'id' => 22,
+                    'name' => 'M/L',
+                    'slug' => 'xs-en',
+                    'lang' => 'en',
+                ]);
+            }
+
+            if ($request->method() === 'POST'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+                && ($query['lang'] ?? null) === 'en'
+            ) {
+                $this->assertSame('XS', $request['name']);
+                $this->assertSame('xs-en-erp', $request['slug']);
+
+                return Http::response([
+                    'id' => 23,
+                    'name' => 'XS',
+                    'slug' => 'xs-en-erp',
+                    'lang' => 'en',
+                ], 201);
             }
 
             if ($request->method() === 'POST'
@@ -2098,10 +2128,13 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                     ], 409);
                 }
 
-                if ($translations === ['en' => 22, 'pl' => 11]) {
+                if (in_array($translations, [
+                    ['en' => 22, 'pl' => 57],
+                    ['en' => 23, 'pl' => 12],
+                ], true)) {
                     return Http::response([
                         'linked' => true,
-                        'changed' => false,
+                        'changed' => $translations === ['en' => 23, 'pl' => 12],
                         'attribute_id' => 1,
                         'translations' => $translations,
                     ]);
@@ -2121,12 +2154,14 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         );
 
         $this->assertSame(['XS'], $result['options']);
-        $this->assertSame([22], $result['term_ids']);
+        $this->assertSame([23], $result['term_ids']);
+        $this->assertTrue($targetRenamed);
         $this->assertSame([
             ['en' => 22, 'pl' => 12],
-            ['en' => 22, 'pl' => 11],
+            ['en' => 22, 'pl' => 57],
+            ['en' => 23, 'pl' => 12],
         ], $linkAttempts);
-        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST'
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
             && (string) parse_url($request->url(), PHP_URL_PATH)
                 === '/wp-json/wc/v3/products/attributes/1/terms');
     }

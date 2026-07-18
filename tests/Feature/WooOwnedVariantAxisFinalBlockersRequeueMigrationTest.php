@@ -289,6 +289,43 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
         $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
     }
 
+    public function test_misnamed_term_migration_requeues_only_the_proven_m_l_mismatch(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'MISNAMED-TERM-AXIS',
+            'name' => 'Misnamed term axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $conflict = $this->mapping(
+            $channel,
+            'MISNAMED-TERM-CONFLICT',
+            'WooCommerce EN #500316: Istniejące polskie tłumaczenie #57 (M/L, m-l) wartości #110014 nie odpowiada opcji XS.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_MISNAMED_TRANSLATION_TERM_REVISION,
+        );
+        $unrelated = $this->mapping(
+            $channel,
+            'MISNAMED-TERM-UNRELATED',
+            'WooCommerce EN #500316: Istniejące polskie tłumaczenie nie jest jednoznaczne.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_MISNAMED_TRANSLATION_TERM_REVISION,
+        );
+        $unrelatedBefore = $unrelated->metadata;
+
+        $this->runMisnamedTermMigration();
+
+        $state = (array) data_get(
+            $conflict->refresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision']);
+        $this->assertSame('pending', $state['status']);
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::PREVIOUS_MISNAMED_TRANSLATION_TERM_REVISION,
+            data_get($state, 'previous.revision'),
+        );
+        $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
+    }
+
     private function mapping(
         SalesChannel $channel,
         string $suffix,
@@ -369,6 +406,13 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
     {
         (require database_path(
             'migrations/2026_07_18_000061_requeue_existing_woo_term_sibling_probe.php',
+        ))->up();
+    }
+
+    private function runMisnamedTermMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_18_000062_requeue_misnamed_woo_translation_term.php',
         ))->up();
     }
 }

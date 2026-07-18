@@ -1489,15 +1489,30 @@ final class WooCommerceClient
                         $language => (int) $term['id'],
                     ]);
                 } catch (ProductAttributeTermTranslationConflictException $exception) {
-                    $linkedSourceTerm = $this->findExistingGlobalProductAttributeSourceTermByLinkProbe(
-                        $integration,
-                        $attributeId,
-                        $pair['source'],
-                        'pl',
-                        $term,
-                        $language,
-                        [(int) $sourceTerm['id']],
-                    );
+                    try {
+                        $linkedSourceTerm = $this->findExistingGlobalProductAttributeSourceTermByLinkProbe(
+                            $integration,
+                            $attributeId,
+                            $pair['source'],
+                            'pl',
+                            $term,
+                            $language,
+                            [(int) $sourceTerm['id']],
+                        );
+                    } catch (ProductAttributeTermTranslationMismatchException $mismatch) {
+                        $term = $this->replaceMismatchedGlobalProductAttributeTargetTerm(
+                            $integration,
+                            $attributeId,
+                            $pair['localized'],
+                            $language,
+                            $sourceTerm,
+                            'pl',
+                            $term,
+                            $mismatch->term,
+                            $pair['menu_order'],
+                        );
+                        $linkedSourceTerm = $sourceTerm;
+                    }
 
                     if (! is_array($linkedSourceTerm)) {
                         throw $exception;
@@ -1512,6 +1527,11 @@ final class WooCommerceClient
                     );
                 }
             }
+
+            $resolvedOptions[array_key_last($resolvedOptions)] = trim((string) (
+                $term['name'] ?? $pair['localized']
+            )) ?: $pair['localized'];
+            $resolvedTermIds[array_key_last($resolvedTermIds)] = (int) $term['id'];
         }
 
         return [
@@ -1686,15 +1706,30 @@ final class WooCommerceClient
                         $language => (int) $term['id'],
                     ]);
                 } catch (ProductAttributeTermTranslationConflictException $exception) {
-                    $linkedSourceTerm = $this->findExistingGlobalProductAttributeSourceTermByLinkProbe(
-                        $integration,
-                        $attributeId,
-                        $pair['source'],
-                        'pl',
-                        $term,
-                        $language,
-                        [(int) $sourceTerm['id']],
-                    );
+                    try {
+                        $linkedSourceTerm = $this->findExistingGlobalProductAttributeSourceTermByLinkProbe(
+                            $integration,
+                            $attributeId,
+                            $pair['source'],
+                            'pl',
+                            $term,
+                            $language,
+                            [(int) $sourceTerm['id']],
+                        );
+                    } catch (ProductAttributeTermTranslationMismatchException $mismatch) {
+                        $term = $this->replaceMismatchedGlobalProductAttributeTargetTerm(
+                            $integration,
+                            $attributeId,
+                            $pair['localized'],
+                            $language,
+                            $sourceTerm,
+                            'pl',
+                            $term,
+                            $mismatch->term,
+                            $pair['menu_order'],
+                        );
+                        $linkedSourceTerm = $sourceTerm;
+                    }
 
                     if (! is_array($linkedSourceTerm)) {
                         throw $exception;
@@ -1709,6 +1744,11 @@ final class WooCommerceClient
                     );
                 }
             }
+
+            $resolvedOptions[array_key_last($resolvedOptions)] = trim((string) (
+                $term['name'] ?? $pair['localized']
+            )) ?: $pair['localized'];
+            $resolvedTermIds[array_key_last($resolvedTermIds)] = (int) $term['id'];
         }
 
         // Make menu_order authoritative only after every term write and
@@ -1927,7 +1967,8 @@ final class WooCommerceClient
                     $candidateName = trim((string) ($candidate['name'] ?? '')) ?: '?';
                     $candidateSlug = trim((string) ($candidate['slug'] ?? '')) ?: '?';
 
-                    throw new RuntimeException(
+                    throw new ProductAttributeTermTranslationMismatchException(
+                        $candidate,
                         "Istniejące polskie tłumaczenie #{$candidateId} ({$candidateName}, {$candidateSlug}) wartości #{$targetTermId} nie odpowiada opcji {$sourceOption}.",
                     );
                 }
@@ -1940,6 +1981,204 @@ final class WooCommerceClient
         }
 
         return null;
+    }
+
+    /**
+     * Repair a term whose display name no longer matches its authoritative
+     * Polylang sibling. Rename that term back to the sibling value, then create
+     * and link one fresh target-language value. Every write is confirmed and
+     * the rename is rolled back if the replacement cannot be linked.
+     *
+     * @param  array<string,mixed>  $sourceTerm
+     * @param  array<string,mixed>  $mismatchedTargetTerm
+     * @param  array<string,mixed>  $existingSiblingTerm
+     * @return array<string,mixed>
+     */
+    private function replaceMismatchedGlobalProductAttributeTargetTerm(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $targetOption,
+        string $targetLanguage,
+        array $sourceTerm,
+        string $sourceLanguage,
+        array $mismatchedTargetTerm,
+        array $existingSiblingTerm,
+        ?int $menuOrder,
+    ): array {
+        $targetLanguage = mb_strtolower(trim($targetLanguage));
+        $sourceLanguage = mb_strtolower(trim($sourceLanguage));
+        $targetTermId = (int) ($mismatchedTargetTerm['id'] ?? 0);
+        $sourceTermId = (int) ($sourceTerm['id'] ?? 0);
+        $originalTargetName = trim((string) ($mismatchedTargetTerm['name'] ?? ''));
+        $siblingName = trim((string) ($existingSiblingTerm['name'] ?? ''));
+
+        if ($attributeId <= 0
+            || $targetTermId <= 0
+            || $sourceTermId <= 0
+            || trim($targetOption) === ''
+            || $targetLanguage === ''
+            || $sourceLanguage === ''
+            || $originalTargetName === ''
+            || $siblingName === ''
+            || mb_strtolower($siblingName) === mb_strtolower(trim($targetOption))
+        ) {
+            throw new RuntimeException(
+                'Naprawa błędnej rodziny tłumaczeń wartości atrybutu nie ma kompletnego kontraktu.',
+            );
+        }
+
+        $renameResponse = $this->request($integration, retry: false)->put(
+            $this->endpoint(
+                $integration,
+                "/products/attributes/{$attributeId}/terms/{$targetTermId}",
+            ),
+            ['name' => $siblingName],
+        );
+
+        if (! $renameResponse->successful()
+            || (int) data_get($renameResponse->json(), 'id') !== $targetTermId
+            || trim((string) data_get($renameResponse->json(), 'name')) !== $siblingName
+        ) {
+            throw new RuntimeException(
+                "WooCommerce nie przywrócił wartości #{$targetTermId} nazwy {$siblingName}; błędna rodzina nie została zmieniona.",
+            );
+        }
+
+        $createdTerm = null;
+
+        try {
+            $replacement = collect(array_merge(
+                $this->globalProductAttributeTerms($integration, $attributeId, $targetLanguage),
+                $this->globalProductAttributeTerms($integration, $attributeId, 'all'),
+            ))
+                ->filter(fn (array $candidate): bool => (int) ($candidate['id'] ?? 0) > 0
+                    && (int) $candidate['id'] !== $targetTermId
+                    && mb_strtolower(trim((string) ($candidate['name'] ?? '')))
+                        === mb_strtolower(trim($targetOption))
+                    && (! $this->globalProductAttributeTermHasLanguageIdentity($candidate)
+                        || $this->globalProductAttributeTermMatchesLanguage(
+                            $candidate,
+                            $targetLanguage,
+                        )))
+                ->unique(fn (array $candidate): int => (int) $candidate['id'])
+                ->sortBy(fn (array $candidate): int => (int) $candidate['id'])
+                ->first(function (array $candidate) use (
+                    $integration,
+                    $attributeId,
+                    $sourceLanguage,
+                    $sourceTermId,
+                    $targetLanguage,
+                ): bool {
+                    try {
+                        $this->linkGlobalProductAttributeTermTranslations(
+                            $integration,
+                            $attributeId,
+                            [
+                                $sourceLanguage => $sourceTermId,
+                                $targetLanguage => (int) $candidate['id'],
+                            ],
+                        );
+
+                        return true;
+                    } catch (ProductAttributeTermTranslationConflictException) {
+                        return false;
+                    }
+                });
+
+            if (! is_array($replacement)) {
+                $existingSlugs = collect(array_merge(
+                    $this->globalProductAttributeTerms($integration, $attributeId, $targetLanguage),
+                    $this->globalProductAttributeTerms($integration, $attributeId, 'all'),
+                ))
+                    ->map(fn (array $candidate): string => Str::slug((string) ($candidate['slug'] ?? '')))
+                    ->filter()
+                    ->flip();
+                $baseSlug = $this->globalProductAttributeTermSlug(
+                    $targetOption,
+                    $targetLanguage,
+                ).'-erp';
+                $replacementSlug = $baseSlug;
+
+                for ($suffix = 2; $existingSlugs->has($replacementSlug); $suffix++) {
+                    $replacementSlug = $baseSlug.'-'.$suffix;
+                }
+
+                $url = $this->endpoint($integration, "/products/attributes/{$attributeId}/terms")
+                    .'?lang='.rawurlencode($targetLanguage);
+                $payload = [
+                    'name' => trim($targetOption),
+                    'slug' => $replacementSlug,
+                ];
+
+                if ($menuOrder !== null) {
+                    $payload['menu_order'] = max(0, min(65535, $menuOrder));
+                }
+
+                $createResponse = $this->request($integration, retry: false)->post($url, $payload);
+                $createdTerm = $createResponse->successful() ? $createResponse->json() : null;
+
+                if (! is_array($createdTerm)
+                    || (int) ($createdTerm['id'] ?? 0) <= 0
+                    || trim((string) ($createdTerm['name'] ?? '')) !== trim($targetOption)
+                    || Str::slug((string) ($createdTerm['slug'] ?? '')) !== $replacementSlug
+                ) {
+                    throw new RuntimeException(
+                        'WooCommerce nie utworzył zastępczej wartości '.trim($targetOption)
+                            .' języka '.mb_strtoupper($targetLanguage)." (HTTP {$createResponse->status()}).",
+                    );
+                }
+
+                $replacement = $createdTerm;
+                $this->linkGlobalProductAttributeTermTranslations(
+                    $integration,
+                    $attributeId,
+                    [
+                        $sourceLanguage => $sourceTermId,
+                        $targetLanguage => (int) $replacement['id'],
+                    ],
+                );
+            }
+
+            $this->rememberGlobalProductAttributeTerm(
+                $integration,
+                $attributeId,
+                $targetOption,
+                $targetLanguage,
+                $replacement,
+            );
+
+            return $replacement;
+        } catch (Throwable $exception) {
+            if (is_array($createdTerm) && (int) ($createdTerm['id'] ?? 0) > 0) {
+                $this->request($integration, retry: false)->delete(
+                    $this->endpoint(
+                        $integration,
+                        "/products/attributes/{$attributeId}/terms/".(int) $createdTerm['id'],
+                    ),
+                    ['force' => true],
+                );
+            }
+
+            $rollback = $this->request($integration, retry: false)->put(
+                $this->endpoint(
+                    $integration,
+                    "/products/attributes/{$attributeId}/terms/{$targetTermId}",
+                ),
+                ['name' => $originalTargetName],
+            );
+
+            if (! $rollback->successful()
+                || trim((string) data_get($rollback->json(), 'name')) !== $originalTargetName
+            ) {
+                throw new RuntimeException(
+                    "WooCommerce nie cofnął nazwy wartości #{$targetTermId} po nieudanej naprawie: {$exception->getMessage()}",
+                    0,
+                    $exception,
+                );
+            }
+
+            throw $exception;
+        }
     }
 
     /**
