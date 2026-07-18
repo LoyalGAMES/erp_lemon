@@ -126,6 +126,11 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
         $this->assertSame([], $mapped['candidate_root_ids'] ?? null);
         $this->assertSame(false, data_get($mapped, 'size_axes.0.variation'));
         $this->assertSame(['36'], $mapped['legacy_options'] ?? null);
+        $this->assertSame('pl', $mapped['language'] ?? null);
+        $this->assertSame('REMOTE-MAPPED', data_get(
+            $mapped,
+            'owner_details.'.$localProduct->id.'.root_sku',
+        ));
 
         $marked = app(WooLegacyVariantAxisRemoteAuditService::class)
             ->markSafeRemoteRepairCandidates($result);
@@ -150,6 +155,10 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
         $this->assertTrue((bool) data_get(
             $metadata,
             WooOwnedVariantAxisRepairService::REMOTE_EVIDENCE_PATH.'.verified',
+        ));
+        $this->assertSame('pl', data_get(
+            $metadata,
+            WooOwnedVariantAxisRepairService::REMOTE_EVIDENCE_PATH.'.targets.0.language',
         ));
     }
 
@@ -203,7 +212,7 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
             'id' => $id,
             'sku' => $sku,
             'type' => 'variable',
-            'lang' => 'pl',
+            'lemon_erp_language' => 'pl',
             'permalink' => 'https://shop.test/product/'.$id,
             'attributes' => [
                 [

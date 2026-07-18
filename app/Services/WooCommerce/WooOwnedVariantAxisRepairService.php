@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000057';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000058';
+
+    public const PREVIOUS_AUTHORITATIVE_REMOTE_AXIS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000057';
 
     public const PREVIOUS_EXACT_REMOTE_EVIDENCE_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000056';
 
@@ -105,6 +107,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_AUTHORITATIVE_REMOTE_AXIS_REVISION,
             self::PREVIOUS_EXACT_REMOTE_EVIDENCE_REVISION,
             self::PREVIOUS_REMOTE_CATALOG_DISCOVERY_REVISION,
             self::PREVIOUS_STALE_TRANSLATED_VARIATION_ALIAS_REVISION,
@@ -409,6 +412,7 @@ final class WooOwnedVariantAxisRepairService
         }
 
         if ($variationOptionHints === []
+            && $product->variantChildren->isNotEmpty()
             && $this->hasParentDuplicatedGenericAndSizeAxisEvidence($product)
             && ! $this->hasOnlyBlankLocalChildAxisEvidence($product)
             && ! $hasRemoteEvidence
@@ -1251,8 +1255,7 @@ final class WooOwnedVariantAxisRepairService
                         && $localSku === $primaryRemoteSku;
                     $existingAliasIdentity = $localVariant instanceof Product
                         && $localVariant->channelAliases->contains(
-                            fn (ProductChannelAlias $alias): bool =>
-                                (int) $alias->sales_channel_id === (int) $target['sales_channel_id']
+                            fn (ProductChannelAlias $alias): bool => (int) $alias->sales_channel_id === (int) $target['sales_channel_id']
                                 && trim((string) $alias->external_product_id) === $externalProductId
                                 && trim((string) $alias->external_variation_id) === $externalVariationId
                                 && $this->language($alias->language ?? 'en') === $language
@@ -3725,6 +3728,64 @@ final class WooOwnedVariantAxisRepairService
                 ) !== []);
     }
 
+    /**
+     * A split historical translation can still own one exact live parent even
+     * though its reciprocal Polylang sibling belongs to another stale ERP
+     * root. When contract discovery fails, use only the current remote-audit
+     * targets already mapped to this root. The later parent/child preflight
+     * and exact mapping bijection remain mandatory before any PUT.
+     *
+     * @return list<array<string,mixed>>
+     */
+    private function currentRemoteEvidenceTargets(
+        ProductChannelMapping $mapping,
+        WordpressIntegration $integration,
+    ): array {
+        if (data_get(
+            $mapping->metadata,
+            self::REMOTE_EVIDENCE_PATH.'.revision',
+        ) !== self::REVISION || data_get(
+            $mapping->metadata,
+            self::REMOTE_EVIDENCE_PATH.'.verified',
+        ) !== true) {
+            return [];
+        }
+
+        $mappingExternalId = trim((string) $mapping->external_product_id);
+
+        return collect((array) data_get(
+            $mapping->metadata,
+            self::REMOTE_EVIDENCE_PATH.'.targets',
+            [],
+        ))
+            ->filter(fn (mixed $target): bool => is_array($target)
+                && (int) ($target['sales_channel_id'] ?? 0) === (int) $mapping->sales_channel_id
+                && ctype_digit(trim((string) ($target['external_product_id'] ?? '')))
+                && (int) ($target['external_product_id'] ?? 0) > 0
+                && in_array($this->language($target['language'] ?? ''), ['pl', 'en'], true))
+            ->map(function (array $target) use (
+                $integration,
+                $mapping,
+                $mappingExternalId,
+            ): array {
+                $externalProductId = trim((string) $target['external_product_id']);
+
+                return [
+                    'integration' => $integration,
+                    'sales_channel_id' => (int) $mapping->sales_channel_id,
+                    'external_product_id' => $externalProductId,
+                    'language' => $this->language($target['language']),
+                    'is_primary' => $externalProductId === $mappingExternalId,
+                    'discovered' => true,
+                    'contract' => false,
+                    'ignore_remote_contract' => true,
+                ];
+            })
+            ->unique(fn (array $target): string => $target['external_product_id'])
+            ->values()
+            ->all();
+    }
+
     public function familyRootId(int $productId): int
     {
         $rootId = ProductRelation::query()
@@ -3838,12 +3899,23 @@ final class WooOwnedVariantAxisRepairService
             );
 
             if ($discovery['error'] !== null) {
-                return [
-                    'targets' => $targets->all(),
-                    'error' => $discovery['error'],
-                    'retryable' => false,
-                    'allow_full_export' => false,
-                ];
+                $evidenceTargets = $this->currentRemoteEvidenceTargets(
+                    $mapping,
+                    $integration,
+                );
+
+                if ($evidenceTargets === []) {
+                    return [
+                        'targets' => $targets->all(),
+                        'error' => $discovery['error'],
+                        'retryable' => false,
+                        'allow_full_export' => false,
+                    ];
+                }
+
+                $targets->push(...$evidenceTargets);
+
+                continue;
             }
 
             $targets->push([
@@ -3965,6 +4037,8 @@ final class WooOwnedVariantAxisRepairService
                 // language from the now-canonical local Size axis.
                 if ($integrationTargets->every(
                     fn (array $target): bool => (bool) ($target['contract'] ?? false),
+                ) || $integrationTargets->every(
+                    fn (array $target): bool => (bool) ($target['ignore_remote_contract'] ?? false),
                 )) {
                     continue;
                 }
@@ -4117,16 +4191,14 @@ final class WooOwnedVariantAxisRepairService
             $entry,
             'plan.status',
         ) === 'unsafe');
-        $emptyTranslations = $unsafe->filter(fn (array $entry): bool => in_array(
-            data_get($entry, 'plan.reason'),
-            [
-                'Produkt nie jest produktem wariantowym.',
-                'Rodzina nie ma wariantów do jednoznacznego przypisania.',
-            ],
-            true,
-        ));
+        $emptyTranslations = $entries->filter(fn (array $entry): bool => (array) ($entry['variations'] ?? []) === []
+            && in_array((string) data_get($entry, 'parent.type'), ['simple', 'variable'], true)
+        );
+        $unrelatedUnsafe = $unsafe->reject(
+            fn (array $entry): bool => $emptyTranslations->contains($entry),
+        );
 
-        if ($emptyTranslations->isEmpty() || $emptyTranslations->count() !== $unsafe->count()) {
+        if ($emptyTranslations->isEmpty() || $unrelatedUnsafe->isNotEmpty()) {
             return [];
         }
 
@@ -4193,8 +4265,7 @@ final class WooOwnedVariantAxisRepairService
                 return [];
             }
 
-            if ($integrationEmpty->contains(fn (array $entry): bool =>
-                (bool) data_get($entry, 'target.is_primary', false)
+            if ($integrationEmpty->contains(fn (array $entry): bool => (bool) data_get($entry, 'target.is_primary', false)
                 || ! in_array((string) data_get($entry, 'parent.type'), ['simple', 'variable'], true)
                 || (array) ($entry['variations'] ?? []) !== []
             )) {
@@ -4206,8 +4277,7 @@ final class WooOwnedVariantAxisRepairService
             // the canonical simple->variable export hand-off. This recognizes
             // an interrupted rebuild without widening the exception to an
             // arbitrary damaged variable family.
-            if ($integrationEmpty->contains(fn (array $entry): bool =>
-                (string) data_get($entry, 'parent.type') === 'variable'
+            if ($integrationEmpty->contains(fn (array $entry): bool => (string) data_get($entry, 'parent.type') === 'variable'
             ) && (! self::isSynchronizedRevision($localHandoff['revision'] ?? null)
                 || blank($localHandoff['canonical_full_export_handoff_at'] ?? null)
             )) {
@@ -4308,7 +4378,12 @@ final class WooOwnedVariantAxisRepairService
             $entry['parent'],
             ...$entry['variations'],
         ]);
-        $contract = $objects->contains(fn (array $item): bool => collect([
+        $ignoreRemoteContract = collect($plans)->isNotEmpty()
+            && collect($plans)->every(fn (array $entry): bool => data_get(
+                $entry,
+                'target.ignore_remote_contract',
+            ) === true);
+        $contract = ! $ignoreRemoteContract && $objects->contains(fn (array $item): bool => collect([
             'lemon_erp_catalog_contract',
             'lemon_erp_language',
             'lemon_erp_translations',
@@ -4386,7 +4461,9 @@ final class WooOwnedVariantAxisRepairService
                 && $localParentSku === 'WC-B2C-PARENT-'.mb_strtoupper($primaryExternalId);
 
             if (! is_array($primary)
-                || ($remoteParentSku !== $localParentSku && ! $syntheticParentSku)
+                || ($remoteParentSku !== ''
+                    && $remoteParentSku !== $localParentSku
+                    && ! $syntheticParentSku)
             ) {
                 return ['contract' => true, 'error' => 'SKU głównego rodzica nie zgadza się z rodziną ERP.'];
             }
@@ -4417,7 +4494,13 @@ final class WooOwnedVariantAxisRepairService
             $mappedIdentity = $mappedVariationIds !== []
                 && $mappedVariationIds === $remoteVariationIds;
 
-            if (($localSkus === [] || $primarySkus !== $localSkus) && ! $mappedIdentity) {
+            $emptyFamilyIdentity = $product->variantChildren->isEmpty()
+                && collect($primary['variations'])->isEmpty();
+
+            if (! $emptyFamilyIdentity
+                && ($localSkus === [] || $primarySkus !== $localSkus)
+                && ! $mappedIdentity
+            ) {
                 return ['contract' => true, 'error' => 'Polskie warianty nie odpowiadają dokładnie wariantom rodziny ERP.'];
             }
 
@@ -4534,8 +4617,7 @@ final class WooOwnedVariantAxisRepairService
             $externalProductId,
         ): ?string {
             $matches = $child->channelMappings
-                ->filter(fn (ProductChannelMapping $mapping): bool =>
-                    (int) $mapping->sales_channel_id === $salesChannelId
+                ->filter(fn (ProductChannelMapping $mapping): bool => (int) $mapping->sales_channel_id === $salesChannelId
                     && trim((string) $mapping->external_product_id) === $externalProductId
                     && trim((string) $mapping->external_variation_id) !== '')
                 ->values();
@@ -6262,10 +6344,6 @@ final class WooOwnedVariantAxisRepairService
             return $this->unsafePlan('Źródłowy rozmiar nie jest osią wariantową.');
         }
 
-        if ($variations === []) {
-            return $this->unsafePlan('Rodzina nie ma wariantów do jednoznacznego przypisania.');
-        }
-
         $variationOptions = [];
         $skuOptionKeys = [];
         $variationOptionKeys = [];
@@ -6339,9 +6417,10 @@ final class WooOwnedVariantAxisRepairService
             ->sort()
             ->values();
 
-        if ($variationKeys->count() !== $canonicalByKey->count()
-            || $variationKeys->unique()->count() !== $variationKeys->count()
-            || $variationKeys->sort()->values()->all() !== $expectedVariationKeys->all()
+        if ($variations !== []
+            && ($variationKeys->count() !== $canonicalByKey->count()
+                || $variationKeys->unique()->count() !== $variationKeys->count()
+                || $variationKeys->sort()->values()->all() !== $expectedVariationKeys->all())
         ) {
             $assignments = $variationKeys
                 ->countBy()
@@ -6615,14 +6694,59 @@ final class WooOwnedVariantAxisRepairService
         string $sizeName,
         string $language,
     ): array {
-        if ($this->language($language) !== 'en'
-            || ! is_array($sourceSize)
+        if (! is_array($sourceSize)
             || ! is_array($generic)
             || ! $this->isCanonicalGlobalSizeAttribute($sourceSize)
             || (bool) ($sourceSize['variation'] ?? false)
             || ! (bool) ($generic['variation'] ?? false)
             || $variations === []
         ) {
+            return [];
+        }
+
+        $existingKeys = $this->localOptionValues($sourceSize['options'] ?? [])
+            ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey($sizeName, (string) $option))
+            ->filter()
+            ->unique()
+            ->values();
+        $genericKeys = $this->localOptionValues($generic['options'] ?? [])
+            ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey($sizeName, (string) $option))
+            ->filter()
+            ->unique()
+            ->values();
+        $genericIdentity = $this->axisIdentityKey($generic);
+        $childKeys = collect($variations)
+            ->map(function (array $variation) use ($genericIdentity, $sizeName): ?string {
+                $keys = collect((array) ($variation['attributes'] ?? []))
+                    ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                        && $this->axisIdentityKey($attribute) === $genericIdentity)
+                    ->map(fn (array $attribute): string => $this->canonicalSizeOptionKey(
+                        $sizeName,
+                        (string) ($attribute['option'] ?? ''),
+                    ))
+                    ->filter()
+                    ->unique()
+                    ->values();
+
+                return $keys->count() === 1 ? (string) $keys->first() : null;
+            });
+
+        if (! $childKeys->contains(null)
+            && $childKeys->count() === count($variations)
+            && $childKeys->unique()->count() === $childKeys->count()
+            && $childKeys->sort()->values()->all() === $genericKeys->sort()->values()->all()
+        ) {
+            return $this->orderedSizeOptions(
+                $sizeName,
+                $genericKeys
+                    ->diff($existingKeys)
+                    ->map(fn (string $key): string => $this->canonicalSizeOption($sizeName, $key))
+                    ->values()
+                    ->all(),
+            );
+        }
+
+        if ($this->language($language) !== 'en') {
             return [];
         }
 
@@ -6644,17 +6768,6 @@ final class WooOwnedVariantAxisRepairService
         ) {
             return [];
         }
-
-        $existingKeys = $this->localOptionValues($sourceSize['options'] ?? [])
-            ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey($sizeName, (string) $option))
-            ->filter()
-            ->unique()
-            ->values();
-        $genericKeys = $this->localOptionValues($generic['options'] ?? [])
-            ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey($sizeName, (string) $option))
-            ->filter()
-            ->unique()
-            ->values();
 
         if ($existingKeys->diff($hintKeys)->isNotEmpty()
             || $genericKeys->diff($hintKeys)->isNotEmpty()
@@ -7751,12 +7864,22 @@ final class WooOwnedVariantAxisRepairService
     /** @return array<string, int> */
     private function sizeDictionaryOrder(string $attribute): array
     {
-        return $this->sizeOrder
-            ->entries()
-            ->mapWithKeys(fn (array $entry): array => [
-                $this->optionKey($entry['source']) => $entry['menu_order'],
-            ])
-            ->all();
+        $orders = [];
+
+        foreach ($this->sizeOrder->entries() as $entry) {
+            foreach (collect([
+                $entry['source'],
+                $entry['localized'],
+                ...(array) ($entry['source_aliases'] ?? []),
+                ...(array) ($entry['localized_aliases'] ?? []),
+            ])->filter() as $alias) {
+                // PHP and Laravel cast numeric-looking string keys to ints,
+                // but direct assignment preserves the value/order mapping.
+                $orders[$this->optionKey((string) $alias)] = (int) $entry['menu_order'];
+            }
+        }
+
+        return $orders;
     }
 
     /** @return Collection<int, ProductParameterDefinition> */

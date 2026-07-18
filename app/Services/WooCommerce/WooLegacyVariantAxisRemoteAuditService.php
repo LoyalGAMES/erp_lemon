@@ -8,8 +8,8 @@ use App\Models\Product;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\WordpressIntegration;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Throwable;
 
@@ -137,6 +137,7 @@ final class WooLegacyVariantAxisRemoteAuditService
                                 $remoteProduct['lang']
                                 ?? $remoteProduct['language']
                                 ?? $remoteProduct['erp_import_language']
+                                ?? $remoteProduct['lemon_erp_language']
                                 ?? 'unknown'
                             )),
                             'legacy_options' => collect((array) ($legacyAxis['options'] ?? []))
@@ -164,6 +165,20 @@ final class WooLegacyVariantAxisRemoteAuditService
                                     ),
                                 ])
                                 ->all(),
+                            'owner_details' => $ownerRootIds
+                                ->mapWithKeys(fn (int $rootId): array => [
+                                    $rootId => $this->ownerDetail(
+                                        $rootId,
+                                        (int) $integration->sales_channel_id,
+                                        $remoteId,
+                                    ),
+                                ])
+                                ->all(),
+                            'remote_contract' => [
+                                'language' => trim((string) ($remoteProduct['lemon_erp_language'] ?? '')),
+                                'translations' => (array) ($remoteProduct['lemon_erp_translations'] ?? []),
+                                'group' => trim((string) ($remoteProduct['lemon_erp_translation_group'] ?? '')),
+                            ],
                             'permalink' => trim((string) ($remoteProduct['permalink'] ?? '')),
                         ]);
                     }
@@ -257,6 +272,7 @@ final class WooLegacyVariantAxisRemoteAuditService
                 ->map(fn (array $row): array => [
                     'sales_channel_id' => (int) $row['sales_channel_id'],
                     'external_product_id' => (string) $row['external_product_id'],
+                    'language' => (string) $row['language'],
                     'attribute_id' => (int) $row['attribute_id'],
                     'size_attribute_id' => (int) data_get($row, 'remote_evidence.size_attribute_id'),
                     'evidence_mode' => (string) data_get($row, 'remote_evidence.mode'),
@@ -371,6 +387,43 @@ final class WooLegacyVariantAxisRemoteAuditService
             (string) data_get($mapping?->metadata, WooOwnedVariantAxisRepairService::STATE_PATH.'.revision', 'unmarked'),
             (string) data_get($mapping?->metadata, WooOwnedVariantAxisRepairService::STATE_PATH.'.status', 'unmarked'),
         ]));
+    }
+
+    /** @return array<string,mixed> */
+    private function ownerDetail(
+        int $rootId,
+        int $salesChannelId,
+        string $externalProductId,
+    ): array {
+        $root = Product::query()
+            ->with(['variantChildren.channelMappings' => fn ($query) => $query
+                ->where('sales_channel_id', $salesChannelId)])
+            ->find($rootId);
+
+        if (! $root instanceof Product) {
+            return [];
+        }
+
+        $mappedVariationIds = $root->variantChildren
+            ->flatMap(fn (Product $child): Collection => $child->channelMappings
+                ->filter(fn (ProductChannelMapping $mapping): bool => trim(
+                    (string) $mapping->external_product_id,
+                ) === $externalProductId)
+                ->pluck('external_variation_id'))
+            ->map(fn (mixed $id): string => trim((string) $id))
+            ->filter()
+            ->unique()
+            ->sort(SORT_NATURAL)
+            ->values();
+
+        return [
+            'root_sku' => trim((string) $root->sku),
+            'children' => $root->variantChildren->count(),
+            'children_with_sku' => $root->variantChildren
+                ->filter(fn (Product $child): bool => trim((string) $child->sku) !== '')
+                ->count(),
+            'mapped_variation_ids' => $mappedVariationIds->all(),
+        ];
     }
 
     /**

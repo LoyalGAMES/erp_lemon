@@ -66,7 +66,7 @@ final class AuditWooLegacyVariantAxesDuringMaintenanceCommand extends Command
 
         foreach (collect($result['rows'])->take(max(1, (int) $this->option('limit'))) as $row) {
             $this->line(sprintf(
-                'Woo legacy-axis product #%s channel=%s sku=%s lang=%s owners=%s candidates=%s state=%s remote_safe=%d remote_mode=%s remote_reason=%s size_axes=%s legacy_options=%s.',
+                'Woo legacy-axis product #%s channel=%s sku=%s lang=%s owners=%s candidates=%s state=%s remote_safe=%d remote_mode=%s remote_reason=%s size_axes=%s legacy_options=%s owner_detail=%s contract=%s.',
                 $row['external_product_id'],
                 $row['channel'],
                 $row['sku'] !== '' ? $row['sku'] : '-',
@@ -87,6 +87,8 @@ final class AuditWooLegacyVariantAxesDuringMaintenanceCommand extends Command
                     )->implode(',')
                     : '-',
                 implode('|', $row['legacy_options']),
+                json_encode($row['owner_details'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '-',
+                json_encode($row['remote_contract'] ?? [], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?: '-',
             ));
         }
 

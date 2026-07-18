@@ -212,6 +212,54 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         ]], $catalog->variations[123][124]['attributes']);
     }
 
+    public function test_it_removes_the_legacy_axis_from_a_variable_parent_without_remote_variations(): void
+    {
+        [$parent, $catalog] = $this->family();
+        ProductRelation::query()
+            ->where('parent_product_id', $parent->id)
+            ->where('relation_type', 'variant')
+            ->delete();
+        $catalog->variations[123] = [];
+        $catalog->variations[223] = [];
+
+        foreach ([123, 223] as $parentId) {
+            $catalog->products[$parentId]['manage_stock'] = true;
+            $catalog->products[$parentId]['stock_quantity'] = 7;
+            $catalog->products[$parentId]['stock_status'] = 'instock';
+        }
+
+        $this->fakeCatalog($catalog);
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+
+        foreach ([123, 223] as $parentId) {
+            $attributes = collect($catalog->products[$parentId]['attributes']);
+            $this->assertFalse($attributes->contains(
+                fn (array $attribute): bool => in_array(
+                    mb_strtolower((string) ($attribute['name'] ?? '')),
+                    ['wariant', 'variant', 'blvariant'],
+                    true,
+                ),
+            ));
+            $this->assertTrue((bool) data_get($attributes->firstWhere('id', 1), 'variation'));
+            $this->assertSame(7, $catalog->products[$parentId]['stock_quantity']);
+            $this->assertSame('instock', $catalog->products[$parentId]['stock_status']);
+        }
+
+        $this->assertFalse(Http::recorded()->contains(function (array $record): bool {
+            /** @var Request $request */
+            $request = $record[0];
+
+            return $request->method() === 'PUT'
+                && str_contains((string) parse_url($request->url(), PHP_URL_PATH), '/variations/');
+        }));
+        $this->assertSame('Rozmiar', data_get(
+            $parent->fresh()->masterData(),
+            'variant_attribute',
+        ));
+    }
+
     public function test_it_collapses_wariant_and_blvariant_duplicates_into_size_without_recreating_variations_or_stock(): void
     {
         [$parent, $catalog] = $this->family();
@@ -1392,6 +1440,86 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             return in_array($request->method(), ['POST', 'DELETE'], true)
                 && preg_match('#/wc/v3/products/\d+(?:/variations(?:/\d+)?)?$#', $path) === 1;
         }));
+    }
+
+    public function test_it_adds_a_missing_polish_size_term_proven_by_the_live_legacy_axis(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $large = $parent->variantChildren()->get()->first(
+            fn (Product $variant): bool => str_ends_with((string) $variant->sku, '-ML'),
+        );
+        ProductRelation::query()
+            ->where('parent_product_id', $parent->id)
+            ->where('child_product_id', $large?->id)
+            ->delete();
+        ProductChannelAlias::query()->delete();
+        $integration = WordpressIntegration::query()->firstOrFail();
+        $settings = (array) $integration->settings;
+        data_set($settings, 'product_import.languages', ['pl']);
+        data_set($settings, 'product_export.languages', ['pl']);
+        $integration->update(['settings' => $settings]);
+        $this->makeLocalGenericOnly($parent->fresh(), 'wariant', ['XS']);
+
+        $size = collect($catalog->products[123]['attributes'])->firstWhere('id', 1);
+        $size['variation'] = false;
+        $size['options'] = ['S'];
+        $legacy = collect($catalog->products[123]['attributes'])->firstWhere('id', 6);
+        $legacy['variation'] = true;
+        $legacy['options'] = ['XS'];
+        $catalog->products[123]['attributes'] = [$legacy, $size];
+        $catalog->products[123]['default_attributes'] = [];
+        $catalog->variations[123] = [124 => $catalog->variations[123][124]];
+        $catalog->variations[123][124]['attributes'] = [[
+            'id' => 6,
+            'name' => 'wariant',
+            'option' => 'XS',
+        ]];
+        $originalStock = $catalog->variations[123][124]['stock_quantity'];
+        $polishTerms = [
+            ['id' => 13, 'name' => 'S', 'slug' => 's', 'menu_order' => 30, 'lang' => 'pl'],
+        ];
+        $termPosts = [];
+        $this->fakeCatalog($catalog, static function (Request $request) use (
+            &$polishTerms,
+            &$termPosts,
+        ): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if ($path !== '/wp-json/wc/v3/products/attributes/1/terms') {
+                return null;
+            }
+
+            if ($request->method() === 'GET' && ($query['lang'] ?? null) === 'pl') {
+                return Http::response($polishTerms);
+            }
+
+            if ($request->method() === 'POST' && ($query['lang'] ?? null) === 'pl') {
+                $termPosts[] = $request->data();
+                $created = array_merge([
+                    'id' => 14,
+                    'lang' => 'pl',
+                ], $request->data());
+                $polishTerms[] = $created;
+
+                return Http::response($created, 201);
+            }
+
+            return null;
+        });
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        $this->assertSame([[
+            'name' => 'XS',
+            'slug' => 'xs-pl',
+            'menu_order' => 20,
+        ]], $termPosts);
+        $this->assertSame(['XS'], collect($catalog->products[123]['attributes'])
+            ->firstWhere('id', 1)['options']);
+        $this->assertSame([['id' => 1, 'option' => 'XS']], $catalog->variations[123][124]['attributes']);
+        $this->assertSame($originalStock, $catalog->variations[123][124]['stock_quantity']);
     }
 
     public function test_it_does_not_create_a_missing_english_term_without_linking_capability(): void
@@ -4845,6 +4973,31 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
     }
 
+    public function test_complete_contract_accepts_a_blank_primary_parent_sku_when_variation_ids_match(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        $catalog->products[123]['sku'] = '';
+        $catalog->products[223]['sku'] = '';
+        $originalIds = collect($catalog->variations)
+            ->map(fn (array $variations): array => array_keys($variations))
+            ->all();
+        $originalStock = collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)->pluck('stock_quantity')->all())
+            ->all();
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        $this->assertSame($originalIds, collect($catalog->variations)
+            ->map(fn (array $variations): array => array_keys($variations))
+            ->all());
+        $this->assertSame($originalStock, collect($catalog->variations)
+            ->map(fn (array $variations): array => collect($variations)->pluck('stock_quantity')->all())
+            ->all());
+    }
+
     public function test_complete_contract_uses_exact_primary_mapping_ids_when_child_skus_are_stale(): void
     {
         [$parent, $catalog] = $this->family();
@@ -5149,6 +5302,61 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertStringContainsString('Mapa tłumaczeń rodzica', $result['reason']);
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
         $this->assertFalse(ProductChannelAlias::query()->where('language', 'en')->exists());
+    }
+
+    public function test_current_remote_audit_evidence_repairs_only_the_exact_split_translation_owner(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        $this->makeEnglishPrimary($parent);
+        $catalog->products[223]['lemon_erp_translations'] = [
+            'pl' => 123,
+            'en' => 223,
+            'de' => 999,
+        ];
+        $catalog->products[223]['lemon_erp_translation_group'] = 'product:123|223|999';
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::REMOTE_EVIDENCE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::REVISION,
+            'verified' => true,
+            'targets' => [[
+                'sales_channel_id' => (int) $mapping->sales_channel_id,
+                'external_product_id' => '223',
+                'language' => 'en',
+                'attribute_id' => 8,
+                'size_attribute_id' => 1,
+                'evidence_mode' => 'legacy_over_informational_size',
+                'option_keys' => ['s-m', 'm-l'],
+            ]],
+        ]);
+        $mapping->update(['metadata' => $metadata]);
+        $polishBefore = unserialize(serialize([
+            'product' => $catalog->products[123],
+            'variations' => $catalog->variations[123],
+        ]));
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        $this->assertSame(1, $result['targets']);
+        $this->assertSame($polishBefore['product'], $catalog->products[123]);
+        $this->assertSame($polishBefore['variations'], $catalog->variations[123]);
+        $this->assertFalse(collect($catalog->products[223]['attributes'])->contains(
+            fn (array $attribute): bool => in_array(
+                mb_strtolower((string) ($attribute['name'] ?? '')),
+                ['wariant', 'variant', 'blvariant'],
+                true,
+            ),
+        ));
+        $this->assertSame([224, 225], array_keys($catalog->variations[223]));
+        $this->assertSame([3, 3], collect($catalog->variations[223])
+            ->pluck('stock_quantity')
+            ->values()
+            ->all());
     }
 
     public function test_contract_discovery_rejects_an_english_identity_mapped_to_another_local_product(): void
@@ -7424,12 +7632,12 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
 
                 return Http::response(($query['lang'] ?? 'pl') === 'en'
                     ? [
-                        ['id' => 21, 'name' => 'S/M', 'slug' => 's-m-en', 'menu_order' => 10],
-                        ['id' => 22, 'name' => 'M/L', 'slug' => 'm-l-en', 'menu_order' => 20],
+                        ['id' => 21, 'name' => 'S/M', 'slug' => 's-m-en', 'menu_order' => 10, 'lang' => 'en'],
+                        ['id' => 22, 'name' => 'M/L', 'slug' => 'm-l-en', 'menu_order' => 20, 'lang' => 'en'],
                     ]
                     : [
-                        ['id' => 11, 'name' => 'S/M', 'slug' => 's-m', 'menu_order' => 10],
-                        ['id' => 12, 'name' => 'M/L', 'slug' => 'm-l', 'menu_order' => 20],
+                        ['id' => 11, 'name' => 'S/M', 'slug' => 's-m', 'menu_order' => 10, 'lang' => 'pl'],
+                        ['id' => 12, 'name' => 'M/L', 'slug' => 'm-l', 'menu_order' => 20, 'lang' => 'pl'],
                     ]);
             }
 
@@ -7496,6 +7704,14 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                         'menu_order' => 20,
                     ],
                 ]);
+            }
+
+            if (preg_match('#/wc/v3/products/attributes/1/terms/(\d+)$#', $path, $matches) === 1
+                && $request->method() === 'PUT'
+            ) {
+                return Http::response(array_merge([
+                    'id' => (int) $matches[1],
+                ], $request->data()));
             }
 
             if (preg_match('#/wc/v3/products/(\d+)/variations/(\d+)$#', $path, $matches) === 1) {
