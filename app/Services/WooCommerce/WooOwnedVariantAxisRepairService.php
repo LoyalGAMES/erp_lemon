@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000042';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000043';
+
+    public const PREVIOUS_NUMERIC_SIZE_KEY_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000042';
 
     public const PREVIOUS_VARIATION_COVERAGE_DIAGNOSTIC_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000041';
 
@@ -73,6 +75,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_NUMERIC_SIZE_KEY_REVISION,
             self::PREVIOUS_VARIATION_COVERAGE_DIAGNOSTIC_REVISION,
             self::PREVIOUS_PARENT_AXIS_IDENTITY_REVISION,
             self::PREVIOUS_ACTIVE_CHILD_AXIS_REVISION,
@@ -5895,9 +5898,17 @@ final class WooOwnedVariantAxisRepairService
 
         $variationKeys = collect($variationOptionKeys);
 
+        $expectedVariationKeys = $canonicalByKey->keys()
+            // PHP converts numeric-looking array keys such as `36` to ints,
+            // while WooCommerce variation options remain strings. Compare
+            // the canonical value identity, not that internal key type.
+            ->map(fn (mixed $key): string => (string) $key)
+            ->sort()
+            ->values();
+
         if ($variationKeys->count() !== $canonicalByKey->count()
             || $variationKeys->unique()->count() !== $variationKeys->count()
-            || $variationKeys->sort()->values()->all() !== $canonicalByKey->keys()->sort()->values()->all()
+            || $variationKeys->sort()->values()->all() !== $expectedVariationKeys->all()
         ) {
             $assignments = $variationKeys
                 ->countBy()
@@ -5905,7 +5916,7 @@ final class WooOwnedVariantAxisRepairService
                 ->map(fn (int $count, string $key): string => $key.'x'.$count)
                 ->values()
                 ->implode(',');
-            $expected = $canonicalByKey->keys()->sort()->values()->implode(',');
+            $expected = $expectedVariationKeys->implode(',');
 
             return $this->unsafePlan(sprintf(
                 'Warianty nie pokrywają dokładnie i jednokrotnie wartości globalnego rozmiaru '

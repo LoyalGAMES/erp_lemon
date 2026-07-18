@@ -603,6 +603,156 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('pending', $state['status'] ?? null);
     }
 
+    public function test_numeric_size_key_migration_requeues_an_unresolved_previous_revision_family(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_NUMERIC_SIZE_KEY_REVISION,
+            'status' => 'manual_review',
+            'result' => ['reason' => 'numeric string keys compared with integer array keys'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000043_requeue_numeric_size_key_repairs.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+    }
+
+    public function test_numeric_size_options_form_the_same_exact_bijection_as_text_options(): void
+    {
+        [$parent, $catalog] = $this->family();
+        ProductParameterDefinition::query()
+            ->where('name', 'Rozmiar')
+            ->update(['values' => ['36', '37'], 'values_en' => ['36', '37']]);
+
+        $parentAttributes = (array) $parent->attributes;
+        data_set($parentAttributes, 'master.variant_attribute', 'Rozmiar');
+        data_set($parentAttributes, 'master.parameters', [[
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'value' => '36 | 37',
+            'variation' => true,
+        ]]);
+        data_set($parentAttributes, 'woocommerce_attributes', [
+            $this->legacyParentAttributes('Rozmiar')[0],
+            [
+                'id' => 1,
+                'name' => 'Rozmiar',
+                'slug' => 'pa_rozmiar',
+                'position' => 1,
+                'visible' => true,
+                'variation' => true,
+                'options' => ['36', '37'],
+            ],
+        ]);
+        data_set($parentAttributes, 'woocommerce_default_attributes', [[
+            'id' => 1,
+            'name' => 'Rozmiar',
+            'option' => '37',
+        ]]);
+        $parent->forceFill(['attributes' => $parentAttributes])->save();
+
+        foreach ($parent->variantChildren()->get()->values() as $index => $variant) {
+            $option = (string) (36 + $index);
+            $variantAttributes = (array) $variant->attributes;
+            data_set($variantAttributes, 'master.variant_attribute', 'Rozmiar');
+            data_set($variantAttributes, 'master.parameters', [[
+                'name' => 'Rozmiar',
+                'name_en' => 'Size',
+                'value' => $option,
+                'variation' => true,
+            ]]);
+            data_set($variantAttributes, 'woocommerce_variation_attributes', [[
+                'id' => 1,
+                'name' => 'Rozmiar',
+                'option' => $option,
+            ]]);
+            data_set($variantAttributes, 'woocommerce_attributes', [[
+                'id' => 1,
+                'name' => 'Rozmiar',
+                'option' => $option,
+            ]]);
+            $variant->forceFill(['attributes' => $variantAttributes])->save();
+        }
+
+        foreach ([123 => [6, 'wariant'], 223 => [8, 'variant']] as $parentId => [$axisId, $axisName]) {
+            foreach ($catalog->products[$parentId]['attributes'] as &$attribute) {
+                if (in_array((int) ($attribute['id'] ?? 0), [1, $axisId], true)) {
+                    $attribute['options'] = ['36', '37'];
+                }
+            }
+            unset($attribute);
+            $catalog->products[$parentId]['default_attributes'][0]['option'] = '37';
+
+            foreach (array_values($catalog->variations[$parentId]) as $index => $variation) {
+                $variationId = (int) $variation['id'];
+                $catalog->variations[$parentId][$variationId]['attributes'] = [[
+                    'id' => $axisId,
+                    'name' => $axisName,
+                    'option' => (string) (36 + $index),
+                ]];
+            }
+        }
+
+        $this->fakeCatalog($catalog, static function (Request $request): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET'
+                && preg_match('#/products/attributes/(1|6|8)/terms$#', $path) === 1
+            ) {
+                parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+                $language = ($query['lang'] ?? 'pl') === 'en' ? 'en' : 'pl';
+                $suffix = $language === 'en' ? '-en' : '';
+                $offset = $language === 'en' ? 200 : 100;
+
+                return Http::response([
+                    [
+                        'id' => $offset + 36,
+                        'name' => '36',
+                        'slug' => '36'.$suffix,
+                        'lang' => $language,
+                        'menu_order' => 10,
+                    ],
+                    [
+                        'id' => $offset + 37,
+                        'name' => '37',
+                        'slug' => '37'.$suffix,
+                        'lang' => $language,
+                        'menu_order' => 20,
+                    ],
+                ]);
+            }
+
+            return null;
+        });
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent);
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        foreach ([123, 223] as $parentId) {
+            $this->assertSame(
+                ['36', '37'],
+                collect($catalog->products[$parentId]['attributes'])->firstWhere('id', 1)['options'],
+            );
+            $this->assertSame(
+                [3, 3],
+                collect($catalog->variations[$parentId])->pluck('stock_quantity')->values()->all(),
+            );
+        }
+    }
+
     public function test_it_accepts_only_the_variation_names_woocommerce_regenerates_from_the_repaired_axis(): void
     {
         [$parent, $catalog] = $this->family();
