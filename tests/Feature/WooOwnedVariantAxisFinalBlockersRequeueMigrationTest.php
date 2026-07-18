@@ -326,6 +326,43 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
         $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
     }
 
+    public function test_missing_target_term_name_migration_requeues_only_the_exact_guard(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'TARGET-NAME-AXIS',
+            'name' => 'Target name axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $conflict = $this->mapping(
+            $channel,
+            'TARGET-NAME-CONFLICT',
+            'WooCommerce EN #500316: Naprawa błędnej rodziny tłumaczeń wartości atrybutu nie ma kompletnego kontraktu.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_MISSING_TARGET_TERM_NAME_REVISION,
+        );
+        $unrelated = $this->mapping(
+            $channel,
+            'TARGET-NAME-UNRELATED',
+            'Naprawa innej rodziny nie ma kompletnego kontraktu.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_MISSING_TARGET_TERM_NAME_REVISION,
+        );
+        $unrelatedBefore = $unrelated->metadata;
+
+        $this->runMissingTargetTermNameMigration();
+
+        $state = (array) data_get(
+            $conflict->refresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision']);
+        $this->assertSame('pending', $state['status']);
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::PREVIOUS_MISSING_TARGET_TERM_NAME_REVISION,
+            data_get($state, 'previous.revision'),
+        );
+        $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
+    }
+
     private function mapping(
         SalesChannel $channel,
         string $suffix,
@@ -413,6 +450,13 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
     {
         (require database_path(
             'migrations/2026_07_18_000062_requeue_misnamed_woo_translation_term.php',
+        ))->up();
+    }
+
+    private function runMissingTargetTermNameMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_18_000063_requeue_missing_woo_target_term_name.php',
         ))->up();
     }
 }

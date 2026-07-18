@@ -2009,21 +2009,32 @@ final class WooCommerceClient
         $sourceLanguage = mb_strtolower(trim($sourceLanguage));
         $targetTermId = (int) ($mismatchedTargetTerm['id'] ?? 0);
         $sourceTermId = (int) ($sourceTerm['id'] ?? 0);
-        $originalTargetName = trim((string) ($mismatchedTargetTerm['name'] ?? ''));
+        $targetOption = trim($targetOption);
+        $originalTargetName = trim((string) ($mismatchedTargetTerm['name'] ?? ''))
+            ?: $targetOption;
         $siblingName = trim((string) ($existingSiblingTerm['name'] ?? ''));
 
         if ($attributeId <= 0
             || $targetTermId <= 0
             || $sourceTermId <= 0
-            || trim($targetOption) === ''
+            || $targetOption === ''
             || $targetLanguage === ''
             || $sourceLanguage === ''
             || $originalTargetName === ''
             || $siblingName === ''
-            || mb_strtolower($siblingName) === mb_strtolower(trim($targetOption))
         ) {
             throw new RuntimeException(
-                'Naprawa błędnej rodziny tłumaczeń wartości atrybutu nie ma kompletnego kontraktu.',
+                sprintf(
+                    'Naprawa błędnej rodziny tłumaczeń wartości atrybutu nie ma kompletnego kontraktu '
+                        .'(atrybut=%d, cel=%d, źródło=%d, opcja=%s, języki=%s/%s, rodzeństwo=%s).',
+                    $attributeId,
+                    $targetTermId,
+                    $sourceTermId,
+                    $targetOption !== '' ? $targetOption : '-',
+                    $sourceLanguage !== '' ? $sourceLanguage : '-',
+                    $targetLanguage !== '' ? $targetLanguage : '-',
+                    $siblingName !== '' ? $siblingName : '-',
+                ),
             );
         }
 
@@ -2054,7 +2065,7 @@ final class WooCommerceClient
                 ->filter(fn (array $candidate): bool => (int) ($candidate['id'] ?? 0) > 0
                     && (int) $candidate['id'] !== $targetTermId
                     && mb_strtolower(trim((string) ($candidate['name'] ?? '')))
-                        === mb_strtolower(trim($targetOption))
+                        === mb_strtolower($targetOption)
                     && (! $this->globalProductAttributeTermHasLanguageIdentity($candidate)
                         || $this->globalProductAttributeTermMatchesLanguage(
                             $candidate,
@@ -2119,11 +2130,11 @@ final class WooCommerceClient
 
                 if (! is_array($createdTerm)
                     || (int) ($createdTerm['id'] ?? 0) <= 0
-                    || trim((string) ($createdTerm['name'] ?? '')) !== trim($targetOption)
+                    || trim((string) ($createdTerm['name'] ?? '')) !== $targetOption
                     || Str::slug((string) ($createdTerm['slug'] ?? '')) !== $replacementSlug
                 ) {
                     throw new RuntimeException(
-                        'WooCommerce nie utworzył zastępczej wartości '.trim($targetOption)
+                        'WooCommerce nie utworzył zastępczej wartości '.$targetOption
                             .' języka '.mb_strtoupper($targetLanguage)." (HTTP {$createResponse->status()}).",
                     );
                 }
