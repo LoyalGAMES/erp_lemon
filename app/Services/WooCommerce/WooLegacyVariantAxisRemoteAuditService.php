@@ -396,8 +396,12 @@ final class WooLegacyVariantAxisRemoteAuditService
         string $externalProductId,
     ): array {
         $root = Product::query()
-            ->with(['variantChildren.channelMappings' => fn ($query) => $query
-                ->where('sales_channel_id', $salesChannelId)])
+            ->with([
+                'variantChildren.channelMappings' => fn ($query) => $query
+                    ->where('sales_channel_id', $salesChannelId),
+                'variantChildren.channelAliases' => fn ($query) => $query
+                    ->where('sales_channel_id', $salesChannelId),
+            ])
             ->find($rootId);
 
         if (! $root instanceof Product) {
@@ -423,6 +427,28 @@ final class WooLegacyVariantAxisRemoteAuditService
                 ->filter(fn (Product $child): bool => trim((string) $child->sku) !== '')
                 ->count(),
             'mapped_variation_ids' => $mappedVariationIds->all(),
+            'child_details' => $root->variantChildren
+                ->map(fn (Product $child): array => [
+                    'local_id' => (int) $child->id,
+                    'sku' => trim((string) $child->sku),
+                    'mappings' => $child->channelMappings
+                        ->map(fn (ProductChannelMapping $mapping): string => trim(
+                            (string) $mapping->external_product_id,
+                        ).'#'.trim((string) $mapping->external_variation_id))
+                        ->filter(fn (string $identity): bool => $identity !== '#')
+                        ->values()
+                        ->all(),
+                    'aliases' => $child->channelAliases
+                        ->map(fn (ProductChannelAlias $alias): string => trim(
+                            (string) $alias->external_product_id,
+                        ).'#'.trim((string) $alias->external_variation_id)
+                            .'@'.trim((string) $alias->language))
+                        ->filter(fn (string $identity): bool => $identity !== '#@')
+                        ->values()
+                        ->all(),
+                ])
+                ->values()
+                ->all(),
         ];
     }
 

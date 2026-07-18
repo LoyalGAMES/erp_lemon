@@ -5,8 +5,10 @@ declare(strict_types=1);
 namespace Tests\Feature;
 
 use App\Models\Product;
+use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
+use App\Models\ProductRelation;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\WooLegacyVariantAxisRemoteAuditService;
@@ -65,6 +67,40 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
             'external_product_id' => '4380',
             'external_sku' => $localProduct->sku,
             'stock_sync_enabled' => true,
+        ]);
+        $localVariant = Product::query()->create([
+            'sku' => 'REMOTE-MAPPED-36',
+            'name' => 'Mapped legacy product - 36',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'woocommerce_import',
+                'product_type' => 'variation',
+            ]],
+        ]);
+        ProductRelation::query()->create([
+            'parent_product_id' => $localProduct->id,
+            'child_product_id' => $localVariant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $localVariant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '4380',
+            'external_variation_id' => '4381',
+            'external_sku' => $localVariant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        ProductChannelAlias::query()->create([
+            'product_id' => $localVariant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '500001',
+            'external_variation_id' => '500002',
+            'external_sku' => $localVariant->sku,
+            'language' => 'en',
         ]);
 
         Http::fake(function (Request $request) {
@@ -130,6 +166,19 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
         $this->assertSame('REMOTE-MAPPED', data_get(
             $mapped,
             'owner_details.'.$localProduct->id.'.root_sku',
+        ));
+        $this->assertSame(['4381'], data_get(
+            $mapped,
+            'owner_details.'.$localProduct->id.'.mapped_variation_ids',
+        ));
+        $this->assertSame([
+            'local_id' => $localVariant->id,
+            'sku' => 'REMOTE-MAPPED-36',
+            'mappings' => ['4380#4381'],
+            'aliases' => ['500001#500002@en'],
+        ], data_get(
+            $mapped,
+            'owner_details.'.$localProduct->id.'.child_details.0',
         ));
 
         $marked = app(WooLegacyVariantAxisRemoteAuditService::class)

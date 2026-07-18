@@ -18,6 +18,7 @@ use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\CanonicalTranslationRebuildExecutor;
 use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
 use App\Services\WooCommerce\ProductDataExportService;
+use App\Services\WooCommerce\WooCommerceClient;
 use App\Services\WooCommerce\WooCommerceImportService;
 use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -254,10 +255,92 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             return $request->method() === 'PUT'
                 && str_contains((string) parse_url($request->url(), PHP_URL_PATH), '/variations/');
         }));
+        $parentPuts = Http::recorded()
+            ->map(fn (array $record): Request => $record[0])
+            ->filter(function (Request $request): bool {
+                $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+                return $request->method() === 'PUT'
+                    && in_array($path, [
+                        '/wp-json/wc/v3/products/123',
+                        '/wp-json/wc/v3/products/223',
+                    ], true);
+            })
+            ->values();
+        $this->assertCount(2, $parentPuts);
+        $parentPuts->each(function (Request $request): void {
+            $this->assertSame('instock', $request['stock_status']);
+            $this->assertArrayNotHasKey('manage_stock', $request->data());
+            $this->assertArrayNotHasKey('stock_quantity', $request->data());
+        });
         $this->assertSame('Rozmiar', data_get(
             $parent->fresh()->masterData(),
             'variant_attribute',
         ));
+    }
+
+    public function test_it_restores_the_known_parent_stock_status_after_an_interrupted_zero_variation_repair(): void
+    {
+        [$parent, $catalog] = $this->family();
+        ProductRelation::query()
+            ->where('parent_product_id', $parent->id)
+            ->where('relation_type', 'variant')
+            ->delete();
+        $catalog->variations[123] = [];
+        $catalog->variations[223] = [];
+
+        foreach ([123, 223] as $parentId) {
+            $catalog->products[$parentId]['manage_stock'] = true;
+            $catalog->products[$parentId]['stock_quantity'] = 7;
+            $catalog->products[$parentId]['stock_status'] = 'outofstock';
+        }
+
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION,
+            'status' => 'pending',
+            'error' => 'rollback_failed; protected_delta=parent.stock_status',
+            'result' => ['status' => 'manual_review'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+        app(WooOwnedVariantAxisRepairService::class)->markPending($parent->fresh());
+
+        $previous = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH.'.previous',
+            [],
+        );
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION,
+            $previous['revision'] ?? null,
+        );
+        $this->assertStringContainsString(
+            'protected_delta=parent.stock_status',
+            (string) ($previous['error'] ?? ''),
+        );
+
+        $this->fakeCatalog($catalog);
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+
+        foreach ([123, 223] as $parentId) {
+            $this->assertSame(7, $catalog->products[$parentId]['stock_quantity']);
+            $this->assertSame('instock', $catalog->products[$parentId]['stock_status']);
+        }
+
+        Http::assertNotSent(function (Request $request): bool {
+            if ($request->method() !== 'PUT') {
+                return false;
+            }
+
+            return array_key_exists('manage_stock', $request->data())
+                || array_key_exists('stock_quantity', $request->data())
+                || ($request['stock_status'] ?? null) !== 'instock';
+        });
     }
 
     public function test_it_collapses_wariant_and_blvariant_duplicates_into_size_without_recreating_variations_or_stock(): void
@@ -1311,6 +1394,89 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 $this->assertSame('539.00', $variation['price']);
             }
         }
+    }
+
+    public function test_existing_size_option_waits_for_a_just_created_polish_term_before_linking_english(): void
+    {
+        $this->family();
+        $integration = WordpressIntegration::query()->firstOrFail();
+        $polishReads = 0;
+
+        Http::fake(function (Request $request) use (&$polishReads): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes'
+            ) {
+                return Http::response([[
+                    'id' => 1,
+                    'name' => 'Rozmiar',
+                    'slug' => 'pa_rozmiar',
+                    'type' => 'select',
+                    'order_by' => 'menu_order',
+                ]]);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+                && ($query['lang'] ?? null) === 'pl'
+            ) {
+                $polishReads++;
+
+                return Http::response($polishReads === 1 ? [] : [[
+                    'id' => 11,
+                    'name' => 'XS',
+                    'slug' => 'xs',
+                    'lang' => 'pl',
+                ]]);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+                && ($query['lang'] ?? null) === 'en'
+            ) {
+                return Http::response([[
+                    'id' => 22,
+                    'name' => 'XS',
+                    'slug' => 'xs-en',
+                    'lang' => 'en',
+                ]]);
+            }
+
+            if ($request->method() === 'POST'
+                && $path === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/1/terms/translations'
+            ) {
+                return Http::response([
+                    'linked' => true,
+                    'attribute_id' => 1,
+                    'translations' => $request['translations'],
+                ]);
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $result = app(WooCommerceClient::class)->ensureExistingGlobalProductAttributeOptions(
+            $integration,
+            1,
+            'Rozmiar',
+            ['XS'],
+            'en',
+            ['XS'],
+        );
+
+        $this->assertSame(2, $polishReads);
+        $this->assertSame(['XS'], $result['options']);
+        $this->assertSame([22], $result['term_ids']);
+        Http::assertSentCount(5);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && $request['translations'] === ['en' => 22, 'pl' => 11]);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST'
+            && str_ends_with(
+                (string) parse_url($request->url(), PHP_URL_PATH),
+                '/products/attributes/1/terms',
+            ));
     }
 
     public function test_it_creates_and_links_only_the_missing_english_size_term_before_repairing_existing_ids(): void
@@ -5309,6 +5475,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         [$parent, $catalog] = $this->family();
         $this->applyLemonContract($catalog);
         $this->makeEnglishPrimary($parent);
+        $parent->update(['sku' => 'WC-B2C-PARENT-223']);
         $catalog->products[223]['lemon_erp_translations'] = [
             'pl' => 123,
             'en' => 223,

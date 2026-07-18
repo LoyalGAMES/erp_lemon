@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000058';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000059';
+
+    public const PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000058';
 
     public const PREVIOUS_AUTHORITATIVE_REMOTE_AXIS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000057';
 
@@ -107,6 +109,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION,
             self::PREVIOUS_AUTHORITATIVE_REMOTE_AXIS_REVISION,
             self::PREVIOUS_EXACT_REMOTE_EVIDENCE_REVISION,
             self::PREVIOUS_REMOTE_CATALOG_DISCOVERY_REVISION,
@@ -206,11 +209,24 @@ final class WooOwnedVariantAxisRepairService
                     continue;
                 }
 
-                data_set($metadata, self::STATE_PATH, [
+                $nextState = [
                     'revision' => self::REVISION,
                     'status' => 'pending',
                     'requested_at' => now()->toISOString(),
-                ]);
+                ];
+
+                if (($state['revision'] ?? null)
+                    === self::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION
+                ) {
+                    $nextState['previous'] = collect($state)->only([
+                        'revision',
+                        'status',
+                        'error',
+                        'result',
+                    ])->all();
+                }
+
+                data_set($metadata, self::STATE_PATH, $nextState);
                 $mapping->forceFill(['metadata' => $metadata])->save();
             }
 
@@ -387,6 +403,8 @@ final class WooOwnedVariantAxisRepairService
         }
 
         $hasRemoteEvidence = $this->hasCurrentRemoteCatalogEvidence($product);
+        $restoreInterruptedZeroVariationStockStatus = $this
+            ->shouldRestoreInterruptedZeroVariationStockStatus($product);
 
         if (! $this->hasLocalSizeAxisEvidence($product) && ! $hasRemoteEvidence) {
             return [
@@ -484,12 +502,24 @@ final class WooOwnedVariantAxisRepairService
                 ];
             }
 
+            $preservedParentStockStatus = $this->preservedZeroVariationParentStockStatus(
+                $parent,
+                $variations,
+                $restoreInterruptedZeroVariationStockStatus,
+            );
+            $protectedParent = $parent;
+
+            if ($preservedParentStockStatus !== null) {
+                $protectedParent['stock_status'] = $preservedParentStockStatus;
+            }
+
             $remoteFamilies[] = [
                 'target' => $target,
                 'parent' => $parent,
                 'planning_parent' => $planningParent,
                 'variations' => $variations,
-                'protected' => $this->protectedSnapshot($parent, $variations),
+                'protected' => $this->protectedSnapshot($protectedParent, $variations),
+                'preserved_parent_stock_status' => $preservedParentStockStatus,
                 'inert_parent_attribute_ids' => $inertParentAttributeIds,
             ];
         }
@@ -530,7 +560,10 @@ final class WooOwnedVariantAxisRepairService
             }
 
             return [
-                'plan' => $plan,
+                'plan' => $this->withPreservedZeroVariationParentStockStatus(
+                    $plan,
+                    $entry['preserved_parent_stock_status'] ?? null,
+                ),
                 'child_only_axis_options' => $childOnlyAxisOptions,
             ];
         };
@@ -771,7 +804,10 @@ final class WooOwnedVariantAxisRepairService
                 ];
             }
 
-            $plans[$index]['plan'] = $resolvedPlan;
+            $plans[$index]['plan'] = $this->withPreservedZeroVariationParentStockStatus(
+                $resolvedPlan,
+                $entry['preserved_parent_stock_status'] ?? null,
+            );
         }
 
         foreach (collect($plans)->groupBy(fn (array $entry): int => (int) $entry['target']['integration']->id) as $integrationPlans) {
@@ -989,6 +1025,7 @@ final class WooOwnedVariantAxisRepairService
                         null,
                         $transition,
                         $this->apiLanguage($target['language']),
+                        $entry['preserved_parent_stock_status'] ?? null,
                     );
                     $transitionalParent = $this->withoutProvenInertGlobalAttributePlaceholders(
                         $transitionalParent,
@@ -1039,6 +1076,7 @@ final class WooOwnedVariantAxisRepairService
                         null,
                         $payload,
                         $this->apiLanguage($target['language']),
+                        $entry['preserved_parent_stock_status'] ?? null,
                     );
                     $updatedParent = $this->withoutProvenInertGlobalAttributePlaceholders(
                         $updatedParent,
@@ -1524,6 +1562,7 @@ final class WooOwnedVariantAxisRepairService
                         null,
                         $transition,
                         $this->apiLanguage($target['language']),
+                        $entry['preserved_parent_stock_status'] ?? null,
                     );
                     $transitionalParent = $this->withoutProvenInertGlobalAttributePlaceholders(
                         $transitionalParent,
@@ -1668,7 +1707,7 @@ final class WooOwnedVariantAxisRepairService
                 $target['integration'],
                 $target['external_product_id'],
                 null,
-                [
+                array_filter([
                     'attributes' => collect((array) ($entry['parent']['attributes'] ?? []))
                         ->filter(fn (mixed $attribute): bool => is_array($attribute))
                         ->map(fn (array $attribute): array => $this->serializeParentAttribute($attribute))
@@ -1679,8 +1718,10 @@ final class WooOwnedVariantAxisRepairService
                         ->map(fn (array $attribute): array => $this->serializeRollbackDefaultAttribute($attribute))
                         ->values()
                         ->all(),
-                ],
+                    'stock_status' => $entry['preserved_parent_stock_status'] ?? null,
+                ], fn (mixed $value): bool => $value !== null),
                 $this->apiLanguage($target['language']),
+                $entry['preserved_parent_stock_status'] ?? null,
             );
         } catch (Throwable $exception) {
             $rollbackErrors[] = 'rodzic: '.$exception->getMessage();
@@ -3786,6 +3827,76 @@ final class WooOwnedVariantAxisRepairService
             ->all();
     }
 
+    private function shouldRestoreInterruptedZeroVariationStockStatus(Product $product): bool
+    {
+        return $product->channelMappings->contains(function (ProductChannelMapping $mapping): bool {
+            $previous = (array) data_get(
+                $mapping->metadata,
+                self::STATE_PATH.'.previous',
+                [],
+            );
+
+            return ($previous['revision'] ?? null)
+                    === self::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION
+                && ($previous['status'] ?? null) === 'pending'
+                && str_contains(
+                    (string) ($previous['error'] ?? ''),
+                    'protected_delta=parent.stock_status',
+                );
+        });
+    }
+
+    /**
+     * Woo recalculates a variable parent's stock status after an attribute
+     * update, even when the family has no variation rows. Reassert the exact
+     * preflight status in the same restricted PUT. One interrupted revision
+     * is known to have changed #700001 from its previously observed `instock`
+     * state to Woo's derived `outofstock`; its persisted failure marker is the
+     * only authority allowed to restore that one value.
+     *
+     * @param  array<string,mixed>  $parent
+     * @param  list<array<string,mixed>>  $variations
+     */
+    private function preservedZeroVariationParentStockStatus(
+        array $parent,
+        array $variations,
+        bool $restoreInterrupted,
+    ): ?string {
+        if ($variations !== []) {
+            return null;
+        }
+
+        $current = mb_strtolower(trim((string) ($parent['stock_status'] ?? '')));
+
+        if ($restoreInterrupted && $current === 'outofstock') {
+            return 'instock';
+        }
+
+        return in_array($current, ['instock', 'outofstock', 'onbackorder'], true)
+            ? $current
+            : null;
+    }
+
+    /** @param array<string,mixed> $plan @return array<string,mixed> */
+    private function withPreservedZeroVariationParentStockStatus(
+        array $plan,
+        mixed $stockStatus,
+    ): array {
+        $stockStatus = mb_strtolower(trim((string) $stockStatus));
+
+        if (! in_array($stockStatus, ['instock', 'outofstock', 'onbackorder'], true)) {
+            return $plan;
+        }
+
+        foreach (['parent_payload', 'transitional_parent_payload'] as $payloadKey) {
+            if (is_array($plan[$payloadKey] ?? null)) {
+                $plan[$payloadKey]['stock_status'] = $stockStatus;
+            }
+        }
+
+        return $plan;
+    }
+
     public function familyRootId(int $productId): int
     {
         $rootId = ProductRelation::query()
@@ -4806,10 +4917,14 @@ final class WooOwnedVariantAxisRepairService
         $skuKey = static fn (mixed $sku): string => mb_strtoupper(trim((string) $sku));
         $localParentSku = $skuKey($product->sku);
         $remoteParentSku = $skuKey($parent['sku'] ?? '');
+        $remoteParentId = trim((string) ($parent['id'] ?? ''));
+        $syntheticParentSku = ctype_digit($remoteParentId)
+            && $localParentSku === 'WC-B2C-PARENT-'.$remoteParentId;
 
         if ($localParentSku !== ''
             && $remoteParentSku !== ''
             && $remoteParentSku !== $localParentSku
+            && ! $syntheticParentSku
         ) {
             return 'Identyfikator SKU rodzica nie zgadza się z mapowaniem ERP.';
         }

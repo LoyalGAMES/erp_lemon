@@ -1565,13 +1565,23 @@ final class WooCommerceClient
             $excludedTargetTermIds = [];
 
             if ($language !== null && $language !== 'pl') {
-                $sourceTerm = $this->findGlobalProductAttributeTerm(
-                    $integration,
-                    $attributeId,
-                    $pair['source'],
-                    'pl',
-                    [],
-                );
+                for ($attempt = 1; $attempt <= 3; $attempt++) {
+                    $sourceTerm = $this->findGlobalProductAttributeTerm(
+                        $integration,
+                        $attributeId,
+                        $pair['source'],
+                        'pl',
+                        [],
+                    );
+
+                    if (is_array($sourceTerm) || $attempt === 3) {
+                        break;
+                    }
+
+                    // Polylang can expose a just-created Polish source term
+                    // one cache cycle after Woo's successful POST response.
+                    usleep($attempt * 200_000);
+                }
 
                 if (! is_array($sourceTerm)) {
                     throw new RuntimeException(
@@ -3049,8 +3059,11 @@ final class WooCommerceClient
 
     /**
      * Correct a legacy variation axis with a mechanically restricted payload.
-     * This guard prevents a maintenance job from ever sending commercial or
-     * editorial fields such as stock, prices, dates, content or images.
+     * This guard prevents a maintenance job from sending commercial or
+     * editorial fields such as quantities, prices, dates, content or images.
+     * A zero-variation parent may reassert only the exact preflight
+     * `stock_status`, because Woo otherwise derives a different value from the
+     * attribute-only update itself.
      *
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>
@@ -3061,10 +3074,22 @@ final class WooCommerceClient
         ?string $externalVariationId,
         array $payload,
         ?string $language = null,
+        ?string $preservedParentStockStatus = null,
     ): array {
+        $preservedParentStockStatus = mb_strtolower(trim((string) $preservedParentStockStatus));
+        $mayPreserveParentStockStatus = blank($externalVariationId)
+            && in_array(
+                $preservedParentStockStatus,
+                ['instock', 'outofstock', 'onbackorder'],
+                true,
+            );
         $allowedKeys = filled($externalVariationId)
             ? ['attributes', 'menu_order']
-            : ['attributes', 'default_attributes'];
+            : [
+                'attributes',
+                'default_attributes',
+                ...($mayPreserveParentStockStatus ? ['stock_status'] : []),
+            ];
         $unexpectedKeys = array_values(array_diff(array_keys($payload), $allowedKeys));
 
         if ($unexpectedKeys !== []) {
@@ -3075,6 +3100,14 @@ final class WooCommerceClient
 
         if (! isset($payload['attributes']) || ! is_array($payload['attributes'])) {
             throw new RuntimeException('Naprawa osi wariantów wymaga jawnej listy atrybutów.');
+        }
+
+        if (array_key_exists('stock_status', $payload)
+            && mb_strtolower(trim((string) $payload['stock_status'])) !== $preservedParentStockStatus
+        ) {
+            throw new RuntimeException(
+                'Naprawa osi wariantów może jedynie ponownie wysłać dokładnie potwierdzony status magazynowy rodzica.',
+            );
         }
 
         return $this->updateProductDataByIds(
