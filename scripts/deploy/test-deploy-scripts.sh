@@ -678,6 +678,8 @@ grep -Fq 'erp:sync-woocommerce-global-size-order-during-maintenance' "$remote_sc
     fail 'deploy nie wykonuje świeżej synchronicznej naprawy globalnej kolejności rozmiarów.'
 grep -Fq 'erp:verify-woocommerce-global-size-order-sync' "$remote_script" ||
     fail 'deploy nie sprawdza warunku końcowego globalnej kolejności rozmiarów.'
+grep -Fq 'erp:audit-woo-legacy-variant-axes-during-maintenance' "$remote_script" ||
+    fail 'deploy nie audytuje zdalnej taksonomii wariant niezależnie od mapowań ERP.'
 ! grep -Fq 'queue:work database' "$remote_script" ||
     fail 'deploy nie powinien uruchamiać workera z pominięciem wspólnej blokady katalogu.'
 

@@ -488,6 +488,16 @@ else
     echo 'Błąd: synchroniczna naprawa kolejności rozmiarów WooCommerce zakończyła się błędem.' >&2
 fi
 
+# Audit the live legacy taxonomy independently of local ERP mappings. This is
+# deliberately read-only and diagnostic: it exposes translated, Woo-only and
+# incomplete historical families that a mapping-driven migration could miss.
+if ! (
+    cd "$release_path"
+    "$php_bin" artisan erp:audit-woo-legacy-variant-axes-during-maintenance --limit=20
+); then
+    echo 'Błąd: zdalny audyt historycznych osi wariantów WooCommerce nie zakończył się poprawnie.' >&2
+fi
+
 # Migrations may mark historical Woo product families for an axis-only repair.
 # All old workers have exited, global Size order is now authoritative and
 # maintenance prevents every web catalog writer, so finish the exact current

@@ -158,6 +158,77 @@ final class WooCommerceClient
     }
 
     /**
+     * Read every parent product assigned to any supplied term of one global
+     * attribute. This authenticated remote-catalog audit deliberately queries
+     * the taxonomy itself instead of relying on local ERP mappings, because
+     * historical Woo-only and translated parents may not have a current local
+     * candidate row.
+     *
+     * @param  list<int|string>  $termIds
+     * @return list<array<string,mixed>>
+     */
+    public function productsByGlobalAttributeTerms(
+        WordpressIntegration $integration,
+        string $taxonomy,
+        array $termIds,
+    ): array {
+        $taxonomy = trim($taxonomy);
+        $termIds = collect($termIds)
+            ->map(fn (mixed $termId): string => trim((string) $termId))
+            ->filter(fn (string $termId): bool => ctype_digit($termId) && (int) $termId > 0)
+            ->unique()
+            ->values();
+
+        if ($taxonomy === '' || $termIds->isEmpty()) {
+            return [];
+        }
+
+        $products = collect();
+
+        foreach ($termIds as $termId) {
+            for ($page = 1; $page <= 200; $page++) {
+                $response = $this->request($integration)->get(
+                    $this->endpoint($integration, '/products'),
+                    [
+                        'status' => 'any',
+                        'attribute' => $taxonomy,
+                        'attribute_term' => $termId,
+                        'per_page' => 100,
+                        'page' => $page,
+                    ],
+                );
+
+                if (! $response->successful()) {
+                    throw new RuntimeException(
+                        "Audyt produktów globalnego atrybutu {$taxonomy} zwrócił HTTP {$response->status()}.",
+                    );
+                }
+
+                $pageProducts = collect($response->json())
+                    ->filter(fn (mixed $product): bool => is_array($product)
+                        && ctype_digit(trim((string) ($product['id'] ?? ''))))
+                    ->values();
+
+                if ($pageProducts->isEmpty()) {
+                    break;
+                }
+
+                $products = $products->concat($pageProducts);
+
+                if ($pageProducts->count() < 100) {
+                    break;
+                }
+            }
+        }
+
+        return $products
+            ->unique(fn (array $product): string => (string) $product['id'])
+            ->sortBy(fn (array $product): int => (int) $product['id'])
+            ->values()
+            ->all();
+    }
+
+    /**
      * @return list<array<string, mixed>>
      */
     private function productsForLanguage(WordpressIntegration $integration, ?string $language): array
