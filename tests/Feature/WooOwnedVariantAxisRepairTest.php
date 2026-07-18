@@ -291,6 +291,11 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
                 }
             }
             unset($attribute);
+
+            foreach ($catalog->variations[$parentId] as &$variation) {
+                unset($variation['attributes'][0]['name']);
+            }
+            unset($variation);
         }
 
         $this->fakeCatalog($catalog);
@@ -530,6 +535,34 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
 
         $migration = require database_path(
             'migrations/2026_07_18_000040_requeue_active_child_size_axes.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+    }
+
+    public function test_parent_axis_identity_followup_migration_requeues_an_unresolved_previous_revision_family(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_PARENT_AXIS_IDENTITY_REVISION,
+            'status' => 'manual_review',
+            'result' => ['reason' => 'historical child response without axis name'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000041_requeue_parent_axis_identity_repairs.php',
         );
         $migration->up();
 

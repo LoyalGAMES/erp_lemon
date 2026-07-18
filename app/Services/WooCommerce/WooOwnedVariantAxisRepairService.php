@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000040';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000041';
+
+    public const PREVIOUS_PARENT_AXIS_IDENTITY_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000040';
 
     public const PREVIOUS_ACTIVE_CHILD_AXIS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000039';
 
@@ -69,6 +71,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_PARENT_AXIS_IDENTITY_REVISION,
             self::PREVIOUS_ACTIVE_CHILD_AXIS_REVISION,
             self::PREVIOUS_ERP_SIZE_CONFIGURATION_ORDER_REVISION,
             self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_REVISION,
@@ -5584,12 +5587,20 @@ final class WooOwnedVariantAxisRepairService
             ->filter(fn (array $attribute): bool => $this->isGenericAttribute($attribute)
                 || $this->isSizeAttribute($attribute))
             ->values();
-        $childTargetAxisKeys = collect($variations)
-            ->flatMap(fn (array $variation): Collection => collect((array) ($variation['attributes'] ?? [])))
-            ->filter(fn (mixed $attribute): bool => is_array($attribute)
-                && ($this->isGenericAttribute($attribute) || $this->isSizeAttribute($attribute)))
+        $parentTargetAxisKeys = $parentTargetAxes
             ->map(fn (array $attribute): string => $this->axisIdentityKey($attribute))
             ->filter()
+            ->unique()
+            ->values();
+        $childTargetAxisKeys = collect($variations)
+            ->flatMap(fn (array $variation): Collection => collect((array) ($variation['attributes'] ?? [])))
+            // Woo variation responses can contain only the stable positive ID
+            // and option. Match every child row to an already classified
+            // parent target axis by identity instead of requiring the child
+            // response to repeat its display name.
+            ->filter(fn (mixed $attribute): bool => is_array($attribute))
+            ->map(fn (array $attribute): string => $this->axisIdentityKey($attribute))
+            ->filter(fn (string $axis): bool => $parentTargetAxisKeys->contains($axis))
             ->unique()
             ->values();
         $activeParentTargetAxes = $parentTargetAxes
@@ -5771,6 +5782,10 @@ final class WooOwnedVariantAxisRepairService
             $canonicalKeys = $canonicalByKey->keys()->sort()->values()->all();
 
             foreach ($genericAttributes as $genericAttribute) {
+                if ($completeActiveChildAxisEvidence) {
+                    continue;
+                }
+
                 if ($activeParentAxisKeys->isNotEmpty()
                     && ! $activeParentAxisKeys->contains($this->axisIdentityKey($genericAttribute))
                 ) {
