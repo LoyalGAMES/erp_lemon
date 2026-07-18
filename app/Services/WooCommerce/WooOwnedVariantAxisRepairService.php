@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000039';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000040';
+
+    public const PREVIOUS_ACTIVE_CHILD_AXIS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000039';
 
     public const PREVIOUS_ERP_SIZE_CONFIGURATION_ORDER_REVISION = 'woo_erp_size_variant_axis_2026_07_17_000038';
 
@@ -67,6 +69,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_ACTIVE_CHILD_AXIS_REVISION,
             self::PREVIOUS_ERP_SIZE_CONFIGURATION_ORDER_REVISION,
             self::PREVIOUS_MULTIPLE_LEGACY_SIZE_AXES_REVISION,
             self::PREVIOUS_EXACT_CHILD_ASSIGNMENT_AUDIT_REVISION,
@@ -4007,10 +4010,14 @@ final class WooOwnedVariantAxisRepairService
             }
 
             $primary = $integrationPlans->first(fn (array $entry): bool => (bool) $entry['target']['is_primary']);
+            $primaryExternalId = trim((string) data_get($primary, 'target.external_product_id', ''));
+            $localParentSku = mb_strtoupper(trim((string) $product->sku));
+            $remoteParentSku = mb_strtoupper(trim((string) data_get($primary, 'parent.sku', '')));
+            $syntheticParentSku = $primaryExternalId !== ''
+                && $localParentSku === 'WC-B2C-PARENT-'.mb_strtoupper($primaryExternalId);
 
             if (! is_array($primary)
-                || mb_strtoupper(trim((string) ($primary['parent']['sku'] ?? '')))
-                    !== mb_strtoupper(trim((string) $product->sku))
+                || ($remoteParentSku !== $localParentSku && ! $syntheticParentSku)
             ) {
                 return ['contract' => true, 'error' => 'SKU głównego rodzica nie zgadza się z rodziną ERP.'];
             }
@@ -4558,6 +4565,14 @@ final class WooOwnedVariantAxisRepairService
             ->groupBy(fn (array $attribute): int => (int) $attribute['id'])
             ->filter(fn (Collection $axes): bool => $axes->count() === 1)
             ->map(fn (Collection $axes): array => (array) $axes->first());
+        $childTargetAxisIds = collect($variations)
+            ->flatMap(fn (array $variation): Collection => collect((array) ($variation['attributes'] ?? [])))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                && (int) ($attribute['id'] ?? 0) > 0)
+            ->map(fn (array $attribute): int => (int) $attribute['id'])
+            ->filter(fn (int $id): bool => $targetAxesById->has($id))
+            ->unique()
+            ->values();
 
         /** @var WordpressIntegration $integration */
         $integration = $target['integration'];
@@ -4576,6 +4591,7 @@ final class WooOwnedVariantAxisRepairService
                 $integration,
                 $language,
                 $targetAxesById,
+                $childTargetAxisIds,
                 $targetDefaultCount,
                 $variations,
                 $variationOptionHints,
@@ -4586,6 +4602,14 @@ final class WooOwnedVariantAxisRepairService
 
                 if ($attributeId <= 0 || ! is_array($axis)) {
                     return $default;
+                }
+
+                if ($childTargetAxisIds->isNotEmpty()
+                    && ! $childTargetAxisIds->contains($attributeId)
+                ) {
+                    $ignoredLegacyDefault = true;
+
+                    return [];
                 }
 
                 $rawOption = trim((string) ($default['option'] ?? ''));
@@ -5556,6 +5580,36 @@ final class WooOwnedVariantAxisRepairService
                 ->values()
                 ->all()
             : [];
+        $parentTargetAxes = $attributes
+            ->filter(fn (array $attribute): bool => $this->isGenericAttribute($attribute)
+                || $this->isSizeAttribute($attribute))
+            ->values();
+        $childTargetAxisKeys = collect($variations)
+            ->flatMap(fn (array $variation): Collection => collect((array) ($variation['attributes'] ?? [])))
+            ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                && ($this->isGenericAttribute($attribute) || $this->isSizeAttribute($attribute)))
+            ->map(fn (array $attribute): string => $this->axisIdentityKey($attribute))
+            ->filter()
+            ->unique()
+            ->values();
+        $activeParentTargetAxes = $parentTargetAxes
+            ->filter(fn (array $attribute): bool => $childTargetAxisKeys->contains(
+                $this->axisIdentityKey($attribute),
+            ))
+            ->values();
+        $activeParentAxisKeys = $activeParentTargetAxes
+            ->map(fn (array $attribute): string => $this->axisIdentityKey($attribute))
+            ->unique()
+            ->values();
+        $completeActiveChildAxisEvidence = $activeParentTargetAxes->isNotEmpty()
+            && collect($variations)->every(function (array $variation) use ($activeParentAxisKeys): bool {
+                return collect((array) ($variation['attributes'] ?? []))
+                    ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                        && $activeParentAxisKeys->contains($this->axisIdentityKey($attribute)))
+                    ->contains(fn (array $attribute): bool => $this->localOptionValues(
+                        $attribute['option'] ?? null,
+                    )->isNotEmpty());
+            });
 
         // The live variation axis is the authoritative source of child
         // assignments. Historical imports often left an informational global
@@ -5572,6 +5626,38 @@ final class WooOwnedVariantAxisRepairService
             && $variationGenericKeys !== $sourceSizeKeys
         ) {
             $sourceAxis = $variationGeneric;
+        }
+
+        // Parent flags and option lists are historical metadata; the axes
+        // actually stored on every existing child are authoritative for the
+        // live variation assignment. This covers two production shapes:
+        // Size was also left marked as a variation while children still use
+        // `wariant`, or children already use Size while stale generic axes
+        // remain marked on the parent. Conflicting child assignments still
+        // fail the 1:1 checks below before any PUT.
+        if ($completeActiveChildAxisEvidence) {
+            $sourceAxis = $activeParentTargetAxes->first(
+                fn (array $attribute): bool => is_array($sourceSize)
+                    && $this->sameAttribute($attribute, $sourceSize),
+            ) ?? $activeParentTargetAxes->first();
+            $activeChildOptions = collect($variations)
+                ->flatMap(fn (array $variation): Collection => collect((array) ($variation['attributes'] ?? [])))
+                ->filter(fn (mixed $attribute): bool => is_array($attribute)
+                    && $activeParentAxisKeys->contains($this->axisIdentityKey($attribute)))
+                ->flatMap(fn (array $attribute): Collection => $this->localOptionValues(
+                    $attribute['option'] ?? null,
+                ))
+                ->filter(fn (string $option): bool => trim($option) !== '')
+                ->unique(fn (string $option): string => $this->canonicalSizeOptionKey(
+                    ProductVariantAxisNameResolver::SIZE,
+                    $option,
+                ))
+                ->values()
+                ->all();
+
+            if (is_array($sourceAxis) && $activeChildOptions !== []) {
+                $sourceAxis['options'] = $activeChildOptions;
+            }
         }
 
         if (! is_array($sourceAxis)) {
@@ -5631,13 +5717,17 @@ final class WooOwnedVariantAxisRepairService
             $sizeName,
             $language,
         );
-        $canonicalOptions = $this->orderedSizeOptions(
-            $sizeName,
-            [
-                ...$this->localOptionValues($sourceAxis['options'] ?? [])->all(),
-                ...$supplementalCanonicalOptions,
-            ],
-        );
+        try {
+            $canonicalOptions = $this->orderedSizeOptions(
+                $sizeName,
+                [
+                    ...$this->localOptionValues($sourceAxis['options'] ?? [])->all(),
+                    ...$supplementalCanonicalOptions,
+                ],
+            );
+        } catch (DomainException $exception) {
+            return $this->unsafePlan($exception->getMessage());
+        }
         $canonicalByKey = collect($canonicalOptions)
             ->mapWithKeys(fn (string $option): array => [$this->optionKey($option) => $option]);
         $targetByKey = $canonicalByKey->map(fn (string $option): string => $this->localizedSizeOption(
@@ -5681,6 +5771,12 @@ final class WooOwnedVariantAxisRepairService
             $canonicalKeys = $canonicalByKey->keys()->sort()->values()->all();
 
             foreach ($genericAttributes as $genericAttribute) {
+                if ($activeParentAxisKeys->isNotEmpty()
+                    && ! $activeParentAxisKeys->contains($this->axisIdentityKey($genericAttribute))
+                ) {
+                    continue;
+                }
+
                 $genericKeys = $this->localOptionValues($genericAttribute['options'] ?? [])
                     ->map(fn (mixed $option): string => $this->canonicalSizeOptionKey(
                         $sizeName,
@@ -5793,6 +5889,24 @@ final class WooOwnedVariantAxisRepairService
 
         foreach ((array) ($parent['default_attributes'] ?? []) as $default) {
             if (! is_array($default)) {
+                continue;
+            }
+
+            $isTargetLooking = $this->isGenericAttribute($default)
+                || $this->isSizeAttribute($default)
+                || $parentTargetAxes->contains(fn (array $attribute): bool => $this->sameAttribute(
+                    $default,
+                    $attribute,
+                ));
+            $defaultAxisKey = $this->axisIdentityKey($default);
+
+            // A default for an axis no child uses cannot select an existing
+            // variation. Drop it together with that inert legacy axis instead
+            // of letting stale colour/aggregate values override live children.
+            if ($isTargetLooking
+                && $activeParentAxisKeys->isNotEmpty()
+                && ! $activeParentAxisKeys->contains($defaultAxisKey)
+            ) {
                 continue;
             }
 

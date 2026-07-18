@@ -306,6 +306,91 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         }
     }
 
+    public function test_child_assignments_override_stale_size_options_even_when_size_is_marked_as_a_variation(): void
+    {
+        [$parent, $catalog] = $this->family();
+
+        foreach ([123, 223] as $parentId) {
+            foreach ($catalog->products[$parentId]['attributes'] as &$attribute) {
+                if ((int) ($attribute['id'] ?? 0) === 1) {
+                    $attribute['variation'] = true;
+                    $attribute['options'] = ['ONE SIZE'];
+                }
+            }
+            unset($attribute);
+        }
+
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+
+        foreach ([123, 223] as $parentId) {
+            $targetAxes = collect($catalog->products[$parentId]['attributes'])
+                ->filter(fn (array $attribute): bool => in_array(
+                    mb_strtolower((string) ($attribute['name'] ?? '')),
+                    ['wariant', 'variant', 'blvariant', 'rozmiar', 'size'],
+                    true,
+                ))
+                ->values();
+            $this->assertCount(1, $targetAxes);
+            $this->assertSame(1, (int) $targetAxes->first()['id']);
+            $this->assertSame(['S/M', 'M/L'], $targetAxes->first()['options']);
+        }
+    }
+
+    public function test_inert_conflicting_generic_parent_axes_are_removed_when_children_already_use_size(): void
+    {
+        [$parent, $catalog] = $this->family();
+
+        foreach ([123, 223] as $parentId) {
+            $this->makeRemoteCanonicalSizeOnly($catalog, $parentId, 'M/L');
+            $genericName = $parentId === 223 ? 'variant' : 'wariant';
+            $genericId = $parentId === 223 ? 8 : 6;
+            $blVariantId = $parentId === 223 ? 11 : 7;
+            $catalog->products[$parentId]['attributes'][] = [
+                'id' => $genericId,
+                'name' => $genericName,
+                'position' => 2,
+                'visible' => true,
+                'variation' => true,
+                'options' => ['Black', 'White'],
+            ];
+            $catalog->products[$parentId]['attributes'][] = [
+                'id' => $blVariantId,
+                'name' => 'BLVariant',
+                'position' => 3,
+                'visible' => true,
+                'variation' => true,
+                'options' => ['Legacy A', 'Legacy B'],
+            ];
+            $catalog->products[$parentId]['default_attributes'][] = [
+                'id' => $genericId,
+                'name' => $genericName,
+                'option' => 'Black',
+            ];
+        }
+
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+
+        foreach ([123, 223] as $parentId) {
+            $variationAxes = collect($catalog->products[$parentId]['attributes'])
+                ->where('variation', true)
+                ->values();
+            $this->assertCount(1, $variationAxes);
+            $this->assertSame(1, (int) $variationAxes->first()['id']);
+            $this->assertSame(['S/M', 'M/L'], $variationAxes->first()['options']);
+            $this->assertSame([
+                ['id' => 1, 'option' => 'M/L'],
+            ], $catalog->products[$parentId]['default_attributes']);
+        }
+    }
+
     public function test_multiple_legacy_axes_with_conflicting_blvariant_values_require_manual_review_without_writes(): void
     {
         [$parent, $catalog] = $this->family();
@@ -334,7 +419,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $result = $repair->repair($parent->fresh());
 
         $this->assertSame('manual_review', $result['status']);
-        $this->assertStringContainsString('mają inne wartości', $result['reason']);
+        $this->assertStringContainsString('nie istnieje w żadnym słowniku rozmiarów ERP', $result['reason']);
         $this->assertSame($original['products'], $catalog->products);
         $this->assertSame($original['variations'], $catalog->variations);
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
@@ -424,6 +509,34 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $state = (array) data_get(
             $mapping->fresh()->metadata,
             WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+    }
+
+    public function test_active_child_axis_followup_migration_requeues_an_unresolved_previous_revision_family(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_ACTIVE_CHILD_AXIS_REVISION,
+            'status' => 'manual_review',
+            'result' => ['reason' => 'historical active child mismatch'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000040_requeue_active_child_size_axes.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
         );
         $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
         $this->assertSame('pending', $state['status'] ?? null);
@@ -3983,9 +4096,9 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
     {
         [$parent, $catalog] = $this->family();
         $catalog->products[223]['default_attributes'][] = [
-            'id' => 1,
-            'name' => 'Size',
-            'option' => 'S/M',
+            'id' => 8,
+            'name' => 'variant',
+            'option' => 's-m',
         ];
         $this->fakeCatalog($catalog);
 
@@ -4007,6 +4120,18 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('manual_review', $result['status']);
         $this->assertStringContainsString('SKU rodzica', $result['reason']);
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
+    }
+
+    public function test_complete_contract_accepts_the_exact_synthetic_parent_sku_for_its_woo_id(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        $parent->update(['sku' => 'WC-B2C-PARENT-123']);
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
     }
 
     public function test_it_rejects_a_same_sku_stale_alias_when_the_lemon_translation_contract_does_not_match(): void
