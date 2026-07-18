@@ -363,6 +363,43 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
         $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
     }
 
+    public function test_cross_localized_size_migration_requeues_only_the_exact_language_conflict(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'CROSS-LOCALIZED-SIZE-AXIS',
+            'name' => 'Cross-localized size axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $conflict = $this->mapping(
+            $channel,
+            'CROSS-LOCALIZED-CONFLICT',
+            'WooCommerce EN #500316: WordPress nie powiązał tłumaczeń wartości globalnego atrybutu: Wartość atrybutu 57 ma już język pl zamiast oczekiwanego en.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_CROSS_LOCALIZED_SIZE_REVISION,
+        );
+        $unrelated = $this->mapping(
+            $channel,
+            'CROSS-LOCALIZED-UNRELATED',
+            'WooCommerce EN #500316: Wartość atrybutu ma nieprawidłowy język.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_CROSS_LOCALIZED_SIZE_REVISION,
+        );
+        $unrelatedBefore = $unrelated->metadata;
+
+        $this->runCrossLocalizedSizeMigration();
+
+        $state = (array) data_get(
+            $conflict->refresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision']);
+        $this->assertSame('pending', $state['status']);
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::PREVIOUS_CROSS_LOCALIZED_SIZE_REVISION,
+            data_get($state, 'previous.revision'),
+        );
+        $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
+    }
+
     private function mapping(
         SalesChannel $channel,
         string $suffix,
@@ -457,6 +494,13 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
     {
         (require database_path(
             'migrations/2026_07_18_000063_requeue_missing_woo_target_term_name.php',
+        ))->up();
+    }
+
+    private function runCrossLocalizedSizeMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_18_000064_requeue_cross_localized_woo_size.php',
         ))->up();
     }
 }

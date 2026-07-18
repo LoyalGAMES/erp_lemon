@@ -33,7 +33,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000067';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000068';
+
+    public const PREVIOUS_CROSS_LOCALIZED_SIZE_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000067';
 
     public const PREVIOUS_MISSING_TARGET_TERM_NAME_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000066';
 
@@ -127,6 +129,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_CROSS_LOCALIZED_SIZE_REVISION,
             self::PREVIOUS_MISSING_TARGET_TERM_NAME_REVISION,
             self::PREVIOUS_MISNAMED_TRANSLATION_TERM_REVISION,
             self::PREVIOUS_EXISTING_TERM_SIBLING_PROBE_REVISION,
@@ -243,6 +246,7 @@ final class WooOwnedVariantAxisRepairService
                 ];
 
                 if (in_array(($state['revision'] ?? null), [
+                    self::PREVIOUS_CROSS_LOCALIZED_SIZE_REVISION,
                     self::PREVIOUS_MISSING_TARGET_TERM_NAME_REVISION,
                     self::PREVIOUS_MISNAMED_TRANSLATION_TERM_REVISION,
                     self::PREVIOUS_EXISTING_TERM_SIBLING_PROBE_REVISION,
@@ -8297,6 +8301,18 @@ final class WooOwnedVariantAxisRepairService
             $canonicalOption,
             $this->language($language),
         );
+
+        // Independently reordered historical values/values_en arrays can make
+        // a real size point at another real size (for example XS -> M/L).
+        // A translation may change a label, but it must never change the
+        // canonical dictionary identity used by parent and variation payloads.
+        if (is_string($localized)
+            && $localized !== ''
+            && $this->canonicalSizeOptionKey($attribute, $localized)
+                !== $this->optionKey($canonicalOption)
+        ) {
+            return $canonicalOption;
+        }
 
         return is_string($localized) && $localized !== ''
             ? $localized

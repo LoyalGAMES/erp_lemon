@@ -97,7 +97,10 @@ final class WooCommerceSizeDictionaryOrder
     {
         $language = mb_strtolower(trim($language)) ?: 'pl';
         $rows = $this->definitions()
-            ->flatMap(function (ProductParameterDefinition $definition) use ($language): Collection {
+            ->flatMap(function (
+                ProductParameterDefinition $definition,
+                int $definitionIndex,
+            ) use ($language): Collection {
                 $localized = collect($definition->valuesForLanguage($language))->values();
                 $polish = collect($definition->valuesForLanguage('pl'))->values();
                 $english = collect($definition->valuesForLanguage('en'))->values();
@@ -108,11 +111,13 @@ final class WooCommerceSizeDictionaryOrder
                         $localized,
                         $polish,
                         $english,
+                        $definitionIndex,
                     ): array {
                         $source = trim((string) $value);
 
                         return [
                             'source' => $source,
+                            'definition_index' => $definitionIndex,
                             'localized' => trim((string) $localized->get($index, '')) ?: $source,
                             'all_localized' => collect([
                                 $polish->get($index),
@@ -305,6 +310,18 @@ final class WooCommerceSizeDictionaryOrder
     private function coalesceEquivalentRows(Collection $rows): Collection
     {
         $owners = [];
+        $canonicalDefinitionIndex = (int) $rows->min('definition_index');
+
+        // Reserve every source identity from the authoritative dictionary
+        // before processing positional translations. Otherwise an earlier XS
+        // row with a crossed M/L translation can claim the later M/L source.
+        foreach ($rows->where('definition_index', $canonicalDefinitionIndex) as $canonicalRow) {
+            $sourceKey = $this->key((string) $canonicalRow['source']);
+
+            if ($sourceKey !== '') {
+                $owners[$sourceKey] = (string) $canonicalRow['identity'];
+            }
+        }
 
         return $rows->map(function (array $row) use (&$owners): array {
             $sourceKey = $this->key((string) $row['source']);

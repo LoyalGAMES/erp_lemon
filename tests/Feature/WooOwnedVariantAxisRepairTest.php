@@ -2170,6 +2170,11 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
     {
         Bus::fake([ImportWooCommerceProductsJob::class]);
         [$parent, $catalog] = $this->family();
+        $definition = ProductParameterDefinition::query()->firstOrFail();
+        $crossedEnglishValues = (array) $definition->values_en;
+        $crossedEnglishValues[1] = 'M/L';
+        $crossedEnglishValues[5] = 'XS';
+        $definition->update(['values_en' => $crossedEnglishValues]);
         $catalog->products[223]['attributes'][1]['options'] = [];
         $catalog->products[223]['attributes'][2]['options'] = ['S/M'];
         $originalParentIds = array_keys($catalog->products);

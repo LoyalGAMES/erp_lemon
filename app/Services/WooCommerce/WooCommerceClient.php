@@ -2058,12 +2058,28 @@ final class WooCommerceClient
         $createdTerm = null;
 
         try {
+            $sourceLanguageTermIds = collect(
+                $this->globalProductAttributeTerms(
+                    $integration,
+                    $attributeId,
+                    $sourceLanguage,
+                ),
+            )
+                ->pluck('id')
+                ->map(fn (mixed $id): int => (int) $id)
+                ->filter(fn (int $id): bool => $id > 0)
+                ->push($sourceTermId)
+                ->push((int) ($existingSiblingTerm['id'] ?? 0))
+                ->filter(fn (int $id): bool => $id > 0)
+                ->unique()
+                ->flip();
             $replacement = collect(array_merge(
                 $this->globalProductAttributeTerms($integration, $attributeId, $targetLanguage),
                 $this->globalProductAttributeTerms($integration, $attributeId, 'all'),
             ))
                 ->filter(fn (array $candidate): bool => (int) ($candidate['id'] ?? 0) > 0
                     && (int) $candidate['id'] !== $targetTermId
+                    && ! $sourceLanguageTermIds->has((int) $candidate['id'])
                     && mb_strtolower(trim((string) ($candidate['name'] ?? '')))
                         === mb_strtolower($targetOption)
                     && (! $this->globalProductAttributeTermHasLanguageIdentity($candidate)
