@@ -33,7 +33,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000060';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000061';
+
+    public const PREVIOUS_EXECUTED_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000060';
 
     public const PREVIOUS_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000059';
 
@@ -113,6 +115,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_EXECUTED_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
             self::PREVIOUS_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
             self::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION,
             self::PREVIOUS_AUTHORITATIVE_REMOTE_AXIS_REVISION,
@@ -222,6 +225,7 @@ final class WooOwnedVariantAxisRepairService
                 ];
 
                 if (in_array(($state['revision'] ?? null), [
+                    self::PREVIOUS_EXECUTED_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
                     self::PREVIOUS_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
                     self::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION,
                 ], true)
@@ -442,6 +446,7 @@ final class WooOwnedVariantAxisRepairService
             && $this->hasParentDuplicatedGenericAndSizeAxisEvidence($product)
             && ! $this->hasOnlyBlankLocalChildAxisEvidence($product)
             && ! $hasRemoteEvidence
+            && ! $this->hasExactSyntheticDuplicateNameShape($product)
         ) {
             return [
                 'status' => 'manual_review',
@@ -5016,6 +5021,32 @@ final class WooOwnedVariantAxisRepairService
         }
 
         return $fresh;
+    }
+
+    /**
+     * Allow the remote preflight to examine one narrowly recognizable import
+     * collision before the ordinary local-axis guard rejects it. This method
+     * authorizes only reads: the later consolidation repeats mapping, parent,
+     * stock, reservation and exact remote-ID proofs before changing anything.
+     */
+    private function hasExactSyntheticDuplicateNameShape(Product $product): bool
+    {
+        $children = $product->variantChildren;
+
+        if ($children->count() < 2 || $children->count() % 2 !== 0) {
+            return false;
+        }
+
+        $normalizedName = static fn (Product $child): string => mb_strtolower(trim(
+            preg_replace('/\s+/u', ' ', (string) $child->name) ?? (string) $child->name,
+        ));
+        $groups = $children->groupBy($normalizedName);
+
+        return ! $groups->has('')
+            && $groups->count() === intdiv($children->count(), 2)
+            && $groups->every(fn (Collection $group): bool => $group->count() === 2
+                && $group->filter(fn (Product $child): bool => $child->isSyntheticWooSku())->count() === 1
+                && $group->filter(fn (Product $child): bool => ! $child->isSyntheticWooSku())->count() === 1);
     }
 
     /**

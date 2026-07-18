@@ -84,10 +84,60 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
         }
     }
 
+    public function test_follow_up_migration_requeues_only_the_two_guards_proven_by_the_executed_retry(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'EXECUTED-FINAL-AXIS',
+            'name' => 'Executed final axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $duplicate = $this->mapping(
+            $channel,
+            'EXECUTED-DUPLICATE',
+            'Lokalne warianty zawierają niepuste lub obce wartości, których zdalna wersja językowa nie może nadpisać.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_EXECUTED_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
+        );
+        $sourceTerm = $this->mapping(
+            $channel,
+            'EXECUTED-SOURCE-TERM',
+            'WooCommerce EN #500316: WooCommerce nie zawiera źródłowej polskiej wartości XS globalnego atrybutu #1.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_EXECUTED_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
+        );
+        $unrelated = $this->mapping(
+            $channel,
+            'EXECUTED-UNRELATED',
+            'Zdalna rodzina nie ma kompletnego zbioru wariantów.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_EXECUTED_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
+        );
+        $unrelatedBefore = $unrelated->metadata;
+
+        $this->runExecutedMigration();
+
+        foreach ([$duplicate, $sourceTerm] as $mapping) {
+            $state = (array) data_get(
+                $mapping->refresh()->metadata,
+                WooOwnedVariantAxisRepairService::STATE_PATH,
+            );
+
+            $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision']);
+            $this->assertSame('pending', $state['status']);
+            $this->assertSame(
+                WooOwnedVariantAxisRepairService::PREVIOUS_EXECUTED_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
+                data_get($state, 'previous.revision'),
+            );
+        }
+
+        $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
+        $postcondition = app(WooOwnedVariantAxisDeploymentGate::class)->postcondition();
+        $this->assertSame(['pending' => 2], $postcondition['statuses']);
+    }
+
     private function mapping(
         SalesChannel $channel,
         string $suffix,
         string $reason,
+        string $revision = WooOwnedVariantAxisRepairService::PREVIOUS_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
     ): ProductChannelMapping {
         $product = Product::query()->create([
             'sku' => 'FINAL-AXIS-'.$suffix,
@@ -111,7 +161,7 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
             'metadata' => [
                 'operator_note' => 'preserve',
                 'maintenance' => ['woo_owned_variant_axis_repair' => [
-                    'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
+                    'revision' => $revision,
                     'status' => 'manual_review',
                     'requested_at' => '2026-07-18T12:00:00+00:00',
                     'completed_at' => '2026-07-18T12:05:00+00:00',
@@ -128,6 +178,13 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
     {
         (require database_path(
             'migrations/2026_07_18_000056_requeue_final_woo_variant_axis_blockers.php',
+        ))->up();
+    }
+
+    private function runExecutedMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_18_000057_requeue_executed_final_woo_variant_axis_blockers.php',
         ))->up();
     }
 }

@@ -1605,8 +1605,20 @@ final class WooCommerceClient
                 }
 
                 if (! is_array($sourceTerm)) {
-                    throw new RuntimeException(
-                        "WooCommerce nie zawiera źródłowej polskiej wartości {$pair['source']} globalnego atrybutu #{$attributeId}.",
+                    $sourceTerm = $this->ensureGlobalProductAttributeTerm(
+                        $integration,
+                        $attributeId,
+                        $pair['source'],
+                        'pl',
+                        [],
+                        $pair['menu_order'],
+                    );
+                    $this->rememberGlobalProductAttributeTerm(
+                        $integration,
+                        $attributeId,
+                        $pair['source'],
+                        'pl',
+                        $sourceTerm,
                     );
                 }
 
