@@ -715,6 +715,34 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('pending', $state['status'] ?? null);
     }
 
+    public function test_transition_id_only_options_migration_requeues_an_unresolved_previous_revision_family(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_TRANSITION_ID_ONLY_OPTIONS_REVISION,
+            'status' => 'pending',
+            'result' => ['reason' => 'ID-only global axis retained localized aliases'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000047_requeue_transition_id_only_options.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+    }
+
     public function test_transition_diagnostic_names_missing_disabled_and_changed_axes(): void
     {
         $this->family();
@@ -793,6 +821,18 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
 
         $payload['attributes'][0]['options'][4] = '41-en';
         $this->assertFalse($method->invoke($service, $parent, $payload));
+
+        $parent['attributes'][0] = [
+            'id' => 8,
+            'variation' => true,
+            'options' => ['36', '37', '38', '39', '40'],
+        ];
+        $payload['attributes'][0] = [
+            'id' => 8,
+            'variation' => true,
+            'options' => ['36', '36-en', '37', '37-en', '38', '38-en', '39', '39-en', '40', '40-en'],
+        ];
+        $this->assertTrue($method->invoke($service, $parent, $payload));
     }
 
     public function test_numeric_size_options_form_the_same_exact_bijection_as_text_options(): void

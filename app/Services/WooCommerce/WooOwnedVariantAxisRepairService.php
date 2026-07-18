@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000046';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000047';
+
+    public const PREVIOUS_TRANSITION_ID_ONLY_OPTIONS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000046';
 
     public const PREVIOUS_TRANSITION_STRUCTURE_DIAGNOSTIC_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000045';
 
@@ -81,6 +83,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_TRANSITION_ID_ONLY_OPTIONS_REVISION,
             self::PREVIOUS_TRANSITION_STRUCTURE_DIAGNOSTIC_REVISION,
             self::PREVIOUS_TRANSITION_CONFIRMATION_REVISION,
             self::PREVIOUS_LANGUAGE_SUFFIX_AND_MAPPING_ID_REVISION,
@@ -6575,14 +6578,17 @@ final class WooOwnedVariantAxisRepairService
                     return;
                 }
 
-                $sizeAxis = $this->isGenericAttribute($expected)
-                    || $this->isSizeAttribute($expected);
-                $identity = fn (mixed $option): string => $sizeAxis
-                    ? $this->canonicalSizeOptionKey(
-                        ProductVariantAxisNameResolver::SIZE,
-                        (string) $option,
-                    )
-                    : $this->optionKey((string) $option);
+                // The family planner rejects every variation axis outside the
+                // size migration. Serialized global attributes intentionally
+                // contain only an ID, so name-based `wariant`/Size detection
+                // is unavailable here. Compare every enabled transition axis
+                // through the canonical ERP Size identity; this treats a
+                // Polylang response pair such as `36` + `36-en` as the one
+                // exact option WooCommerce persists after its own dedupe.
+                $identity = fn (mixed $option): string => $this->canonicalSizeOptionKey(
+                    ProductVariantAxisNameResolver::SIZE,
+                    (string) $option,
+                );
 
                 $expectedOptions = collect((array) ($expected['options'] ?? []))
                     ->map($identity)
