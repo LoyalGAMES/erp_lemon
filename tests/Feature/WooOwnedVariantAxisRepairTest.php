@@ -805,6 +805,34 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('pending', $state['status'] ?? null);
     }
 
+    public function test_interrupted_translation_variation_rebuild_migration_requeues_the_marked_handoff(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_INTERRUPTED_TRANSLATION_VARIATION_REBUILD_REVISION,
+            'status' => 'manual_review',
+            'result' => ['reason' => 'translated parent has no variations yet'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000050_resume_interrupted_translation_variation_rebuild.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+    }
+
     public function test_transition_diagnostic_names_missing_disabled_and_changed_axes(): void
     {
         $this->family();
@@ -4873,6 +4901,34 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         ));
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST');
+
+        $catalog->products[223]['type'] = 'variable';
+        $catalog->products[223]['attributes'] = [[
+            'id' => 1,
+            'name' => 'Size',
+            'slug' => 'pa_rozmiar',
+            'position' => 0,
+            'visible' => true,
+            'variation' => true,
+            'options' => ['S/M', 'M/L'],
+        ]];
+        $catalog->products[223]['default_attributes'] = [[
+            'id' => 1,
+            'name' => 'Size',
+            'option' => 'M/L',
+        ]];
+        $interrupted = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame(
+            'deferred',
+            $interrupted['status'],
+            json_encode($interrupted, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        );
+        $this->assertTrue($interrupted['allow_full_export']);
+        $this->assertSame([[
+            'language' => 'en',
+            'external_product_id' => '223',
+        ]], $interrupted['rebuild_simple_translations']);
     }
 
     public function test_contract_discovery_rejects_a_non_reciprocal_english_family_before_any_write(): void

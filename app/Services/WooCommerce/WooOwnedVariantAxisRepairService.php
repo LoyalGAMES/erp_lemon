@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000049';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000050';
+
+    public const PREVIOUS_INTERRUPTED_TRANSLATION_VARIATION_REBUILD_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000049';
 
     public const PREVIOUS_POST_SIMPLE_TRANSLATION_EXPORT_VERIFICATION_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000048';
 
@@ -87,6 +89,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_INTERRUPTED_TRANSLATION_VARIATION_REBUILD_REVISION,
             self::PREVIOUS_POST_SIMPLE_TRANSLATION_EXPORT_VERIFICATION_REVISION,
             self::PREVIOUS_SIMPLE_TRANSLATION_REBUILD_REVISION,
             self::PREVIOUS_TRANSITION_ID_ONLY_OPTIONS_REVISION,
@@ -540,12 +543,12 @@ final class WooOwnedVariantAxisRepairService
                 ->all();
         }
 
-        $simpleTranslationTargets = $this->recoverableSimpleTranslationTargets(
+        $emptyTranslationTargets = $this->recoverableEmptyTranslationTargets(
             $product,
             $plans,
         );
 
-        if ($simpleTranslationTargets !== []) {
+        if ($emptyTranslationTargets !== []) {
             // A full product export is the only operation allowed to convert
             // an existing translated `simple` product to `variable` and to
             // create its missing translated children with inherited prices
@@ -555,7 +558,7 @@ final class WooOwnedVariantAxisRepairService
             // export emits canonical Size instead of preserving the mapped
             // legacy axis; the pending repair state still blocks every other
             // broad export until the rebuilt family passes remote verification.
-            $this->markCanonicalFullExportHandoff($product, $simpleTranslationTargets);
+            $this->markCanonicalFullExportHandoff($product, $emptyTranslationTargets);
 
             return [
                 'status' => 'deferred',
@@ -563,13 +566,13 @@ final class WooOwnedVariantAxisRepairService
                 'mutations' => 0,
                 'reason' => sprintf(
                     'Zweryfikowane tłumaczenie %s jest produktem prostym bez wariantów; pełny eksport odbuduje je jako rodzinę wariantową opartą o Rozmiar.',
-                    collect($simpleTranslationTargets)
+                    collect($emptyTranslationTargets)
                         ->map(fn (array $target): string => mb_strtoupper($target['language']).' #'.$target['external_product_id'])
                         ->implode(', '),
                 ),
                 'languages' => array_values(array_unique(array_column($targetResolution['targets'], 'language'))),
                 'allow_full_export' => true,
-                'rebuild_simple_translations' => $simpleTranslationTargets,
+                'rebuild_simple_translations' => $emptyTranslationTargets,
             ];
         }
 
@@ -4047,28 +4050,38 @@ final class WooOwnedVariantAxisRepairService
      * @param  list<array<string,mixed>>  $plans
      * @return list<array{language:string,external_product_id:string}>
      */
-    private function recoverableSimpleTranslationTargets(Product $product, array $plans): array
+    private function recoverableEmptyTranslationTargets(Product $product, array $plans): array
     {
         $entries = collect($plans);
         $unsafe = $entries->filter(fn (array $entry): bool => data_get(
             $entry,
             'plan.status',
         ) === 'unsafe');
-        $simple = $unsafe->filter(fn (array $entry): bool => data_get(
-            $entry,
-            'plan.reason',
-        ) === 'Produkt nie jest produktem wariantowym.');
+        $emptyTranslations = $unsafe->filter(fn (array $entry): bool => in_array(
+            data_get($entry, 'plan.reason'),
+            [
+                'Produkt nie jest produktem wariantowym.',
+                'Rodzina nie ma wariantów do jednoznacznego przypisania.',
+            ],
+            true,
+        ));
 
-        if ($simple->isEmpty() || $simple->count() !== $unsafe->count()) {
+        if ($emptyTranslations->isEmpty() || $emptyTranslations->count() !== $unsafe->count()) {
             return [];
         }
 
+        $localHandoff = (array) data_get(
+            $product->masterData(),
+            self::STATE_PATH,
+            [],
+        );
+
         foreach ($entries->groupBy(fn (array $entry): int => (int) $entry['target']['integration']->id) as $integrationEntries) {
-            $integrationSimple = $integrationEntries->filter(
-                fn (array $entry): bool => $simple->contains($entry),
+            $integrationEmpty = $integrationEntries->filter(
+                fn (array $entry): bool => $emptyTranslations->contains($entry),
             );
 
-            if ($integrationSimple->isEmpty()) {
+            if ($integrationEmpty->isEmpty()) {
                 continue;
             }
 
@@ -4120,10 +4133,23 @@ final class WooOwnedVariantAxisRepairService
                 return [];
             }
 
-            if ($integrationSimple->contains(fn (array $entry): bool =>
+            if ($integrationEmpty->contains(fn (array $entry): bool =>
                 (bool) data_get($entry, 'target.is_primary', false)
-                || (string) data_get($entry, 'parent.type') !== 'simple'
+                || ! in_array((string) data_get($entry, 'parent.type'), ['simple', 'variable'], true)
                 || (array) ($entry['variations'] ?? []) !== []
+            )) {
+                return [];
+            }
+
+            // A variable translated parent without children is recoverable
+            // only when this service itself previously authorized and marked
+            // the canonical simple->variable export hand-off. This recognizes
+            // an interrupted rebuild without widening the exception to an
+            // arbitrary damaged variable family.
+            if ($integrationEmpty->contains(fn (array $entry): bool =>
+                (string) data_get($entry, 'parent.type') === 'variable'
+            ) && (! self::isSynchronizedRevision($localHandoff['revision'] ?? null)
+                || blank($localHandoff['canonical_full_export_handoff_at'] ?? null)
             )) {
                 return [];
             }
@@ -4174,7 +4200,7 @@ final class WooOwnedVariantAxisRepairService
             }
         }
 
-        return $simple
+        return $emptyTranslations
             ->map(fn (array $entry): array => [
                 'language' => $this->language($entry['target']['language']),
                 'external_product_id' => trim((string) $entry['target']['external_product_id']),
