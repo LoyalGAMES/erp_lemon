@@ -6,9 +6,11 @@ namespace Tests\Feature;
 
 use App\Models\Product;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Services\WooCommerce\WooLegacyVariantAxisRemoteAuditService;
+use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Crypt;
@@ -21,6 +23,17 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
 
     public function test_remote_audit_finds_mapped_and_unmapped_legacy_axes_without_local_candidate_filtering(): void
     {
+        ProductParameterDefinition::query()->create([
+            'name' => 'Rozmiar',
+            'name_en' => 'Size',
+            'slug' => 'rozmiar',
+            'input_type' => 'select',
+            'values' => ['36'],
+            'values_en' => ['36'],
+            'is_variant' => true,
+            'is_required' => false,
+            'sort_order' => 10,
+        ]);
         $channel = SalesChannel::query()->create([
             'code' => 'REMOTE-AXIS-AUDIT',
             'name' => 'Remote axis audit',
@@ -103,11 +116,39 @@ final class WooLegacyVariantAxisRemoteAuditTest extends TestCase
         $this->assertSame(0, $result['ambiguous_products']);
         $this->assertSame(0, $result['current_candidates']);
         $this->assertSame(2, $result['missed_products']);
+        $this->assertSame(1, $result['exact_remote_products']);
+        $this->assertSame(0, $result['conflicting_remote_products']);
+        $this->assertSame(1, $result['exact_remote_roots']);
         $mapped = collect($result['rows'])->firstWhere('external_product_id', '4380');
         $this->assertSame([$localProduct->id], $mapped['owner_root_ids'] ?? null);
         $this->assertSame([], $mapped['candidate_root_ids'] ?? null);
         $this->assertSame(false, data_get($mapped, 'size_axes.0.variation'));
         $this->assertSame(['36'], $mapped['legacy_options'] ?? null);
+
+        $marked = app(WooLegacyVariantAxisRemoteAuditService::class)
+            ->markExactRemoteRepairCandidates($result);
+        $this->assertSame([
+            'eligible_roots' => 1,
+            'marked_roots' => 1,
+            'marked_mappings' => 1,
+            'skipped_roots' => 0,
+        ], $marked);
+        $metadata = (array) ProductChannelMapping::query()
+            ->where('product_id', $localProduct->id)
+            ->firstOrFail()
+            ->metadata;
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::REVISION,
+            data_get($metadata, WooOwnedVariantAxisRepairService::STATE_PATH.'.revision'),
+        );
+        $this->assertSame(
+            'pending',
+            data_get($metadata, WooOwnedVariantAxisRepairService::STATE_PATH.'.status'),
+        );
+        $this->assertTrue((bool) data_get(
+            $metadata,
+            WooOwnedVariantAxisRepairService::REMOTE_EVIDENCE_PATH.'.verified',
+        ));
     }
 
     /** @return array<string,mixed> */

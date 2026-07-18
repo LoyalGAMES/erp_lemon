@@ -8,8 +8,10 @@ use App\Models\Product;
 use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\WordpressIntegration;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
+use Throwable;
 
 final class WooLegacyVariantAxisRemoteAuditService
 {
@@ -25,6 +27,7 @@ final class WooLegacyVariantAxisRemoteAuditService
     public function __construct(
         private readonly WooCommerceClient $client,
         private readonly WooOwnedVariantAxisRepairService $repair,
+        private readonly WooCommerceSizeDictionaryOrder $sizeOrder,
     ) {}
 
     /**
@@ -38,6 +41,9 @@ final class WooLegacyVariantAxisRemoteAuditService
      *   ambiguous_products:int,
      *   current_candidates:int,
      *   missed_products:int,
+     *   exact_remote_products:int,
+     *   conflicting_remote_products:int,
+     *   exact_remote_roots:int,
      *   rows:list<array<string,mixed>>
      * }
      */
@@ -116,6 +122,7 @@ final class WooLegacyVariantAxisRemoteAuditService
                             ->filter(fn (mixed $candidate): bool => is_array($candidate)
                                 && $this->isSizeAttribute($candidate))
                             ->values();
+                        $remoteEvidence = $this->remoteSizeEvidence($legacyAxis, $sizeAxes);
 
                         $rows->push([
                             'sales_channel_id' => (int) $integration->sales_channel_id,
@@ -146,6 +153,7 @@ final class WooLegacyVariantAxisRemoteAuditService
                             ])->all(),
                             'owner_root_ids' => $ownerRootIds->all(),
                             'candidate_root_ids' => $candidateRootIds->all(),
+                            'remote_evidence' => $remoteEvidence,
                             'owner_statuses' => $ownerRootIds
                                 ->mapWithKeys(fn (int $rootId): array => [
                                     $rootId => $this->ownerStatus(
@@ -172,6 +180,14 @@ final class WooLegacyVariantAxisRemoteAuditService
         $unmapped = $rows->filter(fn (array $row): bool => $row['owner_root_ids'] === []);
         $ambiguous = $rows->filter(fn (array $row): bool => count($row['owner_root_ids']) > 1);
         $currentCandidates = $rows->filter(fn (array $row): bool => count($row['candidate_root_ids']) === 1);
+        $exactRemote = $rows->filter(fn (array $row): bool => data_get(
+            $row,
+            'remote_evidence.verified',
+        ) === true && count($row['owner_root_ids']) === 1);
+        $conflictingRemote = $rows->reject(fn (array $row): bool => data_get(
+            $row,
+            'remote_evidence.verified',
+        ) === true);
 
         return [
             'integrations' => $integrationCount,
@@ -186,7 +202,108 @@ final class WooLegacyVariantAxisRemoteAuditService
             'ambiguous_products' => $ambiguous->count(),
             'current_candidates' => $currentCandidates->count(),
             'missed_products' => $rows->count() - $currentCandidates->count(),
+            'exact_remote_products' => $exactRemote->count(),
+            'conflicting_remote_products' => $conflictingRemote->count(),
+            'exact_remote_roots' => $exactRemote
+                ->flatMap(fn (array $row): array => $row['owner_root_ids'])
+                ->unique()
+                ->count(),
             'rows' => $rows->all(),
+        ];
+    }
+
+    /**
+     * Persist a fail-closed remote evidence envelope and queue only roots for
+     * which every still-legacy language parent has the same exact, dictionary-
+     * backed Size/wariant option set. `repair()` will independently refetch
+     * parents and every child before its first PUT.
+     *
+     * @param  array{rows:list<array<string,mixed>>}  $audit
+     * @return array{eligible_roots:int,marked_roots:int,marked_mappings:int,skipped_roots:int}
+     */
+    public function markExactRemoteRepairCandidates(array $audit): array
+    {
+        $grouped = collect($audit['rows'])
+            ->filter(fn (array $row): bool => count($row['owner_root_ids']) === 1)
+            ->groupBy(fn (array $row): int => (int) $row['owner_root_ids'][0]);
+        $eligibleRoots = 0;
+        $markedRoots = 0;
+        $markedMappings = 0;
+
+        foreach ($grouped as $rootId => $rows) {
+            if ($rows->isEmpty()
+                || $rows->contains(fn (array $row): bool => data_get(
+                    $row,
+                    'remote_evidence.verified',
+                ) !== true)
+            ) {
+                continue;
+            }
+
+            $eligibleRoots++;
+            $targets = $rows
+                ->map(fn (array $row): array => [
+                    'sales_channel_id' => (int) $row['sales_channel_id'],
+                    'external_product_id' => (string) $row['external_product_id'],
+                    'attribute_id' => (int) $row['attribute_id'],
+                    'size_attribute_id' => (int) data_get($row, 'remote_evidence.size_attribute_id'),
+                    'option_keys' => (array) data_get($row, 'remote_evidence.option_keys', []),
+                ])
+                ->sortBy(fn (array $target): string => $target['sales_channel_id'].'|'.$target['external_product_id'])
+                ->values()
+                ->all();
+            $written = DB::transaction(function () use ($rootId, $targets): int {
+                $mappings = ProductChannelMapping::query()
+                    ->where('product_id', $rootId)
+                    ->whereHas('salesChannel', fn ($query) => $query
+                        ->where('type', 'woocommerce')
+                        ->where('is_active', true))
+                    ->where(function ($query): void {
+                        $query
+                            ->whereNull('external_variation_id')
+                            ->orWhereIn('external_variation_id', ['', '0'])
+                            ->orWhereRaw("TRIM(external_variation_id) = ''");
+                    })
+                    ->lockForUpdate()
+                    ->get();
+
+                foreach ($mappings as $mapping) {
+                    $metadata = (array) $mapping->metadata;
+                    data_set($metadata, WooOwnedVariantAxisRepairService::REMOTE_EVIDENCE_PATH, [
+                        'revision' => WooOwnedVariantAxisRepairService::REVISION,
+                        'verified' => true,
+                        'verified_at' => now()->toISOString(),
+                        'targets' => array_values(array_filter(
+                            $targets,
+                            fn (array $target): bool => (int) $target['sales_channel_id']
+                                === (int) $mapping->sales_channel_id,
+                        )),
+                    ]);
+                    $mapping->forceFill(['metadata' => $metadata])->save();
+                }
+
+                return $mappings->count();
+            });
+
+            if ($written === 0) {
+                continue;
+            }
+
+            $root = Product::query()->find((int) $rootId);
+
+            if (! $root instanceof Product) {
+                continue;
+            }
+
+            $markedMappings += $this->repair->markPending($root);
+            $markedRoots++;
+        }
+
+        return [
+            'eligible_roots' => $eligibleRoots,
+            'marked_roots' => $markedRoots,
+            'marked_mappings' => $markedMappings,
+            'skipped_roots' => $grouped->count() - $eligibleRoots,
         ];
     }
 
@@ -241,6 +358,85 @@ final class WooLegacyVariantAxisRemoteAuditService
             (string) data_get($mapping?->metadata, WooOwnedVariantAxisRepairService::STATE_PATH.'.revision', 'unmarked'),
             (string) data_get($mapping?->metadata, WooOwnedVariantAxisRepairService::STATE_PATH.'.status', 'unmarked'),
         ]));
+    }
+
+    /**
+     * @param  array<string,mixed>  $legacyAxis
+     * @param  Collection<int,array<string,mixed>>  $sizeAxes
+     * @return array{verified:bool,reason:?string,size_attribute_id:?int,option_keys:list<string>}
+     */
+    private function remoteSizeEvidence(array $legacyAxis, Collection $sizeAxes): array
+    {
+        if ($sizeAxes->count() !== 1) {
+            return [
+                'verified' => false,
+                'reason' => 'Produkt nie ma dokładnie jednego globalnego atrybutu Rozmiar/Size.',
+                'size_attribute_id' => null,
+                'option_keys' => [],
+            ];
+        }
+
+        $sizeAxis = $sizeAxes->first();
+        $legacyOptions = collect((array) ($legacyAxis['options'] ?? []))
+            ->map(fn (mixed $option): string => trim((string) $option))
+            ->filter()
+            ->unique(fn (string $option): string => $this->sizeOrder->key($option))
+            ->values();
+        $sizeOptions = collect((array) ($sizeAxis['options'] ?? []))
+            ->map(fn (mixed $option): string => trim((string) $option))
+            ->filter()
+            ->unique(fn (string $option): string => $this->sizeOrder->key($option))
+            ->values();
+
+        if ($legacyOptions->isEmpty() || $sizeOptions->isEmpty()) {
+            return [
+                'verified' => false,
+                'reason' => 'Oś wariantowa albo Rozmiar nie zawiera wartości.',
+                'size_attribute_id' => (int) ($sizeAxis['id'] ?? 0),
+                'option_keys' => [],
+            ];
+        }
+
+        try {
+            $this->sizeOrder->menuOrders($legacyOptions->all());
+            $this->sizeOrder->menuOrders($sizeOptions->all());
+        } catch (Throwable $exception) {
+            return [
+                'verified' => false,
+                'reason' => $exception->getMessage(),
+                'size_attribute_id' => (int) ($sizeAxis['id'] ?? 0),
+                'option_keys' => [],
+            ];
+        }
+
+        $legacyKeys = $legacyOptions
+            ->map(fn (string $option): string => $this->sizeOrder->key($option))
+            ->sort()
+            ->values();
+        $sizeKeys = $sizeOptions
+            ->map(fn (string $option): string => $this->sizeOrder->key($option))
+            ->sort()
+            ->values();
+
+        if ($legacyKeys->all() !== $sizeKeys->all()) {
+            return [
+                'verified' => false,
+                'reason' => 'Wariant i Rozmiar mają różne zbiory wartości.',
+                'size_attribute_id' => (int) ($sizeAxis['id'] ?? 0),
+                'option_keys' => [],
+            ];
+        }
+
+        return [
+            'verified' => true,
+            'reason' => null,
+            'size_attribute_id' => (int) ($sizeAxis['id'] ?? 0),
+            'option_keys' => $sizeOptions
+                ->sortBy(fn (string $option): int => $this->sizeOrder->menuOrders([$option])[0])
+                ->map(fn (string $option): string => $this->sizeOrder->key($option))
+                ->values()
+                ->all(),
+        ];
     }
 
     /** @param array<string,mixed> $attribute */

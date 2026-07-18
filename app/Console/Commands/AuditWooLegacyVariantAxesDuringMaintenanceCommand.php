@@ -12,6 +12,7 @@ final class AuditWooLegacyVariantAxesDuringMaintenanceCommand extends Command
 {
     protected $signature = 'erp:audit-woo-legacy-variant-axes-during-maintenance
         {--external-id= : Include only one exact WooCommerce parent ID}
+        {--mark-repair-candidates : Persist exact remote evidence and queue safe roots}
         {--limit=20 : Maximum number of detailed rows}';
 
     protected $description = 'Audit every live Woo wariant/BLVariant axis independently of local ERP candidate mappings.';
@@ -34,7 +35,7 @@ final class AuditWooLegacyVariantAxesDuringMaintenanceCommand extends Command
         }
 
         $this->info(sprintf(
-            'Woo legacy-axis remote audit: integrations=%d, attributes=%d, remote_products=%d, unique_local_roots=%d, mapped=%d, unmapped=%d, ambiguous=%d, current_candidates=%d, missed=%d.',
+            'Woo legacy-axis remote audit: integrations=%d, attributes=%d, remote_products=%d, unique_local_roots=%d, mapped=%d, unmapped=%d, ambiguous=%d, current_candidates=%d, missed=%d, exact_remote_products=%d, conflicting_remote_products=%d, exact_remote_roots=%d.',
             $result['integrations'],
             $result['attributes'],
             $result['remote_products'],
@@ -44,11 +45,25 @@ final class AuditWooLegacyVariantAxesDuringMaintenanceCommand extends Command
             $result['ambiguous_products'],
             $result['current_candidates'],
             $result['missed_products'],
+            $result['exact_remote_products'],
+            $result['conflicting_remote_products'],
+            $result['exact_remote_roots'],
         ));
+
+        if ((bool) $this->option('mark-repair-candidates')) {
+            $marked = $audit->markExactRemoteRepairCandidates($result);
+            $this->info(sprintf(
+                'Woo legacy-axis remote candidates: eligible_roots=%d, marked_roots=%d, marked_mappings=%d, skipped_roots=%d.',
+                $marked['eligible_roots'],
+                $marked['marked_roots'],
+                $marked['marked_mappings'],
+                $marked['skipped_roots'],
+            ));
+        }
 
         foreach (collect($result['rows'])->take(max(1, (int) $this->option('limit'))) as $row) {
             $this->line(sprintf(
-                'Woo legacy-axis product #%s channel=%s sku=%s lang=%s owners=%s candidates=%s state=%s size_axes=%s legacy_options=%s.',
+                'Woo legacy-axis product #%s channel=%s sku=%s lang=%s owners=%s candidates=%s state=%s remote_exact=%d remote_reason=%s size_axes=%s legacy_options=%s.',
                 $row['external_product_id'],
                 $row['channel'],
                 $row['sku'] !== '' ? $row['sku'] : '-',
@@ -60,6 +75,8 @@ final class AuditWooLegacyVariantAxesDuringMaintenanceCommand extends Command
                         fn (string $status, int|string $rootId): string => $rootId.'='.$status,
                     )->implode(',')
                     : '-',
+                (int) data_get($row, 'remote_evidence.verified', false),
+                (string) (data_get($row, 'remote_evidence.reason') ?? '-'),
                 $row['size_axes'] !== []
                     ? collect($row['size_axes'])->map(
                         fn (array $axis): string => '#'.$axis['id'].'/variation='.(int) $axis['variation'].'/'.implode('|', $axis['options']),

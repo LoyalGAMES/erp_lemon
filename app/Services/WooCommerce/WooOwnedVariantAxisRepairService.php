@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000055';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000056';
+
+    public const PREVIOUS_REMOTE_CATALOG_DISCOVERY_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000055';
 
     public const PREVIOUS_STALE_TRANSLATED_VARIATION_ALIAS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000054';
 
@@ -93,12 +95,15 @@ final class WooOwnedVariantAxisRepairService
 
     public const STATE_PATH = 'maintenance.woo_owned_variant_axis_repair';
 
+    public const REMOTE_EVIDENCE_PATH = 'maintenance.woo_legacy_variant_axis_remote_evidence';
+
     public const REPAIR_QUEUE = 'woocommerce-repair';
 
     public static function isSynchronizedRevision(mixed $revision): bool
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_REMOTE_CATALOG_DISCOVERY_REVISION,
             self::PREVIOUS_STALE_TRANSLATED_VARIATION_ALIAS_REVISION,
             self::PREVIOUS_TRANSLATION_ID_DIAGNOSTIC_REVISION,
             self::PREVIOUS_EXACT_TRANSLATION_HANDOFF_ALIAS_REVISION,
@@ -372,7 +377,9 @@ final class WooOwnedVariantAxisRepairService
             ];
         }
 
-        if (! $this->hasLocalSizeAxisEvidence($product)) {
+        $hasRemoteEvidence = $this->hasCurrentRemoteCatalogEvidence($product);
+
+        if (! $this->hasLocalSizeAxisEvidence($product) && ! $hasRemoteEvidence) {
             return [
                 'status' => 'manual_review',
                 'targets' => 0,
@@ -381,11 +388,24 @@ final class WooOwnedVariantAxisRepairService
             ];
         }
 
-        $variationOptionHints = $this->localVariationOptionHints($product);
+        try {
+            $variationOptionHints = $this->localVariationOptionHints($product);
+        } catch (DomainException $exception) {
+            if (! $hasRemoteEvidence) {
+                throw $exception;
+            }
+
+            // The live parent has an exact dictionary-backed Size/wariant
+            // bijection recorded by the remote audit. Let the multilingual
+            // remote preflight derive child assignments instead of trusting a
+            // stale or incomplete local import snapshot.
+            $variationOptionHints = [];
+        }
 
         if ($variationOptionHints === []
             && $this->hasParentDuplicatedGenericAndSizeAxisEvidence($product)
             && ! $this->hasOnlyBlankLocalChildAxisEvidence($product)
+            && ! $hasRemoteEvidence
         ) {
             return [
                 'status' => 'manual_review',
@@ -3678,6 +3698,25 @@ final class WooOwnedVariantAxisRepairService
                     ->orWhereIn('external_variation_id', ['', '0'])
                     ->orWhereRaw("TRIM(external_variation_id) = ''");
             });
+    }
+
+    private function hasCurrentRemoteCatalogEvidence(Product $product): bool
+    {
+        return $this->parentMappingsQuery((int) $product->id)
+            ->get(['metadata'])
+            ->contains(fn (ProductChannelMapping $mapping): bool => data_get(
+                $mapping->metadata,
+                self::REMOTE_EVIDENCE_PATH.'.revision',
+            ) === self::REVISION
+                && data_get(
+                    $mapping->metadata,
+                    self::REMOTE_EVIDENCE_PATH.'.verified',
+                ) === true
+                && (array) data_get(
+                    $mapping->metadata,
+                    self::REMOTE_EVIDENCE_PATH.'.targets',
+                    [],
+                ) !== []);
     }
 
     public function familyRootId(int $productId): int
