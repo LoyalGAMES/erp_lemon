@@ -631,6 +631,34 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('pending', $state['status'] ?? null);
     }
 
+    public function test_language_suffix_and_mapping_id_migration_requeues_an_unresolved_previous_revision_family(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_LANGUAGE_SUFFIX_AND_MAPPING_ID_REVISION,
+            'status' => 'manual_review',
+            'result' => ['reason' => 'historical language suffix or stale SKU'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000044_requeue_language_suffix_and_mapping_id_repairs.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+    }
+
     public function test_numeric_size_options_form_the_same_exact_bijection_as_text_options(): void
     {
         [$parent, $catalog] = $this->family();
@@ -689,20 +717,23 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         }
 
         foreach ([123 => [6, 'wariant'], 223 => [8, 'variant']] as $parentId => [$axisId, $axisName]) {
+            $suffix = $parentId === 223 ? '-en' : '';
+            $remoteOptions = ['36'.$suffix, '37'.$suffix];
+
             foreach ($catalog->products[$parentId]['attributes'] as &$attribute) {
                 if (in_array((int) ($attribute['id'] ?? 0), [1, $axisId], true)) {
-                    $attribute['options'] = ['36', '37'];
+                    $attribute['options'] = $remoteOptions;
                 }
             }
             unset($attribute);
-            $catalog->products[$parentId]['default_attributes'][0]['option'] = '37';
+            $catalog->products[$parentId]['default_attributes'][0]['option'] = '37'.$suffix;
 
             foreach (array_values($catalog->variations[$parentId]) as $index => $variation) {
                 $variationId = (int) $variation['id'];
                 $catalog->variations[$parentId][$variationId]['attributes'] = [[
                     'id' => $axisId,
                     'name' => $axisName,
-                    'option' => (string) (36 + $index),
+                    'option' => (string) (36 + $index).$suffix,
                 ]];
             }
         }
@@ -4343,6 +4374,61 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
 
         $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+    }
+
+    public function test_complete_contract_uses_exact_primary_mapping_ids_when_child_skus_are_stale(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        $parent->update(['sku' => 'WC-B2C-PARENT-123']);
+
+        foreach ($parent->variantChildren()->get()->values() as $index => $variant) {
+            $variant->update(['sku' => 'ERP-MAPPED-'.($index + 1)]);
+        }
+
+        $originalRemoteSkus = collect($catalog->variations[123])->pluck('sku')->all();
+        $originalStocks = collect($catalog->variations[123])->pluck('stock_quantity')->all();
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('repaired', $result['status'], (string) ($result['reason'] ?? ''));
+        $this->assertSame($originalRemoteSkus, collect($catalog->variations[123])->pluck('sku')->all());
+        $this->assertSame($originalStocks, collect($catalog->variations[123])->pluck('stock_quantity')->all());
+        $this->assertSame(
+            ['M/L', 'S/M'],
+            $parent->variantChildren()->get()
+                ->map(fn (Product $variant): string => (string) data_get(
+                    $variant->masterData(),
+                    'parameters.0.value',
+                ))
+                ->sort()
+                ->values()
+                ->all(),
+        );
+    }
+
+    public function test_stale_child_skus_without_an_exact_primary_mapping_id_set_stay_blocked(): void
+    {
+        [$parent, $catalog] = $this->family();
+        $this->applyLemonContract($catalog);
+        $parent->update(['sku' => 'WC-B2C-PARENT-123']);
+        $variants = $parent->variantChildren()->get()->values();
+
+        foreach ($variants as $index => $variant) {
+            $variant->update(['sku' => 'ERP-UNMAPPED-'.($index + 1)]);
+        }
+
+        ProductChannelMapping::query()
+            ->where('product_id', $variants->first()->id)
+            ->update(['external_variation_id' => '999999']);
+        $this->fakeCatalog($catalog);
+
+        $result = app(WooOwnedVariantAxisRepairService::class)->repair($parent->fresh());
+
+        $this->assertSame('manual_review', $result['status']);
+        $this->assertStringContainsString('Polskie warianty', $result['reason']);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'PUT');
     }
 
     public function test_it_rejects_a_same_sku_stale_alias_when_the_lemon_translation_contract_does_not_match(): void

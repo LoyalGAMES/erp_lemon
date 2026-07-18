@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000043';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000044';
+
+    public const PREVIOUS_LANGUAGE_SUFFIX_AND_MAPPING_ID_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000043';
 
     public const PREVIOUS_NUMERIC_SIZE_KEY_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000042';
 
@@ -75,6 +77,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_LANGUAGE_SUFFIX_AND_MAPPING_ID_REVISION,
             self::PREVIOUS_NUMERIC_SIZE_KEY_REVISION,
             self::PREVIOUS_VARIATION_COVERAGE_DIAGNOSTIC_REVISION,
             self::PREVIOUS_PARENT_AXIS_IDENTITY_REVISION,
@@ -1144,12 +1147,22 @@ final class WooOwnedVariantAxisRepairService
                         'sku',
                         '',
                     )));
+                    $skuIdentity = $localSku !== ''
+                        && $primaryRemoteSku !== ''
+                        && $localSku === $primaryRemoteSku;
+                    $existingAliasIdentity = $localVariant instanceof Product
+                        && $localVariant->channelAliases->contains(
+                            fn (ProductChannelAlias $alias): bool =>
+                                (int) $alias->sales_channel_id === (int) $target['sales_channel_id']
+                                && trim((string) $alias->external_product_id) === $externalProductId
+                                && trim((string) $alias->external_variation_id) === $externalVariationId
+                                && $this->language($alias->language ?? 'en') === $language
+                                && $alias->isOutboundSyncEnabled(),
+                        );
 
                     if (! $localVariant instanceof Product
                         || ! is_array($primaryVariation)
-                        || $localSku === ''
-                        || $primaryRemoteSku === ''
-                        || $localSku !== $primaryRemoteSku
+                        || (! $skuIdentity && ! $existingAliasIdentity)
                         || ! ctype_digit($externalVariationId)
                         || (int) $externalVariationId <= 0
                     ) {
@@ -1746,6 +1759,17 @@ final class WooOwnedVariantAxisRepairService
                 mb_strtoupper(trim((string) ($variation['sku'] ?? ''))) => $variation,
             ])
             ->filter(fn (array $variation, string $sku): bool => $sku !== '');
+        $remoteById = collect($verifiedVariations)
+            ->mapWithKeys(fn (array $variation): array => [
+                trim((string) ($variation['id'] ?? '')) => $variation,
+            ])
+            ->filter(fn (array $variation, mixed $id): bool => trim((string) $id) !== '');
+        $primarySalesChannelId = (int) data_get($primary, 'target.integration.sales_channel_id', 0);
+        $primaryExternalProductId = trim((string) data_get(
+            $primary,
+            'target.external_product_id',
+            '',
+        ));
 
         DB::transaction(function () use (
             $product,
@@ -1753,6 +1777,9 @@ final class WooOwnedVariantAxisRepairService
             $sizeName,
             $orderedOptions,
             $remoteBySku,
+            $remoteById,
+            $primarySalesChannelId,
+            $primaryExternalProductId,
             $primaryLanguage,
         ): void {
             $root = Product::query()->lockForUpdate()->find($product->id);
@@ -1801,7 +1828,24 @@ final class WooOwnedVariantAxisRepairService
             foreach ($relations as $relation) {
                 $variant = $children->get($relation->child_product_id);
                 $sku = mb_strtoupper(trim((string) $variant?->sku));
-                $remote = $remoteBySku->get($sku);
+                $mappedVariationIds = ProductChannelMapping::query()
+                    ->where('product_id', $relation->child_product_id)
+                    ->where('sales_channel_id', $primarySalesChannelId)
+                    ->where('external_product_id', $primaryExternalProductId)
+                    ->whereNotNull('external_variation_id')
+                    ->lockForUpdate()
+                    ->pluck('external_variation_id')
+                    ->map(fn (mixed $id): string => trim((string) $id))
+                    ->filter()
+                    ->unique()
+                    ->values();
+                $remote = $mappedVariationIds->count() === 1
+                    ? $remoteById->get((string) $mappedVariationIds->first())
+                    : null;
+
+                if (! is_array($remote)) {
+                    $remote = $remoteBySku->get($sku);
+                }
 
                 if (! $variant instanceof Product || ! is_array($remote)) {
                     throw new RuntimeException("Nie znaleziono zweryfikowanego wariantu Woo dla SKU {$sku}.");
@@ -4045,8 +4089,19 @@ final class WooOwnedVariantAxisRepairService
                 ->sort()
                 ->values()
                 ->all();
+            $remoteVariationIds = collect($primary['variations'])
+                ->pluck('id')
+                ->map(fn (mixed $id): string => trim((string) $id))
+                ->filter()
+                ->unique()
+                ->sort(SORT_NATURAL)
+                ->values()
+                ->all();
+            $mappedVariationIds = $this->primaryMappedVariationIds($product, $primary);
+            $mappedIdentity = $mappedVariationIds !== []
+                && $mappedVariationIds === $remoteVariationIds;
 
-            if ($localSkus === [] || $primarySkus !== $localSkus) {
+            if (($localSkus === [] || $primarySkus !== $localSkus) && ! $mappedIdentity) {
                 return ['contract' => true, 'error' => 'Polskie warianty nie odpowiadają dokładnie wariantom rodziny ERP.'];
             }
 
@@ -4134,6 +4189,60 @@ final class WooOwnedVariantAxisRepairService
         }
 
         return ['contract' => true, 'error' => null];
+    }
+
+    /**
+     * Return the exact primary Woo variation IDs already persisted for every
+     * ERP child. A missing, duplicate or ambiguous mapping invalidates the
+     * whole proof; callers must not use a partial set.
+     *
+     * @param  array<string,mixed>  $primary
+     * @return list<string>
+     */
+    private function primaryMappedVariationIds(Product $product, array $primary): array
+    {
+        $salesChannelId = (int) data_get($primary, 'target.integration.sales_channel_id', 0);
+        $externalProductId = trim((string) data_get(
+            $primary,
+            'target.external_product_id',
+            '',
+        ));
+        $children = $product->variantChildren;
+
+        if ($salesChannelId <= 0 || $externalProductId === '' || $children->isEmpty()) {
+            return [];
+        }
+
+        $ids = $children->map(function (Product $child) use (
+            $salesChannelId,
+            $externalProductId,
+        ): ?string {
+            $matches = $child->channelMappings
+                ->filter(fn (ProductChannelMapping $mapping): bool =>
+                    (int) $mapping->sales_channel_id === $salesChannelId
+                    && trim((string) $mapping->external_product_id) === $externalProductId
+                    && trim((string) $mapping->external_variation_id) !== '')
+                ->values();
+
+            if ($matches->count() !== 1) {
+                return null;
+            }
+
+            return trim((string) $matches->first()->external_variation_id);
+        });
+
+        if ($ids->contains(null)
+            || $ids->count() !== $children->count()
+            || $ids->unique()->count() !== $ids->count()
+        ) {
+            return [];
+        }
+
+        return $ids
+            ->map(fn (mixed $id): string => (string) $id)
+            ->sort(SORT_NATURAL)
+            ->values()
+            ->all();
     }
 
     /**
@@ -7183,6 +7292,40 @@ final class WooOwnedVariantAxisRepairService
     {
         $key = $this->optionKey($option);
 
+        $dictionaryOption = $this->dictionaryCanonicalSizeOption($attribute, $key);
+
+        if ($dictionaryOption !== null) {
+            return $dictionaryOption;
+        }
+
+        // Historical Polylang terms can leak their language-qualified slug
+        // (`40-en`, `s-m-en`) into a Woo option response. Accept it only when
+        // removing exactly one supported language suffix produces an exact
+        // option in the ERP Size dictionary. Arbitrary unknown suffixes stay
+        // blocked by the normal unknown-value validation.
+        if (preg_match('/^(.+)-(?:pl|en)$/u', $key, $matches) === 1) {
+            $dictionaryOption = $this->dictionaryCanonicalSizeOption(
+                $attribute,
+                (string) $matches[1],
+            );
+
+            if ($dictionaryOption !== null) {
+                return $dictionaryOption;
+            }
+        }
+
+        $candidate = trim($option);
+
+        if (preg_match('/^(?:[2-9]xl|x{1,6}[sl]|[sml])(?:\s*-\s*(?:[2-9]xl|x{1,6}[sl]|[sml]))+$/iu', $candidate) === 1) {
+            $candidate = (string) preg_replace('/\s*-\s*/u', '/', $candidate);
+        }
+
+        return $this->variantOptions->normalize($attribute, $candidate);
+    }
+
+    private function dictionaryCanonicalSizeOption(string $attribute, string $key): ?string
+    {
+
         foreach ($this->sizeDefinitionsByCanonicalPriority($attribute) as $definition) {
             $polishValues = collect((array) $definition->values)
                 ->map(fn (mixed $candidate): string => trim((string) $candidate))
@@ -7212,13 +7355,7 @@ final class WooOwnedVariantAxisRepairService
             }
         }
 
-        $candidate = trim($option);
-
-        if (preg_match('/^(?:[2-9]xl|x{1,6}[sl]|[sml])(?:\s*-\s*(?:[2-9]xl|x{1,6}[sl]|[sml]))+$/iu', $candidate) === 1) {
-            $candidate = (string) preg_replace('/\s*-\s*/u', '/', $candidate);
-        }
-
-        return $this->variantOptions->normalize($attribute, $candidate);
+        return null;
     }
 
     private function canonicalSizeOptionKey(string $attribute, string $option): string
