@@ -1568,22 +1568,33 @@ final class WooCommerceClient
             $excludedTargetTermIds = [];
 
             if ($language !== null && $language !== 'pl') {
-                for ($attempt = 1; $attempt <= 3; $attempt++) {
-                    $sourceTerm = $this->findGlobalProductAttributeTerm(
-                        $integration,
-                        $attributeId,
-                        $pair['source'],
-                        'pl',
-                        [],
-                    );
+                $sourceTerm = $this->findExistingLinkedGlobalProductAttributeSourceTerm(
+                    $integration,
+                    $attributeId,
+                    $pair['localized'],
+                    $language,
+                    $pair['source'],
+                    'pl',
+                );
 
-                    if (is_array($sourceTerm) || $attempt === 3) {
-                        break;
+                if (! is_array($sourceTerm)) {
+                    for ($attempt = 1; $attempt <= 3; $attempt++) {
+                        $sourceTerm = $this->findGlobalProductAttributeTerm(
+                            $integration,
+                            $attributeId,
+                            $pair['source'],
+                            'pl',
+                            [],
+                        );
+
+                        if (is_array($sourceTerm) || $attempt === 3) {
+                            break;
+                        }
+
+                        // Polylang can expose a just-created Polish source term
+                        // one cache cycle after Woo's successful POST response.
+                        usleep($attempt * 200_000);
                     }
-
-                    // Polylang can expose a just-created Polish source term
-                    // one cache cycle after Woo's successful POST response.
-                    usleep($attempt * 200_000);
                 }
 
                 if (! is_array($sourceTerm)) {
@@ -1664,6 +1675,116 @@ final class WooCommerceClient
             'options' => $resolvedOptions,
             'term_ids' => $resolvedTermIds,
         ];
+    }
+
+    /**
+     * Prefer the exact source already linked to an existing target term. This
+     * prevents an interrupted repair's extra unassigned Polish term from
+     * replacing a valid Polylang family that Woo already uses.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function findExistingLinkedGlobalProductAttributeSourceTerm(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $targetOption,
+        string $targetLanguage,
+        string $sourceOption,
+        string $sourceLanguage,
+    ): ?array {
+        $target = $this->findGlobalProductAttributeTerm(
+            $integration,
+            $attributeId,
+            $targetOption,
+            $targetLanguage,
+        );
+
+        if (! is_array($target)) {
+            return null;
+        }
+
+        $translations = collect((array) ($target['translations'] ?? []))
+            ->mapWithKeys(function (mixed $id, mixed $language): array {
+                $language = mb_strtolower(trim((string) $language));
+                $id = is_numeric($id) ? (int) $id : 0;
+
+                return $language !== '' && $id > 0 ? [$language => $id] : [];
+            })
+            ->sortKeys();
+        $targetId = (int) ($target['id'] ?? 0);
+        $sourceId = (int) $translations->get($sourceLanguage, 0);
+
+        if ($translations->count() !== 2
+            || (int) $translations->get($targetLanguage, 0) !== $targetId
+            || $sourceId <= 0
+            || $sourceId === $targetId
+        ) {
+            return null;
+        }
+
+        $source = collect($this->globalProductAttributeTerms(
+            $integration,
+            $attributeId,
+            'all',
+        ))->first(fn (array $term): bool => (int) ($term['id'] ?? 0) === $sourceId);
+
+        if (! is_array($source)) {
+            $response = $this->freshReadRequest($integration)->get(
+                $this->endpoint(
+                    $integration,
+                    "/products/attributes/{$attributeId}/terms/{$sourceId}",
+                ),
+                $this->freshReadQuery(['context' => 'edit']),
+            );
+            $source = $response->successful() ? $response->json() : null;
+        }
+
+        if (! is_array($source) || (int) ($source['id'] ?? 0) !== $sourceId) {
+            throw new RuntimeException(
+                "WooCommerce nie zwrócił polskiej wartości #{$sourceId} powiązanej z {$targetOption} globalnego atrybutu #{$attributeId}.",
+            );
+        }
+
+        if ($this->globalProductAttributeTermHasLanguageIdentity($source)
+            && ! $this->globalProductAttributeTermMatchesLanguage($source, $sourceLanguage)
+        ) {
+            throw new RuntimeException(
+                "Powiązana wartość #{$sourceId} globalnego atrybutu #{$attributeId} nie należy do języka ".mb_strtoupper($sourceLanguage).'.',
+            );
+        }
+
+        $normalizedSourceName = mb_strtolower(trim($sourceOption));
+        $sourceSlug = Str::slug((string) ($source['slug'] ?? ''));
+        $baseSlug = $this->globalProductAttributeTermSlug($sourceOption);
+        $localizedSlug = $this->globalProductAttributeTermSlug($sourceOption, $sourceLanguage);
+        $isExactSource = mb_strtolower(trim((string) ($source['name'] ?? ''))) === $normalizedSourceName
+            || in_array($sourceSlug, [$baseSlug, $localizedSlug], true)
+            || Str::startsWith($sourceSlug, $localizedSlug.'-');
+
+        if (! $isExactSource) {
+            throw new RuntimeException(
+                "Powiązana polska wartość #{$sourceId} globalnego atrybutu #{$attributeId} nie odpowiada opcji {$sourceOption}.",
+            );
+        }
+
+        $sourceTranslations = collect((array) ($source['translations'] ?? []))
+            ->mapWithKeys(function (mixed $id, mixed $termLanguage): array {
+                $termLanguage = mb_strtolower(trim((string) $termLanguage));
+                $id = is_numeric($id) ? (int) $id : 0;
+
+                return $termLanguage !== '' && $id > 0 ? [$termLanguage => $id] : [];
+            })
+            ->sortKeys();
+
+        if ($sourceTranslations->isNotEmpty()
+            && $sourceTranslations->all() !== $translations->all()
+        ) {
+            throw new RuntimeException(
+                "Wartości #{$sourceId} i #{$targetId} globalnego atrybutu #{$attributeId} wskazują różne rodziny tłumaczeń.",
+            );
+        }
+
+        return $source;
     }
 
     /**

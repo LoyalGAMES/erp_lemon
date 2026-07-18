@@ -1651,7 +1651,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame(2, $polishReads);
         $this->assertSame(['XS'], $result['options']);
         $this->assertSame([22], $result['term_ids']);
-        Http::assertSentCount(5);
+        Http::assertSentCount(6);
         Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
             && $request['translations'] === ['en' => 22, 'pl' => 11]);
         Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST'
@@ -1756,7 +1756,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             && (string) parse_url($request->url(), PHP_URL_PATH)
                 === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/1/terms/translations'
             && $request['translations'] === ['en' => 22, 'pl' => 11]);
-        Http::assertSentCount(9);
+        Http::assertSentCount(10);
     }
 
     public function test_english_size_option_recovers_an_exact_unassigned_polish_term_after_a_process_restart(): void
@@ -1841,7 +1841,7 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             && (string) parse_url($request->url(), PHP_URL_PATH)
                 === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/1/terms/translations'
             && $request['translations'] === ['en' => 22, 'pl' => 11]);
-        Http::assertSentCount(7);
+        Http::assertSentCount(8);
     }
 
     public function test_english_size_option_creates_its_missing_proven_polish_source_term_before_linking(): void
@@ -1928,6 +1928,86 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
             && (string) parse_url($request->url(), PHP_URL_PATH)
                 === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/1/terms/translations'
             && $request['translations'] === ['en' => 22, 'pl' => 11]);
+    }
+
+    public function test_english_size_option_reuses_its_existing_exact_polish_translation_family(): void
+    {
+        $this->family();
+        $integration = WordpressIntegration::query()->firstOrFail();
+
+        Http::fake(function (Request $request): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes'
+            ) {
+                return Http::response([[
+                    'id' => 1,
+                    'name' => 'Rozmiar',
+                    'slug' => 'pa_rozmiar',
+                    'type' => 'select',
+                    'order_by' => 'menu_order',
+                ]]);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+                && ($query['lang'] ?? null) === 'en'
+            ) {
+                return Http::response([[
+                    'id' => 22,
+                    'name' => 'XS',
+                    'slug' => 'xs-en',
+                    'lang' => 'en',
+                    'translations' => ['en' => 22, 'pl' => 11],
+                ]]);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+                && ($query['lang'] ?? null) === 'all'
+            ) {
+                return Http::response([[
+                    'id' => 11,
+                    'name' => 'XS PL',
+                    'slug' => 'xs-pl',
+                    'lang' => 'pl',
+                    'translations' => ['en' => 22, 'pl' => 11],
+                ]]);
+            }
+
+            if ($request->method() === 'POST'
+                && $path === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/1/terms/translations'
+            ) {
+                return Http::response([
+                    'linked' => true,
+                    'changed' => false,
+                    'attribute_id' => 1,
+                    'translations' => $request['translations'],
+                ]);
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $result = app(WooCommerceClient::class)->ensureExistingGlobalProductAttributeOptions(
+            $integration,
+            1,
+            'Rozmiar',
+            ['XS'],
+            'en',
+            ['XS'],
+        );
+
+        $this->assertSame([22], $result['term_ids']);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && (string) parse_url($request->url(), PHP_URL_PATH)
+                === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/1/terms/translations'
+            && $request['translations'] === ['en' => 22, 'pl' => 11]);
+        Http::assertNotSent(fn (Request $request): bool => $request->method() === 'POST'
+            && (string) parse_url($request->url(), PHP_URL_PATH)
+                === '/wp-json/wc/v3/products/attributes/1/terms');
     }
 
     public function test_it_creates_and_links_only_the_missing_english_size_term_before_repairing_existing_ids(): void

@@ -133,6 +133,47 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
         $this->assertSame(['pending' => 2], $postcondition['statuses']);
     }
 
+    public function test_existing_term_family_migration_requeues_only_the_exact_polylang_conflict(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'TERM-FAMILY-AXIS',
+            'name' => 'Term family axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $conflict = $this->mapping(
+            $channel,
+            'TERM-FAMILY-CONFLICT',
+            'WooCommerce EN #500316: WordPress nie powiązał tłumaczeń wartości globalnego atrybutu: Wartość atrybutu 110014 należy już do innej rodziny tłumaczeń.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_EXISTING_TERM_TRANSLATION_FAMILY_REVISION,
+        );
+        $unrelated = $this->mapping(
+            $channel,
+            'TERM-FAMILY-UNRELATED',
+            'WordPress nie potwierdził kompletnej rodziny tłumaczeń.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_EXISTING_TERM_TRANSLATION_FAMILY_REVISION,
+        );
+        $unrelatedBefore = $unrelated->metadata;
+
+        $this->runExistingTermFamilyMigration();
+
+        $state = (array) data_get(
+            $conflict->refresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision']);
+        $this->assertSame('pending', $state['status']);
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::PREVIOUS_EXISTING_TERM_TRANSLATION_FAMILY_REVISION,
+            data_get($state, 'previous.revision'),
+        );
+        $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
+        $this->assertSame(
+            ['pending' => 1],
+            app(WooOwnedVariantAxisDeploymentGate::class)->postcondition()['statuses'],
+        );
+    }
+
     private function mapping(
         SalesChannel $channel,
         string $suffix,
@@ -185,6 +226,13 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
     {
         (require database_path(
             'migrations/2026_07_18_000057_requeue_executed_final_woo_variant_axis_blockers.php',
+        ))->up();
+    }
+
+    private function runExistingTermFamilyMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_18_000058_requeue_existing_woo_term_translation_family.php',
         ))->up();
     }
 }
