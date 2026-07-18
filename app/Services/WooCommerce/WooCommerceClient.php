@@ -2347,7 +2347,7 @@ final class WooCommerceClient
      */
     public function linkProductTranslations(WordpressIntegration $integration, array $translations): array
     {
-        $translations = $this->validatedProductTranslationMap($translations);
+        $translations = $this->validatedProductTranslationMap($translations, 'produktów');
 
         try {
             $response = $this->request($integration, retry: false)
@@ -2389,8 +2389,8 @@ final class WooCommerceClient
         array $translations,
         array $parents,
     ): array {
-        $translations = $this->validatedProductTranslationMap($translations);
-        $parents = $this->validatedProductTranslationMap($parents);
+        $translations = $this->validatedProductTranslationMap($translations, 'wariantów');
+        $parents = $this->validatedProductTranslationMap($parents, 'produktów nadrzędnych wariantów');
 
         if (array_keys($translations) !== array_keys($parents)) {
             throw new RuntimeException(
@@ -2451,7 +2451,10 @@ final class WooCommerceClient
             throw new RuntimeException('ERP przygotował niepoprawne ID globalnego atrybutu WooCommerce.');
         }
 
-        $translations = $this->validatedProductTranslationMap($translations);
+        $translations = $this->validatedProductTranslationMap(
+            $translations,
+            "wartości globalnego atrybutu #{$attributeId}",
+        );
         $url = $this->wordpressRestEndpoint(
             $integration,
             "/wc-lemon-erp/v1/catalog/products/attributes/{$attributeId}/terms/translations",
@@ -2751,7 +2754,10 @@ final class WooCommerceClient
      * @param  array<string, int|string>  $translations
      * @return array<string, int>
      */
-    private function validatedProductTranslationMap(array $translations): array
+    private function validatedProductTranslationMap(
+        array $translations,
+        string $resource = 'produktów',
+    ): array
     {
         $normalized = [];
 
@@ -2786,7 +2792,16 @@ final class WooCommerceClient
         }
 
         if (count(array_unique(array_values($normalized))) !== count($normalized)) {
-            throw new RuntimeException('Każdy język tłumaczenia musi wskazywać inny produkt WooCommerce.');
+            $duplicates = collect($normalized)
+                ->groupBy(fn (int $externalId): int => $externalId, preserveKeys: true)
+                ->filter(fn ($languages): bool => $languages->count() > 1)
+                ->map(fn ($languages, int $externalId): string => '#'.$externalId.' ('.implode(', ', $languages->keys()->all()).')')
+                ->implode('; ');
+
+            throw new RuntimeException(
+                "Każdy język tłumaczenia {$resource} musi wskazywać inne ID WooCommerce"
+                    .($duplicates !== '' ? ": {$duplicates}." : '.'),
+            );
         }
 
         ksort($normalized);

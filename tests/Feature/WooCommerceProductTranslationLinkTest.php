@@ -150,6 +150,50 @@ final class WooCommerceProductTranslationLinkTest extends TestCase
         Http::assertNothingSent();
     }
 
+    public function test_it_identifies_a_duplicate_parent_translation_map_before_sending_a_request(): void
+    {
+        Http::fake();
+
+        try {
+            app(WooCommerceClient::class)->linkProductVariationTranslations(
+                $this->integration(),
+                ['pl' => 700144, 'en' => 750100],
+                ['pl' => 700143, 'en' => 700143],
+            );
+            $this->fail('A duplicate parent translation map should have been rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'produktów nadrzędnych wariantów',
+                $exception->getMessage(),
+            );
+            $this->assertStringContainsString('#700143 (pl, en)', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+    }
+
+    public function test_it_identifies_a_duplicate_attribute_term_translation_map_before_sending_a_request(): void
+    {
+        Http::fake();
+
+        try {
+            app(WooCommerceClient::class)->linkProductAttributeTermTranslations(
+                $this->integration(),
+                90,
+                ['pl' => 701, 'en' => 701],
+            );
+            $this->fail('A duplicate attribute-term translation map should have been rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString(
+                'wartości globalnego atrybutu #90',
+                $exception->getMessage(),
+            );
+            $this->assertStringContainsString('#701 (pl, en)', $exception->getMessage());
+        }
+
+        Http::assertNothingSent();
+    }
+
     public function test_it_reports_that_the_plugin_must_be_updated_when_the_route_is_missing(): void
     {
         Http::fake([
