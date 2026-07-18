@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000048';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000049';
+
+    public const PREVIOUS_POST_SIMPLE_TRANSLATION_EXPORT_VERIFICATION_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000048';
 
     public const PREVIOUS_SIMPLE_TRANSLATION_REBUILD_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000047';
 
@@ -85,6 +87,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_POST_SIMPLE_TRANSLATION_EXPORT_VERIFICATION_REVISION,
             self::PREVIOUS_SIMPLE_TRANSLATION_REBUILD_REVISION,
             self::PREVIOUS_TRANSITION_ID_ONLY_OPTIONS_REVISION,
             self::PREVIOUS_TRANSITION_STRUCTURE_DIAGNOSTIC_REVISION,
