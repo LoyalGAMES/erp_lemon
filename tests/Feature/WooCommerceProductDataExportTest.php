@@ -3326,6 +3326,229 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->assertSame(1, IntegrationSyncLog::query()->where('operation', 'create_product_variation')->count());
     }
 
+    public function test_export_recreates_a_deleted_mapped_variation_and_replaces_its_stale_woo_id(): void
+    {
+        $this->createDefaultSizeDictionary(['36']);
+        $this->fakeWooWithGlobalAttributes(function ($request) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'PUT'
+                && $path === '/wp-json/wc/v3/products/321'
+            ) {
+                return Http::response([
+                    'id' => 321,
+                    'sku' => 'HEROS-PARENT',
+                    'type' => 'variable',
+                ]);
+            }
+
+            if ($request->method() === 'PUT'
+                && $path === '/wp-json/wc/v3/products/321/variations/399'
+            ) {
+                return Http::response([
+                    'code' => 'woocommerce_rest_product_variation_invalid_id',
+                    'message' => 'Nieprawidłowy identyfikator.',
+                    'data' => ['status' => 404],
+                ], 404);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/321/variations'
+            ) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'POST'
+                && $path === '/wp-json/wc/v3/products/321/variations'
+            ) {
+                return Http::response([
+                    'id' => 401,
+                    'sku' => $request['sku'],
+                    'attributes' => $request['attributes'],
+                    'stock_quantity' => $request['stock_quantity'],
+                ], 201);
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+            'stock_export_enabled' => true,
+            'settings' => ['product_export' => ['languages' => ['pl']]],
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'M1',
+            'name' => 'Magazyn',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'HEROS-PARENT',
+            'name' => 'Klapki HEROS Beżowe',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+            'attributes' => ['master' => [
+                'source' => 'erp',
+                'product_type' => 'variable',
+                'variant_attribute' => 'Rozmiar',
+                'content' => ['pl' => ['name' => 'Klapki HEROS Beżowe']],
+                'parameters' => [[
+                    'name' => 'Rozmiar',
+                    'value' => '36',
+                    'variation' => true,
+                ]],
+            ]],
+        ]);
+        $variant = $this->createVariantProduct('BLS6A4BB2A01EA5F-36', '36', 299.00);
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $variant->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
+        ProductChannelMapping::query()->create([
+            'product_id' => $parent->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '321',
+            'external_sku' => $parent->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        $mapping = ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '321',
+            'external_variation_id' => '399',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $variant->id,
+            'quantity_on_hand' => 7,
+            'quantity_reserved' => 0,
+            'quantity_available' => 7,
+        ]);
+
+        app(ProductDataExportService::class)->export($parent);
+
+        $mapping->refresh();
+        $this->assertSame('401', $mapping->external_variation_id);
+        $this->assertSame('399', data_get(
+            $mapping->metadata,
+            'deleted_variation_recovery.old_variation_id',
+        ));
+        $this->assertSame('recreated', data_get(
+            $mapping->metadata,
+            'deleted_variation_recovery.mode',
+        ));
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && (string) parse_url($request->url(), PHP_URL_PATH)
+                === '/wp-json/wc/v3/products/321/variations'
+            && $request['sku'] === $variant->sku
+            && $request['stock_quantity'] === 7
+            && $request['stock_status'] === 'instock');
+        $this->assertSame(1, IntegrationSyncLog::query()
+            ->where('operation', 'recreate_product_variation')
+            ->where('external_id', '401')
+            ->count());
+    }
+
+    public function test_deleted_variation_recovery_adopts_an_already_regenerated_exact_sku_without_creating_a_duplicate(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'B2C',
+            'name' => 'Sklep B2C',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $integration = WordpressIntegration::query()->create([
+            'sales_channel_id' => $channel->id,
+            'name' => 'B2C Woo',
+            'base_url' => 'https://shop.test',
+            'consumer_key_encrypted' => Crypt::encryptString('ck_test'),
+            'consumer_secret_encrypted' => Crypt::encryptString('cs_test'),
+        ]);
+        $parent = Product::query()->create([
+            'sku' => 'HEROS-PARENT',
+            'name' => 'Klapki HEROS Beżowe',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $variant = $this->createVariantProduct('BLS6A4BB2A01EA5F-36', '36', 299.00);
+        $mapping = ProductChannelMapping::query()->create([
+            'product_id' => $variant->id,
+            'sales_channel_id' => $channel->id,
+            'external_product_id' => '321',
+            'external_variation_id' => '399',
+            'external_sku' => $variant->sku,
+            'stock_sync_enabled' => true,
+        ]);
+
+        Http::fake(function ($request) use ($variant) {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/321/variations'
+            ) {
+                return Http::response([[
+                    'id' => 401,
+                    'sku' => $variant->sku,
+                    'attributes' => [['id' => 70, 'option' => '36']],
+                ]]);
+            }
+
+            if ($request->method() === 'PUT'
+                && $path === '/wp-json/wc/v3/products/321/variations/401'
+            ) {
+                return Http::response([
+                    'id' => 401,
+                    'sku' => $variant->sku,
+                    'attributes' => $request['attributes'],
+                ]);
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $result = (new \ReflectionMethod(
+            ProductDataExportService::class,
+            'recoverDeletedMappedVariation',
+        ))->invoke(
+            app(ProductDataExportService::class),
+            $parent,
+            $variant,
+            $integration,
+            $mapping,
+            [
+                'sku' => $variant->sku,
+                'attributes' => [['id' => 70, 'option' => '36']],
+            ],
+        );
+
+        $this->assertSame('recover_product_variation_mapping', $result['operation']);
+        $this->assertSame('401', $mapping->fresh()->external_variation_id);
+        $this->assertSame('adopted_existing', data_get(
+            $mapping->fresh()->metadata,
+            'deleted_variation_recovery.mode',
+        ));
+        Http::assertNotSent(fn ($request): bool => $request->method() === 'POST');
+    }
+
     public function test_detached_variant_is_deleted_from_polish_and_english_woocommerce_products(): void
     {
         Http::fake(function ($request) {

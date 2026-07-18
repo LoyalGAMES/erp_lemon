@@ -1596,6 +1596,15 @@ final class WooCommerceClient
                 }
 
                 if (! is_array($sourceTerm)) {
+                    $sourceTerm = $this->findExactUnassignedGlobalProductAttributeTerm(
+                        $integration,
+                        $attributeId,
+                        $pair['source'],
+                        'pl',
+                    );
+                }
+
+                if (! is_array($sourceTerm)) {
                     throw new RuntimeException(
                         "WooCommerce nie zawiera źródłowej polskiej wartości {$pair['source']} globalnego atrybutu #{$attributeId}.",
                     );
@@ -2433,6 +2442,36 @@ final class WooCommerceClient
             mb_strtolower(trim((string) $language)),
             mb_strtolower(trim($option)),
         ]);
+    }
+
+    /**
+     * Recover a term created by Woo before Polylang assigned its language.
+     * Only ERP's exact language-suffixed slug is accepted; a name-only match
+     * or a term explicitly assigned to another language remains unsafe.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function findExactUnassignedGlobalProductAttributeTerm(
+        WordpressIntegration $integration,
+        int $attributeId,
+        string $option,
+        string $language,
+    ): ?array {
+        $language = mb_strtolower(trim($language));
+        $slug = $this->globalProductAttributeTermSlug($option, $language);
+        $matches = collect($this->globalProductAttributeTerms(
+            $integration,
+            $attributeId,
+            'all',
+        ))
+            ->filter(fn (array $term): bool => (int) ($term['id'] ?? 0) > 0
+                && Str::slug((string) ($term['slug'] ?? '')) === $slug)
+            ->reject(fn (array $term): bool => $this->globalProductAttributeTermHasLanguageIdentity($term)
+                && ! $this->globalProductAttributeTermMatchesLanguage($term, $language))
+            ->unique(fn (array $term): int => (int) $term['id'])
+            ->values();
+
+        return $matches->count() === 1 ? $matches->first() : null;
     }
 
     private function globalProductAttributeSlug(string $name): string

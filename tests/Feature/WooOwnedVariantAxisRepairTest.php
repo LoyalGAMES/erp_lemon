@@ -1577,6 +1577,91 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         Http::assertSentCount(9);
     }
 
+    public function test_english_size_option_recovers_an_exact_unassigned_polish_term_after_a_process_restart(): void
+    {
+        $this->family();
+        $integration = WordpressIntegration::query()->firstOrFail();
+        $polishReads = 0;
+
+        Http::fake(function (Request $request) use (&$polishReads): mixed {
+            $path = (string) parse_url($request->url(), PHP_URL_PATH);
+            parse_str((string) parse_url($request->url(), PHP_URL_QUERY), $query);
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes'
+            ) {
+                return Http::response([[
+                    'id' => 1,
+                    'name' => 'Rozmiar',
+                    'slug' => 'pa_rozmiar',
+                    'type' => 'select',
+                    'order_by' => 'menu_order',
+                ]]);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+                && ($query['lang'] ?? null) === 'pl'
+            ) {
+                $polishReads++;
+
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+                && ($query['lang'] ?? null) === 'all'
+            ) {
+                return Http::response([[
+                    'id' => 11,
+                    'name' => 'XS',
+                    'slug' => 'xs-pl',
+                ]]);
+            }
+
+            if ($request->method() === 'GET'
+                && $path === '/wp-json/wc/v3/products/attributes/1/terms'
+                && ($query['lang'] ?? null) === 'en'
+            ) {
+                return Http::response([[
+                    'id' => 22,
+                    'name' => 'XS',
+                    'slug' => 'xs-en',
+                    'lang' => 'en',
+                ]]);
+            }
+
+            if ($request->method() === 'POST'
+                && $path === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/1/terms/translations'
+            ) {
+                return Http::response([
+                    'linked' => true,
+                    'attribute_id' => 1,
+                    'translations' => $request['translations'],
+                ]);
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $result = app(WooCommerceClient::class)->ensureExistingGlobalProductAttributeOptions(
+            $integration,
+            1,
+            'Rozmiar',
+            ['XS'],
+            'en',
+            ['XS'],
+        );
+
+        $this->assertSame([22], $result['term_ids']);
+        $this->assertSame(3, $polishReads);
+        Http::assertSent(fn (Request $request): bool => $request->method() === 'POST'
+            && (string) parse_url($request->url(), PHP_URL_PATH)
+                === '/wp-json/wc-lemon-erp/v1/catalog/products/attributes/1/terms/translations'
+            && $request['translations'] === ['en' => 22, 'pl' => 11]);
+        Http::assertSentCount(7);
+    }
+
     public function test_it_creates_and_links_only_the_missing_english_size_term_before_repairing_existing_ids(): void
     {
         Bus::fake([ImportWooCommerceProductsJob::class]);
