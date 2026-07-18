@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000044';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000045';
+
+    public const PREVIOUS_TRANSITION_CONFIRMATION_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000044';
 
     public const PREVIOUS_LANGUAGE_SUFFIX_AND_MAPPING_ID_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000043';
 
@@ -77,6 +79,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_TRANSITION_CONFIRMATION_REVISION,
             self::PREVIOUS_LANGUAGE_SUFFIX_AND_MAPPING_ID_REVISION,
             self::PREVIOUS_NUMERIC_SIZE_KEY_REVISION,
             self::PREVIOUS_VARIATION_COVERAGE_DIAGNOSTIC_REVISION,
@@ -6538,15 +6541,24 @@ final class WooOwnedVariantAxisRepairService
                     return false;
                 }
 
+                $sizeAxis = $this->isGenericAttribute($expected)
+                    || $this->isSizeAttribute($expected);
+                $identity = fn (mixed $option): string => $sizeAxis
+                    ? $this->canonicalSizeOptionKey(
+                        ProductVariantAxisNameResolver::SIZE,
+                        (string) $option,
+                    )
+                    : $this->optionKey((string) $option);
+
                 $expectedOptions = collect((array) ($expected['options'] ?? []))
-                    ->map(fn (mixed $option): string => $this->optionKey((string) $option))
+                    ->map($identity)
                     ->filter()
                     ->unique()
                     ->sort()
                     ->values()
                     ->all();
                 $actualOptions = collect((array) ($matching['options'] ?? []))
-                    ->map(fn (mixed $option): string => $this->optionKey((string) $option))
+                    ->map($identity)
                     ->filter()
                     ->unique()
                     ->sort()

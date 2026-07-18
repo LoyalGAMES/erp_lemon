@@ -659,6 +659,67 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('pending', $state['status'] ?? null);
     }
 
+    public function test_transition_confirmation_migration_requeues_an_unresolved_previous_revision_family(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_TRANSITION_CONFIRMATION_REVISION,
+            'status' => 'pending',
+            'result' => ['reason' => 'Woo normalized a language-qualified term after PUT'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000045_requeue_transition_confirmation_repairs.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+    }
+
+    public function test_transition_confirmation_treats_exact_language_suffix_as_the_same_size_identity(): void
+    {
+        $this->family();
+        ProductParameterDefinition::query()
+            ->where('name', 'Rozmiar')
+            ->update([
+                'values' => ['36', '37', '38', '39', '40'],
+                'values_en' => ['36', '37', '38', '39', '40'],
+            ]);
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'parentAxisPayloadMatches',
+        );
+        $service = app(WooOwnedVariantAxisRepairService::class);
+        $parent = ['attributes' => [[
+            'id' => 8,
+            'name' => 'variant',
+            'variation' => true,
+            'options' => ['36', '37', '38', '39', '40'],
+        ]]];
+        $payload = ['attributes' => [[
+            'id' => 8,
+            'name' => 'variant',
+            'variation' => true,
+            'options' => ['36-en', '37-en', '38-en', '39-en', '40-en'],
+        ]]];
+
+        $this->assertTrue($method->invoke($service, $parent, $payload));
+
+        $payload['attributes'][0]['options'][4] = '41-en';
+        $this->assertFalse($method->invoke($service, $parent, $payload));
+    }
+
     public function test_numeric_size_options_form_the_same_exact_bijection_as_text_options(): void
     {
         [$parent, $catalog] = $this->family();
