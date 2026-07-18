@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000045';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000046';
+
+    public const PREVIOUS_TRANSITION_STRUCTURE_DIAGNOSTIC_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000045';
 
     public const PREVIOUS_TRANSITION_CONFIRMATION_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000044';
 
@@ -79,6 +81,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_TRANSITION_STRUCTURE_DIAGNOSTIC_REVISION,
             self::PREVIOUS_TRANSITION_CONFIRMATION_REVISION,
             self::PREVIOUS_LANGUAGE_SUFFIX_AND_MAPPING_ID_REVISION,
             self::PREVIOUS_NUMERIC_SIZE_KEY_REVISION,
@@ -903,9 +906,14 @@ final class WooOwnedVariantAxisRepairService
                         (array) ($entry['inert_parent_attribute_ids'] ?? []),
                     );
 
-                    if (! $this->parentAxisPayloadMatches($transitionalParent, $transition)) {
+                    $transitionMismatch = $this->parentAxisPayloadMismatch(
+                        $transitionalParent,
+                        $transition,
+                    );
+
+                    if ($transitionMismatch !== null) {
                         throw new RuntimeException(
-                            "WooCommerce nie potwierdził przejściowej osi rozmiaru produktu #{$target['external_product_id']}.",
+                            "WooCommerce nie potwierdził przejściowej osi rozmiaru produktu #{$target['external_product_id']}: {$transitionMismatch}.",
                         );
                     }
 
@@ -948,9 +956,11 @@ final class WooOwnedVariantAxisRepairService
                         (array) ($entry['inert_parent_attribute_ids'] ?? []),
                     );
 
-                    if (! $this->parentAxisPayloadMatches($updatedParent, $payload)) {
+                    $parentMismatch = $this->parentAxisPayloadMismatch($updatedParent, $payload);
+
+                    if ($parentMismatch !== null) {
                         throw new RuntimeException(
-                            "WooCommerce nie potwierdził docelowej osi rozmiaru produktu #{$target['external_product_id']}.",
+                            "WooCommerce nie potwierdził docelowej osi rozmiaru produktu #{$target['external_product_id']}: {$parentMismatch}.",
                         );
                     }
 
@@ -1432,11 +1442,16 @@ final class WooOwnedVariantAxisRepairService
                         (array) ($entry['inert_parent_attribute_ids'] ?? []),
                     );
 
-                    if ($this->parentAxisPayloadMatches($transitionalParent, $transition)) {
+                    $transitionMismatch = $this->parentAxisPayloadMismatch(
+                        $transitionalParent,
+                        $transition,
+                    );
+
+                    if ($transitionMismatch === null) {
                         return true;
                     }
 
-                    $attemptErrors[] = "rodzic przejściowy (próba {$attempt}): WooCommerce nie potwierdził osi";
+                    $attemptErrors[] = "rodzic przejściowy (próba {$attempt}): {$transitionMismatch}";
                 } catch (Throwable $exception) {
                     $attemptErrors[] = "rodzic przejściowy (próba {$attempt}): ".$exception->getMessage();
                 }
@@ -6521,24 +6536,43 @@ final class WooOwnedVariantAxisRepairService
      */
     private function parentAxisPayloadMatches(array $parent, array $payload): bool
     {
+        return $this->parentAxisPayloadMismatch($parent, $payload) === null;
+    }
+
+    /**
+     * @param  array<string,mixed>  $parent
+     * @param  array{attributes:list<array<string,mixed>>,default_attributes?:list<array<string,mixed>>}  $payload
+     */
+    private function parentAxisPayloadMismatch(array $parent, array $payload): ?string
+    {
         $attributes = collect((array) ($parent['attributes'] ?? []))
             ->filter(fn (mixed $attribute): bool => is_array($attribute))
             ->values()
             ->all();
+        $mismatches = collect();
 
-        return collect($payload['attributes'])
+        collect($payload['attributes'])
             // The transition contract depends only on axes Woo will accept
             // for children. Position, visibility, response-only names and
             // array order may legitimately be normalized by WooCommerce.
             ->filter(fn (mixed $attribute): bool => is_array($attribute)
                 && (bool) ($attribute['variation'] ?? false))
-            ->every(function (array $expected) use ($attributes): bool {
+            ->each(function (array $expected) use ($attributes, $mismatches): void {
+                $axis = $this->axisIdentityKey($expected);
                 $matching = collect($attributes)->first(fn (array $actual): bool => $this->axisIdentityKey(
                     $actual,
-                ) === $this->axisIdentityKey($expected));
+                ) === $axis);
 
-                if (! is_array($matching) || ! (bool) ($matching['variation'] ?? false)) {
-                    return false;
+                if (! is_array($matching)) {
+                    $mismatches->push("{$axis}=brak");
+
+                    return;
+                }
+
+                if (! (bool) ($matching['variation'] ?? false)) {
+                    $mismatches->push("{$axis}=nie jest osią wariantową");
+
+                    return;
                 }
 
                 $sizeAxis = $this->isGenericAttribute($expected)
@@ -6565,8 +6599,17 @@ final class WooOwnedVariantAxisRepairService
                     ->values()
                     ->all();
 
-                return $expectedOptions === $actualOptions;
+                if ($expectedOptions !== $actualOptions) {
+                    $mismatches->push(sprintf(
+                        '%s opcje oczekiwane=[%s], faktyczne=[%s]',
+                        $axis,
+                        implode(',', $expectedOptions),
+                        implode(',', $actualOptions),
+                    ));
+                }
             });
+
+        return $mismatches->isEmpty() ? null : $mismatches->implode('; ');
     }
 
     /**

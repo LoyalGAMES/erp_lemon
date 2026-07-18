@@ -687,6 +687,81 @@ final class WooOwnedVariantAxisRepairTest extends TestCase
         $this->assertSame('pending', $state['status'] ?? null);
     }
 
+    public function test_transition_structure_diagnostic_migration_requeues_an_unresolved_previous_revision_family(): void
+    {
+        [$parent] = $this->family();
+        $mapping = ProductChannelMapping::query()
+            ->where('product_id', $parent->id)
+            ->firstOrFail();
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::PREVIOUS_TRANSITION_STRUCTURE_DIAGNOSTIC_REVISION,
+            'status' => 'pending',
+            'result' => ['reason' => 'Woo did not confirm a transitional parent axis'],
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $migration = require database_path(
+            'migrations/2026_07_18_000046_requeue_transition_structure_diagnostics.php',
+        );
+        $migration->up();
+
+        $state = (array) data_get(
+            $mapping->fresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision'] ?? null);
+        $this->assertSame('pending', $state['status'] ?? null);
+    }
+
+    public function test_transition_diagnostic_names_missing_disabled_and_changed_axes(): void
+    {
+        $this->family();
+        $method = new \ReflectionMethod(
+            WooOwnedVariantAxisRepairService::class,
+            'parentAxisPayloadMismatch',
+        );
+        $service = app(WooOwnedVariantAxisRepairService::class);
+        $payload = ['attributes' => [
+            [
+                'id' => 1,
+                'name' => 'Size',
+                'variation' => true,
+                'options' => ['S', 'M'],
+            ],
+            [
+                'id' => 8,
+                'name' => 'variant',
+                'variation' => true,
+                'options' => ['S', 'M'],
+            ],
+        ]];
+
+        $this->assertSame(
+            'id:1=brak; id:8=nie jest osią wariantową',
+            $method->invoke($service, ['attributes' => [[
+                'id' => 8,
+                'name' => 'variant',
+                'variation' => false,
+                'options' => ['S', 'M'],
+            ]]], $payload),
+        );
+
+        $this->assertSame(
+            'id:1 opcje oczekiwane=[m,s], faktyczne=[l,s]',
+            $method->invoke($service, ['attributes' => [
+                [
+                    'id' => 1,
+                    'name' => 'Size',
+                    'variation' => true,
+                    'options' => ['S', 'L'],
+                ],
+                $payload['attributes'][1],
+            ]], $payload),
+        );
+    }
+
     public function test_transition_confirmation_treats_exact_language_suffix_as_the_same_size_identity(): void
     {
         $this->family();
