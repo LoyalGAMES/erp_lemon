@@ -1870,31 +1870,35 @@ final class WooCommerceClient
             .preg_quote($sourceLanguage, '/').'(?:-\d+)?|\d+))?$/';
         $excludedSourceTermIds[] = $targetTermId;
 
+        $isPlausibleSource = static function (array $candidate) use (
+            $normalizedSourceName,
+            $baseSlug,
+            $localizedSlug,
+            $sourceSlugPattern,
+        ): bool {
+            $candidateSlug = Str::slug((string) ($candidate['slug'] ?? ''));
+            $candidateNameSlug = Str::slug((string) ($candidate['name'] ?? ''));
+
+            return mb_strtolower(trim((string) ($candidate['name'] ?? '')))
+                    === $normalizedSourceName
+                || in_array($candidateSlug, [$baseSlug, $localizedSlug], true)
+                || Str::startsWith($candidateSlug, $localizedSlug.'-')
+                || preg_match($sourceSlugPattern, $candidateSlug) === 1
+                || preg_match($sourceSlugPattern, $candidateNameSlug) === 1;
+        };
+
         $candidates = collect(array_merge(
             $this->globalProductAttributeTerms($integration, $attributeId, $sourceLanguage),
             $this->globalProductAttributeTerms($integration, $attributeId, 'all'),
         ))
             ->filter(function (array $candidate) use (
-                $normalizedSourceName,
-                $baseSlug,
-                $localizedSlug,
-                $sourceSlugPattern,
                 $sourceLanguage,
                 $excludedSourceTermIds,
             ): bool {
                 $candidateId = (int) ($candidate['id'] ?? 0);
-                $candidateSlug = Str::slug((string) ($candidate['slug'] ?? ''));
-                $candidateNameSlug = Str::slug((string) ($candidate['name'] ?? ''));
-                $isExactSource = mb_strtolower(trim((string) ($candidate['name'] ?? '')))
-                        === $normalizedSourceName
-                    || in_array($candidateSlug, [$baseSlug, $localizedSlug], true)
-                    || Str::startsWith($candidateSlug, $localizedSlug.'-')
-                    || preg_match($sourceSlugPattern, $candidateSlug) === 1
-                    || preg_match($sourceSlugPattern, $candidateNameSlug) === 1;
 
                 return $candidateId > 0
                     && ! in_array($candidateId, $excludedSourceTermIds, true)
-                    && $isExactSource
                     && (! $this->globalProductAttributeTermHasLanguageIdentity($candidate)
                         || $this->globalProductAttributeTermMatchesLanguage(
                             $candidate,
@@ -1902,7 +1906,13 @@ final class WooCommerceClient
                         ));
             })
             ->unique(fn (array $candidate): int => (int) $candidate['id'])
-            ->sortBy(fn (array $candidate): int => (int) $candidate['id'])
+            ->sortBy(fn (array $candidate): string => sprintf(
+                '%d|%010d|%010d',
+                $isPlausibleSource($candidate) ? 0 : 1,
+                abs((int) $candidate['id'] - $targetTermId),
+                (int) $candidate['id'],
+            ))
+            ->take(100)
             ->values();
 
         foreach ($candidates as $candidate) {
@@ -1911,6 +1921,16 @@ final class WooCommerceClient
                     $sourceLanguage => (int) $candidate['id'],
                     $targetLanguage => $targetTermId,
                 ]);
+
+                if (! $isPlausibleSource($candidate)) {
+                    $candidateId = (int) $candidate['id'];
+                    $candidateName = trim((string) ($candidate['name'] ?? '')) ?: '?';
+                    $candidateSlug = trim((string) ($candidate['slug'] ?? '')) ?: '?';
+
+                    throw new RuntimeException(
+                        "Istniejące polskie tłumaczenie #{$candidateId} ({$candidateName}, {$candidateSlug}) wartości #{$targetTermId} nie odpowiada opcji {$sourceOption}.",
+                    );
+                }
 
                 return $candidate;
             } catch (ProductAttributeTermTranslationConflictException) {

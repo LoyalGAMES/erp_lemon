@@ -252,6 +252,43 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
         $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
     }
 
+    public function test_existing_sibling_probe_migration_requeues_only_the_persisting_exact_conflict(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'SIBLING-PROBE-AXIS',
+            'name' => 'Sibling probe axis',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $conflict = $this->mapping(
+            $channel,
+            'SIBLING-PROBE-CONFLICT',
+            'WooCommerce EN #500316: WordPress nie powiązał tłumaczeń wartości globalnego atrybutu: Wartość atrybutu 110014 należy już do innej rodziny tłumaczeń.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_EXISTING_TERM_SIBLING_PROBE_REVISION,
+        );
+        $unrelated = $this->mapping(
+            $channel,
+            'SIBLING-PROBE-UNRELATED',
+            'WordPress nie potwierdził kompletnej rodziny tłumaczeń.',
+            WooOwnedVariantAxisRepairService::PREVIOUS_EXISTING_TERM_SIBLING_PROBE_REVISION,
+        );
+        $unrelatedBefore = $unrelated->metadata;
+
+        $this->runExistingSiblingProbeMigration();
+
+        $state = (array) data_get(
+            $conflict->refresh()->metadata,
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+        );
+        $this->assertSame(WooOwnedVariantAxisRepairService::REVISION, $state['revision']);
+        $this->assertSame('pending', $state['status']);
+        $this->assertSame(
+            WooOwnedVariantAxisRepairService::PREVIOUS_EXISTING_TERM_SIBLING_PROBE_REVISION,
+            data_get($state, 'previous.revision'),
+        );
+        $this->assertSame($unrelatedBefore, $unrelated->refresh()->metadata);
+    }
+
     private function mapping(
         SalesChannel $channel,
         string $suffix,
@@ -325,6 +362,13 @@ final class WooOwnedVariantAxisFinalBlockersRequeueMigrationTest extends TestCas
     {
         (require database_path(
             'migrations/2026_07_18_000060_requeue_numeric_woo_term_translation_sibling.php',
+        ))->up();
+    }
+
+    private function runExistingSiblingProbeMigration(): void
+    {
+        (require database_path(
+            'migrations/2026_07_18_000061_requeue_existing_woo_term_sibling_probe.php',
         ))->up();
     }
 }
