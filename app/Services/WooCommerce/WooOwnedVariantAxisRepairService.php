@@ -33,7 +33,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000059';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000060';
+
+    public const PREVIOUS_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000059';
 
     public const PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000058';
 
@@ -111,6 +113,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
             self::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION,
             self::PREVIOUS_AUTHORITATIVE_REMOTE_AXIS_REVISION,
             self::PREVIOUS_EXACT_REMOTE_EVIDENCE_REVISION,
@@ -218,8 +221,10 @@ final class WooOwnedVariantAxisRepairService
                     'requested_at' => now()->toISOString(),
                 ];
 
-                if (($state['revision'] ?? null)
-                    === self::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION
+                if (in_array(($state['revision'] ?? null), [
+                    self::PREVIOUS_FINAL_VARIANT_REPAIR_BLOCKERS_REVISION,
+                    self::PREVIOUS_ZERO_VARIATION_AND_SPLIT_OWNER_REVISION,
+                ], true)
                 ) {
                     $nextState['previous'] = collect($state)->only([
                         'revision',
