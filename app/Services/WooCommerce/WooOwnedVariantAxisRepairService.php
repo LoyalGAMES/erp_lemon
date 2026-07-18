@@ -31,7 +31,9 @@ use Throwable;
  */
 final class WooOwnedVariantAxisRepairService
 {
-    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000041';
+    public const REVISION = 'woo_erp_size_variant_axis_2026_07_18_000042';
+
+    public const PREVIOUS_VARIATION_COVERAGE_DIAGNOSTIC_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000041';
 
     public const PREVIOUS_PARENT_AXIS_IDENTITY_REVISION = 'woo_erp_size_variant_axis_2026_07_18_000040';
 
@@ -71,6 +73,7 @@ final class WooOwnedVariantAxisRepairService
     {
         return is_string($revision) && in_array($revision, [
             self::REVISION,
+            self::PREVIOUS_VARIATION_COVERAGE_DIAGNOSTIC_REVISION,
             self::PREVIOUS_PARENT_AXIS_IDENTITY_REVISION,
             self::PREVIOUS_ACTIVE_CHILD_AXIS_REVISION,
             self::PREVIOUS_ERP_SIZE_CONFIGURATION_ORDER_REVISION,
@@ -5896,7 +5899,22 @@ final class WooOwnedVariantAxisRepairService
             || $variationKeys->unique()->count() !== $variationKeys->count()
             || $variationKeys->sort()->values()->all() !== $canonicalByKey->keys()->sort()->values()->all()
         ) {
-            return $this->unsafePlan('Warianty nie pokrywają dokładnie i jednokrotnie wartości globalnego rozmiaru.');
+            $assignments = $variationKeys
+                ->countBy()
+                ->sortKeys()
+                ->map(fn (int $count, string $key): string => $key.'x'.$count)
+                ->values()
+                ->implode(',');
+            $expected = $canonicalByKey->keys()->sort()->values()->implode(',');
+
+            return $this->unsafePlan(sprintf(
+                'Warianty nie pokrywają dokładnie i jednokrotnie wartości globalnego rozmiaru '
+                    .'(warianty=%d, rozmiary=%d, przypisania=%s, oczekiwane=%s).',
+                $variationKeys->count(),
+                $canonicalByKey->count(),
+                $assignments !== '' ? $assignments : '-',
+                $expected !== '' ? $expected : '-',
+            ));
         }
 
         $targetDefaultOptions = collect();
