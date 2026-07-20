@@ -3746,11 +3746,18 @@ final class WooOwnedVariantAxisRepairService
      * and `queued` families — never `manual_review` — and a family that no
      * longer looks like an audit candidate (its legacy axis was just removed in
      * Woo) is never re-marked pending. Without this hatch the block is permanent.
-     * Only the current-revision repair state on the parent mappings is removed;
-     * nothing else in the metadata is touched, and a later audit can re-mark the
-     * family if a genuine legacy axis reappears.
      *
-     * @return array{root_id:int, cleared:int, targets:list<array{channel:string,status:string,external_product_id:string}>}
+     * Two writes happen: the current-revision repair state on the parent
+     * mappings is removed (unblocks the export job), and the family root's
+     * masterData is stamped with the synchronized repair revision — the marker
+     * a successful official repair writes. The stamp switches
+     * protectedMappedLegacyVariantAttribute() off, so the released family's
+     * exports emit the canonical axis instead of resurrecting the legacy
+     * `wariant` attribute from the stale Woo snapshot. Nothing else in the
+     * metadata is touched, and a later audit can re-mark the family if a
+     * genuine legacy axis reappears.
+     *
+     * @return array{root_id:int, cleared:int, stamped_synchronized:bool, targets:list<array{channel:string,status:string,external_product_id:string}>}
      */
     public function clearFamilyRepairBlock(int $productId, bool $dryRun = false): array
     {
@@ -3787,7 +3794,50 @@ final class WooOwnedVariantAxisRepairService
                     $cleared++;
                 });
 
-            return ['root_id' => $rootId, 'cleared' => $cleared, 'targets' => $targets];
+            // The mapping-level block is only half the lock. Full export also
+            // consults protectedMappedLegacyVariantAttribute(), which keeps a
+            // mapped family on its legacy Woo axis (e.g. `wariant`) until the
+            // root's masterData carries a synchronized repair revision — the
+            // stamp the official repair writes on success. Without it, the
+            // released family would keep RE-CREATING the legacy attribute in
+            // Woo on every export, undoing the operator's manual cleanup.
+            // Stamp the same synchronized marker here; the next full export
+            // then emits only the canonical axis and Woo's attribute-replacing
+            // PUT removes the legacy one remotely.
+            $stamped = false;
+            $root = Product::query()
+                ->when(! $dryRun, fn ($query) => $query->lockForUpdate())
+                ->find($rootId);
+
+            if ($root instanceof Product) {
+                $attributes = (array) $root->attributes;
+                $master = (array) ($attributes['master'] ?? []);
+                $declared = trim((string) ($master['variant_attribute'] ?? ''));
+                $declaredIsLegacy = $declared === ''
+                    || $this->legacySizeAxis->isLegacyGeneric($declared)
+                    || app(ProductVariantAxisNameResolver::class)->isLegacyPluralSizeAlias($declared);
+                $axis = $declaredIsLegacy ? ProductVariantAxisNameResolver::SIZE : $declared;
+                $existing = (array) data_get($master, self::STATE_PATH, []);
+                $stamped = ! self::isSynchronizedRevision($existing['revision'] ?? null);
+
+                if ($stamped && ! $dryRun) {
+                    data_set($master, self::STATE_PATH, [
+                        'revision' => self::REVISION,
+                        'variant_attribute' => $axis,
+                        'synchronized_at' => now()->toISOString(),
+                        'released_by_operator' => true,
+                    ]);
+                    $attributes['master'] = $master;
+                    $root->forceFill(['attributes' => $attributes])->save();
+                }
+            }
+
+            return [
+                'root_id' => $rootId,
+                'cleared' => $cleared,
+                'stamped_synchronized' => $stamped,
+                'targets' => $targets,
+            ];
         };
 
         return $dryRun ? $apply() : DB::transaction($apply, 3);
