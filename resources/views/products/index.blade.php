@@ -932,7 +932,7 @@
                                             <button class="button secondary" type="submit">Archiwizuj</button>
                                         </form>
                                     @endif
-                                    <form method="POST" action="{{ route('products.destroy', $product) }}" onsubmit="return confirm('Usunąć produkt?');">
+                                    <form method="POST" action="{{ route('products.destroy', $product) }}" onsubmit="return confirm('Usunąć produkt? Jeśli nie miał sprzedaży, jego dokumenty magazynowe (KOR/PZ) zostaną wycofane razem z nim.');">
                                         @csrf
                                         @method('DELETE')
                                         <button class="button" style="background: var(--red);" type="submit">Usuń</button>

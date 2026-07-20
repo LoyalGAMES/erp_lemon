@@ -12,9 +12,12 @@ use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
+use App\Models\ExternalOrderLine;
+use App\Models\InvoiceLine;
+use App\Models\PackingTask;
 use App\Models\ProductChannelAlias;
+use App\Models\ReturnCaseLine;
 use App\Models\StockBalance;
-use App\Models\StockLedgerEntry;
 use App\Models\StockSyncQueueItem;
 use App\Models\StockSyncState;
 use App\Models\WarehouseDocumentLine;
@@ -1624,24 +1627,94 @@ class ProductController extends Controller
         );
     }
 
-    public function destroy(Product $product): RedirectResponse
+    /**
+     * Warehouse-document types whose rows may be silently withdrawn together
+     * with a never-sold product. Anything else (WZ/RW/RX and future outbound
+     * types) is treated as usage evidence and keeps the product deletable only
+     * through archiving.
+     */
+    private const WITHDRAWABLE_DOCUMENT_TYPES = ['KOR', 'PZ', 'INW'];
+
+    public function destroy(Product $product, AuditLogService $audit): RedirectResponse
     {
         if ($this->productHasStock($product)) {
             return back()->with('error', 'Nie można usunąć produktu ze stanem magazynowym.');
         }
 
-        // Document and ledger rows reference products with restrictOnDelete —
-        // deleting would orphan booked KOR/PZ documents. Surface the archive
-        // path instead of letting the database throw an opaque 500.
-        if ($this->productHasDocumentHistory($product)) {
+        // A product that was ever sold, invoiced, returned or packed must keep
+        // its full paper trail — deletion would silently null those references.
+        $tradeEvidence = $this->productTradeEvidence($product);
+
+        if ($tradeEvidence !== []) {
             return back()->with(
                 'error',
-                'Nie można usunąć produktu z historią dokumentów magazynowych. Użyj „Archiwizuj" — produkt zniknie z listy i synchronizacji, a dokumenty pozostaną spójne.',
+                'Nie można usunąć produktu z historią sprzedaży ('.implode(', ', $tradeEvidence).'). Użyj „Archiwizuj" — produkt zniknie z listy i synchronizacji, a historia pozostanie spójna.',
+            );
+        }
+
+        // Never traded: its documents are pure data-entry noise (intake and
+        // corrections that net to zero, enforced by the stock guard above).
+        // Withdraw them, but only documents that belong to this product alone —
+        // a shared delivery cannot be pulled from under other products' feet.
+        $documents = WarehouseDocument::query()
+            ->whereHas('lines', fn ($query) => $query->where('product_id', $product->id))
+            ->with('lines')
+            ->get();
+        $blocked = $documents
+            ->filter(fn (WarehouseDocument $document): bool => $document->status !== 'cancelled'
+                && ! in_array($document->type, self::WITHDRAWABLE_DOCUMENT_TYPES, true))
+            ->merge($documents->filter(
+                fn (WarehouseDocument $document): bool => $document->status !== 'cancelled'
+                    && $document->lines->contains(
+                        fn (WarehouseDocumentLine $line): bool => (int) $line->product_id !== (int) $product->id,
+                    ),
+            ))
+            ->unique('id')
+            ->values();
+
+        if ($blocked->isNotEmpty()) {
+            return back()->with(
+                'error',
+                'Nie można automatycznie wycofać dokumentów: '.$blocked->pluck('number')->implode(', ')
+                    .' — zawierają inne produkty lub wydania. Anuluj je ręcznie w module dokumentów albo użyj „Archiwizuj".',
             );
         }
 
         try {
-            $product->delete();
+            DB::transaction(function () use ($product, $documents, $audit): void {
+                $withdrawn = [];
+
+                foreach ($documents as $document) {
+                    if ($document->status !== 'cancelled'
+                        || ! $document->lines->contains(
+                            fn (WarehouseDocumentLine $line): bool => (int) $line->product_id !== (int) $product->id,
+                        )
+                    ) {
+                        // Exclusive document (or an exclusive cancelled one):
+                        // remove it entirely; lines and ledger cascade away.
+                        $withdrawn[] = $document->number;
+                        $document->forceDelete();
+
+                        continue;
+                    }
+
+                    // A cancelled document shared with other products keeps its
+                    // shell; only this product's lines (and their cascading
+                    // ledger entries) go, so the remaining rows stay intact.
+                    $withdrawn[] = $document->number.' (tylko pozycje produktu)';
+                    WarehouseDocumentLine::query()
+                        ->where('warehouse_document_id', $document->id)
+                        ->where('product_id', $product->id)
+                        ->delete();
+                }
+
+                $audit->record('product.deleted_with_documents_withdrawn', $product, null, [
+                    'sku' => $product->sku,
+                    'withdrawn_documents' => $withdrawn,
+                ]);
+
+                $product->delete();
+            });
         } catch (\Illuminate\Database\QueryException) {
             return back()->with(
                 'error',
@@ -1649,7 +1722,12 @@ class ProductController extends Controller
             );
         }
 
-        return back()->with('status', 'Produkt został usunięty.');
+        return back()->with(
+            'status',
+            $documents->isEmpty()
+                ? 'Produkt został usunięty.'
+                : 'Produkt został usunięty, a jego dokumenty magazynowe zostały wycofane: '.$documents->pluck('number')->implode(', ').'.',
+        );
     }
 
     public function archive(Product $product, AuditLogService $audit): RedirectResponse
@@ -1724,10 +1802,39 @@ class ProductController extends Controller
             ->exists();
     }
 
-    private function productHasDocumentHistory(Product $product): bool
+    /** @return list<string> */
+    private function productTradeEvidence(Product $product): array
     {
-        return WarehouseDocumentLine::query()->where('product_id', $product->id)->exists()
-            || StockLedgerEntry::query()->where('product_id', $product->id)->exists();
+        $evidence = [];
+
+        if (ExternalOrderLine::query()->where('product_id', $product->id)->exists()) {
+            $evidence[] = 'pozycje zamówień';
+        }
+
+        if (InvoiceLine::query()->where('product_id', $product->id)->exists()) {
+            $evidence[] = 'pozycje faktur';
+        }
+
+        if (ReturnCaseLine::query()->where('product_id', $product->id)->exists()) {
+            $evidence[] = 'zwroty';
+        }
+
+        if (PackingTask::query()->where('product_id', $product->id)->exists()) {
+            $evidence[] = 'zadania pakowania';
+        }
+
+        if (WarehouseDocumentLine::query()
+            ->where('product_id', $product->id)
+            ->whereHas('document', fn ($query) => $query->whereNotIn(
+                'type',
+                self::WITHDRAWABLE_DOCUMENT_TYPES,
+            ))
+            ->exists()
+        ) {
+            $evidence[] = 'dokumenty wydań';
+        }
+
+        return $evidence;
     }
 
     /**

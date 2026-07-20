@@ -56,13 +56,13 @@ class ProductArchiveTest extends TestCase
         ]);
     }
 
-    public function test_destroy_refuses_a_product_with_document_history_instead_of_500(): void
+    public function test_destroy_withdraws_documents_of_a_never_sold_product(): void
     {
         $warehouse = $this->warehouse();
         $product = $this->product();
 
-        // Booking a correction creates a KOR document, its line and a ledger
-        // entry — exactly the state after an operator zeroes stock by hand.
+        // Booking corrections creates KOR documents, lines and ledger entries —
+        // exactly the state after an operator zeroes stock before removal.
         $this->post(route('products.stock.adjust', $product), [
             'warehouse_id' => $warehouse->id,
             'new_quantity' => 5,
@@ -73,12 +73,67 @@ class ProductArchiveTest extends TestCase
             'new_quantity' => 0,
             'notes' => 'zerowanie przed usunięciem',
         ])->assertSessionHas('status');
+        $this->assertSame(2, \App\Models\WarehouseDocument::query()->count());
 
         $response = $this->delete(route('products.destroy', $product));
 
         $response->assertRedirect();
+        $this->assertStringContainsString('wycofane', (string) session('status'));
+        $this->assertNull(Product::query()->find($product->id));
+        $this->assertSame(0, \App\Models\WarehouseDocument::query()->withTrashed()->count());
+        $this->assertSame(0, \App\Models\StockLedgerEntry::query()->count());
+        $this->assertTrue(AuditLog::query()->where('action', 'product.deleted_with_documents_withdrawn')->exists());
+    }
+
+    public function test_destroy_refuses_a_product_with_outbound_document_history(): void
+    {
+        $warehouse = $this->warehouse();
+        $product = $this->product();
+        $document = \App\Models\WarehouseDocument::query()->create([
+            'number' => 'WZ/2026/07/001',
+            'type' => 'WZ',
+            'status' => 'posted',
+            'source_warehouse_id' => $warehouse->id,
+        ]);
+        \App\Models\WarehouseDocumentLine::query()->create([
+            'warehouse_document_id' => $document->id,
+            'product_id' => $product->id,
+            'quantity' => 1,
+        ]);
+
+        $this->delete(route('products.destroy', $product));
+
+        $this->assertStringContainsString('historią sprzedaży', (string) session('error'));
         $this->assertStringContainsString('Archiwizuj', (string) session('error'));
         $this->assertNotNull(Product::query()->find($product->id));
+        $this->assertNotNull(\App\Models\WarehouseDocument::query()->find($document->id));
+    }
+
+    public function test_destroy_refuses_when_a_shared_document_contains_other_products(): void
+    {
+        $warehouse = $this->warehouse();
+        $product = $this->product();
+        $sibling = $this->product('SKU-ARCH-SIBLING');
+        $document = \App\Models\WarehouseDocument::query()->create([
+            'number' => 'PZ/2026/07/001',
+            'type' => 'PZ',
+            'status' => 'posted',
+            'destination_warehouse_id' => $warehouse->id,
+        ]);
+
+        foreach ([$product, $sibling] as $lineProduct) {
+            \App\Models\WarehouseDocumentLine::query()->create([
+                'warehouse_document_id' => $document->id,
+                'product_id' => $lineProduct->id,
+                'quantity' => 2,
+            ]);
+        }
+
+        $this->delete(route('products.destroy', $product));
+
+        $this->assertStringContainsString('PZ/2026/07/001', (string) session('error'));
+        $this->assertNotNull(Product::query()->find($product->id));
+        $this->assertSame(2, \App\Models\WarehouseDocumentLine::query()->count());
     }
 
     public function test_destroy_still_deletes_a_product_without_history(): void
