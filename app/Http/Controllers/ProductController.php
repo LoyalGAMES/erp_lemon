@@ -1367,17 +1367,41 @@ class ProductController extends Controller
             return back()->with('error', 'Ten produkt nie ma mapowania rodzica do żadnego kanału WooCommerce.');
         }
 
+        // Lift a stuck axis-repair block BEFORE contending for the mutation
+        // locks. A blocked family keeps its export job bouncing every minute
+        // and each bounce briefly holds the very locks this action needs, so
+        // an unlucky operator could be starved forever by the loop this button
+        // exists to end. Clearing is a pure DB write (its own transaction with
+        // row locks) and needs no cache lock. Forcing a reconnect is the
+        // operator's assertion that Woo was already repaired by hand — the
+        // scheduler never re-attempts a manual_review family on its own.
+        $unblocked = (int) $axisRepair->clearFamilyRepairBlock($rootId)['cleared'];
+
         $locks = $this->acquireWooCommerceMutationLocks(
             $rootId,
             ImportWooCommerceProductsJob::catalogIntegrationIdsForProduct($rootId),
         );
 
         if ($locks === null) {
+            if ($unblocked > 0) {
+                $audit->record('product.woocommerce_relink_unblocked', $root, null, [
+                    'axis_repair_blocks_cleared' => $unblocked,
+                ]);
+                // A fresh token supersedes the bouncing job (or replaces one
+                // that already exhausted its retries) and performs the full
+                // family rebuild without waiting for the busy locks.
+                $this->queueWooCommerceDataExport($root);
+
+                return back()->with(
+                    'status',
+                    'Zdjęto blokadę naprawy osi Rozmiar; trwająca synchronizacja dokończy pełny eksport rodziny w tle. Jeśli chcesz też ponowić łączenie mapowań, kliknij ponownie za chwilę.',
+                );
+            }
+
             return back()->with('status', 'Synchronizacja tego produktu z WooCommerce już trwa. Spróbuj ponownie za chwilę.');
         }
 
         $totalChanged = 0;
-        $unblocked = 0;
         $reports = [];
 
         try {
@@ -1394,15 +1418,10 @@ class ProductController extends Controller
                 $totalChanged += (int) $report['changed'];
                 $reports[$channelId] = $report;
             }
-
-            // Forcing a reconnect asserts the operator has already repaired the
-            // WooCommerce axis by hand. Clear any stuck axis-repair block so the
-            // export below is not silently held by blocksFullExport() — the
-            // scheduler never re-attempts a manual_review family on its own.
-            $unblocked = (int) $axisRepair->clearFamilyRepairBlock($rootId)['cleared'];
         } catch (\Throwable $exception) {
             $audit->record('product.woocommerce_relink_failed', $root, null, null, [
                 'error' => $exception->getMessage(),
+                'axis_repair_blocks_cleared' => $unblocked,
             ]);
 
             return back()->with('error', $exception->getMessage());
