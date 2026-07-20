@@ -1376,6 +1376,7 @@ class ProductController extends Controller
         }
 
         $totalChanged = 0;
+        $unblocked = 0;
         $reports = [];
 
         try {
@@ -1392,6 +1393,12 @@ class ProductController extends Controller
                 $totalChanged += (int) $report['changed'];
                 $reports[$channelId] = $report;
             }
+
+            // Forcing a reconnect asserts the operator has already repaired the
+            // WooCommerce axis by hand. Clear any stuck axis-repair block so the
+            // export below is not silently held by blocksFullExport() — the
+            // scheduler never re-attempts a manual_review family on its own.
+            $unblocked = (int) $axisRepair->clearFamilyRepairBlock($rootId)['cleared'];
         } catch (\Throwable $exception) {
             $audit->record('product.woocommerce_relink_failed', $root, null, null, [
                 'error' => $exception->getMessage(),
@@ -1404,19 +1411,24 @@ class ProductController extends Controller
 
         $audit->record('product.woocommerce_relinked', $root, null, [
             'changed' => $totalChanged,
+            'axis_repair_blocks_cleared' => $unblocked,
             'reports' => $reports,
         ]);
 
         // Push data and recreate any variants still missing in Woo through the
-        // normal, token-guarded export path once the mappings point at live IDs.
+        // normal, token-guarded export path once the mappings point at live IDs
+        // and the axis-repair block (if any) has been lifted.
         $this->queueWooCommerceDataExport($root);
 
-        return back()->with(
-            'status',
-            $totalChanged > 0
-                ? "Ponownie połączono {$totalChanged} mapowań z WooCommerce; dane i stany zostaną wysłane w tle."
-                : 'Wszystkie mapowania były już aktualne; dane i stany zostaną odświeżone w tle.',
-        );
+        $message = $totalChanged > 0
+            ? "Ponownie połączono {$totalChanged} mapowań z WooCommerce; dane i stany zostaną wysłane w tle."
+            : 'Wszystkie mapowania były już aktualne; dane i stany zostaną odświeżone w tle.';
+
+        if ($unblocked > 0) {
+            $message .= ' Zdjęto blokadę naprawy osi Rozmiar — pełny eksport rodziny zostanie wykonany.';
+        }
+
+        return back()->with('status', $message);
     }
 
     public function createInWooCommerce(

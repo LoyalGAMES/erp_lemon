@@ -3737,6 +3737,63 @@ final class WooOwnedVariantAxisRepairService
     }
 
     /**
+     * Operator escape hatch. After a human manually repaired the WooCommerce
+     * variant axis (for example removed a legacy `wariant` attribute and rebuilt
+     * the sizes), clear a stuck axis-repair block on the family root so the
+     * normal token-guarded full export can rebuild the family again.
+     *
+     * This exists because {@see dispatchPending()} only re-attempts `pending`
+     * and `queued` families — never `manual_review` — and a family that no
+     * longer looks like an audit candidate (its legacy axis was just removed in
+     * Woo) is never re-marked pending. Without this hatch the block is permanent.
+     * Only the current-revision repair state on the parent mappings is removed;
+     * nothing else in the metadata is touched, and a later audit can re-mark the
+     * family if a genuine legacy axis reappears.
+     *
+     * @return array{root_id:int, cleared:int, targets:list<array{channel:string,status:string,external_product_id:string}>}
+     */
+    public function clearFamilyRepairBlock(int $productId, bool $dryRun = false): array
+    {
+        $rootId = $this->familyRootId($productId);
+
+        $apply = function () use ($rootId, $dryRun): array {
+            $targets = [];
+            $cleared = 0;
+
+            $this->parentMappingsQuery($rootId)
+                ->with('salesChannel')
+                ->when(! $dryRun, fn ($query) => $query->lockForUpdate())
+                ->get()
+                ->each(function (ProductChannelMapping $mapping) use (&$targets, &$cleared, $dryRun): void {
+                    $metadata = (array) $mapping->metadata;
+                    $state = data_get($metadata, self::STATE_PATH);
+
+                    if (! is_array($state) || $state === []) {
+                        return;
+                    }
+
+                    $targets[] = [
+                        'channel' => (string) ($mapping->salesChannel?->code ?? $mapping->sales_channel_id),
+                        'status' => (string) ($state['status'] ?? ''),
+                        'external_product_id' => (string) $mapping->external_product_id,
+                    ];
+
+                    if ($dryRun) {
+                        return;
+                    }
+
+                    data_forget($metadata, self::STATE_PATH);
+                    $mapping->forceFill(['metadata' => $metadata])->save();
+                    $cleared++;
+                });
+
+            return ['root_id' => $rootId, 'cleared' => $cleared, 'targets' => $targets];
+        };
+
+        return $dryRun ? $apply() : DB::transaction($apply, 3);
+    }
+
+    /**
      * @return array{status:string,product_id?:int,token?:string}
      */
     private function reserve(int $productId, int $staleMinutes): array
