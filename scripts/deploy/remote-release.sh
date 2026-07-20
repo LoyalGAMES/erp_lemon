@@ -614,11 +614,18 @@ fi
 "$php_bin" "$deploy_path/artisan" erp:inspect-woo-owned-variant-axis-repair --limit=30
 
 completed=1
+# The code is already activated and serving (atomic CURRENT switch, preflight
+# and `up` above). Outstanding WooCommerce axis / size-order maintenance is a
+# data condition — some families legitimately require manual review and cannot
+# be auto-resolved — so, exactly like the storefront-metadata and product-label
+# syncs above, a live-Woo maintenance step must not report an otherwise healthy,
+# already-activated release as failed. Surface it loudly and leave the durable
+# pending state for a later retry; the diagnostics above list what remains.
 if [[ "$variant_axis_repair_verified" -ne 1 ]]; then
-    fail 'Kod został aktywowany, ale naprawa osi wariantów WooCommerce nie zakończyła się sukcesem; sprawdź stan bieżącej rewizji powyżej.'
+    echo 'OSTRZEŻENIE: kod aktywny, ale naprawa osi wariantów WooCommerce ma nierozwiązane rodziny lub nie potwierdziła czystego stanu; rozwiąż je ręcznie (patrz diagnostyka powyżej).' >&2
 fi
 if [[ "$size_order_sync_verified" -ne 1 ]]; then
-    fail 'Kod został aktywowany, ale naprawa globalnej kolejności rozmiarów WooCommerce nie zakończyła się sukcesem; sprawdź log joba powyżej.'
+    echo 'OSTRZEŻENIE: kod aktywny, ale globalna kolejność rozmiarów WooCommerce nie została potwierdzona; sprawdź log joba powyżej.' >&2
 fi
 echo "Wdrożenie aktywne: ${release_path}"
 echo "Backup bazy: ${backup_directory}"
