@@ -132,6 +132,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::delete('/products/{product}/relations/{relation}', [ProductController::class, 'destroyRelation'])->name('products.relations.destroy');
         Route::post('/products/{product}/stock-adjustments', [ProductController::class, 'adjustStock'])->name('products.stock.adjust');
         Route::post('/products/{product}/export-woocommerce', [ProductController::class, 'exportToWooCommerce'])->name('products.woocommerce.export');
+        Route::post('/products/{product}/woocommerce/relink', [ProductController::class, 'relinkWooCommerce'])->name('products.woocommerce.relink');
         Route::post('/products/{product}/woocommerce/{integration}/create', [ProductController::class, 'createInWooCommerce'])->name('products.woocommerce.create');
         Route::post('/products/{product}/gs1/ean', [ProductController::class, 'generateGs1Ean'])->name('products.gs1.ean.generate');
         Route::get('/products/{product}', [ProductController::class, 'show'])->name('products.show');

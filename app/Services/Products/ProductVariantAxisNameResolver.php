@@ -86,6 +86,15 @@ final class ProductVariantAxisNameResolver
     }
 
     /**
+     * True only for the single canonical size slug ('rozmiar'). Distinguishes
+     * the definition that other size aliases (e.g. 'rozmiary') consolidate into.
+     */
+    public function isCanonicalSize(string $attributeName): bool
+    {
+        return $this->attributeSlug($attributeName) === Str::slug(self::SIZE);
+    }
+
+    /**
      * @return Collection<int, string>
      */
     public function optionTokens(iterable $options): Collection
