@@ -33,6 +33,13 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
 
     public const LOCK_SECONDS = 3600;
 
+    /**
+     * Operator-initiated publishes ride this dedicated queue so they are drained
+     * by the woocommerce-critical worker instead of queuing behind the shared
+     * `default` backlog (up to 100 stock jobs every 5 min, imports, backfills).
+     */
+    public const PUBLISH_QUEUE = 'woocommerce-critical';
+
     /** @return list<int> */
     public function backoff(): array
     {

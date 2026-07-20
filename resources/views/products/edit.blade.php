@@ -168,6 +168,10 @@
                     @csrf
                     <button class="button secondary" type="submit">Wyślij dane do WooCommerce</button>
                 </form>
+                <form method="POST" action="{{ route('products.woocommerce.relink', $product) }}" onsubmit="return confirm('Wymusić ponowne połączenie wariantów z WooCommerce po SKU? Użyj, gdy warianty usunięto i utworzono w Woo na nowo. Operacja nie kasuje wariantów ani nie zmienia stanów.');">
+                    @csrf
+                    <button class="button secondary" type="submit">Wymuś ponowne połączenie</button>
+                </form>
             @endif
         </div>
         <div class="toolbar-note">Po zapisie ERP przejmuje produkt jako źródło prawdy i import WooCommerce nie nadpisuje tych pól.</div>

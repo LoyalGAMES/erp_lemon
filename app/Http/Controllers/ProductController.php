@@ -34,6 +34,7 @@ use App\Services\Products\ProductVariantOptionNormalizer;
 use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceProductCreationRecoveryService;
 use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
+use App\Services\WooCommerce\WooVariationMappingRelinker;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Database\Eloquent\Builder;
@@ -1213,9 +1214,16 @@ class ProductController extends Controller
             return false;
         }
 
+        // Route the interactive publish onto the dedicated critical queue so it
+        // is not stuck behind the shared `default` backlog. The after-response
+        // copy runs inline in the web process; on contention it is released onto
+        // the same critical queue rather than `default`.
         ExportWooCommerceProductDataJob::dispatch($product->id, $syncToken)
-            ->onConnection('database');
-        ExportWooCommerceProductDataJob::dispatchAfterResponse($product->id, $syncToken);
+            ->onConnection('database')
+            ->onQueue(ExportWooCommerceProductDataJob::PUBLISH_QUEUE);
+        ExportWooCommerceProductDataJob::dispatch($product->id, $syncToken)
+            ->onQueue(ExportWooCommerceProductDataJob::PUBLISH_QUEUE)
+            ->afterResponse();
 
         return true;
     }
@@ -1327,6 +1335,88 @@ class ProductController extends Controller
         ]);
 
         return back()->with('status', "Dane produktu wysłane do WooCommerce: {$result['exported']} kanałów.");
+    }
+
+    /**
+     * Rebind this family's ERP → WooCommerce mappings onto the IDs Woo owns now
+     * and re-export. Recovers the case where an operator deleted and recreated
+     * variations (or the whole product) in Woo admin, leaving the ERP with
+     * stale IDs so stock and data no longer reach the live posts. Matches only
+     * on SKU; never deletes variations and never touches stock quantities.
+     */
+    public function relinkWooCommerce(
+        Product $product,
+        WooVariationMappingRelinker $relinker,
+        AuditLogService $audit,
+        WooOwnedVariantAxisRepairService $axisRepair,
+    ): RedirectResponse {
+        $rootId = $axisRepair->familyRootId((int) $product->id);
+        $root = Product::query()->find($rootId) ?? $product;
+
+        $channelIds = ProductChannelMapping::query()
+            ->where('product_id', $root->id)
+            ->whereNull('external_variation_id')
+            ->pluck('sales_channel_id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->unique()
+            ->values();
+
+        if ($channelIds->isEmpty()) {
+            return back()->with('error', 'Ten produkt nie ma mapowania rodzica do żadnego kanału WooCommerce.');
+        }
+
+        $locks = $this->acquireWooCommerceMutationLocks(
+            $rootId,
+            ImportWooCommerceProductsJob::catalogIntegrationIdsForProduct($rootId),
+        );
+
+        if ($locks === null) {
+            return back()->with('status', 'Synchronizacja tego produktu z WooCommerce już trwa. Spróbuj ponownie za chwilę.');
+        }
+
+        $totalChanged = 0;
+        $reports = [];
+
+        try {
+            foreach ($channelIds as $channelId) {
+                $integration = WordpressIntegration::query()
+                    ->where('sales_channel_id', $channelId)
+                    ->first();
+
+                if (! $integration instanceof WordpressIntegration) {
+                    continue;
+                }
+
+                $report = $relinker->relinkFamily($root, $integration, (int) $channelId);
+                $totalChanged += (int) $report['changed'];
+                $reports[$channelId] = $report;
+            }
+        } catch (\Throwable $exception) {
+            $audit->record('product.woocommerce_relink_failed', $root, null, null, [
+                'error' => $exception->getMessage(),
+            ]);
+
+            return back()->with('error', $exception->getMessage());
+        } finally {
+            $this->releaseWooCommerceMutationLocks($locks);
+        }
+
+        $audit->record('product.woocommerce_relinked', $root, null, [
+            'changed' => $totalChanged,
+            'reports' => $reports,
+        ]);
+
+        // Push data and recreate any variants still missing in Woo through the
+        // normal, token-guarded export path once the mappings point at live IDs.
+        $this->queueWooCommerceDataExport($root);
+
+        return back()->with(
+            'status',
+            $totalChanged > 0
+                ? "Ponownie połączono {$totalChanged} mapowań z WooCommerce; dane i stany zostaną wysłane w tle."
+                : 'Wszystkie mapowania były już aktualne; dane i stany zostaną odświeżone w tle.',
+        );
     }
 
     public function createInWooCommerce(

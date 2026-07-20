@@ -898,6 +898,59 @@ final class WooCommerceClient
     }
 
     /**
+     * Resolve the live product that currently owns an exact SKU. An operator
+     * who deletes and recreates a variable product in Woo leaves the ERP
+     * mapping pointing at a dead parent ID; this read-only lookup lets the
+     * relink flow rebind to the regenerated parent without guessing. Returns
+     * null when no live product carries the SKU.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function productBySku(
+        WordpressIntegration $integration,
+        string $sku,
+    ): ?array {
+        $sku = trim($sku);
+
+        if ($sku === '') {
+            return null;
+        }
+
+        $response = $this->freshReadRequest($integration)->get(
+            $this->endpoint($integration, '/products'),
+            $this->freshReadQuery([
+                'sku' => $sku,
+                'per_page' => 100,
+                'status' => 'any',
+            ]),
+        );
+
+        if (! $response->successful()) {
+            throw new RuntimeException(
+                "Wyszukanie produktu WooCommerce po SKU zwróciło HTTP {$response->status()}.",
+            );
+        }
+
+        $items = $response->json();
+
+        if (! is_array($items)) {
+            return null;
+        }
+
+        // Woo matches ?sku= exactly, but returns a list. Keep only an exact,
+        // case-insensitive hit so a partial index match can never rebind the
+        // mapping to a different product.
+        $normalizedSku = mb_strtoupper($sku);
+
+        return collect($items)
+            ->filter(fn (mixed $product): bool => is_array($product)
+                && mb_strtoupper(trim((string) ($product['id'] ?? ''))) !== ''
+                && mb_strtoupper(trim((string) ($product['sku'] ?? ''))) === $normalizedSku)
+            ->values()
+            ->first();
+    }
+
+    /**
      * Read a bounded set of exact products in batches. Maintenance resolvers
      * use this to prove which global attribute is a real variation axis; they
      * must not select a taxonomy from its mutable label or creation order.

@@ -4,6 +4,10 @@ use App\Models\AuditLog;
 use App\Models\Invoice;
 use App\Models\Product;
 use App\Models\ProductChannelMapping;
+use App\Models\ProductParameterDefinition;
+use App\Models\ProductRelation;
+use App\Models\WordpressIntegration;
+use App\Services\Products\ProductVariantAxisNameResolver;
 use App\Services\Communication\UnpaidOrderReminderService;
 use App\Services\Integrations\WooCommerceImportQueueService;
 use App\Services\Inventory\StockSyncQueueService;
@@ -19,6 +23,7 @@ use App\Services\WooCommerce\LegacyVariantFamilyBackfillService;
 use App\Services\WooCommerce\ProductDataExportService;
 use App\Services\WooCommerce\WooCommerceProductCreationRecoveryService;
 use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
+use App\Services\WooCommerce\WooVariationMappingRelinker;
 use Illuminate\Foundation\Inspiring;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
@@ -594,6 +599,223 @@ Artisan::command('erp:inspect-woocommerce-product-export-failures {--limit=20 : 
 
     return 0;
 })->purpose('Inspect recent root WooCommerce product export failures without changing state or exposing payloads.');
+
+Artisan::command('erp:relink-woocommerce-variation-mappings {--sku= : Limit to a single variable product (parent or variant SKU)} {--channel= : Limit to one sales-channel code} {--dry-run : Report changes without writing them}', function (WooVariationMappingRelinker $relinker): int {
+    $dryRun = (bool) $this->option('dry-run');
+    $skuOption = trim((string) $this->option('sku'));
+    $channelOption = trim((string) $this->option('channel'));
+
+    // Resolve the parent products in scope. A supplied SKU may be the variable
+    // parent itself or any of its variants; in both cases relinking runs on the
+    // family root so children are matched against the live parent's variations.
+    $rootIds = collect();
+
+    if ($skuOption !== '') {
+        $product = Product::query()->where('sku', $skuOption)->first();
+
+        if (! $product instanceof Product) {
+            $this->error("Nie znaleziono produktu o SKU {$skuOption}.");
+
+            return 1;
+        }
+
+        $rootId = ProductRelation::query()
+            ->where('child_product_id', $product->id)
+            ->where('relation_type', 'variant')
+            ->orderBy('id')
+            ->value('parent_product_id');
+        $rootIds->push(is_numeric($rootId) && (int) $rootId > 0 ? (int) $rootId : (int) $product->id);
+    } else {
+        $rootIds = ProductRelation::query()
+            ->where('relation_type', 'variant')
+            ->distinct()
+            ->pluck('parent_product_id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0);
+    }
+
+    $rootIds = $rootIds->unique()->values();
+
+    if ($rootIds->isEmpty()) {
+        $this->warn('Brak rodzin wariantowych do sprawdzenia.');
+
+        return 0;
+    }
+
+    $rows = [];
+    $changedTotal = 0;
+    $familiesTouched = 0;
+    $errors = 0;
+
+    foreach ($rootIds as $rootId) {
+        $root = Product::query()->find($rootId);
+
+        if (! $root instanceof Product) {
+            continue;
+        }
+
+        $mappingQuery = ProductChannelMapping::query()
+            ->where('product_id', $root->id)
+            ->whereNull('external_variation_id')
+            ->with('salesChannel');
+
+        if ($channelOption !== '') {
+            $mappingQuery->whereHas('salesChannel', fn ($query) => $query->where('code', $channelOption));
+        }
+
+        foreach ($mappingQuery->get() as $mapping) {
+            $integration = WordpressIntegration::query()
+                ->where('sales_channel_id', $mapping->sales_channel_id)
+                ->first();
+
+            if (! $integration instanceof WordpressIntegration) {
+                continue;
+            }
+
+            $channelCode = $mapping->salesChannel?->code ?? (string) $mapping->sales_channel_id;
+
+            try {
+                $report = $relinker->relinkFamily($root, $integration, (int) $mapping->sales_channel_id, $dryRun);
+            } catch (\Throwable $exception) {
+                $errors++;
+                $rows[] = [$root->sku, $channelCode, 'ERROR', '-', '-', str($exception->getMessage())->limit(80)->toString()];
+
+                continue;
+            }
+
+            $changedTotal += (int) $report['changed'];
+
+            if ((int) $report['changed'] > 0 || $report['parent']['status'] !== 'ok') {
+                $familiesTouched++;
+            }
+
+            if ($report['parent']['status'] !== 'ok') {
+                $rows[] = [
+                    $root->sku,
+                    $channelCode,
+                    'parent:'.$report['parent']['status'],
+                    $report['parent']['stored_external_product_id'],
+                    $report['parent']['live_external_product_id'],
+                    '-',
+                ];
+            }
+
+            foreach ($report['variants'] as $variant) {
+                if ($variant['status'] === 'ok') {
+                    continue;
+                }
+
+                $rows[] = [
+                    $variant['sku'],
+                    $channelCode,
+                    $variant['status'],
+                    $variant['stored_external_variation_id'] ?: '-',
+                    $variant['live_external_variation_id'] ?: '-',
+                    '-',
+                ];
+            }
+        }
+    }
+
+    $this->table(
+        ['sku', 'channel', 'status', 'stored_id', 'live_id', 'note'],
+        $rows,
+    );
+    $this->info(sprintf(
+        '%s families_in_scope=%d, families_touched=%d, mappings_%s=%d, errors=%d.',
+        $dryRun ? '[DRY-RUN] would relink.' : 'Relinked.',
+        $rootIds->count(),
+        $familiesTouched,
+        $dryRun ? 'to_change' : 'changed',
+        $changedTotal,
+        $errors,
+    ));
+
+    return $errors > 0 ? 1 : 0;
+})->purpose('Rebind stale WooCommerce variation/parent IDs onto the live SKU-matched posts without deleting variations or touching stock.');
+
+Artisan::command('erp:consolidate-variant-size-dictionary {--dry-run : Report changes without writing them}', function (ProductVariantAxisNameResolver $axisNames): int {
+    $dryRun = (bool) $this->option('dry-run');
+
+    // The canonical axis is 'Rozmiar' (slug 'rozmiar'). Everything the resolver
+    // treats as a direct size alias — e.g. the duplicate 'Rozmiary' shown in the
+    // PIM — is folded into it. This touches only product_parameter_definitions;
+    // it never reads or writes product rows, relations or stock.
+    $definitions = ProductParameterDefinition::query()->orderBy('id')->get();
+    $canonical = $definitions->first(fn (ProductParameterDefinition $definition): bool => $axisNames
+        ->isCanonicalSize((string) $definition->slug)
+        || $axisNames->isCanonicalSize((string) $definition->name));
+
+    if (! $canonical instanceof ProductParameterDefinition) {
+        $this->error("Brak kanonicznego słownika 'Rozmiar' (slug 'rozmiar'). Utwórz go w Parametrach przed konsolidacją.");
+
+        return 1;
+    }
+
+    $duplicates = $definitions->filter(fn (ProductParameterDefinition $definition): bool => $definition->id !== $canonical->id
+        && (
+            $axisNames->isDirectSizeAlias((string) $definition->slug)
+            || $axisNames->isDirectSizeAlias((string) $definition->name)
+        ))
+        ->values();
+
+    if ($duplicates->isEmpty()) {
+        $this->info("Słownik rozmiarów jest już skonsolidowany do '{$canonical->name}'.");
+
+        return 0;
+    }
+
+    $identity = static fn (string $value): string => mb_strtolower((string) preg_replace('/\s+/u', ' ', trim($value)));
+    $pl = collect((array) $canonical->values)->map(fn (mixed $value): string => trim((string) $value))->values()->all();
+    $en = collect((array) $canonical->values_en)->map(fn (mixed $value): string => trim((string) $value))->values()->all();
+    $known = collect($pl)->mapWithKeys(fn (string $value): array => [$identity($value) => true])->all();
+    $rows = [];
+    $added = 0;
+
+    foreach ($duplicates as $duplicate) {
+        $dupPl = collect((array) $duplicate->values)->map(fn (mixed $value): string => trim((string) $value))->values();
+        $dupEn = collect((array) $duplicate->values_en)->map(fn (mixed $value): string => trim((string) $value))->values();
+
+        foreach ($dupPl as $index => $value) {
+            if ($value === '' || array_key_exists($identity($value), $known)) {
+                continue;
+            }
+
+            $pl[] = $value;
+            $en[] = (string) ($dupEn[$index] ?? '');
+            $known[$identity($value)] = true;
+            $added++;
+            $rows[] = [$duplicate->name, $value, 'dołączona do Rozmiar'];
+        }
+
+        $rows[] = [$duplicate->name, '('.$dupPl->count().' wartości)', $dryRun ? 'zostanie usunięty' : 'usunięty'];
+    }
+
+    if (! $dryRun) {
+        DB::transaction(function () use ($canonical, $pl, $en, $duplicates): void {
+            $canonical->forceFill([
+                'values' => array_values($pl),
+                'values_en' => array_values($en),
+                'is_variant' => true,
+            ])->save();
+
+            foreach ($duplicates as $duplicate) {
+                $duplicate->delete();
+            }
+        });
+    }
+
+    $this->table(['słownik źródłowy', 'wartość', 'akcja'], $rows);
+    $this->info(sprintf(
+        '%s canonical=%s, duplicates=%d, values_added=%d.',
+        $dryRun ? '[DRY-RUN] would consolidate.' : 'Consolidated.',
+        $canonical->name,
+        $duplicates->count(),
+        $added,
+    ));
+
+    return 0;
+})->purpose('Merge duplicate size dictionaries (e.g. Rozmiary) into the canonical Rozmiar without touching products, relations or stock.');
 
 Artisan::command('erp:refresh-ksef-submissions {--limit=25 : Maximum number of KSeF submissions to refresh} {--minutes=2 : Refresh submissions older than this many minutes}', function (): int {
     $limit = max(1, (int) $this->option('limit'));

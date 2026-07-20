@@ -1136,6 +1136,16 @@ class ProductCatalogWorkflowTest extends TestCase
 
         Bus::assertDispatchedAfterResponse(ExportWooCommerceProductDataJob::class, 1);
         $this->assertCount(1, Bus::dispatched(ExportWooCommerceProductDataJob::class));
+        // The interactive publish rides the dedicated critical queue, not the
+        // shared `default` backlog.
+        Bus::assertDispatched(
+            ExportWooCommerceProductDataJob::class,
+            fn (ExportWooCommerceProductDataJob $job): bool => $job->queue === ExportWooCommerceProductDataJob::PUBLISH_QUEUE,
+        );
+        Bus::assertDispatchedAfterResponse(
+            ExportWooCommerceProductDataJob::class,
+            fn (ExportWooCommerceProductDataJob $job): bool => $job->queue === ExportWooCommerceProductDataJob::PUBLISH_QUEUE,
+        );
     }
 
     public function test_editing_variant_updates_parent_and_dispatches_complete_parent_export_immediately(): void

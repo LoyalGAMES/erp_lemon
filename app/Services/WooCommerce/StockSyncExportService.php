@@ -11,6 +11,7 @@ use App\Models\StockSyncQueueItem;
 use App\Models\StockSyncState;
 use App\Models\WordpressIntegration;
 use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -20,6 +21,7 @@ final class StockSyncExportService
 {
     public function __construct(
         private readonly WooCommerceClient $client,
+        private readonly WooVariationMappingRelinker $relinker,
     ) {}
 
     /**
@@ -107,13 +109,15 @@ final class StockSyncExportService
                 $target->external_variation_id !== null ? (string) $target->external_variation_id : null,
             ))
             ->values()
-            ->map(function (ProductChannelMapping $target) use ($integration, $stockQuantity): array {
+            ->map(function (ProductChannelMapping $target) use ($integration, $mapping, $stockQuantity): array {
+                $response = $this->pushStockWithRecovery($integration, $target, $mapping, $stockQuantity);
+
                 return [
                     'external_product_id' => (string) $target->external_product_id,
                     'external_variation_id' => $target->external_variation_id !== null
                         ? (string) $target->external_variation_id
                         : null,
-                    'response' => $this->client->updateStock($integration, $target, $stockQuantity),
+                    'response' => $response,
                 ];
             });
         $response = (array) data_get($responses->first(), 'response', []);
@@ -158,6 +162,50 @@ final class StockSyncExportService
         ]);
 
         return $response;
+    }
+
+    /**
+     * Push stock for one target, self-healing a variation that an operator
+     * deleted and recreated in Woo (new ID). Only the persisted primary mapping
+     * is relinked; alias fan-out targets and any non-deleted error propagate
+     * unchanged so the quantity is never silently lost.
+     *
+     * @return array<string, mixed>
+     */
+    private function pushStockWithRecovery(
+        WordpressIntegration $integration,
+        ProductChannelMapping $target,
+        ProductChannelMapping $primaryMapping,
+        int $stockQuantity,
+    ): array {
+        try {
+            return $this->client->updateStock($integration, $target, $stockQuantity);
+        } catch (RequestException $exception) {
+            $isPrimary = $target->getKey() !== null
+                && (int) $target->getKey() === (int) $primaryMapping->getKey();
+
+            if (! $isPrimary
+                || ! WooVariationMappingRelinker::isDeletedVariationResponse($exception)
+            ) {
+                throw $exception;
+            }
+
+            // Capture the stale ID before relinking: relinkVariationBySku
+            // mutates and returns the same mapping instance, so the comparison
+            // must be against the value from before the rebind.
+            $staleVariationId = trim((string) $target->external_variation_id);
+            $relinked = $this->relinker->relinkVariationBySku($target, $integration);
+
+            if (! $relinked instanceof ProductChannelMapping
+                || trim((string) $relinked->external_variation_id) === $staleVariationId
+            ) {
+                // No live SKU match (parent gone or ambiguous). Keep the
+                // original deleted-variation failure for markFailed().
+                throw $exception;
+            }
+
+            return $this->client->updateStock($integration, $relinked, $stockQuantity);
+        }
     }
 
     public function markFailed(StockSyncQueueItem $item, Throwable $exception): void

@@ -37,6 +37,7 @@ final class ProductDataExportService
         private readonly LegacySizeVariantAxisResolver $legacySizeAxis,
         private readonly ChannelStockAvailabilityService $channelStock,
         private readonly WooCommerceSizeDictionaryOrder $sizeOrder,
+        private readonly WooVariationMappingRelinker $variationRelinker,
     ) {}
 
     /**
@@ -1432,175 +1433,13 @@ final class ProductDataExportService
         ProductChannelMapping $mapping,
         array $payload,
     ): array {
-        $externalProductId = trim((string) $mapping->external_product_id);
-        $staleVariationId = trim((string) $mapping->external_variation_id);
-        $liveVariations = collect($this->client->productVariationsByParent(
-            $integration,
-            $externalProductId,
-        ))
-            ->filter(fn (mixed $remote): bool => is_array($remote)
-                && ctype_digit(trim((string) ($remote['id'] ?? '')))
-                && (int) $remote['id'] > 0)
-            ->unique(fn (array $remote): string => trim((string) $remote['id']))
-            ->values();
-        $localSku = mb_strtoupper(trim((string) $variant->sku));
-        $skuMatches = $localSku === ''
-            ? collect()
-            : $liveVariations->filter(fn (array $remote): bool => mb_strtoupper(
-                trim((string) ($remote['sku'] ?? '')),
-            ) === $localSku)->values();
-
-        if ($skuMatches->count() > 1) {
-            throw new RuntimeException(
-                "WooCommerce zawiera kilka wariantów SKU {$variant->sku} pod produktem #{$externalProductId}; stare mapowanie #{$staleVariationId} nie zostanie zastąpione arbitralnie.",
-            );
-        }
-
-        $match = $skuMatches->first();
-
-        if (! is_array($match)) {
-            $payloadSignature = $this->variationAttributeSignature(
-                (array) ($payload['attributes'] ?? []),
-            );
-            $attributeMatches = $payloadSignature === ''
-                ? collect()
-                : $liveVariations->filter(fn (array $remote): bool => $this->variationAttributeSignature(
-                    (array) ($remote['attributes'] ?? []),
-                ) === $payloadSignature)->values();
-
-            if ($attributeMatches->count() > 1) {
-                throw new RuntimeException(
-                    "WooCommerce zawiera kilka wariantów z tym samym rozmiarem pod produktem #{$externalProductId}; stare mapowanie #{$staleVariationId} wymaga ręcznej weryfikacji.",
-                );
-            }
-
-            $match = $attributeMatches->first();
-        }
-
-        $operation = 'recover_product_variation_mapping';
-
-        if (is_array($match)) {
-            $response = $this->client->updateProductDataByIds(
-                $integration,
-                $externalProductId,
-                (string) $match['id'],
-                $payload,
-            );
-            $resolvedVariationId = trim((string) $match['id']);
-        } else {
-            $response = $this->client->createProductVariation(
-                $integration,
-                $externalProductId,
-                $payload,
-            );
-            $resolvedVariationId = trim((string) ($response['id'] ?? ''));
-            $operation = 'recreate_product_variation';
-        }
-
-        if (! ctype_digit($resolvedVariationId) || (int) $resolvedVariationId <= 0) {
-            throw new RuntimeException(
-                "WooCommerce nie zwrócił nowego ID dla usuniętego wariantu {$variant->sku} produktu #{$externalProductId}.",
-            );
-        }
-
-        DB::transaction(function () use (
-            $mapping,
+        return $this->variationRelinker->recoverByPayload(
+            $parent,
             $variant,
-            $externalProductId,
-            $staleVariationId,
-            $resolvedVariationId,
-            $response,
-            $operation,
-        ): void {
-            $locked = ProductChannelMapping::query()
-                ->lockForUpdate()
-                ->findOrFail($mapping->id);
-            $currentVariationId = trim((string) $locked->external_variation_id);
-
-            if ($currentVariationId !== $staleVariationId
-                && $currentVariationId !== $resolvedVariationId
-            ) {
-                throw new RuntimeException(
-                    "Mapowanie wariantu {$variant->sku} zmieniło się równolegle; nowe ID WooCommerce nie zostanie nadpisane.",
-                );
-            }
-
-            $mappingOwner = ProductChannelMapping::query()
-                ->where('sales_channel_id', $locked->sales_channel_id)
-                ->where('external_product_id', $externalProductId)
-                ->where('external_variation_id', $resolvedVariationId)
-                ->whereKeyNot($locked->id)
-                ->lockForUpdate()
-                ->value('product_id');
-
-            if ($mappingOwner !== null && (int) $mappingOwner !== (int) $variant->id) {
-                throw new RuntimeException(
-                    "Nowe ID wariantu WooCommerce #{$externalProductId}/{$resolvedVariationId} jest już mapowaniem innego produktu ERP.",
-                );
-            }
-
-            $alias = ProductChannelAlias::query()
-                ->forExternalIdentity(
-                    (int) $locked->sales_channel_id,
-                    $externalProductId,
-                    $resolvedVariationId,
-                )
-                ->lockForUpdate()
-                ->first();
-
-            if ($alias instanceof ProductChannelAlias
-                && (int) $alias->product_id !== (int) $variant->id
-            ) {
-                throw new RuntimeException(
-                    "Nowe ID wariantu WooCommerce #{$externalProductId}/{$resolvedVariationId} jest już aliasem innego produktu ERP.",
-                );
-            }
-
-            $alias?->delete();
-            $metadata = (array) $locked->metadata;
-            data_set($metadata, 'deleted_variation_recovery', [
-                'old_variation_id' => $staleVariationId,
-                'new_variation_id' => $resolvedVariationId,
-                'mode' => $operation === 'recreate_product_variation' ? 'recreated' : 'adopted_existing',
-                'recovered_at' => now()->toISOString(),
-            ]);
-            $locked->forceFill([
-                'external_product_id' => $externalProductId,
-                'external_variation_id' => $resolvedVariationId,
-                'external_sku' => trim((string) ($response['sku'] ?? '')) ?: $variant->sku,
-                'metadata' => $metadata,
-            ])->save();
-        }, 3);
-
-        $mapping->refresh();
-
-        return [
-            'mapping' => $mapping,
-            'response' => $response,
-            'operation' => $operation,
-        ];
-    }
-
-    /** @param list<array<string,mixed>> $attributes */
-    private function variationAttributeSignature(array $attributes): string
-    {
-        $normalized = collect($attributes)
-            ->filter(fn (mixed $attribute): bool => is_array($attribute))
-            ->mapWithKeys(function (array $attribute): array {
-                $attributeId = (int) ($attribute['id'] ?? 0);
-                $key = $attributeId > 0
-                    ? 'id:'.$attributeId
-                    : 'name:'.Str::slug((string) ($attribute['name'] ?? ''));
-                $option = Str::slug((string) ($attribute['option'] ?? ''));
-
-                return $key !== 'name:' && $option !== '' ? [$key => $option] : [];
-            })
-            ->sortKeys()
-            ->all();
-
-        return $normalized === []
-            ? ''
-            : hash('sha256', json_encode($normalized, JSON_THROW_ON_ERROR));
+            $integration,
+            $mapping,
+            $payload,
+        );
     }
 
     /**
