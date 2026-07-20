@@ -361,7 +361,7 @@ class IntegrationRetryWorkflowTest extends TestCase
             'queue:work --queue=default --stop-when-empty',
             $output,
         );
-        $this->assertStringContainsString('erp:release-stale-woocommerce-imports --minutes=60', $output);
+        $this->assertStringContainsString('erp:release-stale-woocommerce-imports --minutes=20', $output);
     }
 
     public function test_console_command_queues_enabled_woocommerce_imports_without_duplicates(): void

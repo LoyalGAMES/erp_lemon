@@ -1180,7 +1180,7 @@ Schedule::command('erp:queue-woocommerce-imports --customers')
     ->withoutOverlapping(20)
     ->runInBackground();
 
-Schedule::command('erp:release-stale-woocommerce-imports --minutes=60')
+Schedule::command('erp:release-stale-woocommerce-imports --minutes=20')
     ->cron('*/10 * * * *')
     ->withoutOverlapping(10)
     ->runInBackground();

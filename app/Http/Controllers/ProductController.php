@@ -37,6 +37,7 @@ use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use App\Services\WooCommerce\WooVariationMappingRelinker;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -1532,15 +1533,18 @@ class ProductController extends Controller
         $acquired = [];
 
         foreach ($locks as $lock) {
-            if ($lock->get()) {
+            try {
+                // Operator-initiated actions briefly wait for a transient
+                // in-flight sync (which usually finishes within seconds) instead
+                // of failing on the first collision. A genuinely long-running
+                // import/export still falls back to "already in progress".
+                $lock->block(4);
                 $acquired[] = $lock;
+            } catch (LockTimeoutException) {
+                $this->releaseWooCommerceMutationLocks($acquired);
 
-                continue;
+                return null;
             }
-
-            $this->releaseWooCommerceMutationLocks($acquired);
-
-            return null;
         }
 
         return $acquired;

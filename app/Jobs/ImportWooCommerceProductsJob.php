@@ -36,7 +36,11 @@ final class ImportWooCommerceProductsJob implements ShouldBeUnique, ShouldQueue
 
     public int $uniqueFor = 1200;
 
-    public const CATALOG_LOCK_SECONDS = 3600;
+    // Aligned with $uniqueFor and kept comfortably above the longest single run
+    // that holds this shared lock (900s import / 840s export). A process killed
+    // mid-run therefore frees the catalog lock in ~20 min instead of an hour, so
+    // a dead import no longer blocks publishes and relinks for a full hour.
+    public const CATALOG_LOCK_SECONDS = 1200;
 
     public function __construct(
         private readonly int $integrationId,
