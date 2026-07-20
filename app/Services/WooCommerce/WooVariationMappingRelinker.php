@@ -61,11 +61,13 @@ final class WooVariationMappingRelinker
             );
             $resolvedVariationId = trim((string) $match['id']);
         } else {
-            $response = $this->client->createProductVariation(
+            $created = $this->createVariationResolvingSkuConflict(
                 $integration,
+                (int) $mapping->sales_channel_id,
                 $externalProductId,
                 $payload,
             );
+            $response = $created['response'];
             $resolvedVariationId = trim((string) ($response['id'] ?? ''));
             $operation = 'recreate_product_variation';
         }
@@ -93,6 +95,91 @@ final class WooVariationMappingRelinker
             'response' => $response,
             'operation' => $operation,
         ];
+    }
+
+    /**
+     * Create a primary-language variation, resolving a duplicate-SKU rejection
+     * instead of failing the whole export. After an operator deletes the PL
+     * variations by hand, the family's translated siblings (created via the
+     * temporary-SKU flow in createProductVariationForLanguage and later given
+     * the canonical SKU once Polylang linked the posts) may still own that SKU.
+     * A fresh, not-yet-linked PL post is then rejected as a duplicate.
+     *
+     * Resolution, strictly narrowed by productBySku ownership:
+     * - owner is a live variation under THIS parent → adopt it (PUT payload),
+     * - owner is one of the family's own translated posts (a channel alias) →
+     *   create without `sku`; the canonical SKU returns on the next full
+     *   export's PUT once Polylang links the new PL post to that sibling,
+     * - anything else → rethrow, the SKU genuinely belongs to a foreign post.
+     *
+     * @param  array<string, mixed>  $payload
+     * @return array{response: array<string, mixed>, resolution: string}
+     */
+    public function createVariationResolvingSkuConflict(
+        WordpressIntegration $integration,
+        int $salesChannelId,
+        string $externalProductId,
+        array $payload,
+    ): array {
+        try {
+            return [
+                'response' => $this->client->createProductVariation($integration, $externalProductId, $payload),
+                'resolution' => 'created',
+            ];
+        } catch (WooCommerceProductVariationCreateException $exception) {
+            $sku = trim((string) ($payload['sku'] ?? ''));
+
+            if (! $exception->indicatesDuplicateSku() || $sku === '') {
+                throw $exception;
+            }
+
+            $owner = $this->client->productBySku($integration, $sku);
+            $ownerId = trim((string) data_get($owner, 'id', ''));
+            $ownerParentId = trim((string) data_get($owner, 'parent_id', ''));
+            $ownerIsVariation = (string) data_get($owner, 'type', '') === 'variation';
+
+            if ($owner === null || $ownerId === '') {
+                throw $exception;
+            }
+
+            if ($ownerIsVariation && $ownerParentId === $externalProductId) {
+                $response = $this->client->updateProductDataByIds(
+                    $integration,
+                    $externalProductId,
+                    $ownerId,
+                    $payload,
+                );
+
+                return [
+                    'response' => array_merge($response, ['id' => (int) $ownerId]),
+                    'resolution' => 'adopted_same_parent',
+                ];
+            }
+
+            $ownedByFamilyTranslation = $ownerIsVariation
+                && $ownerParentId !== ''
+                && ProductChannelAlias::query()
+                    ->where('sales_channel_id', $salesChannelId)
+                    ->where('external_product_id', $ownerParentId)
+                    ->exists();
+
+            if ($ownedByFamilyTranslation) {
+                unset($payload['sku']);
+
+                return [
+                    'response' => $this->client->createProductVariation($integration, $externalProductId, $payload),
+                    'resolution' => 'created_without_sku',
+                ];
+            }
+
+            throw new RuntimeException(
+                $exception->getMessage()
+                    ." SKU {$sku} należy do WooCommerce #{$ownerId}"
+                    .($ownerParentId !== '' ? " (rodzic #{$ownerParentId})" : '')
+                    .' spoza tej rodziny — rozwiąż konflikt ręcznie.',
+                previous: $exception,
+            );
+        }
     }
 
     /**
