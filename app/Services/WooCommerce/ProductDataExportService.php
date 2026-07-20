@@ -1313,12 +1313,29 @@ final class ProductDataExportService
                     $operation = $recovery['operation'];
                 }
             } else {
-                $response = $this->client->createProductVariation($integration, $externalProductId, $payload);
+                $created = $this->variationRelinker->createVariationResolvingSkuConflict(
+                    $integration,
+                    $salesChannelId,
+                    $externalProductId,
+                    $payload,
+                );
+                $response = $created['response'];
                 $operation = 'create_product_variation';
                 $variationExternalId = $response['id'] ?? null;
 
                 if ($variationExternalId === null || (string) $variationExternalId === '') {
                     throw new RuntimeException("WooCommerce nie zwrócił ID wariantu {$variant->sku}.");
+                }
+
+                $creationMetadata = [
+                    'source' => 'erp',
+                    'created_via' => 'erp_product_export_variation_create',
+                    'parent_product_id' => $product->id,
+                    'created_in_woocommerce_at' => now()->toDateTimeString(),
+                ];
+
+                if ($created['resolution'] !== 'created') {
+                    $creationMetadata['sku_conflict_resolution'] = $created['resolution'];
                 }
 
                 $mapping = ProductChannelMapping::query()->updateOrCreate(
@@ -1331,12 +1348,7 @@ final class ProductDataExportService
                         'external_variation_id' => (string) $variationExternalId,
                         'external_sku' => (string) ($response['sku'] ?? $variant->sku),
                         'stock_sync_enabled' => true,
-                        'metadata' => [
-                            'source' => 'erp',
-                            'created_via' => 'erp_product_export_variation_create',
-                            'parent_product_id' => $product->id,
-                            'created_in_woocommerce_at' => now()->toDateTimeString(),
-                        ],
+                        'metadata' => $creationMetadata,
                     ],
                 );
                 $targetMapping = $mapping;

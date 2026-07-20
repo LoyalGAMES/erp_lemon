@@ -838,7 +838,18 @@ final class WooCommerceClient
             ->post($url, $payload);
 
         if (! $response->successful()) {
-            throw new RuntimeException("Utworzenie wariantu WooCommerce zwróciło HTTP {$response->status()}.");
+            $wooCode = trim((string) data_get($response->json(), 'code'));
+            $wooMessage = trim((string) data_get($response->json(), 'message'));
+            $detail = trim($wooCode.' '.$wooMessage);
+
+            throw new WooCommerceProductVariationCreateException(
+                $response->status(),
+                $wooCode,
+                'Utworzenie wariantu WooCommerce zwróciło HTTP '
+                    .$response->status()
+                    .($detail !== '' ? " ({$detail})" : '')
+                    .'.',
+            );
         }
 
         $json = $response->json();
