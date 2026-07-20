@@ -283,10 +283,11 @@ final class ProductStorefrontVisibilityService
             throw new RuntimeException('Nie można jednoznacznie ustalić produktu głównego dla tego wariantu.');
         }
 
-        if ($parentIds->isEmpty() && $variationMappings->isNotEmpty()) {
-            throw new RuntimeException('Nie znaleziono produktu głównego WooCommerce dla tego wariantu. Uzupełnij mapowanie lub relację wariantu.');
-        }
-
+        // A variant can be orphaned: the operator deleted the ERP parent (its
+        // parent mapping cascaded away) while this child kept its variation
+        // mapping. No local parent candidate exists at all then — treat the
+        // variant as its own root so it can still be hidden or archived
+        // instead of failing with "complete the mapping" it can never satisfy.
         return $parentIds->isEmpty()
             ? $product
             : Product::query()->findOrFail((int) $parentIds->first());

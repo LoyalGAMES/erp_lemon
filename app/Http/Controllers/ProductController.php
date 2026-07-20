@@ -12,7 +12,12 @@ use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
+use App\Models\ProductChannelAlias;
 use App\Models\StockBalance;
+use App\Models\StockLedgerEntry;
+use App\Models\StockSyncQueueItem;
+use App\Models\StockSyncState;
+use App\Models\WarehouseDocumentLine;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
@@ -1621,21 +1626,108 @@ class ProductController extends Controller
 
     public function destroy(Product $product): RedirectResponse
     {
-        $hasStock = StockBalance::query()
+        if ($this->productHasStock($product)) {
+            return back()->with('error', 'Nie można usunąć produktu ze stanem magazynowym.');
+        }
+
+        // Document and ledger rows reference products with restrictOnDelete —
+        // deleting would orphan booked KOR/PZ documents. Surface the archive
+        // path instead of letting the database throw an opaque 500.
+        if ($this->productHasDocumentHistory($product)) {
+            return back()->with(
+                'error',
+                'Nie można usunąć produktu z historią dokumentów magazynowych. Użyj „Archiwizuj" — produkt zniknie z listy i synchronizacji, a dokumenty pozostaną spójne.',
+            );
+        }
+
+        try {
+            $product->delete();
+        } catch (\Illuminate\Database\QueryException) {
+            return back()->with(
+                'error',
+                'Nie można usunąć produktu, ponieważ inne rekordy nadal się do niego odwołują. Użyj „Archiwizuj" zamiast usuwania.',
+            );
+        }
+
+        return back()->with('status', 'Produkt został usunięty.');
+    }
+
+    public function archive(Product $product, AuditLogService $audit): RedirectResponse
+    {
+        if ($product->isArchived()) {
+            return back()->with('status', 'Produkt jest już zarchiwizowany.');
+        }
+
+        if ($this->productHasStock($product)) {
+            return back()->with('error', 'Wyzeruj stany magazynowe przed archiwizacją produktu.');
+        }
+
+        $detached = 0;
+
+        DB::transaction(function () use ($product, $audit, &$detached): void {
+            $locked = Product::query()->lockForUpdate()->findOrFail($product->id);
+
+            // Detach every channel identity so no export, stock push or import
+            // ever targets this product again. Woo posts are not touched —
+            // the operator trashes them in wp-admin when applicable.
+            $mappingIds = ProductChannelMapping::query()
+                ->where('product_id', $locked->id)
+                ->pluck('id');
+            $detached = ProductChannelMapping::query()
+                ->whereIn('id', $mappingIds)
+                ->delete();
+            ProductChannelAlias::query()->where('product_id', $locked->id)->delete();
+            StockSyncQueueItem::query()->where('product_id', $locked->id)->delete();
+            StockSyncState::query()->where('product_id', $locked->id)->delete();
+
+            $locked->forceFill([
+                'is_active' => false,
+                'archived_at' => now(),
+                'storefront_hidden_at' => $locked->storefront_hidden_at ?? now(),
+                'storefront_restore_visibility' => null,
+            ])->save();
+
+            $audit->record('product.archived', $locked, null, [
+                'detached_mappings' => $detached,
+            ]);
+        });
+
+        return back()->with(
+            'status',
+            "Produkt {$product->name} został zarchiwizowany: wyłączony, ukryty i odpięty od kanałów ({$detached} mapowań). Jeśli jego post w WooCommerce nadal istnieje, przenieś go do kosza w wp-admin.",
+        );
+    }
+
+    public function unarchive(Product $product, AuditLogService $audit): RedirectResponse
+    {
+        if (! $product->isArchived()) {
+            return back()->with('status', 'Produkt nie jest zarchiwizowany.');
+        }
+
+        $product->forceFill(['archived_at' => null])->save();
+        $audit->record('product.unarchived', $product);
+
+        return back()->with(
+            'status',
+            "Produkt {$product->name} został przywrócony z archiwum jako nieaktywny. Aktywuj go i wyślij do sklepu, gdy będzie gotowy.",
+        );
+    }
+
+    private function productHasStock(Product $product): bool
+    {
+        return StockBalance::query()
             ->where('product_id', $product->id)
             ->where(function ($query): void {
                 $query->where('quantity_on_hand', '!=', 0)
                     ->orWhere('quantity_reserved', '!=', 0);
             })
             ->exists();
+    }
 
-        if ($hasStock) {
-            return back()->with('error', 'Nie można usunąć produktu ze stanem magazynowym.');
-        }
-
-        $product->delete();
-
-        return back()->with('status', 'Produkt został usunięty.');
+    private function productHasDocumentHistory(Product $product): bool
+    {
+        return WarehouseDocumentLine::query()->where('product_id', $product->id)->exists()
+            || StockLedgerEntry::query()->where('product_id', $product->id)->exists();
     }
 
     /**
@@ -3143,6 +3235,14 @@ class ProductController extends Controller
             $products->where('attributes', 'like', '%'.$filters['category'].'%');
         }
 
+        // Archived products live outside day-to-day work: every view hides
+        // them unless the operator explicitly asks for the archive.
+        if ($filters['status'] === 'archived') {
+            $products->whereNotNull('archived_at');
+        } else {
+            $products->whereNull('archived_at');
+        }
+
         if ($filters['status'] === 'active') {
             $products->where('is_active', true);
         }
@@ -3291,7 +3391,7 @@ class ProductController extends Controller
                 ? (string) $input['type']
                 : '',
             'category' => $this->nullableString($input['category'] ?? null) ?? '',
-            'status' => in_array($input['status'] ?? null, ['active', 'inactive', 'publish', 'draft'], true)
+            'status' => in_array($input['status'] ?? null, ['active', 'inactive', 'publish', 'draft', 'archived'], true)
                 ? (string) $input['status']
                 : '',
             'favorites' => $favorites,
