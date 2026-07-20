@@ -478,6 +478,7 @@
                     <option value="inactive" @selected($filters['status'] === 'inactive')>Nieaktywne</option>
                     <option value="publish" @selected($filters['status'] === 'publish')>Opublikowane Woo</option>
                     <option value="draft" @selected($filters['status'] === 'draft')>Szkice Woo</option>
+                    <option value="archived" @selected($filters['status'] === 'archived')>Zarchiwizowane</option>
                 </select>
             </label>
             <label>Kategoria
@@ -920,7 +921,18 @@
                                         @csrf
                                         <button class="button secondary" type="submit">Kopiuj</button>
                                     </form>
-                                    <form method="POST" action="{{ route('products.destroy', $product) }}" onsubmit="return confirm('Usunąć produkt?');">
+                                    @if ($product->isArchived())
+                                        <form method="POST" action="{{ route('products.unarchive', $product) }}">
+                                            @csrf
+                                            <button class="button secondary" type="submit">Przywróć z archiwum</button>
+                                        </form>
+                                    @else
+                                        <form method="POST" action="{{ route('products.archive', $product) }}" onsubmit="return confirm('Zarchiwizować produkt? Zostanie wyłączony, ukryty i odpięty od kanałów sprzedaży.');">
+                                            @csrf
+                                            <button class="button secondary" type="submit">Archiwizuj</button>
+                                        </form>
+                                    @endif
+                                    <form method="POST" action="{{ route('products.destroy', $product) }}" onsubmit="return confirm('Usunąć produkt? Jeśli nie miał sprzedaży, jego dokumenty magazynowe (KOR/PZ) zostaną wycofane razem z nim.');">
                                         @csrf
                                         @method('DELETE')
                                         <button class="button" style="background: var(--red);" type="submit">Usuń</button>

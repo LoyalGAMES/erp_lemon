@@ -12,7 +12,15 @@ use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
 use App\Models\SalesChannel;
+use App\Models\ExternalOrderLine;
+use App\Models\InvoiceLine;
+use App\Models\PackingTask;
+use App\Models\ProductChannelAlias;
+use App\Models\ReturnCaseLine;
 use App\Models\StockBalance;
+use App\Models\StockSyncQueueItem;
+use App\Models\StockSyncState;
+use App\Models\WarehouseDocumentLine;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
@@ -1619,23 +1627,214 @@ class ProductController extends Controller
         );
     }
 
-    public function destroy(Product $product): RedirectResponse
+    /**
+     * Warehouse-document types whose rows may be silently withdrawn together
+     * with a never-sold product. Anything else (WZ/RW/RX and future outbound
+     * types) is treated as usage evidence and keeps the product deletable only
+     * through archiving.
+     */
+    private const WITHDRAWABLE_DOCUMENT_TYPES = ['KOR', 'PZ', 'INW'];
+
+    public function destroy(Product $product, AuditLogService $audit): RedirectResponse
     {
-        $hasStock = StockBalance::query()
+        if ($this->productHasStock($product)) {
+            return back()->with('error', 'Nie można usunąć produktu ze stanem magazynowym.');
+        }
+
+        // A product that was ever sold, invoiced, returned or packed must keep
+        // its full paper trail — deletion would silently null those references.
+        $tradeEvidence = $this->productTradeEvidence($product);
+
+        if ($tradeEvidence !== []) {
+            return back()->with(
+                'error',
+                'Nie można usunąć produktu z historią sprzedaży ('.implode(', ', $tradeEvidence).'). Użyj „Archiwizuj" — produkt zniknie z listy i synchronizacji, a historia pozostanie spójna.',
+            );
+        }
+
+        // Never traded: its documents are pure data-entry noise (intake and
+        // corrections that net to zero, enforced by the stock guard above).
+        // Withdraw them, but only documents that belong to this product alone —
+        // a shared delivery cannot be pulled from under other products' feet.
+        $documents = WarehouseDocument::query()
+            ->whereHas('lines', fn ($query) => $query->where('product_id', $product->id))
+            ->with('lines')
+            ->get();
+        $blocked = $documents
+            ->filter(fn (WarehouseDocument $document): bool => $document->status !== 'cancelled'
+                && ! in_array($document->type, self::WITHDRAWABLE_DOCUMENT_TYPES, true))
+            ->merge($documents->filter(
+                fn (WarehouseDocument $document): bool => $document->status !== 'cancelled'
+                    && $document->lines->contains(
+                        fn (WarehouseDocumentLine $line): bool => (int) $line->product_id !== (int) $product->id,
+                    ),
+            ))
+            ->unique('id')
+            ->values();
+
+        if ($blocked->isNotEmpty()) {
+            return back()->with(
+                'error',
+                'Nie można automatycznie wycofać dokumentów: '.$blocked->pluck('number')->implode(', ')
+                    .' — zawierają inne produkty lub wydania. Anuluj je ręcznie w module dokumentów albo użyj „Archiwizuj".',
+            );
+        }
+
+        try {
+            DB::transaction(function () use ($product, $documents, $audit): void {
+                $withdrawn = [];
+
+                foreach ($documents as $document) {
+                    if ($document->status !== 'cancelled'
+                        || ! $document->lines->contains(
+                            fn (WarehouseDocumentLine $line): bool => (int) $line->product_id !== (int) $product->id,
+                        )
+                    ) {
+                        // Exclusive document (or an exclusive cancelled one):
+                        // remove it entirely; lines and ledger cascade away.
+                        $withdrawn[] = $document->number;
+                        $document->forceDelete();
+
+                        continue;
+                    }
+
+                    // A cancelled document shared with other products keeps its
+                    // shell; only this product's lines (and their cascading
+                    // ledger entries) go, so the remaining rows stay intact.
+                    $withdrawn[] = $document->number.' (tylko pozycje produktu)';
+                    WarehouseDocumentLine::query()
+                        ->where('warehouse_document_id', $document->id)
+                        ->where('product_id', $product->id)
+                        ->delete();
+                }
+
+                $audit->record('product.deleted_with_documents_withdrawn', $product, null, [
+                    'sku' => $product->sku,
+                    'withdrawn_documents' => $withdrawn,
+                ]);
+
+                $product->delete();
+            });
+        } catch (\Illuminate\Database\QueryException) {
+            return back()->with(
+                'error',
+                'Nie można usunąć produktu, ponieważ inne rekordy nadal się do niego odwołują. Użyj „Archiwizuj" zamiast usuwania.',
+            );
+        }
+
+        return back()->with(
+            'status',
+            $documents->isEmpty()
+                ? 'Produkt został usunięty.'
+                : 'Produkt został usunięty, a jego dokumenty magazynowe zostały wycofane: '.$documents->pluck('number')->implode(', ').'.',
+        );
+    }
+
+    public function archive(Product $product, AuditLogService $audit): RedirectResponse
+    {
+        if ($product->isArchived()) {
+            return back()->with('status', 'Produkt jest już zarchiwizowany.');
+        }
+
+        if ($this->productHasStock($product)) {
+            return back()->with('error', 'Wyzeruj stany magazynowe przed archiwizacją produktu.');
+        }
+
+        $detached = 0;
+
+        DB::transaction(function () use ($product, $audit, &$detached): void {
+            $locked = Product::query()->lockForUpdate()->findOrFail($product->id);
+
+            // Detach every channel identity so no export, stock push or import
+            // ever targets this product again. Woo posts are not touched —
+            // the operator trashes them in wp-admin when applicable.
+            $mappingIds = ProductChannelMapping::query()
+                ->where('product_id', $locked->id)
+                ->pluck('id');
+            $detached = ProductChannelMapping::query()
+                ->whereIn('id', $mappingIds)
+                ->delete();
+            ProductChannelAlias::query()->where('product_id', $locked->id)->delete();
+            StockSyncQueueItem::query()->where('product_id', $locked->id)->delete();
+            StockSyncState::query()->where('product_id', $locked->id)->delete();
+
+            $locked->forceFill([
+                'is_active' => false,
+                'archived_at' => now(),
+                'storefront_hidden_at' => $locked->storefront_hidden_at ?? now(),
+                'storefront_restore_visibility' => null,
+            ])->save();
+
+            $audit->record('product.archived', $locked, null, [
+                'detached_mappings' => $detached,
+            ]);
+        });
+
+        return back()->with(
+            'status',
+            "Produkt {$product->name} został zarchiwizowany: wyłączony, ukryty i odpięty od kanałów ({$detached} mapowań). Jeśli jego post w WooCommerce nadal istnieje, przenieś go do kosza w wp-admin.",
+        );
+    }
+
+    public function unarchive(Product $product, AuditLogService $audit): RedirectResponse
+    {
+        if (! $product->isArchived()) {
+            return back()->with('status', 'Produkt nie jest zarchiwizowany.');
+        }
+
+        $product->forceFill(['archived_at' => null])->save();
+        $audit->record('product.unarchived', $product);
+
+        return back()->with(
+            'status',
+            "Produkt {$product->name} został przywrócony z archiwum jako nieaktywny. Aktywuj go i wyślij do sklepu, gdy będzie gotowy.",
+        );
+    }
+
+    private function productHasStock(Product $product): bool
+    {
+        return StockBalance::query()
             ->where('product_id', $product->id)
             ->where(function ($query): void {
                 $query->where('quantity_on_hand', '!=', 0)
                     ->orWhere('quantity_reserved', '!=', 0);
             })
             ->exists();
+    }
 
-        if ($hasStock) {
-            return back()->with('error', 'Nie można usunąć produktu ze stanem magazynowym.');
+    /** @return list<string> */
+    private function productTradeEvidence(Product $product): array
+    {
+        $evidence = [];
+
+        if (ExternalOrderLine::query()->where('product_id', $product->id)->exists()) {
+            $evidence[] = 'pozycje zamówień';
         }
 
-        $product->delete();
+        if (InvoiceLine::query()->where('product_id', $product->id)->exists()) {
+            $evidence[] = 'pozycje faktur';
+        }
 
-        return back()->with('status', 'Produkt został usunięty.');
+        if (ReturnCaseLine::query()->where('product_id', $product->id)->exists()) {
+            $evidence[] = 'zwroty';
+        }
+
+        if (PackingTask::query()->where('product_id', $product->id)->exists()) {
+            $evidence[] = 'zadania pakowania';
+        }
+
+        if (WarehouseDocumentLine::query()
+            ->where('product_id', $product->id)
+            ->whereHas('document', fn ($query) => $query->whereNotIn(
+                'type',
+                self::WITHDRAWABLE_DOCUMENT_TYPES,
+            ))
+            ->exists()
+        ) {
+            $evidence[] = 'dokumenty wydań';
+        }
+
+        return $evidence;
     }
 
     /**
@@ -3143,6 +3342,14 @@ class ProductController extends Controller
             $products->where('attributes', 'like', '%'.$filters['category'].'%');
         }
 
+        // Archived products live outside day-to-day work: every view hides
+        // them unless the operator explicitly asks for the archive.
+        if ($filters['status'] === 'archived') {
+            $products->whereNotNull('archived_at');
+        } else {
+            $products->whereNull('archived_at');
+        }
+
         if ($filters['status'] === 'active') {
             $products->where('is_active', true);
         }
@@ -3291,7 +3498,7 @@ class ProductController extends Controller
                 ? (string) $input['type']
                 : '',
             'category' => $this->nullableString($input['category'] ?? null) ?? '',
-            'status' => in_array($input['status'] ?? null, ['active', 'inactive', 'publish', 'draft'], true)
+            'status' => in_array($input['status'] ?? null, ['active', 'inactive', 'publish', 'draft', 'archived'], true)
                 ? (string) $input['status']
                 : '',
             'favorites' => $favorites,

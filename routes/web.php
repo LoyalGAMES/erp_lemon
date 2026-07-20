@@ -137,6 +137,8 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/products/{product}/gs1/ean', [ProductController::class, 'generateGs1Ean'])->name('products.gs1.ean.generate');
         Route::get('/products/{product}', [ProductController::class, 'show'])->name('products.show');
         Route::delete('/products/{product}', [ProductController::class, 'destroy'])->name('products.destroy');
+        Route::post('/products/{product}/archive', [ProductController::class, 'archive'])->name('products.archive');
+        Route::post('/products/{product}/unarchive', [ProductController::class, 'unarchive'])->name('products.unarchive');
     });
 
     Route::middleware(EnsureErpRole::class.':warehouses')->group(function (): void {

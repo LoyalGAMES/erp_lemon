@@ -29,6 +29,7 @@ class Product extends Model
         'storefront_hidden_at',
         'storefront_restore_visibility',
         'stock_verification_required_at',
+        'archived_at',
     ];
 
     protected $casts = [
@@ -38,6 +39,7 @@ class Product extends Model
         'is_translation' => 'boolean',
         'storefront_hidden_at' => 'datetime',
         'stock_verification_required_at' => 'datetime',
+        'archived_at' => 'datetime',
         'vat_rate' => 'decimal:2',
         'weight_kg' => 'decimal:4',
     ];
@@ -181,6 +183,11 @@ class Product extends Model
     public function isStorefrontHidden(): bool
     {
         return $this->storefront_hidden_at !== null;
+    }
+
+    public function isArchived(): bool
+    {
+        return $this->archived_at !== null;
     }
 
     public function requiresStockVerification(): bool
