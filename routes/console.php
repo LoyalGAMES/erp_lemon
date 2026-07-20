@@ -817,6 +817,80 @@ Artisan::command('erp:consolidate-variant-size-dictionary {--dry-run : Report ch
     return 0;
 })->purpose('Merge duplicate size dictionaries (e.g. Rozmiary) into the canonical Rozmiar without touching products, relations or stock.');
 
+Artisan::command('erp:clear-woo-axis-repair-block {--sku= : Limit to a single variable product (parent or variant SKU)} {--dry-run : Report families without clearing}', function (WooOwnedVariantAxisRepairService $axisRepair): int {
+    $dryRun = (bool) $this->option('dry-run');
+    $skuOption = trim((string) $this->option('sku'));
+
+    // Resolve family roots. A supplied SKU may be the variable parent or any of
+    // its variants; the block always lives on the family root's parent mapping.
+    $rootIds = collect();
+
+    if ($skuOption !== '') {
+        $product = Product::query()->where('sku', $skuOption)->first();
+
+        if (! $product instanceof Product) {
+            $this->error("Nie znaleziono produktu o SKU {$skuOption}.");
+
+            return 1;
+        }
+
+        $rootIds->push($axisRepair->familyRootId((int) $product->id));
+    } else {
+        // Every family whose parent mapping still carries a current-revision
+        // block. Preview with --dry-run before clearing catalogue-wide.
+        $statePath = str_replace('.', '->', WooOwnedVariantAxisRepairService::STATE_PATH);
+        $rootIds = ProductChannelMapping::query()
+            ->whereNull('external_variation_id')
+            ->where('metadata->'.$statePath.'->revision', WooOwnedVariantAxisRepairService::REVISION)
+            ->whereIn('metadata->'.$statePath.'->status', ['pending', 'queued', 'manual_review'])
+            ->pluck('product_id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0);
+    }
+
+    $rootIds = $rootIds->unique()->values();
+
+    if ($rootIds->isEmpty()) {
+        $this->warn('Brak rodzin z blokadą naprawy osi.');
+
+        return 0;
+    }
+
+    $rows = [];
+    $clearedTotal = 0;
+
+    foreach ($rootIds as $rootId) {
+        $root = Product::query()->find($rootId);
+        $result = $axisRepair->clearFamilyRepairBlock((int) $rootId, $dryRun);
+        $clearedTotal += (int) $result['cleared'];
+
+        foreach ($result['targets'] as $target) {
+            $rows[] = [
+                $root?->sku ?? (string) $rootId,
+                $target['channel'],
+                $target['status'] ?: '-',
+                $target['external_product_id'] ?: '-',
+                $dryRun ? 'do odblokowania' : 'odblokowano',
+            ];
+        }
+    }
+
+    $this->table(['sku', 'channel', 'prior_status', 'woo_id', 'akcja'], $rows);
+    $this->info(sprintf(
+        '%s families_in_scope=%d, mappings_%s=%d.',
+        $dryRun ? '[DRY-RUN] would clear.' : 'Cleared.',
+        $rootIds->count(),
+        $dryRun ? 'to_clear' : 'cleared',
+        $dryRun ? count($rows) : $clearedTotal,
+    ));
+
+    if (! $dryRun && $clearedTotal > 0) {
+        $this->line('Uruchom teraz eksport rodziny: przycisk „Wyślij dane do WooCommerce" albo zapis produktu.');
+    }
+
+    return 0;
+})->purpose('Clear a stuck WooCommerce axis-repair manual_review block after a manual Woo fix so the normal full export can rebuild the family.');
+
 Artisan::command('erp:refresh-ksef-submissions {--limit=25 : Maximum number of KSeF submissions to refresh} {--minutes=2 : Refresh submissions older than this many minutes}', function (): int {
     $limit = max(1, (int) $this->option('limit'));
     $minutes = max(0, (int) $this->option('minutes'));
