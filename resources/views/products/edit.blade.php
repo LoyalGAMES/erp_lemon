@@ -139,7 +139,12 @@
 
     @if ($errors->any())
         <div class="alert error">
-            Nie zapisano produktu. Popraw pola formularza oznaczone przez walidację.
+            <strong>Nie zapisano produktu. Popraw poniższe pola:</strong>
+            <ul style="margin: 6px 0 0 18px;">
+                @foreach ($errors->all() as $validationMessage)
+                    <li>{{ $validationMessage }}</li>
+                @endforeach
+            </ul>
         </div>
     @endif
 
