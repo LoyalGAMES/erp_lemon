@@ -510,13 +510,15 @@ class ProductController extends Controller
             ->values()
             ->all();
         $changes = (array) ($validated['changes'] ?? []);
+        // Label colors are deliberately NOT required: clearing them via bulk
+        // edit is the only UI path to reset a color (the single-product form
+        // uses <input type=color>, which cannot submit an empty value) and the
+        // storefront falls back to the theme defaults.
         $requiredValues = [
             'is_active',
             'catalog_visibility',
             'publication_status',
             'backorders',
-            'custom_label_bg_color',
-            'custom_label_text_color',
             'lemon_preorder',
         ];
 
@@ -2023,11 +2025,22 @@ class ProductController extends Controller
                     ? $request->boolean('sold_individually')
                     : (bool) data_get($existingMaster, 'inventory.sold_individually', false),
             ],
+            // array_key_exists, not `??`: ConvertEmptyStringsToNull turns a
+            // cleared input into null, and `??` would silently resurrect the
+            // old label — an operator could never remove e.g. "PREORDER".
             'custom_label' => [
-                'pl' => $this->nullableString($validated['custom_label_pl'] ?? data_get($existingMaster, 'custom_label.pl')),
-                'en' => $this->nullableString($validated['custom_label_en'] ?? data_get($existingMaster, 'custom_label.en')),
-                'bg_color' => $this->nullableString($validated['custom_label_bg_color'] ?? data_get($existingMaster, 'custom_label.bg_color')),
-                'text_color' => $this->nullableString($validated['custom_label_text_color'] ?? data_get($existingMaster, 'custom_label.text_color')),
+                'pl' => array_key_exists('custom_label_pl', $validated)
+                    ? $this->nullableString($validated['custom_label_pl'])
+                    : $this->nullableString(data_get($existingMaster, 'custom_label.pl')),
+                'en' => array_key_exists('custom_label_en', $validated)
+                    ? $this->nullableString($validated['custom_label_en'])
+                    : $this->nullableString(data_get($existingMaster, 'custom_label.en')),
+                'bg_color' => array_key_exists('custom_label_bg_color', $validated)
+                    ? $this->nullableString($validated['custom_label_bg_color'])
+                    : $this->nullableString(data_get($existingMaster, 'custom_label.bg_color')),
+                'text_color' => array_key_exists('custom_label_text_color', $validated)
+                    ? $this->nullableString($validated['custom_label_text_color'])
+                    : $this->nullableString(data_get($existingMaster, 'custom_label.text_color')),
             ],
             'shipping' => [
                 'days' => array_key_exists('lemon_shipping_days', $validated)
