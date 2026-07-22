@@ -109,7 +109,7 @@ class ProductEmptyFieldPropagationTest extends TestCase
             $meta = collect($request['meta_data'])->pluck('value', 'key');
 
             return $request['regular_price'] === ''
-                && $request['low_stock_amount'] === ''
+                && $request['low_stock_amount'] === null
                 && $meta['_lemon_product_label_text'] === ''
                 && $meta['_sempre_erp_tags'] === '';
         });

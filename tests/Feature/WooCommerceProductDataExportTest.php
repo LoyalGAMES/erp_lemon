@@ -180,7 +180,7 @@ class WooCommerceProductDataExportTest extends TestCase
             $meta = collect($request['meta_data'])->pluck('value', 'key');
 
             return $request['catalog_visibility'] === 'hidden'
-                && $request['low_stock_amount'] === ''
+                && $request['low_stock_amount'] === null
                 && $request['images'][0]['src'] === 'https://shop.test/wp-content/uploads/legacy.jpg'
                 && $meta['lemon_shipping_days'] === ''
                 && $meta['lemon_shipping_text'] === ''
