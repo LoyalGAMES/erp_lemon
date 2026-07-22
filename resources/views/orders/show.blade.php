@@ -555,6 +555,15 @@
                                 <button class="button danger" type="submit">Zatwierdź stan sprzed podziału</button>
                             </div>
                         </form>
+                    @elseif (is_array($historicalSplitReconciliation) && $historicalSplitReconciliation['reasons'] !== [])
+                        <div class="alert warning" style="margin: 14px 0 0;">
+                            <strong>Kontrola historyczna nadal blokuje automatyczne uzgodnienie.</strong>
+                            <ul>
+                                @foreach ($historicalSplitReconciliation['reasons'] as $reason)
+                                    <li>{{ $reason }}</li>
+                                @endforeach
+                            </ul>
+                        </div>
                     @endif
                 @endif
             </div>
