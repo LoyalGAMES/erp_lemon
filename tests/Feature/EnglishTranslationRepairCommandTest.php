@@ -160,10 +160,13 @@ class EnglishTranslationRepairCommandTest extends TestCase
         );
     }
 
-    public function test_limit_bounds_the_batch(): void
+    public function test_limit_bounds_the_batch_and_jobs_ride_the_repair_queue(): void
     {
         Bus::fake();
-        Http::fake(fn () => Http::response(['code' => 'x', 'data' => ['status' => 404]], 404));
+        Http::fake(fn () => Http::response([
+            'code' => 'woocommerce_rest_product_invalid_id',
+            'data' => ['status' => 404],
+        ], 404));
 
         foreach (['SKU-L1', 'SKU-L2', 'SKU-L3'] as $sku) {
             $this->mappedProduct(
@@ -177,5 +180,140 @@ class EnglishTranslationRepairCommandTest extends TestCase
             ->assertExitCode(0);
 
         Bus::assertDispatchedTimes(ExportWooCommerceProductDataJob::class, 2);
+        Bus::assertDispatched(
+            ExportWooCommerceProductDataJob::class,
+            fn (ExportWooCommerceProductDataJob $job): bool => $job->queue === 'woocommerce-repair',
+        );
+    }
+
+    public function test_check_limit_bounds_remote_verifications_per_run(): void
+    {
+        Bus::fake();
+        Http::fake(fn () => Http::response(['id' => 556], 200));
+
+        foreach (['SKU-C1', 'SKU-C2', 'SKU-C3'] as $sku) {
+            $this->mappedProduct(
+                $sku,
+                ['content' => ['en' => ['name' => 'EN']]],
+                ['woocommerce_translations' => ['en' => ['product_id' => '556']]],
+            );
+        }
+
+        $this->artisan('erp:dispatch-english-translation-repair', ['--check-limit' => 1, '--limit' => 10])
+            ->assertExitCode(0);
+
+        // Exactly one family paid HTTP this tick; the rest wait for later runs.
+        $this->assertCount(1, Http::recorded());
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_one_broken_ref_does_not_wedge_the_sweep(): void
+    {
+        Bus::fake();
+        Http::fake(function ($request) {
+            if (str_contains($request->url(), '/products/500500')) {
+                return Http::response(['message' => 'awaria'], 500);
+            }
+
+            return Http::response([
+                'code' => 'woocommerce_rest_product_invalid_id',
+                'data' => ['status' => 404],
+            ], 404);
+        });
+
+        // First (lower id) family has a ref that 500s; second is healable.
+        [, $brokenMapping] = $this->mappedProduct(
+            'SKU-BROKEN',
+            ['content' => ['en' => ['name' => 'EN']]],
+            ['woocommerce_translations' => ['en' => ['product_id' => '500500']]],
+        );
+        $this->mappedProduct(
+            'SKU-AFTER',
+            ['content' => ['en' => ['name' => 'EN']]],
+            ['woocommerce_translations' => ['en' => ['product_id' => '555']]],
+        );
+
+        $this->artisan('erp:dispatch-english-translation-repair', ['--limit' => 10])
+            ->assertExitCode(0);
+
+        // The broken family was marked (daily window) and the sweep continued.
+        Bus::assertDispatchedTimes(ExportWooCommerceProductDataJob::class, 1);
+        $this->assertNotNull(data_get(
+            $brokenMapping->fresh()->metadata,
+            'english_translation_repair.checked_at',
+        ));
+        $this->assertNotNull(data_get(
+            $brokenMapping->fresh()->metadata,
+            'english_translation_repair.check_error',
+        ));
+    }
+
+    public function test_families_with_repeated_export_failures_wait_for_a_human(): void
+    {
+        Bus::fake();
+        Http::fake();
+
+        [, $mapping] = $this->mappedProduct(
+            'SKU-3FAILS',
+            ['content' => ['en' => ['name' => 'EN']]],
+        );
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, 'english_translation_repair', [
+            'checked_at' => now()->subDays(3)->toISOString(),
+            'failure_count' => 3,
+            'last_failed_at' => now()->subDays(2)->toISOString(),
+            'last_error' => 'WooCommerce zawiera kilka wartości SEMPRE',
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        $this->artisan('erp:dispatch-english-translation-repair', ['--limit' => 10])
+            ->assertExitCode(0);
+
+        Http::assertNothingSent();
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_recent_failure_applies_exponential_cooldown(): void
+    {
+        Bus::fake();
+        Http::fake();
+
+        [, $mapping] = $this->mappedProduct(
+            'SKU-COOLDOWN',
+            ['content' => ['en' => ['name' => 'EN']]],
+        );
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, 'english_translation_repair', [
+            'checked_at' => now()->subDays(3)->toISOString(),
+            'failure_count' => 2,
+            'last_failed_at' => now()->subHours(30)->toISOString(),
+        ]);
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        // failure_count=2 -> cooldown 2 dni; 30h < 48h -> pominięty.
+        $this->artisan('erp:dispatch-english-translation-repair', ['--limit' => 10])
+            ->assertExitCode(0);
+
+        Http::assertNothingSent();
+        Bus::assertNothingDispatched();
+    }
+
+    public function test_failed_tokenless_export_stamps_failure_memory_on_the_mapping(): void
+    {
+        [$product, $mapping] = $this->mappedProduct(
+            'SKU-STAMP',
+            ['content' => ['en' => ['name' => 'EN']]],
+        );
+        $metadata = (array) $mapping->metadata;
+        data_set($metadata, 'english_translation_repair.checked_at', now()->toISOString());
+        $mapping->forceFill(['metadata' => $metadata])->save();
+
+        (new ExportWooCommerceProductDataJob((int) $product->id))
+            ->failed(new \RuntimeException('Utworzenie tłumaczenia padło'));
+
+        $fresh = (array) data_get($mapping->fresh()->metadata, 'english_translation_repair');
+        $this->assertSame(1, (int) ($fresh['failure_count'] ?? 0));
+        $this->assertNotNull($fresh['last_failed_at'] ?? null);
+        $this->assertStringContainsString('padło', (string) ($fresh['last_error'] ?? ''));
     }
 }

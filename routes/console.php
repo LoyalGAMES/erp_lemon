@@ -27,6 +27,7 @@ use App\Services\WooCommerce\WooCommerceProductCreationRecoveryService;
 use App\Services\WooCommerce\WooOwnedVariantAxisRepairService;
 use App\Services\WooCommerce\WooVariationMappingRelinker;
 use Illuminate\Foundation\Inspiring;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
@@ -893,11 +894,12 @@ Artisan::command('erp:clear-woo-axis-repair-block {--sku= : Limit to a single va
     return 0;
 })->purpose('Clear a stuck WooCommerce axis-repair manual_review block after a manual Woo fix so the normal full export can rebuild the family.');
 
-Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families queued per run} {--dry-run : Classify without pruning or queueing} {--sku= : Limit to a single family}', function (
+Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families queued per run} {--check-limit=10 : Families remotely verified per run} {--dry-run : Classify without pruning or queueing} {--sku= : Limit to a single family}', function (
     ProductDataExportService $exporter,
     WooOwnedVariantAxisRepairService $axisRepair,
 ): int {
     $limit = max(1, (int) $this->option('limit'));
+    $checkLimit = max(1, (int) $this->option('check-limit'));
     $dryRun = (bool) $this->option('dry-run');
     $skuOption = trim((string) $this->option('sku'));
 
@@ -918,13 +920,39 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
     $counts = [
         'healthy' => 0,
         'monolingual' => 0,
+        'translation_row' => 0,
         'axis_blocked' => 0,
         'shared_children' => 0,
         'recently_checked' => 0,
+        'failed_cooldown' => 0,
+        'manual_after_failures' => 0,
+        'check_failed' => 0,
         'live_ref_manual' => 0,
+        'checked' => 0,
         'queued' => 0,
     ];
     $rows = [];
+    $writeMarker = function (ProductChannelMapping $mapping, array $extra = []): void {
+        // Locked fresh re-read: the loop's model may be minutes old and a
+        // whole-column save from it would clobber concurrent metadata writes
+        // (e.g. a publish pending_token). Only the repair subtree is touched.
+        DB::transaction(function () use ($mapping, $extra): void {
+            $locked = ProductChannelMapping::query()->lockForUpdate()->find($mapping->id);
+
+            if ($locked === null) {
+                return;
+            }
+
+            $metadata = (array) $locked->metadata;
+            data_set($metadata, 'english_translation_repair.checked_at', now()->toISOString());
+
+            foreach ($extra as $key => $value) {
+                data_set($metadata, "english_translation_repair.{$key}", $value);
+            }
+
+            $locked->forceFill(['metadata' => $metadata])->save();
+        }, 3);
+    };
 
     foreach ($integrations as $integration) {
         $channelId = (int) $integration->sales_channel_id;
@@ -932,6 +960,10 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
             ->where('sales_channel_id', $channelId)
             ->whereNull('external_variation_id')
             ->where('external_product_id', '!=', '')
+            ->whereHas('product', fn ($query) => $query
+                ->where('is_active', true)
+                ->whereNull('archived_at')
+                ->where('is_translation', false))
             ->orderBy('product_id')
             ->with('product')
             ->get();
@@ -940,8 +972,6 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
             $product = $mapping->product;
 
             if (! $product instanceof Product
-                || ! $product->is_active
-                || $product->isArchived()
                 || ($skuOption !== '' && $product->sku !== $skuOption)
             ) {
                 continue;
@@ -988,11 +1018,33 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
                 continue;
             }
 
+            $repairState = (array) data_get($mapping->metadata, 'english_translation_repair', []);
+            $failureCount = (int) ($repairState['failure_count'] ?? 0);
+
+            // Failure memory: a family whose repair export keeps dying gets an
+            // exponential cooldown (1d, 2d, 4d) and, after three strikes, waits
+            // for a human instead of burning 70 retries every day forever.
+            if ($failureCount >= 3) {
+                $counts['manual_after_failures']++;
+                $rows[] = [$product->sku, "eksport naprawczy padł {$failureCount}× — wymaga człowieka ("
+                    .str((string) ($repairState['last_error'] ?? ''))->limit(60)->toString().')'];
+
+                continue;
+            }
+
+            if ($failureCount > 0 && filled($repairState['last_failed_at'] ?? null)
+                && now()->subDays(2 ** ($failureCount - 1))->lt(Carbon::parse((string) $repairState['last_failed_at']))
+            ) {
+                $counts['failed_cooldown']++;
+
+                continue;
+            }
+
             // One remote check per family per day keeps the loop gentle when a
             // family cannot be healed automatically (live-but-unlinked EN post)
             // or its queued export has not produced an alias yet.
-            $checkedAt = data_get($mapping->metadata, 'english_translation_repair.checked_at');
-            if (filled($checkedAt) && now()->subDay()->lt(\Illuminate\Support\Carbon::parse((string) $checkedAt))) {
+            $checkedAt = $repairState['checked_at'] ?? null;
+            if (filled($checkedAt) && now()->subDay()->lt(Carbon::parse((string) $checkedAt))) {
                 $counts['recently_checked']++;
 
                 continue;
@@ -1012,11 +1064,31 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
                 continue;
             }
 
-            $exporter->pruneDeadLegacyTranslationSnapshot($product, $integration);
+            // Remote-verification budget is separate from the queue budget: the
+            // very first run meets the whole backlog and must not spend an
+            // unbounded number of HTTP round-trips in a single scheduler tick.
+            $counts['checked']++;
 
-            $metadata = (array) $mapping->metadata;
-            data_set($metadata, 'english_translation_repair.checked_at', now()->toISOString());
-            $mapping->forceFill(['metadata' => $metadata])->save();
+            try {
+                $exporter->pruneDeadLegacyTranslationSnapshot($product, $integration);
+                $writeMarker($mapping);
+            } catch (Throwable $exception) {
+                // One family with an unreachable ref must not wedge the sweep
+                // (head-of-line) nor be retried every 5 minutes: mark it
+                // checked, report, and move on — the daily window retries it.
+                report($exception);
+                $writeMarker($mapping, [
+                    'check_error' => str($exception->getMessage())->limit(300)->toString(),
+                ]);
+                $counts['check_failed']++;
+                $rows[] = [$product->sku, 'błąd weryfikacji: '.str($exception->getMessage())->limit(70)->toString()];
+
+                if ($counts['checked'] >= $checkLimit) {
+                    break 2;
+                }
+
+                continue;
+            }
 
             $liveRef = data_get($product->fresh()->attributes, 'woocommerce_translations.en.product_id');
 
@@ -1028,15 +1100,23 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
                 $counts['live_ref_manual']++;
                 $rows[] = [$product->sku, "istnieje niespięty post EN #{$liveRef} — spięcie/kasacja to decyzja operatora"];
 
+                if ($counts['checked'] >= $checkLimit) {
+                    break 2;
+                }
+
                 continue;
             }
 
+            // The bounded repair queue keeps heavy rebuild exports away from
+            // the default lane (stock sync) and behind woocommerce-critical
+            // (operator publishes) on the shared worker.
             ExportWooCommerceProductDataJob::dispatch((int) $product->id)
-                ->onConnection('database');
+                ->onConnection('database')
+                ->onQueue(WooOwnedVariantAxisRepairService::REPAIR_QUEUE);
             $counts['queued']++;
             $rows[] = [$product->sku, 'zakolejkowano pełny eksport (utworzy i zepnie EN)'];
 
-            if ($counts['queued'] >= $limit) {
+            if ($counts['queued'] >= $limit || $counts['checked'] >= $checkLimit) {
                 break 2;
             }
         }
@@ -1047,20 +1127,25 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
     }
 
     $this->info(sprintf(
-        '%s zdrowe=%d, jednojęzyczne=%d, oś-w-naprawie=%d, wspólne-warianty=%d, sprawdzone-ostatnio=%d, żywy-niespięty-post=%d, %s=%d.',
+        '%s zdrowe=%d, jednojęzyczne=%d, wiersze-tłumaczeń=%d, oś-w-naprawie=%d, wspólne-warianty=%d, sprawdzone-ostatnio=%d, cooldown-po-porażce=%d, do-decyzji-po-porażkach=%d, błędy-weryfikacji=%d, żywy-niespięty-post=%d, sprawdzone-teraz=%d, %s=%d.',
         $dryRun ? '[DRY-RUN]' : 'English repair:',
         $counts['healthy'],
         $counts['monolingual'],
+        $counts['translation_row'],
         $counts['axis_blocked'],
         $counts['shared_children'],
         $counts['recently_checked'],
+        $counts['failed_cooldown'],
+        $counts['manual_after_failures'],
+        $counts['check_failed'],
         $counts['live_ref_manual'],
+        $counts['checked'],
         $dryRun ? 'kandydaci' : 'zakolejkowane',
         $counts['queued'],
     ));
 
     return 0;
-})->purpose('Automatically rebuild missing English translations: prune dead snapshot refs and queue full exports for safe families; report the ones needing a human.');
+})->purpose('Automatically rebuild missing English translations: prune dead snapshot refs and queue bounded repair exports; report every family that needs a human.');
 
 Artisan::command('erp:refresh-ksef-submissions {--limit=25 : Maximum number of KSeF submissions to refresh} {--minutes=2 : Refresh submissions older than this many minutes}', function (): int {
     $limit = max(1, (int) $this->option('limit'));

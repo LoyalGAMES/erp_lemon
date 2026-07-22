@@ -93,7 +93,6 @@ final class ProductDataExportService
             );
             if (! $isVariation) {
                 $this->removePendingVariants($product, $integration, $mapping);
-                $this->pruneDeadLegacyTranslationSnapshot($product, $integration);
             }
             $payload = $variantParent instanceof Product
                 ? $this->variationPayload(
@@ -114,6 +113,14 @@ final class ProductDataExportService
             $response = $this->client->updateProductData($integration, $mapping, $payload);
 
             $this->updateMappingAfterExport($mapping, $product, $payload, $response);
+
+            // Run after the Polish PUT: even when the snapshot preflight hits a
+            // transient fault and aborts the translation phase, the family's
+            // canonical PL data has already reached WooCommerce.
+            if (! $isVariation) {
+                $this->pruneDeadLegacyTranslationSnapshot($product, $integration);
+            }
+
             $creationInProgress = ! $isVariation
                 && data_get($mapping->metadata, 'creation_state') === 'creating';
             $missingTranslations = ! $isVariation
@@ -1115,6 +1122,20 @@ final class ProductDataExportService
      * erase a valid reference. Alias-backed families skip the check entirely
      * (aliases are authoritative and actively maintained).
      */
+    /**
+     * Woo/WP error codes that prove the referenced post itself was permanently
+     * deleted. A bare 404 status is NOT enough: a temporarily deactivated Woo
+     * plugin, a permalink flush or a WAF answer 404 with `rest_no_route` (or an
+     * HTML body) for the whole namespace — pruning on those would erase valid
+     * references catalog-wide and later duplicate the translations.
+     */
+    private const DELETED_POST_ERROR_CODES = [
+        'woocommerce_rest_product_invalid_id',
+        'rest_post_invalid_id',
+    ];
+
+    private const SNAPSHOT_VERIFIED_PATH = 'woocommerce_translations_verified_at';
+
     public function pruneDeadLegacyTranslationSnapshot(
         Product $product,
         WordpressIntegration $integration,
@@ -1132,9 +1153,41 @@ final class ProductDataExportService
             return;
         }
 
+        // Mirror the translationReferences() guard: the unscoped legacy
+        // snapshot is only ever read for a single-channel product mapped to
+        // THIS channel. Entries of multi-channel products are dead code by
+        // design — never verify them against, or prune them for, another store.
+        $mappedChannelIds = ProductChannelMapping::query()
+            ->where('product_id', $product->id)
+            ->distinct()
+            ->pluck('sales_channel_id');
+
+        if ($mappedChannelIds->count() !== 1
+            || (int) $mappedChannelIds->first() !== (int) $integration->sales_channel_id
+        ) {
+            return;
+        }
+
+        // A recent all-alive verification is remembered so routine exports of
+        // legacy families do not pay the preflight GETs on every publish.
+        $verifiedAt = data_get($product->attributes, self::SNAPSHOT_VERIFIED_PATH);
+
+        if (filled($verifiedAt) && now()->subDays(7)->lt(CarbonImmutable::parse((string) $verifiedAt))) {
+            return;
+        }
+
+        $relevantLanguages = collect($this->exportLanguages($product, $integration))
+            ->reject(fn (string $language): bool => $language === 'pl')
+            ->values();
+        // lang => the exact external id that was verified dead. The locked
+        // rewrite below only forgets an entry that still points at that id.
         $dead = [];
 
         foreach ($snapshot as $language => $reference) {
+            if (! $relevantLanguages->contains(mb_strtolower(trim((string) $language)))) {
+                continue;
+            }
+
             $externalProductId = trim((string) (is_array($reference) ? ($reference['product_id'] ?? '') : ''));
 
             if ($externalProductId === '') {
@@ -1144,23 +1197,44 @@ final class ProductDataExportService
             try {
                 $this->client->productById($integration, $externalProductId);
             } catch (RequestException $exception) {
-                if ($exception->response?->status() !== 404) {
+                $wooCode = trim((string) data_get($exception->response?->json(), 'code'));
+
+                if ($exception->response?->status() !== 404
+                    || ! in_array($wooCode, self::DELETED_POST_ERROR_CODES, true)
+                ) {
                     throw $exception;
                 }
 
-                $dead[] = $language;
+                $dead[$language] = $externalProductId;
             }
         }
 
-        if ($dead === []) {
-            return;
-        }
+        DB::transaction(function () use ($product, $dead): void {
+            $locked = Product::query()->lockForUpdate()->findOrFail($product->id);
+            $attributes = (array) $locked->attributes;
 
-        $attributes = (array) $product->attributes;
-        $attributes['woocommerce_translations'] = collect($snapshot)
-            ->except($dead)
-            ->all();
-        $product->forceFill(['attributes' => $attributes])->save();
+            if ($dead === []) {
+                $attributes[self::SNAPSHOT_VERIFIED_PATH] = now()->toISOString();
+            } else {
+                unset($attributes[self::SNAPSHOT_VERIFIED_PATH]);
+
+                foreach ($dead as $language => $verifiedDeadId) {
+                    $current = trim((string) data_get(
+                        $attributes,
+                        "woocommerce_translations.{$language}.product_id",
+                    ));
+
+                    // A concurrent import may have re-pointed the entry while we
+                    // were verifying; only the exact id that 404-ed is removed.
+                    if ($current === $verifiedDeadId) {
+                        data_forget($attributes, "woocommerce_translations.{$language}");
+                    }
+                }
+            }
+
+            $locked->forceFill(['attributes' => $attributes])->save();
+        }, 3);
+
         $product->refresh();
     }
 

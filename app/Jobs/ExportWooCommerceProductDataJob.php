@@ -60,13 +60,15 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
             ->familyRootId($this->productId);
         $middleware = [];
 
-        if ($this->syncToken !== null) {
-            $middleware[] = (new WithoutOverlapping(self::lockKey($familyRootId)))
-                ->releaseAfter(60)
-                ->expireAfter(self::LOCK_SECONDS)
-                ->withPrefix('')
-                ->shared();
-        }
+        // Unconditional: tokenless repair-driven exports must serialize with
+        // tokened publishes of the same family, otherwise two full exports can
+        // interleave and e.g. create duplicate translated posts. A contention
+        // release consumes a try, which tries=70 absorbs comfortably.
+        $middleware[] = (new WithoutOverlapping(self::lockKey($familyRootId)))
+            ->releaseAfter(60)
+            ->expireAfter(self::LOCK_SECONDS)
+            ->withPrefix('')
+            ->shared();
 
         ImportWooCommerceProductsJob::catalogIntegrationIdsForProduct($familyRootId)
             ->each(function (mixed $integrationId) use (&$middleware): void {
@@ -331,6 +333,48 @@ final class ExportWooCommerceProductDataJob implements ShouldQueue
         }
 
         $this->markCurrentSyncTokenFailed($exception);
+        $this->markEnglishRepairFailed($product, $exception);
+    }
+
+    /**
+     * Failure memory for the scheduler-driven translation repair: a tokenless
+     * export queued by erp:dispatch-english-translation-repair that exhausts
+     * its tries must not be re-queued blindly every day. The counter feeds an
+     * exponential cooldown and, after repeated failures, a manual-review skip.
+     */
+    private function markEnglishRepairFailed(Product $product, Throwable $exception): void
+    {
+        if ($this->syncToken !== null) {
+            return;
+        }
+
+        DB::transaction(function () use ($product, $exception): void {
+            ProductChannelMapping::query()
+                ->where('product_id', $product->id)
+                ->whereNull('external_variation_id')
+                ->lockForUpdate()
+                ->get()
+                ->each(function (ProductChannelMapping $mapping) use ($exception): void {
+                    $metadata = (array) $mapping->metadata;
+
+                    if (! filled(data_get($metadata, 'english_translation_repair.checked_at'))) {
+                        return;
+                    }
+
+                    data_set(
+                        $metadata,
+                        'english_translation_repair.failure_count',
+                        (int) data_get($metadata, 'english_translation_repair.failure_count', 0) + 1,
+                    );
+                    data_set($metadata, 'english_translation_repair.last_failed_at', now()->toISOString());
+                    data_set(
+                        $metadata,
+                        'english_translation_repair.last_error',
+                        str($exception->getMessage())->limit(300)->toString(),
+                    );
+                    $mapping->forceFill(['metadata' => $metadata])->save();
+                });
+        }, 3);
     }
 
     private function markCurrentSyncTokenFailed(Throwable $exception): void
