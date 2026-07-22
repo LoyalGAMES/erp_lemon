@@ -1168,14 +1168,11 @@ final class ProductDataExportService
             return;
         }
 
-        // A recent all-alive verification is remembered so routine exports of
-        // legacy families do not pay the preflight GETs on every publish.
-        $verifiedAt = data_get($product->attributes, self::SNAPSHOT_VERIFIED_PATH);
-
-        if (filled($verifiedAt) && now()->subDays(7)->lt(CarbonImmutable::parse((string) $verifiedAt))) {
-            return;
-        }
-
+        $ownExternalProductId = trim((string) ProductChannelMapping::query()
+            ->where('product_id', $product->id)
+            ->where('sales_channel_id', $integration->sales_channel_id)
+            ->whereNull('external_variation_id')
+            ->value('external_product_id'));
         $relevantLanguages = collect($this->exportLanguages($product, $integration))
             ->reject(fn (string $language): bool => $language === 'pl')
             ->values();
@@ -1190,7 +1187,40 @@ final class ProductDataExportService
 
             $externalProductId = trim((string) (is_array($reference) ? ($reference['product_id'] ?? '') : ''));
 
+            // Corrupt contract data: an entry pointing at the family's own
+            // primary post is no translation. It is alive by definition, so a
+            // liveness GET would "verify" it forever — drop it outright, even
+            // when a stale verified-marker (stamped before this guard existed)
+            // would otherwise skip the preflight.
+            if ($externalProductId !== '' && $externalProductId === $ownExternalProductId) {
+                $dead[$language] = $externalProductId;
+            }
+        }
+
+        // A recent all-alive verification is remembered so routine exports of
+        // legacy families do not pay the preflight GETs on every publish.
+        $verifiedAt = data_get($product->attributes, self::SNAPSHOT_VERIFIED_PATH);
+        $verifiedRecently = filled($verifiedAt)
+            && now()->subDays(7)->lt(CarbonImmutable::parse((string) $verifiedAt));
+
+        if ($dead === [] && $verifiedRecently) {
+            return;
+        }
+
+        foreach ($snapshot as $language => $reference) {
+            $language = mb_strtolower(trim((string) $language));
+
+            if (! $relevantLanguages->contains($language) || array_key_exists($language, $dead)) {
+                continue;
+            }
+
+            $externalProductId = trim((string) (is_array($reference) ? ($reference['product_id'] ?? '') : ''));
+
             if ($externalProductId === '') {
+                continue;
+            }
+
+            if ($verifiedRecently) {
                 continue;
             }
 
@@ -1309,6 +1339,12 @@ final class ProductDataExportService
             return [];
         }
 
+        $ownExternalProductId = trim((string) ProductChannelMapping::query()
+            ->where('product_id', $product->id)
+            ->where('sales_channel_id', $salesChannelId)
+            ->whereNull('external_variation_id')
+            ->value('external_product_id'));
+
         return collect((array) data_get($product->attributes, 'woocommerce_translations', []))
             ->filter(fn (mixed $reference): bool => is_array($reference))
             ->map(fn (array $reference): array => [
@@ -1318,6 +1354,14 @@ final class ProductDataExportService
                     : null,
                 'sku' => filled($reference['sku'] ?? null) ? (string) $reference['sku'] : null,
             ])
+            // A snapshot entry pointing back at the family's own primary post
+            // is corrupt contract data, not a translation. Reporting it as an
+            // existing reference blocks createTranslations forever while
+            // syncTranslations skips it via the main-product guard — the exact
+            // silent `translations: []` deadlock observed on Buty KESJA Czarne.
+            ->reject(fn (array $reference): bool => $ownExternalProductId !== ''
+                && $reference['product_id'] === $ownExternalProductId
+                && $reference['variation_id'] === null)
             ->all();
     }
 
