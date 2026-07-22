@@ -15,6 +15,8 @@ use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\Communication\MailSettingsService;
+use App\Services\Inventory\StockReservationService;
+use App\Services\Orders\OrderSplitService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\WooCommerce\WooCommerceImportService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -22,6 +24,8 @@ use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
+use RuntimeException;
 use Tests\TestCase;
 
 class OrderSplitWorkflowTest extends TestCase
@@ -180,6 +184,120 @@ class OrderSplitWorkflowTest extends TestCase
         $this->assertSame($splitOrder->id, $nestedOrder->split_parent_order_id);
         $this->assertSame($order->id, $nestedOrder->split_root_order_id);
         $this->assertSame('line-2', $nestedOrder->lines->firstOrFail()->canonical_external_line_id);
+    }
+
+    public function test_split_reallocates_woo_reflection_without_creating_phantom_stock(): void
+    {
+        Mail::fake();
+        $channel = SalesChannel::query()->create([
+            'code' => 'SPLIT-REFLECTION',
+            'name' => 'Refleksja stanu przy podziale',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'SPLIT-REFLECTION-WH',
+            'name' => 'Magazyn refleksji',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $warehouse->routes()->create([
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 100,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SPLIT-REFLECTED-SKU',
+            'name' => 'Produkt ujęty w stanie Woo',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $observedAt = now();
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => 'SPLIT-REFLECTED-1001',
+            'external_number' => 'SPLIT/REFLECTED/1001',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 246,
+            'external_created_at' => $observedAt->copy()->subHour(),
+        ]);
+        $line = $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => 'reflected-line',
+            'canonical_external_line_id' => 'reflected-line',
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'quantity' => 2,
+            'unit_gross_price' => 123,
+        ]);
+        $balance = StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 10,
+            'quantity_reserved' => 0,
+            'quantity_available' => 10,
+            'source_sales_channel_id' => $channel->id,
+            'source_available_quantity' => 8,
+            'source_observed_at' => $observedAt,
+            'source_reflected_order_quantities' => [$order->external_id => 2],
+        ]);
+
+        app(StockReservationService::class)->syncForOrder($order);
+        $requestUuid = (string) Str::uuid();
+        $child = app(OrderSplitService::class)->split(
+            $order->fresh(),
+            [$line->id => 1],
+            requestUuid: $requestUuid,
+        );
+        $messageCountAfterFirstSplit = CustomerMessage::query()
+            ->where('trigger', 'order_partial_created')
+            ->count();
+        $retriedChild = app(OrderSplitService::class)->split(
+            $order->fresh(),
+            [$line->id => 1],
+            requestUuid: $requestUuid,
+        );
+
+        try {
+            app(OrderSplitService::class)->split(
+                $order->fresh(),
+                [$line->id => 1],
+                note: 'Zmieniona treść tego samego żądania',
+                requestUuid: $requestUuid,
+            );
+            $this->fail('Reusing a split UUID for a changed command must be rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('został już użyty do innego podziału', $exception->getMessage());
+        }
+
+        $balance->refresh();
+
+        $this->assertSame($child->id, $retriedChild->id);
+        $this->assertSame(2, ExternalOrder::query()->count());
+        $this->assertSame($messageCountAfterFirstSplit, CustomerMessage::query()
+            ->where('trigger', 'order_partial_created')
+            ->count());
+        $this->assertSame('10.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('2.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('8.0000', (string) $balance->quantity_available);
+        $this->assertEqualsWithDelta(1, (float) data_get(
+            $balance->source_reflected_order_quantities,
+            $order->external_id,
+        ), 0.00001);
+        $this->assertEqualsWithDelta(1, (float) data_get(
+            $balance->source_reflected_order_quantities,
+            $child->external_id,
+        ), 0.00001);
+        $this->assertEqualsWithDelta(
+            2,
+            array_sum((array) $balance->source_reflected_order_quantities),
+            0.00001,
+        );
     }
 
     public function test_split_order_waits_for_stock_and_is_allocated_after_pz_posting(): void

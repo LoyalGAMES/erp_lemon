@@ -4090,6 +4090,86 @@ final class WooCommerceClient
         return $this->updateOrder($integration, $orderId, ['status' => $status]);
     }
 
+    public function orderCancellationStockDispositionAvailable(
+        WordpressIntegration $integration,
+        string $minimumPluginVersion,
+    ): bool {
+        try {
+            $response = $this->request($integration, retry: false)
+                ->withoutRedirecting()
+                ->get($this->wordpressRestEndpoint(
+                    $integration,
+                    '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities',
+                ));
+        } catch (Throwable) {
+            return false;
+        }
+
+        if (! $response->successful()) {
+            return false;
+        }
+
+        $payload = $response->json();
+
+        return is_array($payload)
+            && ($payload['available'] ?? null) === true
+            && (int) ($payload['stock_disposition_contract'] ?? 0) === 1
+            && ($payload['configuration_endpoint'] ?? null)
+                === '/wp-json/wc-lemon-erp/v1/orders/{order_id}/cancellation-stock'
+            && is_string($payload['plugin_version'] ?? null)
+            && version_compare($payload['plugin_version'], $minimumPluginVersion, '>=');
+    }
+
+    /** @return array<string, mixed> */
+    public function configureOrderCancellationStockDisposition(
+        WordpressIntegration $integration,
+        string $orderId,
+        bool $restoreStock,
+        string $cancellationUuid,
+        ?string $minimumPluginVersion = null,
+    ): array {
+        $encodedOrderId = rawurlencode($orderId);
+        $response = $this->request($integration, retry: false)
+            ->withoutRedirecting()
+            ->post($this->wordpressRestEndpoint(
+                $integration,
+                "/wc-lemon-erp/v1/orders/{$encodedOrderId}/cancellation-stock",
+            ), [
+                'restore_stock' => $restoreStock,
+                'cancellation_uuid' => $cancellationUuid,
+            ]);
+
+        if (! $response->successful()) {
+            $message = trim((string) data_get($response->json(), 'message'));
+
+            throw new RuntimeException(
+                'Wtyczka Lemon ERP nie potwierdziła decyzji magazynowej anulacji'
+                .($message !== '' ? ': '.$message : " (HTTP {$response->status()})."),
+            );
+        }
+
+        $payload = $response->json();
+
+        if (! is_array($payload)
+            || ($payload['confirmed'] ?? null) !== true
+            || (string) ($payload['order_id'] ?? '') !== $orderId
+            || (string) ($payload['cancellation_uuid'] ?? '') !== $cancellationUuid
+            || ! array_key_exists('restore_stock', $payload)
+            || (bool) $payload['restore_stock'] !== $restoreStock
+            || (int) ($payload['stock_disposition_contract'] ?? 0) !== 1
+            || ! in_array($payload['decision_state'] ?? null, ['armed', 'applied'], true)
+            || ! is_string($payload['plugin_version'] ?? null)
+            || ($minimumPluginVersion !== null
+                && version_compare($payload['plugin_version'], $minimumPluginVersion, '<'))
+        ) {
+            throw new RuntimeException(
+                'Wtyczka Lemon ERP zwróciła niepełne potwierdzenie decyzji o stanie magazynowym anulacji.',
+            );
+        }
+
+        return $payload;
+    }
+
     /**
      * @param  array<string, mixed>  $payload
      * @return array<string, mixed>

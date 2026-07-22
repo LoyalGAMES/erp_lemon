@@ -1231,9 +1231,17 @@
                 event.preventDefault();
 
                 if (form.hasAttribute('data-packing-problem')) {
-                    form.querySelector('input[name="restore_stock"]').value = window.confirm(
-                        'Czy przywrócić stan magazynowy anulowanego zamówienia do sprzedaży?\n\nOK = Tak, Anuluj = Nie'
-                    ) ? '1' : '0';
+                    const restoreStock = window.confirm(
+                        'Czy przywrócić towar z anulowanego zamówienia do sprzedaży?\n\nOK = Przywróć do sprzedaży\nAnuluj = Przejdź do potwierdzenia rozchodu bez przywracania'
+                    );
+
+                    if (!restoreStock && !window.confirm(
+                        'Potwierdź decyzję: towar NIE wróci do dostępnego stanu i powstanie dokument RW.\n\nOK = Nie przywracaj\nAnuluj = Wróć bez anulowania zamówienia'
+                    )) {
+                        return;
+                    }
+
+                    form.querySelector('input[name="restore_stock"]').value = restoreStock ? '1' : '0';
                 }
 
                 if (form.dataset.packingSubmitting === 'true') {

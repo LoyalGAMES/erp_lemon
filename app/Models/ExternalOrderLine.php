@@ -37,7 +37,7 @@ class ExternalOrderLine extends Model
 
     public function order(): BelongsTo
     {
-        return $this->belongsTo(ExternalOrder::class, 'external_order_id');
+        return $this->belongsTo(ExternalOrder::class, 'external_order_id')->withTrashed();
     }
 
     public function product(): BelongsTo

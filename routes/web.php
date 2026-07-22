@@ -275,6 +275,7 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::patch('/orders/{order}/status', [ExternalOrderController::class, 'updateStatus'])->name('orders.status.update');
         Route::post('/orders/{order}/payment-reminder', [ExternalOrderController::class, 'sendPaymentReminder'])->name('orders.payment-reminder.send');
         Route::post('/orders/{order}/split', [ExternalOrderController::class, 'split'])->name('orders.split');
+        Route::delete('/orders/{order}/split', [ExternalOrderController::class, 'reverseSplit'])->name('orders.split.reverse');
         Route::post('/orders/{order}/shipping-decision', [ExternalOrderController::class, 'shippingDecision'])->name('orders.shipping-decision');
         Route::post('/orders/{order}/label', [ExternalOrderController::class, 'generateLabel'])->name('orders.label.generate');
         Route::delete('/orders/{order}/labels/{label}', [ExternalOrderController::class, 'destroyLabel'])->name('orders.labels.destroy');

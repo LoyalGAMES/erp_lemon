@@ -11,6 +11,7 @@ use App\Models\Product;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
 use App\Models\WordpressIntegration;
+use App\Services\Packing\PackingFulfillmentService;
 use App\Services\Packing\PackingSettingsService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippedOrderWooSyncService;
@@ -381,6 +382,50 @@ class PackingShipmentAutomationTest extends TestCase
         }
     }
 
+    public function test_incomplete_split_reversal_blocks_pickup_tracking_and_unpacking_without_mutation(): void
+    {
+        $channel = $this->createChannel();
+        [$order, $task] = $this->createOrderWithTask($channel, 'packed', 'InPost');
+        $label = $this->createLabel($order, [
+            'provider' => 'inpost',
+            'tracking_number' => '520000000000000000009999',
+        ]);
+        $raw = (array) $order->raw_payload;
+        $raw['sempre_erp_split_reversal_operation'] = [
+            'uuid' => 'split-reversal-in-progress',
+            'status' => 'failed',
+            'started_at' => now()->toISOString(),
+        ];
+        $order->update(['raw_payload' => $raw]);
+        Http::preventStrayRequests();
+
+        $pickup = app(PackingFulfillmentService::class)->markOrderPickedUpByCourier($order->fresh());
+
+        $this->assertSame(0, $pickup['tasks']);
+        $this->assertStringContainsString('cofanie podziału', implode(' ', $pickup['warnings']));
+
+        $tracking = app(CourierPickupTrackingService::class)->trackPackedOrders(force: true);
+
+        $this->assertSame(0, $tracking['checked']);
+        $this->assertSame(0, $tracking['picked_up']);
+        $this->assertStringContainsString('cofanie podziału', implode(' ', $tracking['warnings']));
+
+        try {
+            app(PackingFulfillmentService::class)->undoPackedOrder($order->fresh());
+            $this->fail('Unpacking must be blocked while split reversal is incomplete.');
+        } catch (\RuntimeException $exception) {
+            $this->assertStringContainsString('cofania podziału', $exception->getMessage());
+        }
+
+        $this->assertSame('packed', $task->fresh()->status);
+        $this->assertSame('awaiting_courier', $order->fresh()->fulfillment_status);
+        $this->assertSame('generated', $label->fresh()->status);
+        $this->assertNull($label->fresh()->tracking_status);
+        $this->assertNull($label->fresh()->tracking_checked_at);
+        $this->assertNull($label->fresh()->next_tracking_check_at);
+        Http::assertNothingSent();
+    }
+
     public function test_tracker_persists_tracking_state_and_applies_exponential_backoff(): void
     {
         $this->travelTo(Carbon::parse('2026-07-12 11:00:00'));
@@ -692,6 +737,78 @@ class PackingShipmentAutomationTest extends TestCase
         $this->assertSame('shipped', $task->fresh()->status);
         $this->assertSame('shipped', $order->fresh()->fulfillment_status);
         $this->assertSame('completed', $order->fresh()->status);
+    }
+
+    public function test_inpost_sorting_center_departure_moves_order_to_shipped(): void
+    {
+        $this->travelTo(Carbon::parse('2026-07-12 12:45:00'));
+        $channel = $this->createChannel();
+        $this->createIntegration($channel);
+        [$order, $task] = $this->createOrderWithTask($channel, 'packed', 'InPost');
+        $trackingNumber = '520000000000000000008888';
+        $label = $this->createLabel($order, [
+            'provider' => 'inpost',
+            'tracking_number' => $trackingNumber,
+        ]);
+
+        Http::fake([
+            "*/v1/tracking/{$trackingNumber}" => Http::response([
+                'tracking_number' => $trackingNumber,
+                'status' => 'sent_from_sorting_center',
+                'tracking_details' => [],
+            ], 200),
+            'https://shop.test/wp-json/wc/v3/orders/*' => Http::response(['status' => 'completed'], 200),
+        ]);
+
+        $result = app(CourierPickupTrackingService::class)->trackPackedOrders();
+
+        $this->assertSame(1, $result['checked']);
+        $this->assertSame(1, $result['picked_up']);
+        $this->assertSame(1, $result['orders']);
+        $this->assertSame('picked_up', $label->fresh()->status);
+        $this->assertSame('sent_from_sorting_center', $label->fresh()->tracking_status);
+        $this->assertNotNull($label->fresh()->picked_up_at);
+        $this->assertSame('shipped', $task->fresh()->status);
+        $this->assertSame('shipped', $order->fresh()->fulfillment_status);
+    }
+
+    public function test_tracking_race_does_not_mark_a_label_cancelled_without_carrier_confirmation(): void
+    {
+        $channel = $this->createChannel();
+        [$firstOrder] = $this->createOrderWithTask($channel, 'packed', 'InPost');
+        [$cancellingOrder] = $this->createOrderWithTask($channel, 'packed', 'InPost');
+        $firstLabel = $this->createLabel($firstOrder, [
+            'tracking_number' => '520000000000000000001111',
+            'generated_at' => now()->subMinute(),
+        ]);
+        $cancellingLabel = $this->createLabel($cancellingOrder, [
+            'tracking_number' => '520000000000000000002222',
+            'generated_at' => now(),
+        ]);
+
+        Http::fake(function ($request) use ($firstLabel, $cancellingOrder) {
+            if (str_ends_with($request->url(), '/v1/tracking/'.$firstLabel->tracking_number)) {
+                $cancellingOrder->update(['status' => 'cancellation-pending']);
+
+                return Http::response([
+                    'tracking_number' => $firstLabel->tracking_number,
+                    'status' => 'in_transit',
+                    'tracking_details' => [],
+                ], 200);
+            }
+
+            return Http::response(['message' => 'Druga przesyłka nie może zostać odpytana.'], 500);
+        });
+
+        app(CourierPickupTrackingService::class)->trackPackedOrders(force: true);
+
+        $this->assertSame('generated', $cancellingLabel->fresh()->status);
+        $this->assertNull($cancellingLabel->fresh()->next_tracking_check_at);
+        $this->assertStringContainsString(
+            'oczekuje na osobne potwierdzenie anulowania',
+            (string) $cancellingLabel->fresh()->tracking_last_error,
+        );
+        Http::assertSentCount(1);
     }
 
     public function test_tracking_recovers_an_order_left_with_mixed_packed_and_shipped_tasks(): void

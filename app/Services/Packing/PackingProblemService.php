@@ -92,6 +92,11 @@ final class PackingProblemService
 
         $order->refresh();
         $warnings = array_values(array_unique((array) ($cancellationResult['warnings'] ?? [])));
+        $stockRestored = (bool) data_get(
+            $cancellationResult['cancellation']->metadata,
+            'context.restore_stock',
+            true,
+        );
 
         if ($order->status !== 'cancelled') {
             $details = $warnings === []
@@ -107,7 +112,7 @@ final class PackingProblemService
             'problem_note' => $reason,
             'cancellation_uuid' => $cancellationResult['cancellation']->uuid,
             'refund_status' => $cancellationResult['cancellation']->refund_status,
-            'stock_restored' => $restoreStock,
+            'stock_restored' => $stockRestored,
         ]);
 
         if (! $message instanceof CustomerMessage) {
@@ -132,6 +137,7 @@ final class PackingProblemService
             'warnings' => $warnings,
             'order_cancellation_uuid' => $cancellationResult['cancellation']->uuid,
             'refund_status' => $cancellationResult['cancellation']->refund_status,
+            'stock_restored' => $stockRestored,
         ]);
 
         $taskCount = PackingTask::query()
@@ -147,6 +153,7 @@ final class PackingProblemService
             'order_cancellation_id' => $cancellationResult['cancellation']->id,
             'order_cancellation_uuid' => $cancellationResult['cancellation']->uuid,
             'refund_status' => $cancellationResult['cancellation']->refund_status,
+            'stock_restored' => $stockRestored,
             'warnings' => $warnings,
         ]);
 

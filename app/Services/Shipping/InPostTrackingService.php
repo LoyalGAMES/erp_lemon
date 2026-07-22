@@ -14,32 +14,6 @@ use RuntimeException;
 final class InPostTrackingService
 {
     /**
-     * Statusy ShipX oznaczające, że paczka opuściła magazyn nadawcy.
-     */
-    private const PICKED_UP_STATUSES = [
-        'collected_from_sender',
-        'taken_by_courier',
-        'dispatched_by_sender',
-        'adopted_at_source_branch',
-        'sent_from_source_branch',
-        'adopted_at_sorting_center',
-        'out_for_delivery',
-        'ready_to_pickup',
-        'delivered',
-    ];
-
-    /**
-     * Kod zdarzenia w nowszym Tracking API InPost: przesyłka odebrana przez kuriera.
-     */
-    private const PICKED_UP_EVENT_CODES = [
-        'FMD.1002',
-        'FMD.1003',
-        'FMD.1004',
-        'FMD.1005',
-        'FMD.1006',
-    ];
-
-    /**
      * @return array{status:string,picked_up:bool,picked_up_at:?string,delivered:bool,delivered_at:?string}
      */
     public function trackingStatus(string $trackingNumber): array
@@ -68,8 +42,9 @@ final class InPostTrackingService
         $pickedUpAt = null;
         $deliveredAt = null;
         $rootEventCode = (string) ($data['eventCode'] ?? $data['event_code'] ?? '');
+        $eventPickupEvidence = CourierPickupEvidenceClassifier::inPostEventCodeProvesPickup($rootEventCode);
 
-        if (in_array($rootEventCode, self::PICKED_UP_EVENT_CODES, true)) {
+        if ($eventPickupEvidence) {
             $pickedUpAt = (string) ($data['timestamp'] ?? $data['datetime'] ?? '') ?: null;
             $status = $status !== '' ? $status : $rootEventCode;
         }
@@ -79,8 +54,9 @@ final class InPostTrackingService
                 $deliveredAt = (string) ($event['datetime'] ?? '') ?: null;
             }
 
-            if (in_array((string) ($event['status'] ?? ''), self::PICKED_UP_STATUSES, true)) {
+            if (CourierPickupEvidenceClassifier::inPostStatusProvesPickup((string) ($event['status'] ?? ''))) {
                 $pickedUpAt ??= (string) ($event['datetime'] ?? '') ?: null;
+                $eventPickupEvidence = true;
             }
         }
 
@@ -96,7 +72,8 @@ final class InPostTrackingService
                 ?? ''
             );
 
-            if (in_array($eventCode, self::PICKED_UP_EVENT_CODES, true)) {
+            if (CourierPickupEvidenceClassifier::inPostEventCodeProvesPickup($eventCode)) {
+                $eventPickupEvidence = true;
                 $pickedUpAt = (string) (
                     $event['datetime']
                     ?? $event['timestamp']
@@ -109,8 +86,8 @@ final class InPostTrackingService
 
         return [
             'status' => $status,
-            'picked_up' => in_array($status, self::PICKED_UP_STATUSES, true)
-                || in_array($status, self::PICKED_UP_EVENT_CODES, true)
+            'picked_up' => CourierPickupEvidenceClassifier::inPostStatusProvesPickup($status)
+                || $eventPickupEvidence
                 || $pickedUpAt !== null,
             'picked_up_at' => $pickedUpAt,
             'delivered' => $status === 'delivered' || $deliveredAt !== null,

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Services\WooCommerce;
 
+use App\Models\AuditLog;
 use App\Models\ExternalOrder;
 use App\Models\Product;
 use App\Models\ProductCategory;
@@ -22,6 +23,7 @@ use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Customers\CustomerAccountClaimService;
 use App\Services\Inventory\SalesChannelWarehouseResolver;
 use App\Services\Inventory\StockReservationService;
+use App\Services\Orders\OrderMutationLock;
 use App\Services\Orders\OrderStatusPolicyService;
 use App\Services\Orders\OrderWzDocumentService;
 use App\Services\Products\LegacySizeVariantAxisResolver;
@@ -36,6 +38,7 @@ use Illuminate\Support\Arr;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use RuntimeException;
 use Throwable;
 
 final class WooCommerceImportService
@@ -61,6 +64,7 @@ final class WooCommerceImportService
         private readonly WooOwnedVariantAxisRepairService $variantAxisRepair,
         private readonly WooCommerceCustomerSyncService $customerSync,
         private readonly CustomerAccountClaimService $customerAccountClaims,
+        private readonly OrderMutationLock $orderLock,
     ) {}
 
     /**
@@ -833,6 +837,10 @@ final class WooCommerceImportService
         $nextPage = $startPage;
 
         for ($page = $startPage; $page <= $lastPage; $page++) {
+            // Keep this timestamp on the ERP clock. Woo and ERP clocks may be
+            // skewed, so date_modified alone cannot prove that a response was
+            // fetched after a concurrently committed split reversal.
+            $pageRequestStartedAt = CarbonImmutable::now('UTC');
             $items = $this->client->ordersPage($integration, $page, $modifiedAfter);
 
             if ($items === []) {
@@ -857,123 +865,179 @@ final class WooCommerceImportService
                 $item['erp_imported_order_notes'] = $this->orderNotesForImport($integration, $item, $existingOrder);
                 $wasCreated = false;
                 $previousStatus = null;
+                $stalePayloadSkipped = false;
 
-                $order = DB::transaction(function () use ($integration, $item, &$created, &$updated, &$lines, &$reserved, &$released, &$reservationSkipped, &$wasCreated, &$previousStatus): ExternalOrder {
-                    $order = ExternalOrder::query()->firstOrNew([
-                        'sales_channel_id' => $integration->sales_channel_id,
-                        'external_id' => (string) $item['id'],
-                    ]);
-
-                    if ($order->exists) {
-                        $order = ExternalOrder::query()
-                            ->lockForUpdate()
-                            ->findOrFail($order->id);
-                    }
-
-                    $isNew = ! $order->exists;
-                    $wasCreated = $isNew;
-                    $previousStatus = $order->exists ? (string) $order->status : null;
-                    $existingRawPayload = (array) $order->raw_payload;
-                    $cancellation = $order->exists ? $order->cancellationOperation() : null;
-                    $splitAllocations = $order->exists ? $this->splitAllocationsForOrder($order) : [];
-                    $importLines = $this->importableOrderLines($item, $splitAllocations);
-                    $rawPayload = $this->rawPayloadForImportedOrder($item, $existingRawPayload, $splitAllocations);
-                    $importedStatus = (string) ($item['status'] ?? 'unknown');
-
-                    if ($cancellation !== null) {
-                        $importedStatus = ($cancellation->status === 'completed'
-                            || $order->status === 'cancelled')
-                            ? 'cancelled'
-                            : 'cancellation-pending';
-                    }
-
-                    $order->fill([
-                        'wordpress_integration_id' => $integration->id,
-                        'external_number' => (string) ($item['number'] ?? $item['id']),
-                        'status' => $importedStatus,
-                        'currency' => (string) ($item['currency'] ?? 'PLN'),
-                        'total_gross' => $splitAllocations === []
-                            ? (float) ($item['total'] ?? 0)
-                            : $this->grossTotalFromImportLines($importLines),
-                        'billing_data' => $item['billing'] ?? null,
-                        'shipping_data' => $item['shipping'] ?? null,
-                        'raw_payload' => $rawPayload,
-                        'external_created_at' => $this->wooCommerceDateTime($item, 'date_created'),
-                        'external_updated_at' => $this->wooCommerceDateTime($item, 'date_modified'),
-                    ]);
-                    $order->save();
-
-                    $this->customerSync->syncFromOrder($integration, $order, $item);
-
-                    $order->lines()->delete();
-
-                    foreach ($importLines as $line) {
-                        $sku = trim((string) ($line['sku'] ?? ''));
-                        $product = $this->productForOrderLine($integration, $line, $sku);
-                        $quantity = (float) ($line['quantity'] ?? 0);
-                        $sourceQuantity = (float) ($line['sempre_erp_source_quantity'] ?? $quantity);
-
-                        $order->lines()->create([
-                            'product_id' => $product?->id,
-                            'external_line_id' => isset($line['id']) ? (string) $line['id'] : null,
-                            'canonical_external_line_id' => isset($line['id']) ? (string) $line['id'] : null,
-                            'sku' => $sku !== '' ? $sku : null,
-                            'name' => (string) ($line['name'] ?? 'Pozycja zamówienia'),
-                            'quantity' => $quantity,
-                            'unit_net_price' => isset($line['subtotal']) && $sourceQuantity > 0
-                                ? (float) $line['subtotal'] / $sourceQuantity
-                                : null,
-                            'unit_gross_price' => isset($line['total']) && $sourceQuantity > 0
-                                ? (float) $line['total'] / $sourceQuantity
-                                : null,
-                            'vat_rate' => null,
-                            'raw_payload' => $line,
+                $importOrder = function () use ($integration, $item, $pageRequestStartedAt, &$created, &$updated, &$lines, &$reserved, &$released, &$reservationSkipped, &$wasCreated, &$previousStatus, &$stalePayloadSkipped): ExternalOrder {
+                    return DB::transaction(function () use ($integration, $item, $pageRequestStartedAt, &$created, &$updated, &$lines, &$reserved, &$released, &$reservationSkipped, &$wasCreated, &$previousStatus, &$stalePayloadSkipped): ExternalOrder {
+                        $order = ExternalOrder::query()->firstOrNew([
+                            'sales_channel_id' => $integration->sales_channel_id,
+                            'external_id' => (string) $item['id'],
                         ]);
-                        $lines++;
-                    }
 
-                    $reservationStats = $this->reservationService->syncForOrder($order);
-                    $reserved += $reservationStats['reserved'];
-                    $released += $reservationStats['released'];
-                    $reservationSkipped += $reservationStats['skipped'];
+                        if ($order->exists) {
+                            $order = ExternalOrder::query()
+                                ->lockForUpdate()
+                                ->findOrFail($order->id);
+                        }
 
-                    $isNew ? $created++ : $updated++;
+                        if ($order->exists && $this->incomingOrderPayloadIsStale($order, $item, $pageRequestStartedAt)) {
+                            $stalePayloadSkipped = true;
 
-                    return $order->fresh();
-                });
+                            return $order;
+                        }
 
-                $isFulfillmentStatus = $this->statusPolicy->isFulfillmentStatus((string) $order->status);
-
-                if (
-                    $isFulfillmentStatus
-                    && $this->automationSettings->actionEnabled('order.imported', 'order.wz.create')
-                ) {
-                    try {
-                        $this->wzDocuments->ensureDrafts(
-                            $order,
-                            'order_import',
-                            'Automatyczne WZ po imporcie zamówienia WooCommerce '.$order->external_number,
+                        $isNew = ! $order->exists;
+                        $wasCreated = $isNew;
+                        $previousStatus = $order->exists ? (string) $order->status : null;
+                        $existingRawPayload = (array) $order->raw_payload;
+                        $importItem = $this->withoutCancelledShipmentIdentities(
+                            $item,
+                            $existingRawPayload,
                         );
-                    } catch (Throwable) {
-                        // Import zamówienia i rezerwacji jest ważniejszy niż automatyczny szkic WZ.
-                    }
-                }
+                        $cancellation = $order->exists ? $order->cancellationOperation() : null;
+                        $splitChildren = $order->exists
+                            ? $this->activeSplitDescendantsForOrder($order)
+                            : collect();
+                        $splitAllocations = $order->exists
+                            ? $this->splitAllocationsForOrder($order, $splitChildren)
+                            : [];
+                        $importLines = $this->importableOrderLines($importItem, $splitAllocations);
+                        $rawPayload = $this->rawPayloadForImportedOrder(
+                            $importItem,
+                            $existingRawPayload,
+                            $splitAllocations,
+                            $splitChildren->isNotEmpty(),
+                        );
+                        $importedStatus = (string) ($importItem['status'] ?? 'unknown');
 
-                $statusChanged = $wasCreated || mb_strtolower((string) $previousStatus) !== mb_strtolower((string) $order->status);
-                $notificationTrigger = $statusChanged
-                    ? $this->orderNotificationTrigger((string) $order->status, $wasCreated)
-                    : null;
+                        if ($cancellation !== null) {
+                            $importedStatus = ($cancellation->status === 'completed'
+                                || $order->status === 'cancelled')
+                                ? 'cancelled'
+                                : 'cancellation-pending';
+                        }
 
-                if ($notificationTrigger !== null) {
-                    $this->communication->sendOrderStatus($order, $notificationTrigger);
-                }
+                        $order->fill([
+                            'wordpress_integration_id' => $integration->id,
+                            'external_number' => (string) ($importItem['number'] ?? $importItem['id']),
+                            'status' => $importedStatus,
+                            'currency' => (string) ($importItem['currency'] ?? 'PLN'),
+                            'total_gross' => $this->grossTotalForImportedOrder(
+                                $importItem,
+                                $importLines,
+                                $splitAllocations,
+                                $splitChildren,
+                            ),
+                            'billing_data' => $importItem['billing'] ?? null,
+                            'shipping_data' => $importItem['shipping'] ?? null,
+                            'raw_payload' => $rawPayload,
+                            'external_created_at' => $this->wooCommerceDateTime($importItem, 'date_created'),
+                            'external_updated_at' => $this->wooCommerceDateTime($importItem, 'date_modified'),
+                        ]);
+                        $order->save();
 
-                $this->sendGuestAccountInvitationForOrder(
+                        $this->customerSync->syncFromOrder($integration, $order, $importItem);
+
+                        $order->lines()->delete();
+
+                        foreach ($importLines as $line) {
+                            $sku = trim((string) ($line['sku'] ?? ''));
+                            $product = $this->productForOrderLine($integration, $line, $sku);
+                            $quantity = (float) ($line['quantity'] ?? 0);
+                            $sourceQuantity = (float) ($line['sempre_erp_source_quantity'] ?? $quantity);
+
+                            $order->lines()->create([
+                                'product_id' => $product?->id,
+                                'external_line_id' => isset($line['id']) ? (string) $line['id'] : null,
+                                'canonical_external_line_id' => isset($line['id']) ? (string) $line['id'] : null,
+                                'sku' => $sku !== '' ? $sku : null,
+                                'name' => (string) ($line['name'] ?? 'Pozycja zamówienia'),
+                                'quantity' => $quantity,
+                                'unit_net_price' => isset($line['subtotal']) && $sourceQuantity > 0
+                                    ? (float) $line['subtotal'] / $sourceQuantity
+                                    : null,
+                                'unit_gross_price' => isset($line['total']) && $sourceQuantity > 0
+                                    ? (float) $line['total'] / $sourceQuantity
+                                    : null,
+                                'vat_rate' => null,
+                                'raw_payload' => $line,
+                            ]);
+                            $lines++;
+                        }
+
+                        $reservationStats = $this->reservationService->syncForOrder($order);
+                        $reserved += $reservationStats['reserved'];
+                        $released += $reservationStats['released'];
+                        $reservationSkipped += $reservationStats['skipped'];
+
+                        $isNew ? $created++ : $updated++;
+
+                        return $order->fresh();
+                    });
+                };
+                $finishImport = function (ExternalOrder $order) use (
                     $integration,
-                    $order,
                     $item,
                     $guestInvitationBaselineAt,
-                );
+                    &$wasCreated,
+                    &$previousStatus,
+                ): ExternalOrder {
+                    $order = ExternalOrder::query()->findOrFail($order->id);
+                    $isFulfillmentStatus = $this->statusPolicy->isFulfillmentStatus((string) $order->status);
+
+                    if (
+                        $isFulfillmentStatus
+                        && $this->automationSettings->actionEnabled('order.imported', 'order.wz.create')
+                    ) {
+                        try {
+                            $this->wzDocuments->ensureDrafts(
+                                $order,
+                                'order_import',
+                                'Automatyczne WZ po imporcie zamówienia WooCommerce '.$order->external_number,
+                            );
+                        } catch (Throwable) {
+                            // Import zamówienia i rezerwacji jest ważniejszy niż automatyczny szkic WZ.
+                        }
+                    }
+
+                    $statusChanged = $wasCreated
+                        || mb_strtolower((string) $previousStatus) !== mb_strtolower((string) $order->status);
+                    $notificationTrigger = $statusChanged
+                        ? $this->orderNotificationTrigger((string) $order->status, $wasCreated)
+                        : null;
+
+                    if ($notificationTrigger !== null) {
+                        $this->communication->sendOrderStatus($order, $notificationTrigger);
+                    }
+
+                    $this->sendGuestAccountInvitationForOrder(
+                        $integration,
+                        $order,
+                        $item,
+                        $guestInvitationBaselineAt,
+                    );
+
+                    return $order->fresh() ?? $order;
+                };
+
+                if ($existingOrder instanceof ExternalOrder) {
+                    $order = $this->orderLock->forOrderFamily(
+                        ExternalOrder::query()->findOrFail($existingOrder->id),
+                        function () use ($importOrder, $finishImport, &$stalePayloadSkipped): ExternalOrder {
+                            $importedOrder = $importOrder();
+
+                            return $stalePayloadSkipped
+                                ? $importedOrder
+                                : $finishImport($importedOrder);
+                        },
+                    );
+                } else {
+                    $createdOrder = $importOrder();
+                    $order = $this->orderLock->forOrderFamily(
+                        $createdOrder,
+                        fn (): ExternalOrder => $finishImport($createdOrder),
+                    );
+                }
             }
 
             $nextPage = $page + 1;
@@ -1019,6 +1083,64 @@ final class WooCommerceImportService
             'has_more' => $hasMore,
             'next_page' => $nextPage,
         ];
+    }
+
+    /**
+     * A Woo page can be fetched before a split reversal and wait for the family
+     * lock while the reversal finishes. The payload must not then overwrite the
+     * restored order. Compare two timestamps from the ERP clock to detect that
+     * overlap; Woo's date_modified may come from a skewed remote clock. The
+     * stored external_updated_at remains a separate ordinary stale-data guard.
+     *
+     * @param  array<string,mixed>  $item
+     */
+    private function incomingOrderPayloadIsStale(
+        ExternalOrder $order,
+        array $item,
+        CarbonImmutable $pageRequestStartedAt,
+    ): bool {
+        $lastReversal = AuditLog::query()
+            ->where('action', 'order.split_reverted')
+            ->where('auditable_type', $order->getMorphClass())
+            ->where('auditable_id', $order->id)
+            ->latest('id')
+            ->first(['created_at']);
+        $reversalCommittedAt = $lastReversal?->created_at?->toImmutable()->utc();
+
+        // Database timestamps have second precision. Rounding the request start
+        // down avoids accepting a response when both events happened within the
+        // same second. At worst one later page is conservatively skipped.
+        if ($reversalCommittedAt !== null
+            && $reversalCommittedAt->greaterThanOrEqualTo($pageRequestStartedAt->startOfSecond())) {
+            return true;
+        }
+
+        $incomingUpdatedAt = $this->wooCommerceDateTime($item, 'date_modified');
+
+        if ($incomingUpdatedAt === null) {
+            // After a reversal, a payload without a usable remote version is
+            // unverifiable and must never be allowed to restore stale state.
+            return $reversalCommittedAt !== null;
+        }
+
+        try {
+            $incoming = CarbonImmutable::parse($incomingUpdatedAt, 'UTC')->utc();
+        } catch (Throwable) {
+            return $reversalCommittedAt !== null;
+        }
+
+        $watermark = null;
+        $storedUpdatedAt = $order->getRawOriginal('external_updated_at');
+
+        if (is_string($storedUpdatedAt) && trim($storedUpdatedAt) !== '') {
+            try {
+                $watermark = CarbonImmutable::parse($storedUpdatedAt, 'UTC')->utc();
+            } catch (Throwable) {
+                // A malformed historical timestamp cannot be used as a barrier.
+            }
+        }
+
+        return $watermark !== null && $incoming->isBefore($watermark);
     }
 
     private function orderNotificationTrigger(string $status, bool $created): ?string
@@ -1192,9 +1314,19 @@ final class WooCommerceImportService
      * @param  list<array<string, mixed>>  $splitAllocations
      * @return array<string, mixed>
      */
-    private function rawPayloadForImportedOrder(array $item, array $existingRawPayload, array $splitAllocations): array
-    {
-        if ($splitAllocations === []) {
+    private function rawPayloadForImportedOrder(
+        array $item,
+        array $existingRawPayload,
+        array $splitAllocations,
+        bool $hasActiveSplitChildren,
+    ): array {
+        $splitReversalMarker = data_get($existingRawPayload, 'sempre_erp_split_reversal');
+
+        if (is_array($splitReversalMarker)) {
+            $item['sempre_erp_split_reversal'] = $splitReversalMarker;
+        }
+
+        if (! $hasActiveSplitChildren && $splitAllocations === []) {
             return $item;
         }
 
@@ -1205,7 +1337,167 @@ final class WooCommerceImportService
         $item['sempre_erp_split_allocations'] = $splitAllocations;
         $item['sempre_erp_split_import_adjusted_at'] = now()->toISOString();
 
+        foreach (['sempre_erp_split_original', 'sempre_erp_shipping_decision', 'sempre_erp_split_reversal_operation'] as $metadataKey) {
+            if (array_key_exists($metadataKey, $existingRawPayload)) {
+                $item[$metadataKey] = $existingRawPayload[$metadataKey];
+            }
+        }
+
         return $item;
+    }
+
+    /**
+     * Remove only shipment values that were cancelled by split reversal. Woo
+     * may retain those values after status rollback. Different identifiers
+     * belonging to a genuinely new shipment must remain importable.
+     *
+     * @param  array<string,mixed>  $item
+     * @param  array<string,mixed>  $existingRawPayload
+     * @return array<string,mixed>
+     */
+    private function withoutCancelledShipmentIdentities(
+        array $item,
+        array $existingRawPayload,
+    ): array {
+        $cancelledIdentities = collect((array) data_get(
+            $existingRawPayload,
+            'sempre_erp_split_reversal.cancelled_shipment_identities',
+            [],
+        ))
+            ->filter(fn (mixed $identity): bool => is_scalar($identity))
+            ->map(fn (mixed $identity): string => trim((string) $identity))
+            ->filter(fn (string $identity): bool => $identity !== '')
+            ->unique()
+            ->flip();
+
+        if ($cancelledIdentities->isEmpty()) {
+            return $item;
+        }
+
+        foreach (array_keys($item) as $key) {
+            $value = $item[$key] ?? null;
+
+            if ($this->isShipmentIdentityKey((string) $key)
+                && is_scalar($value)
+                && $cancelledIdentities->has(trim((string) $value))) {
+                unset($item[$key]);
+            }
+        }
+
+        $item['meta_data'] = collect((array) ($item['meta_data'] ?? []))
+            ->reject(fn (mixed $meta): bool => $this->isCancelledShipmentMeta(
+                $meta,
+                $cancelledIdentities,
+            ))
+            ->values()
+            ->all();
+
+        foreach ((array) ($item['shipping_lines'] ?? []) as $index => $shippingLine) {
+            if (! is_array($shippingLine)) {
+                continue;
+            }
+
+            $shippingLine['meta_data'] = collect((array) ($shippingLine['meta_data'] ?? []))
+                ->reject(fn (mixed $meta): bool => $this->isCancelledShipmentMeta(
+                    $meta,
+                    $cancelledIdentities,
+                ))
+                ->values()
+                ->all();
+            $item['shipping_lines'][$index] = $shippingLine;
+        }
+
+        return $item;
+    }
+
+    /** @param Collection<string,int> $cancelledIdentities */
+    private function isCancelledShipmentMeta(mixed $meta, Collection $cancelledIdentities): bool
+    {
+        return is_array($meta)
+            && $this->isShipmentIdentityKey((string) ($meta['key'] ?? ''))
+            && is_scalar($meta['value'] ?? null)
+            && $cancelledIdentities->has(trim((string) $meta['value']));
+    }
+
+    private function isShipmentIdentityKey(string $key): bool
+    {
+        $key = mb_strtolower(trim($key));
+
+        if ($key === '') {
+            return false;
+        }
+
+        $isInPostKey = str_contains($key, 'inpost')
+            || str_contains($key, 'shipx')
+            || str_contains($key, 'easypack');
+
+        if ($isInPostKey && (str_contains($key, 'point') || str_contains($key, 'locker')
+            || str_contains($key, 'machine') || str_contains($key, 'target'))) {
+            return false;
+        }
+
+        if (str_contains($key, 'tracking') || str_contains($key, 'waybill') || str_contains($key, 'list_przewoz')) {
+            return true;
+        }
+
+        if (str_contains($key, 'blpaczka')) {
+            return str_contains($key, 'order_id')
+                || str_contains($key, 'shipment')
+                || str_contains($key, 'label');
+        }
+
+        return $isInPostKey
+            && (str_contains($key, 'shipment') || str_contains($key, 'label')
+                || str_contains($key, 'parcel_number') || str_contains($key, 'id'));
+    }
+
+    /**
+     * @param  array<string, mixed>  $item
+     * @param  list<array<string, mixed>>  $importLines
+     * @param  list<array<string, mixed>>  $splitAllocations
+     * @param  Collection<int, ExternalOrder>  $splitChildren
+     */
+    private function grossTotalForImportedOrder(
+        array $item,
+        array $importLines,
+        array $splitAllocations,
+        Collection $splitChildren,
+    ): float {
+        $remoteTotalCents = max(0, $this->moneyToCents($item['total'] ?? 0));
+
+        if ($splitChildren->isNotEmpty()) {
+            $splitChildrenTotalCents = $splitChildren->sum(
+                fn (ExternalOrder $childOrder): int => max(0, $this->moneyToCents($childOrder->total_gross)),
+            );
+
+            if ($splitChildrenTotalCents > $remoteTotalCents) {
+                $orderNumber = trim((string) ($item['number'] ?? $item['id'] ?? ''));
+
+                throw new RuntimeException(sprintf(
+                    'Nie można zaimportować zamówienia %s: suma aktywnych części podziału (%s) przekracza kwotę zamówienia w WooCommerce (%s).',
+                    $orderNumber !== '' ? $orderNumber : '(bez numeru)',
+                    number_format($splitChildrenTotalCents / 100, 2, '.', ''),
+                    number_format($remoteTotalCents / 100, 2, '.', ''),
+                ));
+            }
+
+            return ($remoteTotalCents - $splitChildrenTotalCents) / 100;
+        }
+
+        if ($splitAllocations !== []) {
+            return $this->grossTotalFromImportLines($importLines);
+        }
+
+        return $remoteTotalCents / 100;
+    }
+
+    private function moneyToCents(mixed $amount): int
+    {
+        if (! is_numeric($amount)) {
+            return 0;
+        }
+
+        return (int) round((float) $amount * 100, 0, PHP_ROUND_HALF_UP);
     }
 
     /**
@@ -1228,14 +1520,8 @@ final class WooCommerceImportService
     /**
      * @return list<array<string, mixed>>
      */
-    private function splitAllocationsForOrder(ExternalOrder $order): array
+    private function splitAllocationsForOrder(ExternalOrder $order, Collection $childOrders): array
     {
-        $childOrders = ExternalOrder::query()
-            ->with('lines')
-            ->where('sales_channel_id', $order->sales_channel_id)
-            ->where('external_id', 'like', $order->external_id.'-SPLIT-%')
-            ->get();
-
         if ($childOrders->isNotEmpty()) {
             return $childOrders
                 ->flatMap(function (ExternalOrder $childOrder) use ($order) {
@@ -1270,6 +1556,29 @@ final class WooCommerceImportService
             ->filter(fn (mixed $allocation): bool => is_array($allocation))
             ->values()
             ->all();
+    }
+
+    /**
+     * @return Collection<int, ExternalOrder>
+     */
+    private function activeSplitDescendantsForOrder(ExternalOrder $order): Collection
+    {
+        return ExternalOrder::query()
+            ->with('lines')
+            ->where('sales_channel_id', $order->sales_channel_id)
+            ->whereKeyNot($order->id)
+            ->where(function ($query) use ($order): void {
+                $query
+                    ->where('split_root_order_id', $order->id)
+                    ->orWhere('split_parent_order_id', $order->id)
+                    ->orWhere(function ($legacyQuery) use ($order): void {
+                        $legacyQuery
+                            ->whereNull('split_root_order_id')
+                            ->whereNull('split_parent_order_id')
+                            ->where('external_id', 'like', $order->external_id.'-SPLIT-%');
+                    });
+            })
+            ->get();
     }
 
     private function syncImportedStock(

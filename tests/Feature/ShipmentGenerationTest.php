@@ -15,6 +15,7 @@ use App\Services\Shipping\ShippingLabelService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Storage;
+use RuntimeException;
 use Tests\TestCase;
 
 class ShipmentGenerationTest extends TestCase
@@ -279,6 +280,93 @@ class ShipmentGenerationTest extends TestCase
 
         Http::assertNotSent(fn ($request): bool => $request->method() === 'POST'
             && str_ends_with((string) parse_url($request->url(), PHP_URL_PATH), '/shipments'));
+    }
+
+    public function test_cancelled_inpost_shipments_are_not_reused_from_meta_or_reference(): void
+    {
+        Http::fake([
+            '*/v1/shipments/987654' => Http::response([
+                'id' => '987654',
+                'status' => 'cancelled',
+                'tracking_number' => '520000000000000000000020',
+            ]),
+            '*/v1/organizations/111/shipments?*' => Http::response(['items' => [[
+                'id' => 'CANCELLED-BY-REFERENCE',
+                'status' => 'canceled',
+                'reference' => '801',
+                'tracking_number' => '520000000000000000000021',
+            ]]]),
+            '*/v1/organizations/111/shipments' => Http::response([
+                'id' => 'NEW-AFTER-CANCELLATION',
+                'status' => 'created',
+            ], 201),
+            '*/v1/shipments/NEW-AFTER-CANCELLATION/label*' => Http::response(
+                '^XA new after cancellation ^XZ',
+                200,
+                ['Content-Type' => 'text/plain'],
+            ),
+            '*/v1/shipments/NEW-AFTER-CANCELLATION' => Http::response([
+                'id' => 'NEW-AFTER-CANCELLATION',
+                'status' => 'confirmed',
+                'tracking_number' => '520000000000000000000022',
+            ]),
+        ]);
+
+        $order = $this->createOrder();
+        $raw = (array) $order->raw_payload;
+        $raw['meta_data'] = [
+            ['key' => '_inpost_shipment_id', 'value' => '987654'],
+        ];
+        $order->update(['raw_payload' => $raw]);
+
+        $label = app(ShippingLabelService::class)->generateForOrder(
+            $order->fresh(),
+            $this->createAccount(),
+        );
+
+        $this->assertSame('NEW-AFTER-CANCELLATION', $label->label_number);
+        $this->assertFalse((bool) data_get($label->response_payload, 'shipment.reused_existing_shipment'));
+        Http::assertSent(fn ($request): bool => $request->method() === 'GET'
+            && (string) parse_url($request->url(), PHP_URL_PATH) === '/v1/shipments/987654');
+        Http::assertSent(fn ($request): bool => $request->method() === 'GET'
+            && (string) parse_url($request->url(), PHP_URL_PATH) === '/v1/organizations/111/shipments');
+        Http::assertSent(fn ($request): bool => $request->method() === 'POST'
+            && (string) parse_url($request->url(), PHP_URL_PATH) === '/v1/organizations/111/shipments');
+    }
+
+    public function test_reused_inpost_shipment_cancelled_before_final_label_fetch_is_rejected(): void
+    {
+        Http::fake([
+            '*/v1/organizations/111/shipments?*' => Http::response(['items' => [[
+                'id' => 'CANCELLED-DURING-POLL',
+                'status' => 'confirmed',
+                'reference' => '801',
+                'tracking_number' => '520000000000000000000023',
+            ]]]),
+            '*/v1/shipments/CANCELLED-DURING-POLL' => Http::response([
+                'id' => 'CANCELLED-DURING-POLL',
+                'status' => 'cancelled',
+                'tracking_number' => '520000000000000000000023',
+            ]),
+            '*' => Http::response(['message' => 'Unexpected request'], 500),
+        ]);
+
+        try {
+            app(ShippingLabelService::class)->generateForOrder(
+                $this->createOrder(),
+                $this->createAccount(),
+            );
+            $this->fail('A shipment cancelled between lookup and label fetch must be rejected.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('została anulowana', $exception->getMessage());
+        }
+
+        $this->assertSame(0, ShippingLabel::query()->where('status', 'generated')->count());
+        $this->assertSame(1, ShippingLabel::query()->where('status', 'generating')->count());
+        Http::assertNotSent(fn ($request): bool => str_ends_with(
+            (string) parse_url($request->url(), PHP_URL_PATH),
+            '/label',
+        ));
     }
 
     public function test_new_inpost_cod_shipment_contains_cod_and_matching_insurance(): void

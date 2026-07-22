@@ -7,14 +7,18 @@ namespace App\Jobs;
 use App\Models\KsefSubmission;
 use App\Services\Ksef\KsefSubmissionService;
 use Illuminate\Bus\Queueable;
-use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Throwable;
 
-final class SubmitInvoiceToKsefJob implements ShouldBeUnique, ShouldQueue
+/**
+ * This job is deliberately redispatchable. KsefSubmissionService::claim()
+ * atomically prevents duplicate sends, while a queue-level unique lock could
+ * orphan a durable queued submission when the initial enqueue fails.
+ */
+final class SubmitInvoiceToKsefJob implements ShouldQueue
 {
     use Dispatchable;
     use InteractsWithQueue;
@@ -25,16 +29,9 @@ final class SubmitInvoiceToKsefJob implements ShouldBeUnique, ShouldQueue
 
     public int $timeout = 180;
 
-    public int $uniqueFor = 600;
-
     public function __construct(
         private readonly int $ksefSubmissionId,
     ) {}
-
-    public function uniqueId(): string
-    {
-        return (string) $this->ksefSubmissionId;
-    }
 
     public function handle(KsefSubmissionService $submissions): void
     {

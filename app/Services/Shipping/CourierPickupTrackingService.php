@@ -87,6 +87,18 @@ final class CourierPickupTrackingService
         $warnings = [];
 
         foreach ($labels as $label) {
+            $order = $label->order;
+
+            if (! $order instanceof ExternalOrder) {
+                continue;
+            }
+
+            if ($order->familyHasSplitReversalOperation()) {
+                $warnings[] = "Pominięto śledzenie zamówienia {$order->external_number}: trwa niedokończone cofanie podziału.";
+
+                continue;
+            }
+
             $claim = ShippingLabel::query()
                 ->whereKey($label->id)
                 ->whereIn('status', ['generated', 'picked_up']);
@@ -120,9 +132,8 @@ final class CourierPickupTrackingService
             if ($order->hasCancellationOperation()
                 || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
                 $label->update([
-                    'status' => 'cancelled',
                     'next_tracking_check_at' => null,
-                    'tracking_last_error' => 'Śledzenie wyłączone z powodu anulowania zamówienia.',
+                    'tracking_last_error' => 'Śledzenie wstrzymane z powodu anulowania zamówienia. Etykieta oczekuje na osobne potwierdzenie anulowania u przewoźnika.',
                 ]);
 
                 continue;
@@ -175,8 +186,8 @@ final class CourierPickupTrackingService
             $checked++;
             $wasPickedUp = $label->status === 'picked_up';
             $isDelivered = (bool) ($status['delivered'] ?? false);
-
-            $label->update([
+            $pickedUpAt = $status['picked_up_at'] ?? now()->toISOString();
+            $trackingUpdates = [
                 'tracking_status' => $status['status'],
                 'tracking_checked_at' => now(),
                 'next_tracking_check_at' => $isDelivered
@@ -191,11 +202,50 @@ final class CourierPickupTrackingService
                         'delivered_at' => $status['delivered_at'] ?? null,
                     ],
                 ]),
-            ]);
+            ];
+
+            if ($isDelivered) {
+                $trackingUpdates['status'] = 'delivered';
+                $trackingUpdates['picked_up_at'] = $label->picked_up_at ?? $pickedUpAt;
+            } elseif ((bool) ($status['picked_up'] ?? false)) {
+                $trackingUpdates['status'] = 'picked_up';
+                $trackingUpdates['picked_up_at'] = $label->picked_up_at ?? $pickedUpAt;
+            }
+
+            // Anulowanie etykiety może zakończyć się w czasie oczekiwania
+            // na API trackingu. Aktualizujemy wyłącznie nadal aktywny rekord;
+            // jeżeli anulowanie wygrało wyścig, stara odpowiedź kuriera jest
+            // odrzucana i nigdy nie otwiera ponownie anulowanej przesyłki.
+            $updated = ShippingLabel::query()
+                ->whereKey($label->id)
+                ->where('status', $wasPickedUp ? 'picked_up' : 'generated')
+                ->update($trackingUpdates);
+
+            if ($updated !== 1) {
+                continue;
+            }
+
+            $label->refresh();
 
             if ($wasPickedUp) {
+                if (PackingTask::query()
+                    ->where('external_order_id', $order->id)
+                    ->where('status', 'packed')
+                    ->exists()) {
+                    $pickupResult = $this->fulfillment->markOrderPickedUpByCourier($order, [
+                        'source' => $provider === 'blpaczka' ? 'blpaczka_tracking' : 'inpost_tracking',
+                        'tracking_number' => $label->tracking_number ?: $label->label_number,
+                        'tracking_status' => $status['status'],
+                        'picked_up_at' => $label->picked_up_at?->toISOString() ?? $pickedUpAt,
+                    ]);
+                    $warnings = array_merge($warnings, $pickupResult['warnings']);
+
+                    if ($pickupResult['tasks'] > 0) {
+                        $shippedOrders++;
+                    }
+                }
+
                 if ($isDelivered) {
-                    $label->update(['status' => 'delivered', 'next_tracking_check_at' => null]);
                     $this->communication->sendOrderStatus($order, 'order_delivered', [
                         'tracking_number' => $label->trackingIdentifier(),
                         'tracking_url' => $this->providers->trackingUrl($label),
@@ -213,8 +263,6 @@ final class CourierPickupTrackingService
             }
 
             $pickedUp++;
-
-            $pickedUpAt = $status['picked_up_at'] ?? now()->toISOString();
             $result = $this->fulfillment->markOrderPickedUpByCourier($order, [
                 'source' => $provider === 'blpaczka' ? 'blpaczka_tracking' : 'inpost_tracking',
                 'tracking_number' => $label->tracking_number ?: $label->label_number,
@@ -229,21 +277,17 @@ final class CourierPickupTrackingService
                     ->exists();
 
             if ($stillWaitingForCourier) {
-                $label->update([
-                    'status' => 'generated',
-                    'next_tracking_check_at' => now()->addMinutes(5),
-                    'tracking_last_error' => 'Status odbioru został potwierdzony, ale aktualizacja zamówienia jest jeszcze przetwarzana. Próba zostanie ponowiona.',
-                ]);
+                ShippingLabel::query()
+                    ->whereKey($label->id)
+                    ->where('status', 'picked_up')
+                    ->update([
+                        'next_tracking_check_at' => now()->addMinutes(5),
+                        'tracking_last_error' => 'Status odbioru został potwierdzony, ale aktualizacja zamówienia jest jeszcze przetwarzana. Próba zostanie ponowiona.',
+                    ]);
                 $warnings = array_merge($warnings, $result['warnings']);
 
                 continue;
             }
-
-            $label->update([
-                'status' => $isDelivered ? 'delivered' : 'picked_up',
-                'picked_up_at' => $pickedUpAt,
-                'next_tracking_check_at' => $isDelivered ? null : now()->addHours(2),
-            ]);
 
             ShippingLabel::query()
                 ->shipments()

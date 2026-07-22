@@ -15,6 +15,7 @@ use App\Services\Invoices\InvoiceNumberService;
 use App\Services\Invoices\InvoiceTemplateService;
 use App\Services\Invoices\OrderInvoiceService;
 use App\Services\Ksef\KsefEligibilityService;
+use Carbon\CarbonInterface;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -76,6 +77,273 @@ final class OrderCancellationInvoiceService
             'cancelled' => array_values(array_unique($cancelled)),
             'corrections' => array_values(array_unique($corrections)),
         ];
+    }
+
+    /**
+     * Reverse invoice documents created as side effects after an order split.
+     * Unlike reverseForCancellation(), this operation does not require or
+     * create an OrderCancellation and never uploads documents to WooCommerce.
+     *
+     * @return array{cancelled:list<int>,corrections:list<int>}
+     */
+    public function reverseForSplitReversal(
+        ExternalOrder $order,
+        string $operationUuid,
+        string $reason,
+        ?CarbonInterface $createdAfter,
+    ): array {
+        $cancelled = [];
+        $corrections = [];
+
+        $invoices = Invoice::query()
+            ->where('external_order_id', $order->id)
+            ->when(
+                $createdAfter instanceof CarbonInterface,
+                fn ($query) => $query->where('created_at', '>=', $createdAfter),
+            )
+            ->oldest('id')
+            ->get();
+
+        foreach ($invoices as $invoice) {
+            if ($invoice->type === 'correction') {
+                continue;
+            }
+
+            if ($invoice->status === 'cancelled') {
+                $cancelled[] = (int) $invoice->id;
+
+                continue;
+            }
+
+            if ($invoice->type === 'proforma' || $invoice->status === 'draft') {
+                $this->cancelNonFiscalDocumentForSplitReversal($invoice, $operationUuid, $reason);
+                $cancelled[] = (int) $invoice->id;
+
+                continue;
+            }
+
+            foreach ($this->fullCorrectionForSplitReversal($invoice, $operationUuid, $reason) as $correction) {
+                $corrections[] = (int) $correction->id;
+            }
+        }
+
+        return [
+            'cancelled' => array_values(array_unique($cancelled)),
+            'corrections' => array_values(array_unique($corrections)),
+        ];
+    }
+
+    private function cancelNonFiscalDocumentForSplitReversal(
+        Invoice $invoice,
+        string $operationUuid,
+        string $reason,
+    ): void {
+        DB::transaction(function () use ($invoice, $operationUuid, $reason): void {
+            $locked = Invoice::query()->lockForUpdate()->findOrFail($invoice->id);
+
+            if ($locked->status === 'cancelled') {
+                return;
+            }
+
+            $before = [
+                'status' => $locked->status,
+                'cancelled_at' => $locked->cancelled_at?->toISOString(),
+            ];
+            $metadata = (array) $locked->metadata;
+            $previousSource = data_get($metadata, 'source');
+            $metadata['source'] = 'split_reversal';
+            $metadata['split_reversal'] = array_filter([
+                'operation_uuid' => $operationUuid,
+                'reason' => $reason,
+                'cancelled_at' => now()->toISOString(),
+                'previous_source' => filled($previousSource) ? (string) $previousSource : null,
+            ], fn (mixed $value): bool => $value !== null && $value !== '');
+
+            $locked->update([
+                'status' => 'cancelled',
+                'cancelled_at' => now(),
+                'metadata' => $metadata,
+            ]);
+
+            $this->audit->record('invoice.cancelled_for_split_reversal', $locked, $before, [
+                'status' => $locked->status,
+                'cancelled_at' => $locked->cancelled_at?->toISOString(),
+            ], [
+                'source' => 'split_reversal',
+                'split_reversal_uuid' => $operationUuid,
+                'reason' => $reason,
+                'external_order_id' => $locked->external_order_id,
+            ]);
+        }, 3);
+    }
+
+    /** @return list<Invoice> */
+    private function fullCorrectionForSplitReversal(
+        Invoice $invoice,
+        string $operationUuid,
+        string $reason,
+    ): array {
+        $corrections = DB::transaction(function () use ($invoice, $operationUuid, $reason): array {
+            $original = Invoice::query()
+                ->with(['lines', 'ksefSubmissions'])
+                ->lockForUpdate()
+                ->findOrFail($invoice->id);
+
+            $allCorrections = Invoice::query()
+                ->with('lines')
+                ->where('external_order_id', $original->external_order_id)
+                ->where('type', 'correction')
+                ->oldest('id')
+                ->lockForUpdate()
+                ->get();
+            $existing = $allCorrections->first(
+                fn (Invoice $candidate): bool => (string) data_get($candidate->metadata, 'split_reversal_uuid') === $operationUuid
+                    && (int) data_get($candidate->metadata, 'corrected_invoice_id') === (int) $original->id
+            );
+
+            if ($existing instanceof Invoice) {
+                $this->markOriginalReversedBySplit($original, $existing, $operationUuid, $reason);
+
+                return [$this->invoiceFiles->ensureFiles(
+                    $existing->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']),
+                )];
+            }
+
+            $reconciliation = $this->remainingBalances(
+                $original,
+                $allCorrections->filter(fn (Invoice $candidate): bool => $candidate->status !== 'cancelled')->values(),
+            );
+
+            if ($reconciliation['lines'] === []) {
+                $this->markOriginalAlreadyFullyCorrectedBySplit(
+                    $original,
+                    $reconciliation['correction_invoice_ids'],
+                    $operationUuid,
+                    $reason,
+                );
+
+                return $allCorrections
+                    ->whereIn('id', $reconciliation['correction_invoice_ids'])
+                    ->map(fn (Invoice $correction): Invoice => $this->invoiceFiles->ensureFiles(
+                        $correction->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']),
+                    ))
+                    ->values()
+                    ->all();
+            }
+
+            $template = $this->templates->defaultTemplate();
+            $metadata = $this->splitReversalCorrectionMetadata($original, $operationUuid, $reason);
+            $metadata['reconciled_correction_invoice_ids'] = $reconciliation['correction_invoice_ids'];
+            $netTotal = -$this->minorUnitsTotal($reconciliation['lines'], 'net_total') / 100;
+            $vatTotal = -$this->minorUnitsTotal($reconciliation['lines'], 'vat_total') / 100;
+            $grossTotal = -$this->minorUnitsTotal($reconciliation['lines'], 'gross_total') / 100;
+            $correction = Invoice::query()->create([
+                'number' => $this->numbers->next($this->correctionNumberType($original)),
+                'type' => 'correction',
+                'status' => 'issued',
+                'external_order_id' => $original->external_order_id,
+                'invoice_template_id' => $template->id,
+                'issue_date' => now()->toDateString(),
+                'sale_date' => $original->sale_date?->toDateString(),
+                'payment_due_date' => now()->toDateString(),
+                'currency' => $original->currency,
+                'seller_data' => $original->seller_data,
+                'buyer_data' => $original->buyer_data,
+                'net_total' => $netTotal,
+                'vat_total' => $vatTotal,
+                'gross_total' => $grossTotal,
+                'payment_method' => $original->payment_method,
+                'issued_at' => now(),
+                'metadata' => $metadata,
+            ]);
+
+            foreach ($reconciliation['lines'] as $lineBalance) {
+                $correction->lines()->create(
+                    $this->splitReversalCorrectionLine($lineBalance, $operationUuid, $reason),
+                );
+            }
+
+            $this->markOriginalReversedBySplit($original, $correction, $operationUuid, $reason);
+
+            $this->audit->record('order.split_reversal_correction_invoice_issued', $correction, null, [
+                'invoice_number' => $correction->number,
+                'gross_total' => (string) $correction->gross_total,
+            ], [
+                'source' => 'split_reversal',
+                'split_reversal_uuid' => $operationUuid,
+                'reason' => $reason,
+                'corrected_invoice_id' => $original->id,
+                'corrected_invoice_number' => $original->number,
+            ]);
+
+            return [$this->invoiceFiles->ensureFiles(
+                $correction->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']),
+            )];
+        }, 3);
+
+        foreach ($corrections as $correction) {
+            $this->ksefAutomation->queueAfterInvoiceIssued($correction);
+        }
+
+        return array_map(
+            fn (Invoice $correction): Invoice => $correction
+                ->refresh()
+                ->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']),
+            $corrections,
+        );
+    }
+
+    private function markOriginalReversedBySplit(
+        Invoice $original,
+        Invoice $correction,
+        string $operationUuid,
+        string $reason,
+    ): void {
+        $metadata = (array) $original->metadata;
+        $metadata['split_reversal'] = [
+            'fully_reversed' => true,
+            'operation_uuid' => $operationUuid,
+            'reason' => $reason,
+            'correction_invoice_id' => (int) $correction->id,
+            'correction_invoice_number' => $correction->number,
+            'reversed_at' => now()->toISOString(),
+        ];
+        $original->update(['metadata' => $metadata]);
+    }
+
+    /** @param list<int> $correctionInvoiceIds */
+    private function markOriginalAlreadyFullyCorrectedBySplit(
+        Invoice $original,
+        array $correctionInvoiceIds,
+        string $operationUuid,
+        string $reason,
+    ): void {
+        $metadata = (array) $original->metadata;
+        $previous = (array) ($metadata['split_reversal'] ?? []);
+        $alreadyMarked = ($previous['fully_reversed'] ?? false) === true
+            && (string) ($previous['operation_uuid'] ?? '') === $operationUuid;
+        $metadata['split_reversal'] = [
+            'fully_reversed' => true,
+            'operation_uuid' => $operationUuid,
+            'reason' => $reason,
+            'existing_correction_invoice_ids' => array_values(array_unique($correctionInvoiceIds)),
+            'reversed_at' => $alreadyMarked && filled($previous['reversed_at'] ?? null)
+                ? $previous['reversed_at']
+                : now()->toISOString(),
+        ];
+        $original->update(['metadata' => $metadata]);
+
+        if (! $alreadyMarked) {
+            $this->audit->record('invoice.already_fully_corrected_for_split_reversal', $original, null, [
+                'fully_reversed' => true,
+                'existing_correction_invoice_ids' => $metadata['split_reversal']['existing_correction_invoice_ids'],
+            ], [
+                'source' => 'split_reversal',
+                'split_reversal_uuid' => $operationUuid,
+                'reason' => $reason,
+                'external_order_id' => $original->external_order_id,
+            ]);
+        }
     }
 
     private function cancelNonFiscalDocument(Invoice $invoice, OrderCancellation $cancellation): void
@@ -441,6 +709,55 @@ final class OrderCancellationInvoiceService
     }
 
     /**
+     * @param  array{line:InvoiceLine,quantity:int,net_total:int,vat_total:int,gross_total:int}  $balance
+     * @return array<string, mixed>
+     */
+    private function splitReversalCorrectionLine(
+        array $balance,
+        string $operationUuid,
+        string $reason,
+    ): array {
+        $line = $balance['line'];
+        $before = [
+            'name' => $line->name,
+            'sku' => $line->sku,
+            'unit' => $line->unit,
+            'quantity' => $balance['quantity'] / 10_000,
+            'unit_net_price' => (float) $line->unit_net_price,
+            'net_total' => $balance['net_total'] / 100,
+            'vat_rate' => (float) $line->vat_rate,
+            'vat_total' => $balance['vat_total'] / 100,
+            'gross_total' => $balance['gross_total'] / 100,
+        ];
+
+        return [
+            'product_id' => $line->product_id,
+            'name' => 'Korekta cofnięcia podziału: '.$line->name,
+            'sku' => $line->sku,
+            'unit' => $line->unit,
+            'quantity' => -$balance['quantity'] / 10_000,
+            'unit_net_price' => (float) $line->unit_net_price,
+            'net_total' => -$balance['net_total'] / 100,
+            'vat_rate' => (float) $line->vat_rate,
+            'vat_total' => -$balance['vat_total'] / 100,
+            'gross_total' => -$balance['gross_total'] / 100,
+            'metadata' => [
+                'source' => 'split_reversal',
+                'split_reversal_uuid' => $operationUuid,
+                'split_reversal_reason' => $reason,
+                'corrected_invoice_line_id' => $line->id,
+                'before_correction' => $before,
+                'after_correction' => array_merge($before, [
+                    'quantity' => 0,
+                    'net_total' => 0,
+                    'vat_total' => 0,
+                    'gross_total' => 0,
+                ]),
+            ],
+        ];
+    }
+
+    /**
      * @return array<string, mixed>
      */
     private function correctionMetadata(Invoice $original, OrderCancellation $cancellation): array
@@ -450,6 +767,37 @@ final class OrderCancellationInvoiceService
             'order_cancellation_id' => $cancellation->id,
             'order_cancellation_uuid' => $cancellation->uuid,
             'correction_reason' => $cancellation->reason,
+            'corrected_invoice_id' => $original->id,
+            'corrected_invoice_number' => $original->number,
+            'corrected_invoice_issue_date' => $original->issue_date?->toDateString(),
+            'legal_review_required' => true,
+        ];
+
+        $oss = data_get($original->metadata, 'oss');
+
+        if (is_array($oss)) {
+            $metadata['oss'] = array_merge($oss, [
+                'correction_of_oss_invoice' => true,
+                'corrected_invoice_number' => $original->number,
+            ]);
+        }
+
+        return $this->withKsefContext($metadata, $original);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function splitReversalCorrectionMetadata(
+        Invoice $original,
+        string $operationUuid,
+        string $reason,
+    ): array {
+        $metadata = [
+            'source' => 'split_reversal',
+            'split_reversal_uuid' => $operationUuid,
+            'split_reversal_reason' => $reason,
+            'correction_reason' => $reason,
             'corrected_invoice_id' => $original->id,
             'corrected_invoice_number' => $original->number,
             'corrected_invoice_issue_date' => $original->issue_date?->toDateString(),

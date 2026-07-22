@@ -11,8 +11,7 @@ final class WarehouseDocumentNumberService
 {
     public function __construct(
         private readonly WarehouseDocumentSettingsService $settings,
-    ) {
-    }
+    ) {}
 
     public function next(string $type, ?DateTimeInterface $date = null): string
     {
@@ -24,15 +23,15 @@ final class WarehouseDocumentNumberService
             'padding' => $numbering['padding'],
         ]);
         $prefix = explode($placeholder, $template)[0] ?? '';
-        $sequence = WarehouseDocument::query()
-            ->when($prefix !== '', fn ($query) => $query->where('number', 'like', $prefix . '%'))
+        $sequence = WarehouseDocument::withTrashed()
+            ->when($prefix !== '', fn ($query) => $query->where('number', 'like', $prefix.'%'))
             ->lockForUpdate()
             ->count() + 1;
 
         do {
             $number = $this->settings->renderNumber($type, $sequence, $date, $numbering);
             $sequence += 1;
-        } while (WarehouseDocument::query()->where('number', $number)->exists());
+        } while (WarehouseDocument::withTrashed()->where('number', $number)->exists());
 
         return $number;
     }

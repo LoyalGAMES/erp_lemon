@@ -11,6 +11,7 @@ use App\Models\ReturnCase;
 use App\Models\ShippingLabel;
 use App\Models\WordpressIntegration;
 use App\Services\Audit\AuditLogService;
+use App\Services\Payments\PaymentMethodClassifier;
 use App\Services\WooCommerce\WooCommerceClient;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\QueryException;
@@ -29,6 +30,7 @@ final class ShippingLabelService
         private readonly InPostShipmentService $inpost,
         private readonly BLPaczkaShipmentService $blpaczka,
         private readonly AuditLogService $audit,
+        private readonly PaymentMethodClassifier $paymentMethods,
     ) {}
 
     public function generateForOrder(
@@ -54,6 +56,34 @@ final class ShippingLabelService
 
     public function registerManualShipment(ExternalOrder $order, string $provider, string $trackingNumber): ShippingLabel
     {
+        try {
+            return Cache::lock('shipping-label-order-'.$order->id, self::GENERATION_LOCK_SECONDS)
+                ->block(15, fn (): ShippingLabel => $this->registerManualShipmentWhileLocked(
+                    $order,
+                    $provider,
+                    $trackingNumber,
+                ));
+        } catch (LockTimeoutException $exception) {
+            throw new RuntimeException(
+                'Dla tego zamówienia trwa właśnie zmiana podziału albo obsługa etykiety. Spróbuj ponownie za chwilę.',
+                previous: $exception,
+            );
+        }
+    }
+
+    private function registerManualShipmentWhileLocked(
+        ExternalOrder $order,
+        string $provider,
+        string $trackingNumber,
+    ): ShippingLabel {
+        $order = ExternalOrder::query()->find($order->id);
+
+        if (! $order instanceof ExternalOrder) {
+            throw new RuntimeException('Zamówienie zostało zarchiwizowane podczas zapisywania numeru przesyłki. Odśwież widok.');
+        }
+
+        $this->ensureSplitReversalNotInProgress($order);
+
         $provider = mb_strtolower(trim($provider));
         $trackingNumber = trim($trackingNumber);
         $duplicate = ShippingLabel::query()
@@ -64,12 +94,23 @@ final class ShippingLabelService
             throw new RuntimeException('Ten numer przesyłki jest już przypisany do innego zamówienia.');
         }
 
+        $manualIdempotencyKey = 'manual:shipment:order:'.$order->id;
+        $cancelledManual = ShippingLabel::query()
+            ->where('idempotency_key', $manualIdempotencyKey)
+            ->where('status', 'cancelled')
+            ->exists();
+
+        if ($cancelledManual) {
+            throw new RuntimeException('Poprzednia etykieta tego zamówienia została anulowana. Najpierw dokończ trwające cofnięcie podziału i odśwież zamówienie.');
+        }
+
         $label = ShippingLabel::query()
             ->where('external_order_id', $order->id)
             ->where('idempotency_key', 'like', 'manual:%')
+            ->where('status', 'generated')
             ->first() ?? new ShippingLabel;
         $label->fill([
-            'idempotency_key' => 'manual:shipment:order:'.$order->id,
+            'idempotency_key' => $manualIdempotencyKey,
             'sales_channel_id' => $order->sales_channel_id,
             'external_order_id' => $order->id,
             'purpose' => 'shipment',
@@ -105,10 +146,19 @@ final class ShippingLabelService
         bool $forceNew = false,
     ): ShippingLabel {
         $order = ExternalOrder::query()->findOrFail($order->id);
+        $isSplitOrder = $this->isActiveSplitOrder($order);
+
+        $this->ensureSplitReversalNotInProgress($order);
 
         if ($order->hasCancellationOperation()
             || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
             throw new RuntimeException('Nie można wygenerować etykiety dla anulowanego zamówienia ani podczas trwającej anulacji.');
+        }
+
+        $pendingAttempt = $this->pendingDirectGenerationAttempt($order);
+
+        if ($pendingAttempt instanceof ShippingLabel) {
+            return $this->resumeDirectGenerationAttempt($order, $pendingAttempt);
         }
 
         $idempotencyKey = 'shipment:order:'.$order->id;
@@ -116,8 +166,12 @@ final class ShippingLabelService
             ->where('idempotency_key', $idempotencyKey)
             ->first();
 
-        if (! $forceNew && $existing instanceof ShippingLabel) {
+        if (! $forceNew && $existing instanceof ShippingLabel && $existing->status === 'generated') {
             return $existing;
+        }
+
+        if (! $forceNew && $existing instanceof ShippingLabel) {
+            throw new RuntimeException('Poprzednia etykieta tego zamówienia została anulowana. Najpierw dokończ trwające cofnięcie podziału i odśwież zamówienie.');
         }
 
         $existing = ShippingLabel::query()
@@ -135,18 +189,58 @@ final class ShippingLabelService
 
         if ($courierAccount instanceof CourierAccount) {
             return $courierAccount->provider === 'blpaczka'
-                ? $this->generateViaBLPaczka($order, $courierAccount, $forceNew)
-                : $this->generateViaInPost($order, $courierAccount, $parcelTemplate, $forceNew);
+                ? $this->generateViaBLPaczka(
+                    $order,
+                    $courierAccount,
+                    remoteForceNew: $forceNew || $isSplitOrder,
+                    localForceNew: $forceNew,
+                )
+                : $this->generateViaInPost(
+                    $order,
+                    $courierAccount,
+                    $parcelTemplate,
+                    remoteForceNew: $forceNew || $isSplitOrder,
+                    localForceNew: $forceNew,
+                );
         }
 
         $order = ExternalOrder::query()
             ->with('salesChannel')
             ->findOrFail($order->id);
 
-        $blpaczkaLabel = $forceNew ? null : $this->fetchBLPaczkaLabelIfAvailable($order);
+        $blpaczkaLabel = ($forceNew || $isSplitOrder) ? null : $this->fetchBLPaczkaLabelIfAvailable($order);
 
         if ($blpaczkaLabel instanceof ShippingLabel) {
             return $blpaczkaLabel;
+        }
+
+        $isSplitCod = $isSplitOrder && $this->paymentMethods->isCashOnDelivery($order);
+
+        if ($isSplitCod) {
+            if ($this->looksLikeInPostShipping($order)) {
+                $inpostAccount = CourierAccount::defaultFor('inpost');
+
+                if ($inpostAccount instanceof CourierAccount) {
+                    return $this->generateViaInPost(
+                        $order,
+                        $inpostAccount,
+                        $parcelTemplate,
+                        remoteForceNew: true,
+                        localForceNew: $forceNew,
+                    );
+                }
+            } else {
+                $blpaczkaAccount = CourierAccount::defaultFor('blpaczka');
+
+                if ($blpaczkaAccount instanceof CourierAccount) {
+                    return $this->generateViaBLPaczka(
+                        $order,
+                        $blpaczkaAccount,
+                        remoteForceNew: true,
+                        localForceNew: $forceNew,
+                    );
+                }
+            }
         }
 
         $integration = $this->integrationWithLabelsForOrder($order);
@@ -156,18 +250,35 @@ final class ShippingLabelService
                 $inpostAccount = CourierAccount::defaultFor('inpost');
 
                 if ($inpostAccount instanceof CourierAccount) {
-                    return $this->generateViaInPost($order, $inpostAccount, $parcelTemplate, $forceNew);
+                    return $this->generateViaInPost(
+                        $order,
+                        $inpostAccount,
+                        $parcelTemplate,
+                        remoteForceNew: $forceNew || $isSplitOrder,
+                        localForceNew: $forceNew,
+                    );
                 }
             } else {
                 $blpaczkaAccount = CourierAccount::defaultFor('blpaczka');
 
                 if ($blpaczkaAccount instanceof CourierAccount) {
-                    return $this->generateViaBLPaczka($order, $blpaczkaAccount, $forceNew);
+                    return $this->generateViaBLPaczka(
+                        $order,
+                        $blpaczkaAccount,
+                        remoteForceNew: $forceNew || $isSplitOrder,
+                        localForceNew: $forceNew,
+                    );
                 }
             }
 
             throw new RuntimeException(
                 'Brak konfiguracji etykiet dla kanału tego zamówienia. Włącz etykiety kurierskie w Integracjach (endpoint wtyczki sklepu), dodaj konto InPost/BLPaczka w Ustawienia → Wysyłki albo wygeneruj etykietę ręcznie i wybierz konto przy zamówieniu.',
+            );
+        }
+
+        if ($isSplitCod) {
+            throw new RuntimeException(
+                'Etykieta pobraniowa dla rozdzielonego zamówienia wymaga bezpośredniego konta InPost lub BLPaczka. Endpoint wtyczki WooCommerce nie potwierdza kwoty COD dla tej części zamówienia.',
             );
         }
 
@@ -191,6 +302,8 @@ final class ShippingLabelService
             if ($parcelTemplate !== null) {
                 $responsePayload['parcel_template'] = $parcelTemplate;
             }
+
+            $responsePayload['financial'] = $this->financialSnapshot($order);
 
             Storage::disk('local')->put($path, $contents);
 
@@ -373,109 +486,169 @@ final class ShippingLabelService
         ExternalOrder $order,
         CourierAccount $account,
         ?string $parcelTemplate = null,
-        bool $forceNew = false,
+        bool $remoteForceNew = false,
+        bool $localForceNew = false,
     ): ShippingLabel {
         $order = ExternalOrder::query()
             ->with('salesChannel')
             ->findOrFail($order->id);
 
+        $attempt = $this->startDirectGenerationAttempt(
+            $order,
+            $account,
+            provider: 'inpost',
+            remoteForceNew: $remoteForceNew,
+            localForceNew: $localForceNew,
+            parcelTemplate: $parcelTemplate,
+        );
+
+        return $this->continueInPostGeneration($order, $account, $attempt);
+    }
+
+    private function continueInPostGeneration(
+        ExternalOrder $order,
+        CourierAccount $account,
+        ShippingLabel $attempt,
+    ): ShippingLabel {
+        $generation = (array) data_get($attempt->response_payload, 'generation', []);
+        $parcelTemplate = filled($generation['parcel_template'] ?? null)
+            ? (string) $generation['parcel_template']
+            : null;
+        $remoteForceNew = (bool) ($generation['remote_force_new'] ?? false);
+
         try {
-            $labelData = $this->inpost->createShipmentWithLabel($order, $account, $parcelTemplate, $forceNew);
-
-            $contents = $labelData['contents'];
-            $shipmentPayload = (array) $labelData['response_payload'];
-            $reportedParcelTemplate = (string) (
-                data_get($shipmentPayload, 'parcels.0.template')
-                ?: data_get($shipmentPayload, 'parcel.template')
+            $labelData = $this->inpost->createShipmentWithLabel(
+                $order,
+                $account,
+                $parcelTemplate,
+                $remoteForceNew,
+                $this->directGenerationCheckpoint($attempt),
             );
-            $reusedExistingShipment = (bool) data_get($shipmentPayload, 'reused_existing_shipment', false);
-            $recordedParcelTemplate = in_array($reportedParcelTemplate, ['small', 'medium', 'large'], true)
-                ? $reportedParcelTemplate
-                : ($reusedExistingShipment ? null : ($parcelTemplate ?: $account->default_parcel_template ?: 'small'));
-            $filename = 'inpost-'.($order->external_number ?: $order->external_id ?: $order->id);
-            $extension = str_contains(mb_strtolower((string) $labelData['mime_type']), 'zpl') ? 'zpl' : 'pdf';
-            $filename = preg_replace('/[^A-Za-z0-9._-]+/', '-', $filename)
-                .'-order-'.$order->id.'-'.now()->format('YmdHis').'-'.Str::lower((string) Str::ulid()).'.'.$extension;
-            $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
 
-            Storage::disk('local')->put($path, $contents);
+            return $this->storeInPostGenerationAttempt($order, $account, $attempt, $labelData);
+        } catch (Throwable $exception) {
+            $this->failDirectGeneration($order, $account, $attempt, $exception);
+        }
+    }
 
-            $label = $this->createShipmentLabel([
-                'sales_channel_id' => $order->sales_channel_id,
-                'external_order_id' => $order->id,
-                'courier_account_id' => $account->id,
-                'purpose' => 'shipment',
-                'idempotency_key' => $this->shipmentIdempotencyKey($order, $forceNew),
-                'status' => 'generated',
-                'provider' => 'inpost',
-                'label_number' => $labelData['shipment_id'],
-                'tracking_number' => $labelData['tracking_number'],
-                'disk' => 'local',
-                'path' => $path,
-                'mime_type' => $labelData['mime_type'],
-                'size' => strlen($contents),
-                'sha256' => hash('sha256', $contents),
-                'response_payload' => [
-                    'courier_account' => $account->code,
-                    'parcel_template' => $recordedParcelTemplate,
-                    'shipment' => $shipmentPayload,
-                ],
-                'generated_at' => now(),
-            ]);
+    /**
+     * @param  array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>}  $labelData
+     */
+    private function storeInPostGenerationAttempt(
+        ExternalOrder $order,
+        CourierAccount $account,
+        ShippingLabel $attempt,
+        array $labelData,
+    ): ShippingLabel {
+        $contents = (string) $labelData['contents'];
+        $shipmentPayload = (array) $labelData['response_payload'];
+        $reportedParcelTemplate = (string) (
+            data_get($shipmentPayload, 'parcels.0.template')
+            ?: data_get($shipmentPayload, 'parcel.template')
+        );
+        $reusedExistingShipment = (bool) data_get($shipmentPayload, 'reused_existing_shipment', false);
+        $attemptPayload = (array) ($attempt->fresh()?->response_payload ?? []);
+        $requestedParcelTemplate = filled(data_get($attemptPayload, 'generation.parcel_template'))
+            ? (string) data_get($attemptPayload, 'generation.parcel_template')
+            : null;
+        $recordedParcelTemplate = in_array($reportedParcelTemplate, ['small', 'medium', 'large'], true)
+            ? $reportedParcelTemplate
+            : ($reusedExistingShipment ? null : ($requestedParcelTemplate ?: $account->default_parcel_template ?: 'small'));
+        $filename = 'inpost-'.($order->external_number ?: $order->external_id ?: $order->id);
+        $extension = str_contains(mb_strtolower((string) $labelData['mime_type']), 'zpl') ? 'zpl' : 'pdf';
+        $filename = preg_replace('/[^A-Za-z0-9._-]+/', '-', $filename)
+            .'-order-'.$order->id.'-'.now()->format('YmdHis').'-'.Str::lower((string) Str::ulid()).'.'.$extension;
+        $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
 
-            $this->audit->record('shipping_label.generated', $label, null, [
-                'order_number' => $order->external_number,
-                'label_id' => $label->id,
-                'tracking_number' => $label->tracking_number,
-                'provider' => 'inpost',
+        if (! Storage::disk('local')->put($path, $contents)) {
+            throw new RuntimeException('Nie udało się trwale zapisać pliku etykiety InPost.');
+        }
+
+        $label = $this->completeDirectGenerationAttempt($attempt, [
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_order_id' => $order->id,
+            'courier_account_id' => $account->id,
+            'purpose' => 'shipment',
+            'idempotency_key' => $attempt->idempotency_key,
+            'status' => 'generated',
+            'provider' => 'inpost',
+            'label_number' => $labelData['shipment_id'],
+            'tracking_number' => $labelData['tracking_number'],
+            'disk' => 'local',
+            'path' => $path,
+            'mime_type' => $labelData['mime_type'],
+            'size' => strlen($contents),
+            'sha256' => hash('sha256', $contents),
+            'response_payload' => [
                 'courier_account' => $account->code,
                 'parcel_template' => $recordedParcelTemplate,
-            ], [
-                'sales_channel' => $order->salesChannel?->code,
-            ]);
+                'shipment' => $shipmentPayload,
+                'financial' => (array) data_get($attemptPayload, 'financial', []),
+                'generation' => (array) data_get($attemptPayload, 'generation', []),
+            ],
+            'generated_at' => now(),
+        ], $path);
 
-            return $label;
-        } catch (Throwable $exception) {
-            $this->audit->record('shipping_label.failed', $order, null, null, [
-                'sales_channel' => $order->salesChannel?->code,
-                'provider' => 'inpost',
-                'courier_account' => $account->code,
-                'error' => $exception->getMessage(),
-            ]);
+        $this->audit->record('shipping_label.generated', $label, null, [
+            'order_number' => $order->external_number,
+            'label_id' => $label->id,
+            'tracking_number' => $label->tracking_number,
+            'provider' => 'inpost',
+            'courier_account' => $account->code,
+            'parcel_template' => $recordedParcelTemplate,
+        ], [
+            'sales_channel' => $order->salesChannel?->code,
+        ]);
 
-            throw new RuntimeException($exception->getMessage(), previous: $exception);
-        }
+        return $label;
     }
 
     /**
      * Tworzy nową przesyłkę BLPaczka (wycena + automatyczny dobór kuriera)
      * i zapisuje jej etykietę.
      */
-    private function generateViaBLPaczka(ExternalOrder $order, CourierAccount $account, bool $forceNew = false): ShippingLabel
-    {
+    private function generateViaBLPaczka(
+        ExternalOrder $order,
+        CourierAccount $account,
+        bool $remoteForceNew = false,
+        bool $localForceNew = false,
+    ): ShippingLabel {
         $order = ExternalOrder::query()
             ->with('salesChannel')
             ->findOrFail($order->id);
 
-        $existing = $forceNew ? null : $this->fetchBLPaczkaLabelIfAvailable($order);
+        $existing = $remoteForceNew ? null : $this->fetchBLPaczkaLabelIfAvailable($order);
 
         if ($existing instanceof ShippingLabel) {
             return $existing;
         }
 
+        $attempt = $this->startDirectGenerationAttempt(
+            $order,
+            $account,
+            provider: 'blpaczka',
+            remoteForceNew: $remoteForceNew,
+            localForceNew: $localForceNew,
+        );
+
+        return $this->continueBLPaczkaGeneration($order, $account, $attempt);
+    }
+
+    private function continueBLPaczkaGeneration(
+        ExternalOrder $order,
+        CourierAccount $account,
+        ShippingLabel $attempt,
+    ): ShippingLabel {
         try {
-            $labelData = $this->blpaczka->createShipmentWithLabel($order, $account);
+            $labelData = $this->blpaczka->createShipmentWithLabel(
+                $order,
+                $account,
+                $this->directGenerationCheckpoint($attempt),
+            );
 
-            return $this->storeBLPaczkaLabel($order, $account, $labelData, reused: false, forceNew: $forceNew);
+            return $this->storeBLPaczkaLabel($order, $account, $labelData, reused: false, attempt: $attempt);
         } catch (Throwable $exception) {
-            $this->audit->record('shipping_label.failed', $order, null, null, [
-                'sales_channel' => $order->salesChannel?->code,
-                'provider' => 'blpaczka',
-                'courier_account' => $account->code,
-                'error' => $exception->getMessage(),
-            ]);
-
-            throw new RuntimeException($exception->getMessage(), previous: $exception);
+            $this->failDirectGeneration($order, $account, $attempt, $exception);
         }
     }
 
@@ -488,20 +661,43 @@ final class ShippingLabelService
         array $labelData,
         bool $reused,
         bool $forceNew = false,
+        ?ShippingLabel $attempt = null,
     ): ShippingLabel {
         $extension = str_contains(mb_strtolower($labelData['mime_type']), 'pdf') ? 'pdf' : 'bin';
         $filename = 'blpaczka-'.preg_replace('/[^A-Za-z0-9._-]+/', '-', (string) ($order->external_number ?: $order->external_id))
             .'-order-'.$order->id.'-'.now()->format('YmdHis').'-'.Str::lower((string) Str::ulid()).'.'.$extension;
         $path = 'shipping-labels/'.now()->format('Y/m').'/'.$filename;
 
-        Storage::disk('local')->put($path, $labelData['contents']);
+        if (! Storage::disk('local')->put($path, $labelData['contents'])) {
+            throw new RuntimeException('Nie udało się trwale zapisać pliku etykiety BLPaczka.');
+        }
 
-        $label = $this->createShipmentLabel([
+        $attemptPayload = $attempt instanceof ShippingLabel
+            ? (array) ($attempt->fresh()?->response_payload ?? [])
+            : [];
+        $financialSnapshot = (array) data_get($attemptPayload, 'financial', []);
+
+        if ($financialSnapshot === []) {
+            $financialSnapshot = $this->financialSnapshot($order);
+        }
+
+        $responsePayload = [
+            'courier_account' => $account->code,
+            'reused_existing_shipment' => $reused,
+            'blpaczka' => $labelData['response_payload'],
+            'financial' => $financialSnapshot,
+        ];
+
+        if ($attempt instanceof ShippingLabel) {
+            $responsePayload['generation'] = (array) data_get($attemptPayload, 'generation', []);
+        }
+
+        $attributes = [
             'sales_channel_id' => $order->sales_channel_id,
             'external_order_id' => $order->id,
             'courier_account_id' => $account->id,
             'purpose' => 'shipment',
-            'idempotency_key' => $this->shipmentIdempotencyKey($order, $forceNew),
+            'idempotency_key' => $attempt?->idempotency_key ?? $this->shipmentIdempotencyKey($order, $forceNew),
             'status' => 'generated',
             'provider' => 'blpaczka',
             'label_number' => $labelData['shipment_id'],
@@ -511,13 +707,13 @@ final class ShippingLabelService
             'mime_type' => $labelData['mime_type'],
             'size' => strlen($labelData['contents']),
             'sha256' => hash('sha256', $labelData['contents']),
-            'response_payload' => [
-                'courier_account' => $account->code,
-                'reused_existing_shipment' => $reused,
-                'blpaczka' => $labelData['response_payload'],
-            ],
+            'response_payload' => $responsePayload,
             'generated_at' => now(),
-        ]);
+        ];
+
+        $label = $attempt instanceof ShippingLabel
+            ? $this->completeDirectGenerationAttempt($attempt, $attributes, $path)
+            : $this->createShipmentLabel($attributes);
 
         $this->audit->record('shipping_label.generated', $label, null, [
             'order_number' => $order->external_number,
@@ -530,6 +726,269 @@ final class ShippingLabelService
         ]);
 
         return $label;
+    }
+
+    private function pendingDirectGenerationAttempt(ExternalOrder $order): ?ShippingLabel
+    {
+        $attempts = ShippingLabel::query()
+            ->shipments()
+            ->where('external_order_id', $order->id)
+            ->where('status', 'generating')
+            ->whereIn('provider', ['inpost', 'blpaczka'])
+            ->orderBy('id')
+            ->get();
+
+        if ($attempts->count() > 1) {
+            throw new RuntimeException(
+                'Dla zamówienia istnieje więcej niż jedna niedokończona próba kurierska. Nie wolno automatycznie tworzyć kolejnej przesyłki; sprawdź je u przewoźnika i anuluj duplikaty ręcznie.',
+            );
+        }
+
+        return $attempts->first();
+    }
+
+    private function startDirectGenerationAttempt(
+        ExternalOrder $order,
+        CourierAccount $account,
+        string $provider,
+        bool $remoteForceNew,
+        bool $localForceNew,
+        ?string $parcelTemplate = null,
+    ): ShippingLabel {
+        return ShippingLabel::query()->create([
+            'sales_channel_id' => $order->sales_channel_id,
+            'external_order_id' => $order->id,
+            'courier_account_id' => $account->id,
+            'purpose' => 'shipment',
+            'idempotency_key' => $this->shipmentIdempotencyKey($order, $localForceNew),
+            'status' => 'generating',
+            'provider' => $provider,
+            'disk' => 'local',
+            'path' => '',
+            'response_payload' => [
+                'courier_account' => $account->code,
+                'financial' => $this->financialSnapshot($order),
+                'generation' => [
+                    'version' => 1,
+                    'state' => 'prepared',
+                    'attempt_token' => Str::lower((string) Str::ulid()),
+                    'prepared_at' => now()->toIso8601String(),
+                    'provider' => $provider,
+                    'remote_force_new' => $remoteForceNew,
+                    'local_force_new' => $localForceNew,
+                    'parcel_template' => $parcelTemplate,
+                ],
+            ],
+        ]);
+    }
+
+    private function resumeDirectGenerationAttempt(
+        ExternalOrder $order,
+        ShippingLabel $attempt,
+    ): ShippingLabel {
+        $attempt = ShippingLabel::query()->findOrFail($attempt->id);
+        $account = CourierAccount::query()->find($attempt->courier_account_id);
+
+        if (! $account instanceof CourierAccount) {
+            throw new RuntimeException(
+                'Nie można wznowić niedokończonej przesyłki, ponieważ zapisane konto kurierskie już nie istnieje. Sprawdź przesyłkę ręcznie u przewoźnika.',
+            );
+        }
+
+        $generation = (array) data_get($attempt->response_payload, 'generation', []);
+        $state = (string) ($generation['state'] ?? 'outcome_unknown');
+        $shipmentId = trim((string) ($attempt->label_number ?: ($generation['remote_shipment_id'] ?? '')));
+
+        if ($shipmentId === '') {
+            if ($state === 'prepared') {
+                return $attempt->provider === 'blpaczka'
+                    ? $this->continueBLPaczkaGeneration($order, $account, $attempt)
+                    : $this->continueInPostGeneration($order, $account, $attempt);
+            }
+
+            throw new RuntimeException($this->unknownRemoteCreationMessage($attempt));
+        }
+
+        try {
+            if ($attempt->provider === 'blpaczka') {
+                $labelData = $this->blpaczka->fetchLabelForShipment($shipmentId, $account);
+                $remoteCheckpoint = (array) ($generation['remote_checkpoint'] ?? []);
+                $labelData['response_payload'] = array_merge(
+                    $labelData['response_payload'],
+                    array_filter([
+                        'courier_code' => $remoteCheckpoint['courier_code'] ?? null,
+                        'courier_name' => $remoteCheckpoint['courier_name'] ?? null,
+                        'price' => $remoteCheckpoint['price'] ?? null,
+                    ], fn (mixed $value): bool => $value !== null && $value !== ''),
+                );
+
+                return $this->storeBLPaczkaLabel($order, $account, $labelData, reused: false, attempt: $attempt);
+            }
+
+            $labelData = $this->inpost->fetchExistingShipmentWithLabel(
+                $shipmentId,
+                $account,
+                (bool) data_get($generation, 'remote_checkpoint.reused_existing_shipment', false),
+            );
+
+            return $this->storeInPostGenerationAttempt($order, $account, $attempt, $labelData);
+        } catch (Throwable $exception) {
+            $this->failDirectGeneration($order, $account, $attempt, $exception);
+        }
+    }
+
+    /**
+     * @return callable(string, array<string, mixed>): void
+     */
+    private function directGenerationCheckpoint(ShippingLabel $attempt): callable
+    {
+        return function (string $stage, array $checkpoint) use ($attempt): void {
+            $current = ShippingLabel::query()->findOrFail($attempt->id);
+
+            if ($current->status !== 'generating') {
+                throw new RuntimeException('Nie można zapisać punktu kontrolnego zakończonej próby kurierskiej.');
+            }
+
+            $payload = (array) ($current->response_payload ?? []);
+            $generation = (array) ($payload['generation'] ?? []);
+
+            if ($stage === 'remote_creation_started') {
+                $generation['state'] = 'remote_creation_started';
+                $generation['remote_creation_started_at'] = (string) ($checkpoint['started_at'] ?? now()->toIso8601String());
+                $generation['remote_creation_checkpoint'] = $checkpoint;
+            } elseif ($stage === 'remote_creation_rejected') {
+                $generation['state'] = 'prepared';
+                $generation['remote_creation_rejected_at'] = (string) ($checkpoint['rejected_at'] ?? now()->toIso8601String());
+                $generation['remote_creation_rejection'] = $checkpoint;
+            } elseif ($stage === 'remote_shipment_resolved') {
+                $shipmentId = trim((string) ($checkpoint['shipment_id'] ?? ''));
+
+                if ($shipmentId === '') {
+                    throw new RuntimeException('Przewoźnik nie zwrócił identyfikatora przesyłki do trwałego punktu kontrolnego.');
+                }
+
+                $generation['state'] = 'remote_shipment_resolved';
+                $generation['remote_shipment_id'] = $shipmentId;
+                $generation['remote_shipment_resolved_at'] = (string) ($checkpoint['resolved_at'] ?? now()->toIso8601String());
+                $generation['remote_checkpoint'] = $checkpoint;
+                $current->label_number = $shipmentId;
+                $current->tracking_last_error = null;
+            } else {
+                throw new RuntimeException('Nieznany punkt kontrolny generowania przesyłki: '.$stage.'.');
+            }
+
+            $payload['generation'] = $generation;
+            $current->response_payload = $payload;
+            $current->saveOrFail();
+            $attempt->refresh();
+        };
+    }
+
+    /**
+     * @param  array<string, mixed>  $attributes
+     */
+    private function completeDirectGenerationAttempt(
+        ShippingLabel $attempt,
+        array $attributes,
+        string $newPath,
+    ): ShippingLabel {
+        try {
+            $current = ShippingLabel::query()->findOrFail($attempt->id);
+
+            if ($current->status === 'generated') {
+                if ($newPath !== '' && $newPath !== $current->path) {
+                    Storage::disk('local')->delete($newPath);
+                }
+
+                return $current;
+            }
+
+            if ($current->status !== 'generating') {
+                throw new RuntimeException('Niedokończona próba kurierska zmieniła status podczas zapisu etykiety.');
+            }
+
+            $persistedShipmentId = trim((string) $current->label_number);
+            $completedShipmentId = trim((string) ($attributes['label_number'] ?? ''));
+
+            if ($persistedShipmentId === '' || ! hash_equals($persistedShipmentId, $completedShipmentId)) {
+                throw new RuntimeException('Identyfikator pobranej etykiety nie zgadza się z trwale zapisaną przesyłką przewoźnika.');
+            }
+
+            $responsePayload = (array) ($attributes['response_payload'] ?? []);
+            $generation = (array) ($responsePayload['generation'] ?? []);
+            $generation['state'] = 'completed';
+            $generation['completed_at'] = now()->toIso8601String();
+            $responsePayload['generation'] = $generation;
+            $attributes['response_payload'] = $responsePayload;
+            $attributes['tracking_last_error'] = null;
+            $current->fill($attributes);
+            $current->saveOrFail();
+            $current->refresh();
+
+            return $current;
+        } catch (Throwable $exception) {
+            if ($newPath !== '') {
+                Storage::disk('local')->delete($newPath);
+            }
+
+            throw $exception;
+        }
+    }
+
+    private function failDirectGeneration(
+        ExternalOrder $order,
+        CourierAccount $account,
+        ShippingLabel $attempt,
+        Throwable $exception,
+    ): never {
+        $current = ShippingLabel::query()->find($attempt->id);
+
+        if ($current instanceof ShippingLabel && $current->status === 'generating') {
+            $payload = (array) ($current->response_payload ?? []);
+            $generation = (array) ($payload['generation'] ?? []);
+            $shipmentId = trim((string) ($current->label_number ?: ($generation['remote_shipment_id'] ?? '')));
+
+            if ($shipmentId !== '') {
+                $generation['state'] = 'remote_shipment_resolved';
+            } elseif (in_array((string) ($generation['state'] ?? ''), ['remote_creation_started', 'outcome_unknown'], true)) {
+                $generation['state'] = 'outcome_unknown';
+            } else {
+                $generation['state'] = 'prepared';
+            }
+
+            $generation['last_error'] = $exception->getMessage();
+            $generation['last_failed_at'] = now()->toIso8601String();
+            $payload['generation'] = $generation;
+            $current->response_payload = $payload;
+            $current->tracking_last_error = mb_substr($exception->getMessage(), 0, 2000);
+            $current->save();
+            $attempt = $current;
+        }
+
+        $this->audit->record('shipping_label.failed', $order, null, null, [
+            'sales_channel' => $order->salesChannel?->code,
+            'provider' => $account->provider,
+            'courier_account' => $account->code,
+            'generation_attempt_id' => $attempt->id,
+            'remote_shipment_id' => $attempt->label_number,
+            'error' => $exception->getMessage(),
+        ]);
+
+        $generationState = (string) data_get($attempt->response_payload, 'generation.state', '');
+        $message = match ($generationState) {
+            'outcome_unknown' => $this->unknownRemoteCreationMessage($attempt),
+            'remote_shipment_resolved' => $exception->getMessage().' Identyfikator przesyłki został bezpiecznie zapisany; ponowienie pobierze wyłącznie istniejącą etykietę.',
+            default => $exception->getMessage(),
+        };
+
+        throw new RuntimeException($message, previous: $exception);
+    }
+
+    private function unknownRemoteCreationMessage(ShippingLabel $attempt): string
+    {
+        return 'Nie można bezpiecznie ponowić utworzenia przesyłki: po wysłaniu żądania do '
+            .($attempt->provider === 'blpaczka' ? 'BLPaczka' : 'InPost')
+            .' nie otrzymano identyfikatora, więc wynik jest nieznany. Sprawdź zamówienie w panelu przewoźnika i anuluj albo powiąż przesyłkę ręcznie; ERP nie wyśle automatycznie drugiego COD.';
     }
 
     /**
@@ -743,7 +1202,7 @@ final class ShippingLabelService
                 ? ShippingLabel::query()->where('idempotency_key', $idempotencyKey)->first()
                 : null;
 
-            if (! $existing instanceof ShippingLabel) {
+            if (! $existing instanceof ShippingLabel || $existing->status !== 'generated') {
                 throw $exception;
             }
 
@@ -762,6 +1221,53 @@ final class ShippingLabelService
         return $forceNew
             ? 'shipment:order:'.$order->id.':'.Str::lower((string) Str::ulid())
             : 'shipment:order:'.$order->id;
+    }
+
+    private function isActiveSplitOrder(ExternalOrder $order): bool
+    {
+        if ($order->split_parent_order_id !== null || $order->split_root_order_id !== null) {
+            return true;
+        }
+
+        if ((array) data_get($order->raw_payload, 'sempre_erp_split_allocations', []) !== []) {
+            return true;
+        }
+
+        return ExternalOrder::query()
+            ->where('split_root_order_id', $order->id)
+            ->exists();
+    }
+
+    private function ensureSplitReversalNotInProgress(ExternalOrder $order): void
+    {
+        if ($order->familyHasSplitReversalOperation()) {
+            throw new RuntimeException(
+                'Nie można wygenerować ani wznowić etykiety, dopóki nie zostanie dokończone cofnięcie podziału zamówienia.',
+            );
+        }
+    }
+
+    /**
+     * Snapshot used to prove which order amount was sent to a courier provider.
+     *
+     * @return array{order_id:int,order_total:float,currency:string,cash_on_delivery:bool,requested_cod_amount:?float,split_family_root_order_id:?int}
+     */
+    private function financialSnapshot(ExternalOrder $order): array
+    {
+        $cashOnDelivery = $this->paymentMethods->isCashOnDelivery($order);
+        $isSplitOrder = $this->isActiveSplitOrder($order);
+        $total = round((float) $order->total_gross, 2);
+
+        return [
+            'order_id' => (int) $order->id,
+            'order_total' => $total,
+            'currency' => strtoupper(trim((string) $order->currency)) ?: 'PLN',
+            'cash_on_delivery' => $cashOnDelivery,
+            'requested_cod_amount' => $cashOnDelivery ? $total : null,
+            'split_family_root_order_id' => $isSplitOrder
+                ? (int) ($order->split_root_order_id ?: $order->id)
+                : null,
+        ];
     }
 
     /**

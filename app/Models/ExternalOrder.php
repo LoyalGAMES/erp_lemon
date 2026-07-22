@@ -9,10 +9,11 @@ use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
+use Illuminate\Database\Eloquent\SoftDeletes;
 
 class ExternalOrder extends Model
 {
-    use HasFactory;
+    use HasFactory, SoftDeletes;
 
     protected $fillable = [
         'split_parent_order_id',
@@ -62,12 +63,12 @@ class ExternalOrder extends Model
 
     public function splitParent(): BelongsTo
     {
-        return $this->belongsTo(self::class, 'split_parent_order_id');
+        return $this->belongsTo(self::class, 'split_parent_order_id')->withTrashed();
     }
 
     public function splitRoot(): BelongsTo
     {
-        return $this->belongsTo(self::class, 'split_root_order_id');
+        return $this->belongsTo(self::class, 'split_root_order_id')->withTrashed();
     }
 
     public function splitChildren(): HasMany
@@ -156,5 +157,22 @@ class ExternalOrder extends Model
     public function hasCancellationOperation(): bool
     {
         return $this->cancellationOperation() instanceof OrderCancellation;
+    }
+
+    public function hasSplitReversalOperation(): bool
+    {
+        $operation = data_get($this->raw_payload, 'sempre_erp_split_reversal_operation');
+
+        return is_array($operation) && filled($operation['uuid'] ?? null);
+    }
+
+    public function familyHasSplitReversalOperation(): bool
+    {
+        $rootId = (int) ($this->split_root_order_id ?: $this->id);
+        $root = $rootId === (int) $this->id
+            ? $this
+            : self::withTrashed()->find($rootId);
+
+        return $root instanceof self && $root->hasSplitReversalOperation();
     }
 }

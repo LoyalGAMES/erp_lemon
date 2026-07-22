@@ -40,7 +40,7 @@ class CustomerMessage extends Model
 
     public function externalOrder(): BelongsTo
     {
-        return $this->belongsTo(ExternalOrder::class);
+        return $this->belongsTo(ExternalOrder::class)->withTrashed();
     }
 
     public function customer(): BelongsTo

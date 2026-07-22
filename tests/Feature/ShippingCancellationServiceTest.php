@@ -278,6 +278,75 @@ class ShippingCancellationServiceTest extends TestCase
         Http::assertSentCount(1);
     }
 
+    public function test_historical_locally_cancelled_label_without_remote_proof_requires_manual_confirmation(): void
+    {
+        Http::preventStrayRequests();
+
+        $channel = $this->createSalesChannel();
+        $order = $this->createOrder($channel, '2600');
+        $label = $this->createLabel($order, [
+            'status' => 'cancelled',
+            'provider' => 'inpost',
+            'label_number' => 'SHIP-UNVERIFIED',
+            'response_payload' => [],
+        ]);
+
+        $result = app(ShippingCancellationService::class)->cancelForOrder($order);
+
+        $this->assertSame([], $result['cancelled_label_ids']);
+        $this->assertSame('remote_cancellation_unverified', $result['manual_required'][0]['code']);
+        $this->assertSame($label->id, $result['manual_required'][0]['label_id']);
+        Http::assertNothingSent();
+    }
+
+    public function test_historical_locally_cancelled_label_with_unknown_remote_status_requires_manual_confirmation(): void
+    {
+        Http::preventStrayRequests();
+
+        $channel = $this->createSalesChannel();
+        $order = $this->createOrder($channel, '2700');
+        $label = $this->createLabel($order, [
+            'status' => 'cancelled',
+            'provider' => 'inpost',
+            'label_number' => 'SHIP-UNKNOWN',
+            'response_payload' => [
+                'cancellation' => [
+                    'remote' => ['status' => 'unknown'],
+                ],
+            ],
+        ]);
+
+        $result = app(ShippingCancellationService::class)->cancelForOrder($order);
+
+        $this->assertSame('remote_cancellation_unverified', $result['manual_required'][0]['code']);
+        $this->assertSame($label->id, $result['manual_required'][0]['label_id']);
+        Http::assertNothingSent();
+    }
+
+    public function test_historical_locally_cancelled_label_with_remote_proof_is_safe(): void
+    {
+        Http::preventStrayRequests();
+
+        $channel = $this->createSalesChannel();
+        $order = $this->createOrder($channel, '2800');
+        $this->createLabel($order, [
+            'status' => 'cancelled',
+            'provider' => 'inpost',
+            'label_number' => 'SHIP-VERIFIED',
+            'response_payload' => [
+                'cancellation' => [
+                    'remote' => ['status' => 'cancelled'],
+                ],
+            ],
+        ]);
+
+        $result = app(ShippingCancellationService::class)->cancelForOrder($order);
+
+        $this->assertSame([], $result['cancelled_label_ids']);
+        $this->assertSame([], $result['manual_required']);
+        Http::assertNothingSent();
+    }
+
     public function test_picked_up_label_in_any_family_member_blocks_every_mutation(): void
     {
         Http::preventStrayRequests();
@@ -307,6 +376,31 @@ class ShippingCancellationServiceTest extends TestCase
         $this->assertSame('generated', $rootLabel->refresh()->status);
         $this->assertSame('pending', $rootPrintJob->refresh()->status);
         $this->assertSame('picked_up', $pickedUpLabel->refresh()->status);
+        Http::assertNothingSent();
+    }
+
+    public function test_carrier_pickup_tracking_evidence_blocks_cancellation_even_if_local_label_status_is_stale(): void
+    {
+        Http::preventStrayRequests();
+
+        $channel = $this->createSalesChannel();
+        $order = $this->createOrder($channel, '3100');
+        $label = $this->createLabel($order, [
+            'status' => 'generated',
+            'provider' => 'inpost',
+            'label_number' => 'SHIP-STALE-LOCAL-STATUS',
+            'tracking_status' => 'collected_from_sender',
+            'picked_up_at' => null,
+        ]);
+
+        try {
+            app(ShippingCancellationService::class)->cancelForOrder($order);
+            $this->fail('Oczekiwano blokady po potwierdzonym odbiorze przewoźnika.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('odebrana', $exception->getMessage());
+        }
+
+        $this->assertSame('generated', $label->fresh()->status);
         Http::assertNothingSent();
     }
 

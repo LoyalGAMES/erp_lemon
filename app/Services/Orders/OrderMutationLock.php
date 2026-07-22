@@ -30,7 +30,129 @@ final class OrderMutationLock
      */
     public function forOrderFamily(ExternalOrder $order, callable $operation): mixed
     {
-        return $this->forOrderIds($this->familyOrderIds([(int) $order->id]), $operation);
+        return $this->forStableOrderFamilies([(int) $order->id], $operation);
+    }
+
+    /**
+     * The split-reversal saga itself must be able to resume while its durable
+     * operation marker is present. All ordinary mutations use forOrderFamily()
+     * and remain blocked until the saga removes that marker during final merge.
+     */
+    public function forSplitReversal(ExternalOrder $order, callable $operation): mixed
+    {
+        return $this->forStableOrderFamilies(
+            [(int) $order->id],
+            $operation,
+            allowSplitReversal: true,
+        );
+    }
+
+    /**
+     * A split can finish while this process is waiting for the root lock. The
+     * family list captured before waiting is then incomplete. Once the known
+     * members are locked, resolve the family again and lock every newly added
+     * member before the caller is allowed to mutate anything.
+     *
+     * @param  list<int>  $seedOrderIds
+     */
+    private function forStableOrderFamilies(
+        array $seedOrderIds,
+        callable $operation,
+        bool $allowSplitReversal = false,
+    ): mixed {
+        $seedOrderIds = collect($seedOrderIds)
+            ->map(fn (mixed $orderId): int => (int) $orderId)
+            ->filter(fn (int $orderId): bool => $orderId > 0)
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+
+        if ($seedOrderIds === []) {
+            return $operation();
+        }
+
+        $orderIds = $this->familyOrderIds($seedOrderIds);
+
+        if ($orderIds === []) {
+            $orderIds = $seedOrderIds;
+        }
+
+        try {
+            return $this->acquire(
+                $orderIds,
+                0,
+                fn (): mixed => $this->acquireNewFamilyMembers(
+                    $seedOrderIds,
+                    $orderIds,
+                    $operation,
+                    $allowSplitReversal,
+                ),
+            );
+        } catch (LockTimeoutException $exception) {
+            throw new RuntimeException(
+                'To zamówienie jest właśnie aktualizowane lub obsługiwane w procesie pakowania. Spróbuj ponownie za chwilę.',
+                previous: $exception,
+            );
+        }
+    }
+
+    /**
+     * @param  list<int>  $seedOrderIds
+     * @param  list<int>  $lockedOrderIds
+     */
+    private function acquireNewFamilyMembers(
+        array $seedOrderIds,
+        array $lockedOrderIds,
+        callable $operation,
+        bool $allowSplitReversal,
+    ): mixed {
+        $currentFamilyIds = $this->familyOrderIds($seedOrderIds);
+        $newOrderIds = collect($currentFamilyIds)
+            ->diff($lockedOrderIds)
+            ->map(fn (mixed $orderId): int => (int) $orderId)
+            ->sort()
+            ->values()
+            ->all();
+
+        if ($newOrderIds !== []) {
+            $lastLockedOrderId = max($lockedOrderIds);
+
+            // Split children are newly inserted rows, so their IDs must be
+            // greater than every member already locked in ascending order.
+            // Refuse corrupted/re-parented lineage instead of risking a
+            // reverse-order distributed lock and a deadlock.
+            if (min($newOrderIds) <= $lastLockedOrderId) {
+                throw new RuntimeException(
+                    'Rodzina zamówienia zmieniła się w sposób, którego nie można bezpiecznie zablokować. Odśwież widok i spróbuj ponownie.',
+                );
+            }
+
+            $expandedLockedOrderIds = collect([...$lockedOrderIds, ...$newOrderIds])
+                ->unique()
+                ->sort()
+                ->values()
+                ->all();
+
+            return $this->acquire(
+                $newOrderIds,
+                0,
+                fn (): mixed => $this->acquireNewFamilyMembers(
+                    $seedOrderIds,
+                    $expandedLockedOrderIds,
+                    $operation,
+                    $allowSplitReversal,
+                ),
+            );
+        }
+
+        $this->assertOrdersRemainActive($seedOrderIds);
+
+        if (! $allowSplitReversal) {
+            $this->assertNoSplitReversalInProgress($lockedOrderIds);
+        }
+
+        return $operation();
     }
 
     /**
@@ -44,19 +166,22 @@ final class OrderMutationLock
                 : (int) $order)
             ->all();
 
-        return $this->forOrderIds($orderIds, $operation);
+        return $this->forStableOrderFamilies($orderIds, $operation);
     }
 
     public function forWarehouseDocument(WarehouseDocument $document, callable $operation): mixed
     {
-        return $this->forOrderIds($this->linkedOrderIds($document), $operation);
+        return $this->forStableOrderFamilies($this->linkedOrderIds($document), $operation);
     }
 
     /**
      * @param  list<int>  $orderIds
      */
-    private function forOrderIds(array $orderIds, callable $operation): mixed
-    {
+    private function forOrderIds(
+        array $orderIds,
+        callable $operation,
+        bool $allowSplitReversal = false,
+    ): mixed {
         $orderIds = collect($orderIds)
             ->filter(fn (int $orderId): bool => $orderId > 0)
             ->unique()
@@ -65,7 +190,19 @@ final class OrderMutationLock
             ->all();
 
         try {
-            return $this->acquire($orderIds, 0, $operation);
+            return $this->acquire(
+                $orderIds,
+                0,
+                function () use ($orderIds, $operation, $allowSplitReversal): mixed {
+                    $this->assertOrdersRemainActive($orderIds);
+
+                    if (! $allowSplitReversal) {
+                        $this->assertNoSplitReversalInProgress($orderIds);
+                    }
+
+                    return $operation();
+                },
+            );
         } catch (LockTimeoutException $exception) {
             throw new RuntimeException(
                 'To zamówienie jest właśnie aktualizowane lub obsługiwane w procesie pakowania. Spróbuj ponownie za chwilę.',
@@ -157,21 +294,34 @@ final class OrderMutationLock
      */
     private function familyOrderIds(array $orderIds): array
     {
-        $rootIds = ExternalOrder::query()
+        $families = ExternalOrder::query()
             ->whereKey($orderIds)
-            ->get(['id', 'split_root_order_id'])
-            ->map(fn (ExternalOrder $order): int => (int) ($order->split_root_order_id ?: $order->id))
-            ->unique()
-            ->values()
-            ->all();
+            ->get(['id', 'sales_channel_id', 'split_root_order_id'])
+            ->map(fn (ExternalOrder $order): array => [
+                'root_id' => (int) ($order->split_root_order_id ?: $order->id),
+                'sales_channel_id' => (int) $order->sales_channel_id,
+            ])
+            ->unique(fn (array $family): string => $family['sales_channel_id'].':'.$family['root_id'])
+            ->values();
 
-        if ($rootIds === []) {
+        if ($families->isEmpty()) {
             return [];
         }
 
         return ExternalOrder::query()
-            ->whereIn('id', $rootIds)
-            ->orWhereIn('split_root_order_id', $rootIds)
+            ->where(function (Builder $query) use ($families): void {
+                foreach ($families as $family) {
+                    $query->orWhere(function (Builder $familyQuery) use ($family): void {
+                        $familyQuery
+                            ->where('sales_channel_id', $family['sales_channel_id'])
+                            ->where(function (Builder $memberQuery) use ($family): void {
+                                $memberQuery
+                                    ->whereKey($family['root_id'])
+                                    ->orWhere('split_root_order_id', $family['root_id']);
+                            });
+                    });
+                }
+            })
             ->orderBy('id')
             ->pluck('id')
             ->map(fn (mixed $orderId): int => (int) $orderId)
@@ -181,5 +331,61 @@ final class OrderMutationLock
     private function lockKey(int $orderId): string
     {
         return 'packing-fulfillment-order-'.$orderId;
+    }
+
+    /** @param list<int> $orderIds */
+    private function assertOrdersRemainActive(array $orderIds): void
+    {
+        $activeOrderIds = ExternalOrder::query()
+            ->whereKey($orderIds)
+            ->pluck('id')
+            ->map(fn (mixed $orderId): int => (int) $orderId)
+            ->all();
+        $missingOrderIds = array_values(array_diff($orderIds, $activeOrderIds));
+
+        if ($missingOrderIds !== []) {
+            throw new RuntimeException(
+                'Zamówienie albo jedna z jego części zostały w międzyczasie zarchiwizowane. Odśwież widok przed wykonaniem kolejnej operacji.',
+            );
+        }
+    }
+
+    /** @param list<int> $orderIds */
+    private function assertNoSplitReversalInProgress(array $orderIds): void
+    {
+        $families = ExternalOrder::query()
+            ->whereKey($orderIds)
+            ->get(['id', 'sales_channel_id', 'split_root_order_id'])
+            ->map(fn (ExternalOrder $order): array => [
+                'root_id' => (int) ($order->split_root_order_id ?: $order->id),
+                'sales_channel_id' => (int) $order->sales_channel_id,
+            ])
+            ->unique(fn (array $family): string => $family['sales_channel_id'].':'.$family['root_id'])
+            ->values();
+
+        if ($families->isEmpty()) {
+            return;
+        }
+
+        $reversingRoot = ExternalOrder::query()
+            ->where(function (Builder $query) use ($families): void {
+                foreach ($families as $family) {
+                    $query->orWhere(function (Builder $familyQuery) use ($family): void {
+                        $familyQuery
+                            ->whereKey($family['root_id'])
+                            ->where('sales_channel_id', $family['sales_channel_id']);
+                    });
+                }
+            })
+            ->get(['id', 'external_number', 'raw_payload'])
+            ->first(fn (ExternalOrder $root): bool => $root->hasSplitReversalOperation());
+
+        if ($reversingRoot instanceof ExternalOrder) {
+            $number = trim((string) ($reversingRoot->external_number ?: $reversingRoot->id));
+
+            throw new RuntimeException(
+                "Dla zamówienia {$number} trwa niedokończone cofanie podziału. Dokończ je w widoku zamówienia przed wykonaniem kolejnej operacji.",
+            );
+        }
     }
 }

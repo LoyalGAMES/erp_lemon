@@ -310,6 +310,44 @@ class CustomerCommunicationWorkflowTest extends TestCase
         Mail::assertSent(CustomerMessageMail::class, 1);
     }
 
+    public function test_order_status_outbox_is_durable_idempotent_and_delivered_only_after_explicit_dispatch(): void
+    {
+        $order = $this->createOrder('client@example.test');
+        $communication = app(CustomerCommunicationService::class);
+        $operationUuid = '80000000-0000-4000-8000-000000000001';
+        $context = [
+            'rollback_reason' => 'Cofnięcie podziału',
+            'split_reversal_uuid' => $operationUuid,
+        ];
+
+        $queued = $communication->queueOrderStatus(
+            $order,
+            'order_packing_rollback',
+            $context,
+            $operationUuid,
+        );
+        $sameQueued = $communication->queueOrderStatus(
+            $order,
+            'order_packing_rollback',
+            $context,
+            $operationUuid,
+        );
+
+        $this->assertNotNull($queued);
+        $this->assertSame($queued->id, $sameQueued?->id);
+        $this->assertSame('pending', $queued->fresh()?->status);
+        $this->assertSame(1, CustomerMessage::query()
+            ->where('trigger', 'order_packing_rollback')
+            ->count());
+        Mail::assertNothingSent();
+
+        $delivered = $communication->deliverQueued($queued);
+        $communication->deliverQueued($delivered);
+
+        $this->assertSame('sent', $delivered->fresh()?->status);
+        Mail::assertSent(CustomerMessageMail::class, 1);
+    }
+
     public function test_disabled_workflow_message_is_logged_as_skipped_and_not_sent(): void
     {
         Mail::fake();

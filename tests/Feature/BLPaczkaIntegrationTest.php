@@ -11,6 +11,7 @@ use App\Models\Product;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
 use App\Services\Packing\PackingTaskService;
+use App\Services\Shipping\BLPaczkaShipmentService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use App\Services\Shipping\ShippingLabelService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -145,6 +146,8 @@ class BLPaczkaIntegrationTest extends TestCase
                 'success' => true,
                 'data' => ['Tracking' => [
                     ['status' => 'Zarejestrowano dane przesyłki', 'date' => now()->toDateTimeString()],
+                    ['status' => 'Przyjęto zlecenie odbioru', 'date' => now()->toDateTimeString()],
+                    ['status' => 'Oczekuje na nadanie', 'date' => now()->toDateTimeString()],
                 ]],
             ], 200),
         ]);
@@ -153,6 +156,44 @@ class BLPaczkaIntegrationTest extends TestCase
 
         $this->assertSame(1, $result['checked']);
         $this->assertSame(0, $result['picked_up']);
+    }
+
+    public function test_blpaczka_return_to_sender_status_is_pickup_evidence(): void
+    {
+        $account = $this->createBLPaczkaAccount();
+
+        Http::fake([
+            '*/api/getWaybillTracking.json' => Http::response([
+                'success' => true,
+                'data' => ['Tracking' => [
+                    ['status' => 'Przesyłka zwrócona do nadawcy', 'date' => now()->toDateTimeString()],
+                ]],
+            ], 200),
+        ]);
+
+        $status = app(BLPaczkaShipmentService::class)->trackingStatus('445566', $account);
+
+        $this->assertTrue($status['picked_up']);
+        $this->assertSame('Przesyłka zwrócona do nadawcy', $status['status']);
+    }
+
+    public function test_blpaczka_combined_pre_pickup_and_pickup_description_is_pickup_evidence(): void
+    {
+        $account = $this->createBLPaczkaAccount();
+
+        Http::fake([
+            '*/api/getWaybillTracking.json' => Http::response([
+                'success' => true,
+                'data' => ['Tracking' => [[
+                    'status' => 'Przyjęto zlecenie odbioru; następnie przesyłka odebrana przez kuriera',
+                    'date' => now()->toDateTimeString(),
+                ]]],
+            ], 200),
+        ]);
+
+        $status = app(BLPaczkaShipmentService::class)->trackingStatus('445567', $account);
+
+        $this->assertTrue($status['picked_up']);
     }
 
     public function test_blpaczka_account_can_be_added_in_settings(): void

@@ -404,6 +404,85 @@
         </div>
     </article>
 
+    @if ($splitFamily->count() > 1)
+        <article class="card order-section">
+            <div class="panel-header">
+                <span>Części zamówienia</span>
+                <span>{{ $splitFamily->count() }} aktywne zamówienia</span>
+            </div>
+            <div class="order-section-body">
+                <p class="muted" style="margin-top: 0;">Wszystkie poniższe zamówienia powstały z jednego zamówienia źródłowego. Cofnięcie rozdzielenia odtworzy jego pierwotne pozycje i kwotę, a zamówienia częściowe zostaną zarchiwizowane.</p>
+                <div class="table-scroll">
+                    <table class="dense-table">
+                        <thead>
+                            <tr>
+                                <th>Numer</th>
+                                <th>Rola</th>
+                                <th>Status</th>
+                                <th>Kwota brutto</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach ($splitFamily as $familyOrder)
+                                <tr>
+                                    <td>
+                                        <a class="status" href="{{ route('orders.show', $familyOrder) }}">{{ $familyOrder->external_number ?: $familyOrder->external_id }}</a>
+                                        @if ((int) $familyOrder->id === (int) $order->id)
+                                            <span class="muted">· oglądane</span>
+                                        @endif
+                                    </td>
+                                    <td>{{ (int) $familyOrder->id === (int) $splitReversal['root']->id ? 'Zamówienie główne' : 'Zamówienie częściowe' }}</td>
+                                    <td><span class="status">{{ $familyOrder->status }}</span></td>
+                                    <td>{{ $money($familyOrder->total_gross, $familyOrder->currency) }}</td>
+                                </tr>
+                            @endforeach
+                        </tbody>
+                    </table>
+                </div>
+
+                @if ($splitReversal['available'])
+                    <form method="POST" action="{{ route('orders.split.reverse', $order) }}" style="margin-top: 14px;" onsubmit="return confirm('Cofnąć rozdzielenie całej rodziny? System wyzeruje kompletację, anuluje niewysłane przesyłki i odwróci dokumenty powstałe po podziale. Zamówienia częściowe zostaną zarchiwizowane.');">
+                        @csrf
+                        @method('DELETE')
+                        <input type="hidden" name="family_version" value="{{ $splitReversal['version'] }}">
+                        <label>Notatka do cofnięcia (opcjonalnie)
+                            <textarea name="note" rows="2" maxlength="1000" placeholder="np. klient chce jedną przesyłkę">{{ old('note') }}</textarea>
+                        </label>
+                        <p class="muted" style="margin: 10px 0 0;">
+                            Można cofnąć każdy etap kompletacji i pakowania do momentu faktycznego wysłania. Zadania obu części wrócą do początku, a etykiety, kolejka druku, WZ i dokumenty sprzedaży powstałe po podziale zostaną bezpiecznie odwrócone.
+                        </p>
+                        @if ($splitReversal['shipping_confirmation_required'])
+                            <div class="alert warning" style="margin: 12px 0 0;">
+                                <strong>Wymagane potwierdzenie etykiety.</strong>
+                                <ul>
+                                    @foreach ($splitReversal['shipping_confirmation_reasons'] as $reason)
+                                        <li>{{ $reason }}</li>
+                                    @endforeach
+                                </ul>
+                                <label style="display: flex; gap: 8px; align-items: flex-start;">
+                                    <input type="checkbox" name="confirm_manual_shipping_cancellation" value="1" required @checked(old('confirm_manual_shipping_cancellation'))>
+                                    <span>Potwierdzam, że przesyłka została anulowana u przewoźnika, a każdy fizyczny wydruk etykiety został zniszczony.</span>
+                                </label>
+                            </div>
+                        @endif
+                        <div class="inline-actions" style="margin-top: 12px;">
+                            <button class="button danger" type="submit">Cofnij rozdzielenie zamówienia</button>
+                        </div>
+                    </form>
+                @else
+                    <div class="alert warning" style="margin: 14px 0 0;">
+                        <strong>Nie można teraz cofnąć rozdzielenia.</strong>
+                        <ul style="margin-bottom: 0;">
+                            @foreach ($splitReversal['reasons'] as $reason)
+                                <li>{{ $reason }}</li>
+                            @endforeach
+                        </ul>
+                    </div>
+                @endif
+            </div>
+        </article>
+    @endif
+
     @if (count($orderSegments) > 1)
         <article class="card order-section shipping-decision-card">
             <div class="panel-header">
@@ -422,17 +501,25 @@
                     <p class="muted" style="margin-top: 0;">Zdecyduj, czy buty mają jechać do klienta osobno, nie czekając na skompletowanie odzieży. Wydzielone buty trafią do osobnego zamówienia z własną kompletacją, pakowaniem i etykietą.</p>
                 @endif
                 <div class="inline-actions">
-                    <form method="POST" action="{{ route('orders.shipping-decision', $order) }}" onsubmit="return confirm('Wydzielić buty do osobnego zamówienia i wysłać od razu?');">
-                        @csrf
-                        <input type="hidden" name="decision" value="ship_footwear_now">
-                        <button class="button" type="submit">Wyślij buty od razu</button>
-                    </form>
+                    @if ($splitAvailability['available'])
+                        <form method="POST" action="{{ route('orders.shipping-decision', $order) }}" onsubmit="return confirm('Wydzielić buty do osobnego zamówienia i wysłać od razu?');">
+                            @csrf
+                            <input type="hidden" name="decision" value="ship_footwear_now">
+                            <input type="hidden" name="split_request_uuid" value="{{ $shippingDecisionSplitOperationId }}">
+                            <button class="button" type="submit">Wyślij buty od razu</button>
+                        </form>
+                    @else
+                        <button class="button" type="button" disabled>Wyślij buty od razu</button>
+                    @endif
                     <form method="POST" action="{{ route('orders.shipping-decision', $order) }}">
                         @csrf
                         <input type="hidden" name="decision" value="wait_for_all">
                         <button class="button secondary" type="submit">Czekaj na resztę zamówienia</button>
                     </form>
                 </div>
+                @if (! $splitAvailability['available'])
+                    <div class="alert warning" style="margin: 12px 0 0;">Nie można teraz wydzielić obuwia: {{ implode(' ', $splitAvailability['reasons']) }}</div>
+                @endif
             </div>
         </article>
     @endif
@@ -442,28 +529,42 @@
             <span>Podziel zamówienie</span>
             <span>Wydziel brakujące pozycje do osobnego zamówienia ERP</span>
         </div>
-        <form class="order-section-body" method="POST" action="{{ route('orders.split', $order) }}">
-            @csrf
-            <p class="muted" style="margin-top: 0;">Wpisz ilość, którą chcesz wysłać później. Nowe zamówienie dostanie własne rezerwacje, więc po pojawieniu się stanu na magazynie będzie traktowane jako oczekujące do realizacji.</p>
-            @foreach ($order->lines as $line)
-                <div class="split-line-grid">
-                    <div>
-                        <strong>{{ $line->name }}</strong><br>
-                        <span class="muted">{{ $line->sku ?? '-' }} · dostępne w zamówieniu: {{ $qty($line->quantity) }}</span>
+        @if ($splitAvailability['available'])
+            <form class="order-section-body" method="POST" action="{{ route('orders.split', $order) }}">
+                @csrf
+                <input type="hidden" name="split_request_uuid" value="{{ $manualSplitOperationId }}">
+                <p class="muted" style="margin-top: 0;">Wpisz ilość, którą chcesz wysłać później. Nowe zamówienie dostanie własne rezerwacje, więc po pojawieniu się stanu na magazynie będzie traktowane jako oczekujące do realizacji.</p>
+                @foreach ($order->lines as $line)
+                    <div class="split-line-grid">
+                        <div>
+                            <strong>{{ $line->name }}</strong><br>
+                            <span class="muted">{{ $line->sku ?? '-' }} · dostępne w zamówieniu: {{ $qty($line->quantity) }}</span>
+                        </div>
+                        <label>Ilość później
+                            <input name="split_lines[{{ $line->id }}][quantity]" type="number" min="0" max="{{ (float) $line->quantity }}" step="1" value="0">
+                        </label>
+                        <span class="status">{{ $line->product ? 'Produkt ERP' : 'Brak mapowania' }}</span>
                     </div>
-                    <label>Ilość później
-                        <input name="split_lines[{{ $line->id }}][quantity]" type="number" min="0" max="{{ (float) $line->quantity }}" step="1" value="0">
-                    </label>
-                    <span class="status">{{ $line->product ? 'Produkt ERP' : 'Brak mapowania' }}</span>
+                @endforeach
+                <label style="margin-top: 12px;">Notatka do splitu
+                    <textarea name="note" rows="2" maxlength="1000" placeholder="np. buty zejdą z produkcji później"></textarea>
+                </label>
+                <div class="inline-actions" style="margin-top: 12px;">
+                    <button class="button" type="submit">Utwórz zamówienie częściowe</button>
                 </div>
-            @endforeach
-            <label style="margin-top: 12px;">Notatka do splitu
-                <textarea name="note" rows="2" placeholder="np. buty zejdą z produkcji później"></textarea>
-            </label>
-            <div class="inline-actions" style="margin-top: 12px;">
-                <button class="button" type="submit">Utwórz zamówienie częściowe</button>
+            </form>
+        @else
+            <div class="order-section-body">
+                <div class="alert warning" style="margin: 0;">
+                    <strong>Nie można teraz podzielić tego zamówienia.</strong>
+                    <ul style="margin-bottom: 0;">
+                        @foreach ($splitAvailability['reasons'] as $reason)
+                            <li>{{ $reason }}</li>
+                        @endforeach
+                    </ul>
+                </div>
             </div>
-        </form>
+        @endif
     </article>
 
     <section class="order-grid">
@@ -778,6 +879,11 @@
                     ?->first(fn ($step) => $step->step === 'shipping');
                 $refundCancellationStep = $orderCancellation?->steps
                     ?->first(fn ($step) => $step->step === 'refund');
+                $cancellationRestoresStock = (bool) data_get(
+                    $orderCancellation?->metadata,
+                    'context.restore_stock',
+                    true,
+                );
                 $manualShippingConfirmationRequired = $shippingCancellationStep?->status === 'attention_required'
                     && $refundCancellationStep === null;
                 $manualRefundBlockedByCancellation = ($shippingCancellationStep !== null
@@ -853,6 +959,10 @@
                             <div class="settlement-detail">
                                 <span>Metoda / ID refundu Woo</span>
                                 <strong>{{ $orderCancellation->payment_method ?: '-' }}{{ $orderCancellation->woo_refund_id ? ' · #'.$orderCancellation->woo_refund_id : '' }}</strong>
+                            </div>
+                            <div class="settlement-detail">
+                                <span>Decyzja magazynowa</span>
+                                <strong>{{ $cancellationRestoresStock ? 'Przywróć towar do sprzedaży' : 'Nie przywracaj towaru do sprzedaży' }}</strong>
                             </div>
                         </div>
                         <p class="settlement-help"><strong>Powód:</strong> {{ $orderCancellation->reason }}</p>

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Models;
 
+use App\Services\Shipping\CourierPickupEvidenceClassifier;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
@@ -58,7 +59,7 @@ class ShippingLabel extends Model
 
     public function order(): BelongsTo
     {
-        return $this->belongsTo(ExternalOrder::class, 'external_order_id');
+        return $this->belongsTo(ExternalOrder::class, 'external_order_id')->withTrashed();
     }
 
     public function integration(): BelongsTo
@@ -91,6 +92,60 @@ class ShippingLabel extends Model
         $number = trim((string) ($this->tracking_number ?: $this->label_number));
 
         return $number !== '' ? $number : null;
+    }
+
+    public function hasCourierPickupEvidence(): bool
+    {
+        if (in_array(mb_strtolower(trim((string) $this->status)), ['picked_up', 'delivered'], true)
+            || $this->picked_up_at !== null
+            || (bool) data_get($this->response_payload, 'tracking.picked_up', false)
+            || (bool) data_get($this->response_payload, 'tracking.delivered', false)
+            || filled(data_get($this->response_payload, 'tracking.picked_up_at'))
+            || filled(data_get($this->response_payload, 'tracking.delivered_at'))) {
+            return true;
+        }
+
+        $provider = mb_strtolower(trim((string) $this->provider));
+        $identifier = trim((string) $this->trackingIdentifier());
+        $isInPost = str_contains($provider, 'inpost')
+            || ($provider === '' && preg_match('/^\d{20,26}$/', $identifier) === 1);
+        $statuses = [
+            trim((string) $this->tracking_status),
+            trim((string) data_get($this->response_payload, 'tracking.status', '')),
+            trim((string) data_get($this->response_payload, 'shipment.status', '')),
+        ];
+
+        // The InPost checkpoint contains a ShipX shipment object. BLPaczka's
+        // checkpoint is a createOrderV2 response whose technical `status`, if
+        // present, is not a tracking event and cannot prove physical pickup.
+        if ($isInPost) {
+            $statuses[] = trim((string) data_get(
+                $this->response_payload,
+                'generation.remote_checkpoint.response_payload.status',
+                '',
+            ));
+        }
+
+        $statuses = array_values(array_unique(array_filter(
+            $statuses,
+            fn (string $status): bool => $status !== '',
+        )));
+
+        foreach ($statuses as $status) {
+            if (CourierPickupEvidenceClassifier::inPostStatusProvesPickup($status)
+                || CourierPickupEvidenceClassifier::blpaczkaStatusProvesPickup($status)) {
+                return true;
+            }
+
+            // A carrier can add a new status before the ERP is deployed. For
+            // reversal safety every unknown non-empty status is shipment
+            // evidence unless it is explicitly known to be pre-pickup.
+            if (CourierPickupEvidenceClassifier::unknownStatusProvesPickup($status)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public function filename(): string

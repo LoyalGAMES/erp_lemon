@@ -12,6 +12,7 @@ use App\Services\Inventory\WarehouseDocumentNumberService;
 use Illuminate\Database\Eloquent\Collection as EloquentCollection;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
+use RuntimeException;
 
 final class OrderWzDocumentService
 {
@@ -56,6 +57,12 @@ final class OrderWzDocumentService
     ): array {
         $order->refresh();
 
+        if ($order->familyHasSplitReversalOperation()) {
+            throw new RuntimeException(
+                'Nie można utworzyć WZ podczas niedokończonego cofania podziału zamówienia.',
+            );
+        }
+
         if ($order->hasCancellationOperation()
             || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
             throw new RuntimeException('Nie można utworzyć WZ dla anulowanego zamówienia ani podczas trwającej anulacji.');
@@ -65,6 +72,12 @@ final class OrderWzDocumentService
             $order = ExternalOrder::query()
                 ->lockForUpdate()
                 ->findOrFail($order->id);
+
+            if ($order->familyHasSplitReversalOperation()) {
+                throw new RuntimeException(
+                    'Nie można utworzyć WZ podczas niedokończonego cofania podziału zamówienia.',
+                );
+            }
             $existingDocuments = $this->fulfillmentStatus
                 ->wzDocumentsForOrder($order)
                 ->lockForUpdate()
@@ -536,7 +549,7 @@ final class OrderWzDocumentService
             && ! $this->fulfillmentStatus->canAssociateUnscopedLegacyDocuments($order)) {
             $numbers = $unscopedCandidates->pluck('number')->implode(', ');
 
-            throw new \RuntimeException(
+            throw new RuntimeException(
                 "Nie można automatycznie przypisać starszego WZ ({$numbers}) do zamówienia {$order->external_number}: "
                 .'jego numer lub identyfikator występuje w więcej niż jednym kanale sprzedaży. '
                 .'Uzupełnij kanał sprzedaży w dokumencie WZ i ponów synchronizację.',
@@ -553,7 +566,7 @@ final class OrderWzDocumentService
         if ($candidates->count() > 1) {
             $numbers = $candidates->pluck('number')->implode(', ');
 
-            throw new \RuntimeException(
+            throw new RuntimeException(
                 "Nie można automatycznie zsynchronizować WZ dla zamówienia {$order->external_number} "
                 ."w magazynie #{$warehouseId}: znaleziono więcej niż jeden starszy dokument ({$numbers}). "
                 .'Pozostaw jeden właściwy szkic albo uzupełnij przypisanie dokumentu i ponów synchronizację.',

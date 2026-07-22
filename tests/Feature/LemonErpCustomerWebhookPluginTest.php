@@ -81,13 +81,27 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         $this->assertStringContainsString('Polylang product meta isolation tests passed', $process->getOutput());
     }
 
+    public function test_order_cancellation_stock_contract_harness_passes(): void
+    {
+        $process = new Process([PHP_BINARY, base_path('tools/test-lemon-erp-order-cancellation-stock.php')]);
+        $process->setTimeout(30);
+        $process->run();
+
+        $this->assertSame(
+            0,
+            $process->getExitCode(),
+            $process->getErrorOutput().$process->getOutput(),
+        );
+        $this->assertStringContainsString('order cancellation stock tests passed', $process->getOutput());
+    }
+
     public function test_downloadable_plugin_contains_integration_modules(): void
     {
         $packages = app(LemonErpWooCommercePluginPackageService::class);
         $package = $packages->build();
         $zip = new ZipArchive;
 
-        $this->assertSame('0.5.7', $package['version']);
+        $this->assertSame('0.5.9', $package['version']);
         $this->assertTrue($zip->open($package['path']) === true);
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-customer-webhook.php'),
@@ -109,6 +123,9 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
         );
         $this->assertNotFalse(
             $zip->locateName('lemon-erp-woocommerce/includes/class-polylang-product-meta.php'),
+        );
+        $this->assertNotFalse(
+            $zip->locateName('lemon-erp-woocommerce/includes/class-order-cancellation-stock.php'),
         );
         $cachePurgeModule = $zip->getFromName(
             'lemon-erp-woocommerce/includes/class-storefront-size-cache-upgrade.php',
@@ -165,6 +182,10 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             '(new Lemon_Erp_Storefront_Size_Cache_Upgrade)->hooks();',
             $mainFile,
         );
+        $this->assertStringContainsString(
+            '(new Lemon_Erp_Order_Cancellation_Stock)->hooks();',
+            $mainFile,
+        );
         $taxonomyRegistration = strpos($mainFile, 'Lemon_Erp_Global_Attribute_Taxonomies::register();');
         $localizedMetaRegistration = strpos($mainFile, 'Lemon_Erp_Polylang_Product_Meta::register();');
         $pluginsLoadedHook = strpos($mainFile, "add_action('plugins_loaded'");
@@ -195,7 +216,7 @@ class LemonErpCustomerWebhookPluginTest extends TestCase
             '/wp-json/wc-lemon-erp/v1/catalog/products/translations',
             $readme,
         );
-        $this->assertStringContainsString('Wersja `0.5.7`', $readme);
+        $this->assertStringContainsString('Wersja `0.5.9`', $readme);
         $zip->close();
     }
 }

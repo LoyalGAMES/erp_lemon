@@ -260,6 +260,104 @@ final class CustomerCommunicationService
     }
 
     /**
+     * Persist an automated message without performing network I/O. This is an
+     * outbox primitive for business operations that must commit the intent to
+     * notify in the same transaction as their local state change.
+     *
+     * @param  array<string,mixed>  $context
+     */
+    public function queueOrderStatus(
+        ExternalOrder $order,
+        string $trigger,
+        array $context = [],
+        ?string $idempotencyKey = null,
+    ): ?CustomerMessage {
+        $idempotencyKey = trim((string) $idempotencyKey);
+
+        if ($idempotencyKey !== '') {
+            $existing = CustomerMessage::query()
+                ->where('external_order_id', $order->id)
+                ->where('type', self::TYPE_AUTOMATED)
+                ->where('trigger', $trigger)
+                ->get()
+                ->first(fn (CustomerMessage $message): bool => hash_equals(
+                    $idempotencyKey,
+                    (string) data_get($message->metadata, 'outbox_idempotency_key', ''),
+                ));
+
+            if ($existing instanceof CustomerMessage) {
+                return $existing;
+            }
+
+            $context['outbox_idempotency_key'] = $idempotencyKey;
+        } elseif (! $this->orderTriggerCanRepeat($trigger) && $this->alreadySentForOrder($order, $trigger)) {
+            return null;
+        }
+
+        $recipient = $this->orderRecipient($order);
+        $templateContext = $this->mailContext->forOrder($order, $recipient, $trigger, $context);
+        $content = $this->renderContent(
+            $this->emailWorkflow->contentFor($trigger) ?? $this->orderStatusContent($order, $trigger, $templateContext),
+            $templateContext,
+        );
+        $attributes = [
+            'customer_id' => $order->customer_id,
+            'external_order_id' => $order->id,
+            'type' => self::TYPE_AUTOMATED,
+            'trigger' => $trigger,
+            'recipient_email' => $recipient['email'],
+            'recipient_name' => $recipient['name'],
+            'subject' => $content['subject'],
+            'body' => $content['body'],
+            'metadata' => $templateContext,
+        ];
+
+        if (! $this->emailWorkflow->isEnabled($trigger)) {
+            return $this->createWorkflowSkipped($attributes);
+        }
+
+        if (blank($recipient['email'])) {
+            return CustomerMessage::query()->create(array_merge($attributes, [
+                'direction' => 'outgoing',
+                'status' => 'skipped',
+                'recipient_email' => null,
+                'error_message' => 'Brak adresu e-mail klienta.',
+            ]));
+        }
+
+        return CustomerMessage::query()->create(array_merge($attributes, [
+            'direction' => 'outgoing',
+            'status' => 'pending',
+        ]));
+    }
+
+    /** Deliver a message that was committed through queueOrderStatus(). */
+    public function deliverQueued(CustomerMessage $message): CustomerMessage
+    {
+        $message = $message->fresh() ?? $message;
+
+        if (! in_array((string) $message->status, ['pending', 'held', 'failed'], true)) {
+            return $message;
+        }
+
+        if (! $this->mailSettings->apply()) {
+            $deliveryIssue = (string) ($this->mailSettings->data()['delivery_issue']
+                ?? 'Wybrana metoda wysyłki nie jest gotowa.');
+            $message->update([
+                'status' => 'held',
+                'failed_at' => null,
+                'error_message' => $deliveryIssue.' Wiadomość oczekuje na ręczne ponowienie po poprawieniu ustawień.',
+            ]);
+
+            return $message->refresh();
+        }
+
+        $this->retryMessage($message);
+
+        return $message->refresh();
+    }
+
+    /**
      * @param  array<string, mixed>  $context
      */
     private function sendOrderStatusWhileLocked(ExternalOrder $order, string $trigger, array $context): ?CustomerMessage

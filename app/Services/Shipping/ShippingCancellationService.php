@@ -8,6 +8,7 @@ use App\Models\CourierAccount;
 use App\Models\ExternalOrder;
 use App\Models\PrintJob;
 use App\Models\ShippingLabel;
+use Carbon\CarbonInterface;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Database\Eloquent\Collection;
 use Illuminate\Support\Facades\Cache;
@@ -26,7 +27,7 @@ final class ShippingCancellationService
     private const REMOTELY_CANCELLABLE_INPOST_STATUSES = ['created', 'offers_prepared'];
 
     /** @var list<string> */
-    private const PRINT_JOB_STATUSES_TO_CANCEL = ['pending', 'reserved', 'printing', 'failed'];
+    private const PRINT_JOB_STATUSES_TO_CANCEL = ['pending', 'reserved', 'failed'];
 
     public function __construct(
         private readonly InPostShipmentService $inpost,
@@ -61,6 +62,7 @@ final class ShippingCancellationService
                     $familyOrderIds,
                     $operationUuid,
                     $reason,
+                    null,
                 ),
             );
         } catch (LockTimeoutException $exception) {
@@ -69,6 +71,45 @@ final class ShippingCancellationService
                 previous: $exception,
             );
         }
+    }
+
+    /**
+     * Wariant dla operacji, która już trzyma blokady
+     * shipping-label-order-{id} całej rodziny w rosnącej kolejności ID.
+     * Pozwala utrzymać te same blokady od anulowania przesyłek aż do
+     * atomowego scalenia zamówień, bez ponownego (niereentrantnego) locka.
+     *
+     * @param  list<int>  $familyOrderIds
+     * @return array{
+     *     cancelled_label_ids:list<int>,
+     *     cancelled_print_job_ids:list<int>,
+     *     manual_required:list<array{label_id:int,order_id:int,provider:?string,shipment_id:?string,code:string,message:string}>
+     * }
+     */
+    public function cancelForOrderIdsWhileLocked(
+        array $familyOrderIds,
+        ?string $operationUuid = null,
+        ?string $reason = null,
+        ?CarbonInterface $createdAfter = null,
+    ): array {
+        $familyOrderIds = collect($familyOrderIds)
+            ->map(fn (mixed $orderId): int => (int) $orderId)
+            ->filter(fn (int $orderId): bool => $orderId > 0)
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+
+        if ($familyOrderIds === []) {
+            throw new RuntimeException('Nie wskazano rodziny zamówień do anulowania przesyłek.');
+        }
+
+        return $this->cancelWhileLocked(
+            $familyOrderIds,
+            $this->nullableTrimmed($operationUuid, 100),
+            $this->nullableTrimmed($reason, 1000),
+            $createdAfter,
+        );
     }
 
     /**
@@ -144,12 +185,17 @@ final class ShippingCancellationService
         array $familyOrderIds,
         ?string $operationUuid,
         ?string $reason,
+        ?CarbonInterface $createdAfter,
     ): array {
         /** @var Collection<int, ShippingLabel> $labels */
         $labels = ShippingLabel::query()
             ->with('courierAccount')
             ->shipments()
             ->whereIn('external_order_id', $familyOrderIds)
+            ->when(
+                $createdAfter instanceof CarbonInterface,
+                fn ($query) => $query->where('created_at', '>=', $createdAfter),
+            )
             ->orderBy('id')
             ->get();
 
@@ -164,7 +210,7 @@ final class ShippingCancellationService
         $printResult = $this->cancelPrintJobs($labels, $operationUuid, $reason);
         $cancelledLabelIds = [];
         $cancelledPrintJobIds = $printResult['cancelled_print_job_ids'];
-        $manualRequired = $printResult['manual_required'];
+        $manualRequired = [];
 
         foreach ($labels as $label) {
             $remoteResult = $label->status === 'cancelled'
@@ -186,6 +232,16 @@ final class ShippingCancellationService
                 $cancelledLabelIds[] = (int) $label->id;
             }
         }
+
+        // Carrier uncertainty is the primary warning shown to the operator.
+        // Print warnings follow it and are deduplicated per physical label.
+        $manualRequired = collect([
+            ...$manualRequired,
+            ...$printResult['manual_required'],
+        ])->unique(fn (array $warning): string => implode(':', [
+            (string) ($warning['label_id'] ?? ''),
+            (string) ($warning['code'] ?? ''),
+        ]))->values()->all();
 
         return [
             'cancelled_label_ids' => array_values(array_unique($cancelledLabelIds)),
@@ -423,6 +479,24 @@ final class ShippingCancellationService
 
             foreach ($printJobs as $printJob) {
                 if ($printJob->status === 'cancelled') {
+                    $previousStatus = (string) data_get(
+                        $printJob->metadata,
+                        'shipping_label_cancellation.previous_status',
+                        '',
+                    );
+                    $label = $lockedLabels->get($printJob->shipping_label_id);
+
+                    if ($label instanceof ShippingLabel
+                        && in_array($previousStatus, ['printing', 'printed'], true)) {
+                        $manualRequired[] = $this->warning(
+                            $label,
+                            $this->providers->providerKey($label),
+                            $this->nullableTrimmed((string) $label->label_number, 120),
+                            'label_already_printed',
+                            'Etykieta została już pobrana przez drukarkę albo wydrukowana. Zniszcz fizyczny wydruk, aby nie został omyłkowo użyty.',
+                        );
+                    }
+
                     continue;
                 }
 
@@ -441,16 +515,30 @@ final class ShippingCancellationService
                 $metadata = (array) $printJob->metadata;
                 $metadata['shipping_label_cancellation'] = $audit;
 
-                if ($printJob->status === 'printed') {
+                if (in_array($printJob->status, ['printing', 'printed'], true)) {
                     if (data_get($printJob->metadata, 'shipping_label_cancellation') === null) {
-                        $printJob->forceFill(['metadata' => $metadata])->save();
+                        $updates = ['metadata' => $metadata];
+
+                        if ($printJob->status === 'printing') {
+                            $updates += [
+                                'status' => 'cancelled',
+                                'next_attempt_at' => null,
+                                'reserved_by' => null,
+                                'reserved_station' => null,
+                                'reserved_at' => null,
+                                'lease_token' => null,
+                            ];
+                            $cancelledPrintJobIds[] = (int) $printJob->id;
+                        }
+
+                        $printJob->forceFill($updates)->save();
                     }
                     $manualRequired[] = $this->warning(
                         $label,
                         $this->providers->providerKey($label),
                         $this->nullableTrimmed((string) $label->label_number, 120),
                         'label_already_printed',
-                        'Etykieta została już wydrukowana. Zniszcz fizyczny wydruk, aby nie został omyłkowo użyty.',
+                        'Etykieta została już pobrana przez drukarkę albo wydrukowana. Zniszcz fizyczny wydruk, aby nie został omyłkowo użyty.',
                     );
 
                     continue;
@@ -481,9 +569,7 @@ final class ShippingCancellationService
 
     private function assertNotDispatched(ShippingLabel $label): void
     {
-        $status = mb_strtolower(trim((string) $label->status));
-
-        if (in_array($status, ['picked_up', 'delivered'], true) || $label->picked_up_at !== null) {
+        if ($label->hasCourierPickupEvidence()) {
             $number = $label->trackingIdentifier() ?: '#'.$label->id;
 
             throw new RuntimeException(
@@ -505,12 +591,24 @@ final class ShippingCancellationService
             'cancellation.remote',
             [],
         );
+        $previousStatus = mb_strtolower(trim((string) ($previousRemote['status'] ?? '')));
         $manualWarning = null;
+
+        if (in_array($previousStatus, ['cancelled', 'already_cancelled'], true)) {
+            return [
+                'audit' => [
+                    'status' => 'already_cancelled_locally',
+                    'provider' => $this->providers->providerKey($label),
+                    'shipment_id' => $this->nullableTrimmed((string) $label->label_number, 120),
+                ],
+                'warning' => null,
+            ];
+        }
 
         // A worker may stop after the local label has been voided but before the
         // cancellation step stores its response. Reconstruct the unresolved
         // carrier warning so a retry cannot accidentally pass the manual gate.
-        if (mb_strtolower(trim((string) ($previousRemote['status'] ?? ''))) === 'manual_required') {
+        if ($previousStatus === 'manual_required') {
             $provider = $this->nullableTrimmed(
                 (string) ($previousRemote['provider'] ?? $this->providers->providerKey($label)),
                 80,
@@ -528,6 +626,22 @@ final class ShippingCancellationService
                 $shipmentId,
                 $code,
                 $message,
+            );
+        } else {
+            $provider = $this->nullableTrimmed(
+                (string) ($previousRemote['provider'] ?? $this->providers->providerKey($label)),
+                80,
+            );
+            $shipmentId = $this->nullableTrimmed(
+                (string) ($previousRemote['shipment_id'] ?? $label->label_number),
+                120,
+            );
+            $manualWarning = $this->warning(
+                $label,
+                $provider,
+                $shipmentId,
+                'remote_cancellation_unverified',
+                'Etykieta jest anulowana tylko lokalnie, ale brak potwierdzenia anulowania przesyłki u przewoźnika. Sprawdź ją ręcznie i potwierdź anulowanie przed scaleniem.',
             );
         }
 
@@ -602,6 +716,7 @@ final class ShippingCancellationService
         $rootOrderId = (int) ($order->split_root_order_id ?: $order->id);
 
         return ExternalOrder::query()
+            ->where('sales_channel_id', $order->sales_channel_id)
             ->where(function ($query) use ($rootOrderId, $order): void {
                 $query
                     ->whereKey($rootOrderId)

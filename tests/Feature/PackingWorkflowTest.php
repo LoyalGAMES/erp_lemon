@@ -1160,7 +1160,7 @@ class PackingWorkflowTest extends TestCase
             'task_ids' => [$task->id],
         ])
             ->assertRedirect()
-            ->assertSessionHasErrors('reason');
+            ->assertSessionHasErrors(['reason', 'restore_stock']);
 
         $this->assertSame('open', $task->fresh()->status);
         $this->assertSame('processing', $order->fresh()->status);
@@ -1169,6 +1169,7 @@ class PackingWorkflowTest extends TestCase
         $this->postJson(route('packing.groups.problem'), [
             'task_ids' => [$task->id],
             'reason' => 'Brak produktu na półce',
+            'restore_stock' => '1',
         ])
             ->assertOk()
             ->assertJsonPath('ok', true)
@@ -1285,7 +1286,7 @@ class PackingWorkflowTest extends TestCase
 
         $this->post(route('packing.orders.problem', $order), [])
             ->assertRedirect()
-            ->assertSessionHasErrors('reason');
+            ->assertSessionHasErrors(['reason', 'restore_stock']);
 
         $this->assertSame('picked', $task->fresh()->status);
         $this->assertSame('processing', $order->fresh()->status);
@@ -1293,6 +1294,7 @@ class PackingWorkflowTest extends TestCase
 
         $this->post(route('packing.orders.problem', $order), [
             'reason' => 'Adres wymaga wyjaśnienia',
+            'restore_stock' => '1',
         ])
             ->assertRedirect()
             ->assertSessionHas('status');
@@ -1426,6 +1428,7 @@ class PackingWorkflowTest extends TestCase
             $this->postJson(route('packing.groups.problem'), [
                 'task_ids' => [$task->id],
                 'reason' => 'Klientka zgłosiła problem z zamówieniem',
+                'restore_stock' => '1',
             ])
                 ->assertOk()
                 ->assertJsonPath('ok', true);
@@ -1551,6 +1554,7 @@ class PackingWorkflowTest extends TestCase
         $response = $this->postJson(route('packing.groups.problem'), [
             'task_ids' => [$task->id],
             'reason' => 'Problem wymagający anulowania przesyłki',
+            'restore_stock' => '1',
         ]);
 
         $response
@@ -1581,7 +1585,9 @@ class PackingWorkflowTest extends TestCase
         $this->assertSame('problem', $task->fresh()->status);
         $this->assertSame(1, CustomerMessage::query()->where('trigger', 'order_cancelled_problem')->count());
         $this->assertSame(0, CustomerMessage::query()->where('trigger', 'order_cancelled')->count());
-        Http::assertSentCount(3);
+        // Refund lookup, order lookup, optional Lemon ERP stock-contract
+        // capability check, and the final WooCommerce status update.
+        Http::assertSentCount(4);
     }
 
     public function test_on_hold_order_is_not_available_for_mobile_picking(): void

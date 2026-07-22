@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\CustomerMessage;
 use App\Models\CustomerPayment;
 use App\Models\ExternalOrder;
 use App\Models\Invoice;
@@ -20,6 +21,7 @@ use App\Models\User;
 use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
+use App\Services\Inventory\WarehouseDocumentPostingService;
 use App\Services\Orders\OrderCancellationService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\ConnectionException;
@@ -450,6 +452,613 @@ class OrderCancellationWorkflowTest extends TestCase
 
         $this->assertSame('picked', $context['packingTask']->fresh()->status);
         $this->assertSame('1.0000', (string) $context['packingTask']->fresh()->quantity_picked);
+    }
+
+    public function test_packing_problem_without_stock_restore_writes_off_reserved_item_before_posted_wz(): void
+    {
+        $context = $this->orderContext(1271, withOperations: true);
+        $order = $context['order'];
+        $wooOrder = $this->wooOrder($order, paid: false);
+        $context['wz']->lines()->create([
+            'product_id' => $context['product']->id,
+            'quantity' => 1,
+        ]);
+
+        Http::fake(function (Request $request) use ($wooOrder) {
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/1271/cancellation-stock')) {
+                return Http::response($this->noRestockConfirmation($request, 1271));
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1271/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1271')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($this->path($request), '/orders/1271')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        app(OrderCancellationService::class)->cancelForPackingProblem(
+            $order,
+            'Uszkodzony produkt nie wraca do sprzedaży',
+            restoreStock: false,
+        );
+
+        $balance = $context['balance']->fresh();
+
+        $this->assertSame('cancelled', $context['wz']->fresh()->status);
+        $this->assertSame('released', $context['reservation']->fresh()->status);
+        $this->assertSame('9.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('0.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('9.0000', (string) $balance->quantity_available);
+        $this->assertDatabaseHas('warehouse_documents', [
+            'type' => 'RW',
+            'status' => 'posted',
+        ]);
+    }
+
+    public function test_packing_http_zero_persists_no_restock_decision_and_uses_it_in_communication(): void
+    {
+        $context = $this->orderContext(1279, withOperations: true);
+        $order = $context['order'];
+        $wooOrder = $this->wooOrder($order, paid: false);
+        $context['wz']->lines()->create([
+            'product_id' => $context['product']->id,
+            'quantity' => 1,
+        ]);
+
+        Http::fake(function (Request $request) use ($wooOrder) {
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/1279/cancellation-stock')) {
+                $this->assertFalse((bool) $request['restore_stock']);
+
+                return Http::response($this->noRestockConfirmation($request, 1279));
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1279/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1279')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($this->path($request), '/orders/1279')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $this->actingAs($this->user('packer-no-restock@example.test', User::ROLE_PACKER))
+            ->postJson(route('packing.orders.problem', $order), [
+                'reason' => 'Towar uszkodzony, nie przywracaj do sprzedaży',
+                'restore_stock' => '0',
+            ])
+            ->assertOk()
+            ->assertJsonPath('ok', true);
+
+        $cancellation = OrderCancellation::query()->sole();
+        $message = CustomerMessage::query()->where('trigger', 'order_cancelled_problem')->sole();
+
+        $this->assertFalse((bool) data_get($cancellation->metadata, 'context.restore_stock', true));
+        $this->assertFalse((bool) data_get($message->metadata, 'stock_restored', true));
+        $this->assertSame('9.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame('9.0000', (string) $context['balance']->fresh()->quantity_available);
+    }
+
+    public function test_packing_problem_without_stock_restore_keeps_balance_reduced_after_posted_wz(): void
+    {
+        $context = $this->orderContext(1272, withOperations: true);
+        $order = $context['order'];
+        $wooOrder = $this->wooOrder($order, paid: false);
+        $context['wz']->lines()->create([
+            'product_id' => $context['product']->id,
+            'quantity' => 1,
+        ]);
+        app(WarehouseDocumentPostingService::class)->post($context['wz']);
+
+        $this->assertSame('9.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame('0.0000', (string) $context['balance']->fresh()->quantity_reserved);
+
+        Http::fake(function (Request $request) use ($wooOrder) {
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/1272/cancellation-stock')) {
+                return Http::response($this->noRestockConfirmation($request, 1272));
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1272/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1272')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($this->path($request), '/orders/1272')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        app(OrderCancellationService::class)->cancelForPackingProblem(
+            $order,
+            'Uszkodzony produkt nie wraca do sprzedaży po zaksięgowaniu WZ',
+            restoreStock: false,
+        );
+
+        $balance = $context['balance']->fresh();
+
+        $this->assertSame('cancelled', $context['wz']->fresh()->status);
+        $this->assertSame('9.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('0.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('9.0000', (string) $balance->quantity_available);
+        $this->assertDatabaseHas('warehouse_documents', [
+            'type' => 'RW',
+            'status' => 'posted',
+        ]);
+    }
+
+    public function test_no_restock_does_not_write_off_stale_reservation_already_covered_by_posted_wz_twice(): void
+    {
+        $context = $this->orderContext(1278, withOperations: true);
+        $order = $context['order'];
+        $wooOrder = $this->wooOrder($order, paid: false);
+        $context['wz']->lines()->create([
+            'product_id' => $context['product']->id,
+            'quantity' => 1,
+        ]);
+        app(WarehouseDocumentPostingService::class)->post($context['wz']);
+        $staleReservation = StockReservation::query()->create([
+            'warehouse_id' => $context['warehouse']->id,
+            'product_id' => $context['product']->id,
+            'sales_channel_id' => $context['channel']->id,
+            'external_order_id' => $order->external_id,
+            'quantity' => 1,
+            'status' => 'active',
+            'reserved_at' => now(),
+        ]);
+        $context['balance']->update([
+            'quantity_reserved' => 1,
+            'quantity_available' => 8,
+        ]);
+
+        Http::fake(function (Request $request) use ($wooOrder) {
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/1278/cancellation-stock')) {
+                return Http::response($this->noRestockConfirmation($request, 1278));
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1278/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1278')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($this->path($request), '/orders/1278')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        app(OrderCancellationService::class)->cancelForPackingProblem(
+            $order,
+            'Stara rezerwacja nie może podwoić rozchodu',
+            restoreStock: false,
+        );
+
+        $this->assertSame('released', $staleReservation->fresh()->status);
+        $this->assertSame('9.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame('9.0000', (string) $context['balance']->fresh()->quantity_available);
+        $this->assertSame(1, WarehouseDocument::query()->where('type', 'RW')->where('status', 'posted')->count());
+    }
+
+    public function test_packing_problem_without_stock_restore_writes_off_active_reservation_without_wz(): void
+    {
+        $context = $this->orderContext(1273, withOperations: true);
+        $order = $context['order'];
+        $wooOrder = $this->wooOrder($order, paid: false);
+        $context['wz']->delete();
+
+        Http::fake(function (Request $request) use ($wooOrder) {
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/1273/cancellation-stock')) {
+                return Http::response($this->noRestockConfirmation($request, 1273));
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1273/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1273')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($this->path($request), '/orders/1273')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        app(OrderCancellationService::class)->cancelForPackingProblem(
+            $order,
+            'Towar nie wraca do sprzedaży mimo braku WZ',
+            restoreStock: false,
+        );
+
+        $balance = $context['balance']->fresh();
+        $writeOff = WarehouseDocument::query()->where('type', 'RW')->sole();
+
+        $this->assertSame('released', $context['reservation']->fresh()->status);
+        $this->assertSame('9.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('0.0000', (string) $balance->quantity_reserved);
+        $this->assertSame('9.0000', (string) $balance->quantity_available);
+        $this->assertSame('posted', $writeOff->status);
+        $this->assertSame('active_stock_reservations', data_get($writeOff->metadata, 'source'));
+        $this->assertSame([$context['reservation']->id], data_get($writeOff->metadata, 'source_reservation_ids'));
+    }
+
+    public function test_no_restock_cancellation_locks_but_does_not_write_off_waiting_reservation(): void
+    {
+        $context = $this->orderContext(12731, withOperations: true);
+        $order = $context['order'];
+        $wooOrder = $this->wooOrder($order, paid: false);
+        $context['wz']->delete();
+        $context['reservation']->update([
+            'status' => 'waiting',
+        ]);
+        $context['balance']->update([
+            'quantity_reserved' => 0,
+            'quantity_available' => 10,
+        ]);
+
+        Http::fake(function (Request $request) use ($wooOrder) {
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/12731/cancellation-stock')) {
+                return Http::response($this->noRestockConfirmation($request, 12731));
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/12731/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/12731')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($this->path($request), '/orders/12731')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        app(OrderCancellationService::class)->cancelForPackingProblem(
+            $order,
+            'Oczekująca rezerwacja nie jest fizycznym rozchodem',
+            restoreStock: false,
+        );
+
+        $this->assertSame('released', $context['reservation']->fresh()->status);
+        $this->assertSame('10.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame('0.0000', (string) $context['balance']->fresh()->quantity_reserved);
+        $this->assertSame('10.0000', (string) $context['balance']->fresh()->quantity_available);
+        $this->assertSame(0, WarehouseDocument::query()->where('type', 'RW')->count());
+    }
+
+    public function test_no_restock_cancellation_is_rejected_before_side_effects_when_woo_plugin_contract_is_missing(): void
+    {
+        $context = $this->orderContext(1274, withOperations: true);
+        $context['wz']->lines()->create([
+            'product_id' => $context['product']->id,
+            'quantity' => 1,
+        ]);
+        Http::fake([
+            '*' => Http::response([
+                'available' => true,
+                'plugin_version' => '0.5.7',
+                'stock_disposition_contract' => 0,
+            ]),
+        ]);
+
+        try {
+            app(OrderCancellationService::class)->cancelForPackingProblem(
+                $context['order'],
+                'Nie przywracaj bez zdalnego kontraktu',
+                restoreStock: false,
+            );
+            $this->fail('Brak kontraktu WooCommerce powinien zatrzymać anulowanie przed skutkami ubocznymi.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('0.5.9', $exception->getMessage());
+            $this->assertStringContainsString('bez skutków ubocznych', $exception->getMessage());
+        }
+
+        $this->assertSame('rejected', OrderCancellation::query()->sole()->status);
+        $this->assertSame('processing', $context['order']->fresh()->status);
+        $this->assertSame('draft', $context['wz']->fresh()->status);
+        $this->assertSame('active', $context['reservation']->fresh()->status);
+        $this->assertSame('10.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame('1.0000', (string) $context['balance']->fresh()->quantity_reserved);
+        $this->assertSame(0, WarehouseDocument::query()->where('type', 'RW')->count());
+        Http::assertSentCount(1);
+    }
+
+    public function test_no_restock_cancellation_is_rejected_before_side_effects_when_woo_credentials_are_read_only(): void
+    {
+        $context = $this->orderContext(12740, withOperations: true);
+        $context['wz']->lines()->create([
+            'product_id' => $context['product']->id,
+            'quantity' => 1,
+        ]);
+
+        Http::fake(function (Request $request) {
+            if ($request->method() === 'GET'
+                && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')
+            ) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST'
+                && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/12740/cancellation-stock')
+            ) {
+                return Http::response([
+                    'code' => 'woocommerce_rest_cannot_create',
+                    'message' => 'Klucz API ma uprawnienia tylko do odczytu.',
+                ], 401);
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        try {
+            app(OrderCancellationService::class)->cancelForPackingProblem(
+                $context['order'],
+                'Nie przywracaj przy kluczu tylko do odczytu',
+                restoreStock: false,
+            );
+            $this->fail('Brak prawa zapisu w WooCommerce powinien zatrzymać anulowanie przed skutkami ubocznymi.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('tylko do odczytu', $exception->getMessage());
+        }
+
+        $this->assertSame('rejected', OrderCancellation::query()->sole()->status);
+        $this->assertSame('processing', $context['order']->fresh()->status);
+        $this->assertSame('draft', $context['wz']->fresh()->status);
+        $this->assertSame('active', $context['reservation']->fresh()->status);
+        $this->assertSame('open', $context['packingTask']->fresh()->status);
+        $this->assertSame('issued', $context['proforma']->fresh()->status);
+        $this->assertSame('10.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame('1.0000', (string) $context['balance']->fresh()->quantity_reserved);
+        $this->assertSame(0, WarehouseDocument::query()->where('type', 'RW')->count());
+        Http::assertSentCount(2);
+    }
+
+    public function test_no_restock_wz_cancellation_and_write_off_are_atomic_and_retryable(): void
+    {
+        $context = $this->orderContext(1275, withOperations: true);
+        $order = $context['order'];
+        $wooOrder = $this->wooOrder($order, paid: false);
+        $context['wz']->lines()->create([
+            'product_id' => $context['product']->id,
+            'quantity' => 1,
+        ]);
+        app(WarehouseDocumentPostingService::class)->post($context['wz']);
+        $failWriteOffCreation = true;
+
+        WarehouseDocument::creating(function (WarehouseDocument $document) use (&$failWriteOffCreation): void {
+            if ($failWriteOffCreation && $document->type === 'RW') {
+                throw new RuntimeException('Symulowana awaria przed utworzeniem RW.');
+            }
+        });
+
+        Http::fake(function (Request $request) use ($wooOrder) {
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/1275/cancellation-stock')) {
+                return Http::response($this->noRestockConfirmation($request, 1275));
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1275/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1275')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($this->path($request), '/orders/1275')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        try {
+            app(OrderCancellationService::class)->cancelForPackingProblem(
+                $order,
+                'Awaria ma nie pozostawić przywróconego stanu',
+                restoreStock: false,
+            );
+            $this->fail('Pierwsza próba powinna zatrzymać się na symulowanej awarii RW.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('Symulowana awaria', $exception->getMessage());
+        }
+
+        $this->assertSame('posted', $context['wz']->fresh()->status);
+        $this->assertSame('9.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame(0, WarehouseDocument::query()->where('type', 'RW')->count());
+
+        $failWriteOffCreation = false;
+        $result = app(OrderCancellationService::class)->cancelForPackingProblem(
+            $order->fresh(),
+            'Ponowienie po kontrolowanej awarii',
+            restoreStock: false,
+        );
+
+        $this->assertFalse($result['attention_required']);
+        $this->assertSame('cancelled', $context['wz']->fresh()->status);
+        $this->assertSame('9.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame(1, WarehouseDocument::query()->where('type', 'RW')->where('status', 'posted')->count());
+        $this->assertSame(2, OrderCancellationStep::query()->where('step', 'warehouse_documents')->sole()->attempts);
+    }
+
+    public function test_retry_repairs_previously_cancelled_posted_wz_without_duplicate_write_off(): void
+    {
+        $context = $this->orderContext(1276, withOperations: true);
+        $order = $context['order'];
+        $wooOrder = $this->wooOrder($order, paid: false);
+        $context['wz']->lines()->create([
+            'product_id' => $context['product']->id,
+            'quantity' => 1,
+        ]);
+        $posting = app(WarehouseDocumentPostingService::class);
+        $posting->post($context['wz']);
+        $posting->cancel($context['wz']->fresh());
+
+        $this->assertSame('10.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+
+        Http::fake(function (Request $request) use ($wooOrder) {
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/1276/cancellation-stock')) {
+                return Http::response($this->noRestockConfirmation($request, 1276));
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1276/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1276')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($this->path($request), '/orders/1276')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        $service = app(OrderCancellationService::class);
+        $service->cancelForPackingProblem(
+            $order,
+            'Naprawa wcześniej przerwanej kompensacji',
+            restoreStock: false,
+        );
+        $service->cancelForPackingProblem(
+            $order->fresh(),
+            'Idempotentne ponowienie naprawy',
+            restoreStock: false,
+        );
+
+        $this->assertSame('9.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame(1, WarehouseDocument::query()->where('type', 'RW')->where('status', 'posted')->count());
+    }
+
+    public function test_retry_after_rejected_preflight_does_not_silently_change_no_restock_decision(): void
+    {
+        $context = $this->orderContext(1277, withOperations: true);
+        $order = $context['order'];
+        $wooOrder = $this->wooOrder($order, paid: false);
+        $context['wz']->lines()->create([
+            'product_id' => $context['product']->id,
+            'quantity' => 1,
+        ]);
+        $returnCase = ReturnCase::query()->create([
+            'number' => 'RET/1277',
+            'store_return_reference' => 'RET-1277',
+            'external_order_id' => $order->id,
+            'status' => 'opened',
+            'reason' => 'Tymczasowa blokada anulacji',
+        ]);
+
+        try {
+            app(OrderCancellationService::class)->cancelForPackingProblem(
+                $order,
+                'Pierwsza próba bez przywracania stanu',
+                restoreStock: false,
+            );
+            $this->fail('Pierwsza próba powinna zostać odrzucona przez aktywny zwrot.');
+        } catch (RuntimeException $exception) {
+            $this->assertStringContainsString('zwrot', mb_strtolower($exception->getMessage()));
+        }
+
+        $this->assertFalse((bool) data_get(
+            OrderCancellation::query()->sole()->metadata,
+            'context.restore_stock',
+            true,
+        ));
+        $returnCase->delete();
+
+        Http::fake(function (Request $request) use ($wooOrder) {
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/cancellation-stock/capabilities')) {
+                return Http::response($this->noRestockCapabilities());
+            }
+
+            if ($request->method() === 'POST' && str_ends_with($this->path($request), '/wc-lemon-erp/v1/orders/1277/cancellation-stock')) {
+                return Http::response($this->noRestockConfirmation($request, 1277));
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1277/refunds')) {
+                return Http::response([]);
+            }
+
+            if ($request->method() === 'GET' && str_ends_with($this->path($request), '/orders/1277')) {
+                return Http::response($wooOrder);
+            }
+
+            if ($request->method() === 'PUT' && str_ends_with($this->path($request), '/orders/1277')) {
+                return Http::response(array_replace($wooOrder, ['status' => 'cancelled']));
+            }
+
+            return Http::response(['message' => 'unexpected request'], 500);
+        });
+
+        // This is the generic retry path and deliberately omits restore_stock.
+        app(OrderCancellationService::class)->cancel(
+            $order->fresh(),
+            'Ponowienie z ogólnego ekranu anulacji',
+            context: ['source' => 'order_edit'],
+        );
+
+        $cancellation = OrderCancellation::query()->sole();
+        $this->assertFalse((bool) data_get($cancellation->metadata, 'context.restore_stock', true));
+        $this->assertSame('9.0000', (string) $context['balance']->fresh()->quantity_on_hand);
+        $this->assertSame(1, WarehouseDocument::query()->where('type', 'RW')->where('status', 'posted')->count());
     }
 
     public function test_gateway_without_automatic_refund_is_marked_for_manual_attention_without_double_post(): void
@@ -892,5 +1501,30 @@ class OrderCancellationWorkflowTest extends TestCase
     private function path(Request $request): string
     {
         return (string) parse_url($request->url(), PHP_URL_PATH);
+    }
+
+    /** @return array<string, mixed> */
+    private function noRestockCapabilities(): array
+    {
+        return [
+            'available' => true,
+            'plugin_version' => '0.5.9',
+            'stock_disposition_contract' => 1,
+            'configuration_endpoint' => '/wp-json/wc-lemon-erp/v1/orders/{order_id}/cancellation-stock',
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function noRestockConfirmation(Request $request, int $orderId): array
+    {
+        return [
+            'confirmed' => true,
+            'order_id' => $orderId,
+            'cancellation_uuid' => (string) $request['cancellation_uuid'],
+            'restore_stock' => (bool) $request['restore_stock'],
+            'decision_state' => 'armed',
+            'stock_disposition_contract' => 1,
+            'plugin_version' => '0.5.9',
+        ];
     }
 }

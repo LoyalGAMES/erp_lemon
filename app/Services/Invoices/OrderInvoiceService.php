@@ -49,6 +49,12 @@ final class OrderInvoiceService
                 ->lockForUpdate()
                 ->findOrFail($order->id);
 
+            if ($order->familyHasSplitReversalOperation()) {
+                throw new RuntimeException(
+                    'Nie można wystawić dokumentu sprzedaży podczas niedokończonego cofania podziału zamówienia.',
+                );
+            }
+
             if ($order->hasCancellationOperation()
                 || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
                 throw new RuntimeException('Nie można wystawić dokumentu sprzedaży dla anulowanego zamówienia ani podczas trwającej anulacji.');
@@ -57,7 +63,9 @@ final class OrderInvoiceService
             $existing = $order->invoices()
                 ->where('type', $type)
                 ->latest()
-                ->first();
+                ->get()
+                ->first(fn (Invoice $candidate): bool => $candidate->status !== 'cancelled'
+                    && data_get($candidate->metadata, 'split_reversal.fully_reversed') !== true);
 
             if ($existing !== null) {
                 return $this->ensureFiles($existing->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']));

@@ -25,24 +25,6 @@ final class BLPaczkaShipmentService
     /** Format etykiety 100 x 150 mm przeznaczony dla drukarek termicznych. */
     private const WAYBILL_PRINTER_TYPE = 'LBL';
 
-    /**
-     * Frazy w statusach śledzenia oznaczające, że paczka fizycznie
-     * opuściła magazyn nadawcy.
-     */
-    private const PICKED_UP_KEYWORDS = [
-        'odebran',
-        'nadan',
-        'przyję',
-        'w drodze',
-        'w transporcie',
-        'sortow',
-        'doręcz',
-        'wydano do',
-        'collected',
-        'in transit',
-        'delivered',
-    ];
-
     private const DELIVERED_KEYWORDS = [
         'doręcz',
         'dostarcz',
@@ -61,10 +43,14 @@ final class BLPaczkaShipmentService
      * wybór oferty kuriera wg metody wysyłki z koszyka (fallback: najtańsza)
      * → utworzenie przesyłki → pobranie etykiety.
      *
+     * @param  null|callable(string, array<string, mixed>): void  $checkpoint
      * @return array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>}
      */
-    public function createShipmentWithLabel(ExternalOrder $order, CourierAccount $account): array
-    {
+    public function createShipmentWithLabel(
+        ExternalOrder $order,
+        CourierAccount $account,
+        ?callable $checkpoint = null,
+    ): array {
         $sender = $this->senderFromAccount($account);
         $parcel = $this->parcelFromAccount($account);
         $takerPoint = $this->pickupPointFromMeta($order);
@@ -115,15 +101,36 @@ final class BLPaczkaShipmentService
             $orderBlock['taker_point'] = $takerPoint;
         }
 
-        $created = $this->post($account, 'createOrderV2.json', [
-            'Cart' => [
-                ['Order' => $orderBlock],
-            ],
-            'CourierSearch' => $courierSearch + ['courier_code' => $courierCode],
-            'CartOrder' => [
-                'payment' => (string) data_get($account->metadata, 'payment', 'bank'),
-            ],
-        ]);
+        if ($checkpoint !== null) {
+            $checkpoint('remote_creation_started', [
+                'provider' => 'blpaczka',
+                'started_at' => now()->toIso8601String(),
+                'courier_code' => $courierCode,
+            ]);
+        }
+
+        try {
+            $created = $this->post($account, 'createOrderV2.json', [
+                'Cart' => [
+                    ['Order' => $orderBlock],
+                ],
+                'CourierSearch' => $courierSearch + ['courier_code' => $courierCode],
+                'CartOrder' => [
+                    'payment' => (string) data_get($account->metadata, 'payment', 'bank'),
+                ],
+            ]);
+        } catch (RuntimeException $exception) {
+            if ($checkpoint !== null && $this->isDefinitiveCreationRejection($exception)) {
+                $checkpoint('remote_creation_rejected', [
+                    'provider' => 'blpaczka',
+                    'rejected_at' => now()->toIso8601String(),
+                    'message' => $exception->getMessage(),
+                    'courier_code' => $courierCode,
+                ]);
+            }
+
+            throw $exception;
+        }
 
         $shipmentId = (string) (
             data_get($created, 'data.blpaczka_order_id')
@@ -133,6 +140,19 @@ final class BLPaczkaShipmentService
 
         if ($shipmentId === '' || $shipmentId === '0') {
             throw new RuntimeException('BLPaczka nie zwróciła identyfikatora utworzonej przesyłki.');
+        }
+
+        if ($checkpoint !== null) {
+            $checkpoint('remote_shipment_resolved', [
+                'provider' => 'blpaczka',
+                'shipment_id' => $shipmentId,
+                'reused_existing_shipment' => false,
+                'resolved_at' => now()->toIso8601String(),
+                'response_payload' => $created,
+                'courier_code' => $courierCode,
+                'courier_name' => (string) data_get($offer, 'Courier.name', ''),
+                'price' => data_get($offer, 'Price.value'),
+            ]);
         }
 
         $label = $this->fetchLabelForShipment($shipmentId, $account);
@@ -158,6 +178,21 @@ final class BLPaczkaShipmentService
         }
 
         return $amount;
+    }
+
+    /**
+     * HTTP 5xx, request timeouts and throttling after POST are ambiguous: the
+     * carrier may have accepted the shipment before returning the error. The
+     * exception code is populated by post() only for received HTTP responses;
+     * code 400 is also used for an explicit BLPaczka business rejection.
+     */
+    private function isDefinitiveCreationRejection(RuntimeException $exception): bool
+    {
+        $httpStatus = (int) $exception->getCode();
+
+        return $httpStatus >= 400
+            && $httpStatus < 500
+            && ! in_array($httpStatus, [408, 425, 429, 499], true);
     }
 
     /**
@@ -402,13 +437,7 @@ final class BLPaczkaShipmentService
                 $event,
             )));
 
-            foreach (self::PICKED_UP_KEYWORDS as $keyword) {
-                if (str_contains($haystack, $keyword)) {
-                    return true;
-                }
-            }
-
-            return false;
+            return CourierPickupEvidenceClassifier::blpaczkaStatusProvesPickup($haystack);
         });
         $deliveredEvent = $events->first(function (array $event): bool {
             $haystack = mb_strtolower(implode(' ', array_map(
@@ -504,7 +533,10 @@ final class BLPaczkaShipmentService
             ], $params));
 
         if ($response->failed()) {
-            throw new RuntimeException("BLPaczka zwróciła błąd HTTP {$response->status()} dla {$endpoint}.");
+            throw new RuntimeException(
+                "BLPaczka zwróciła błąd HTTP {$response->status()} dla {$endpoint}.",
+                $response->status(),
+            );
         }
 
         $data = (array) $response->json();
@@ -512,7 +544,10 @@ final class BLPaczkaShipmentService
         if (($data['success'] ?? false) !== true) {
             $message = trim((string) ($data['message'] ?? ''));
 
-            throw new RuntimeException($message !== '' ? "BLPaczka: {$message}" : "BLPaczka odrzuciła żądanie {$endpoint}.");
+            throw new RuntimeException(
+                $message !== '' ? "BLPaczka: {$message}" : "BLPaczka odrzuciła żądanie {$endpoint}.",
+                400,
+            );
         }
 
         return $data;

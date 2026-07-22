@@ -25,6 +25,9 @@ final class InPostShipmentService
      */
     private const LABEL_PENDING_STATUSES = ['created', 'offers_prepared', 'offer_selected', 'unconfirmed'];
 
+    /** @var list<string> */
+    private const NON_REUSABLE_SHIPMENT_STATUSES = ['error', 'canceled', 'cancelled'];
+
     private const LABEL_POLL_ATTEMPTS = 10;
 
     private const LABEL_POLL_DELAY_MS = 800;
@@ -39,6 +42,7 @@ final class InPostShipmentService
      * już istnieje w ShipX (np. utworzona wtyczką InPost dla WooCommerce na tym
      * samym koncie), pobiera etykietę istniejącej przesyłki zamiast tworzyć nową.
      *
+     * @param  null|callable(string, array<string, mixed>): void  $checkpoint
      * @return array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>}
      */
     public function createShipmentWithLabel(
@@ -46,17 +50,57 @@ final class InPostShipmentService
         CourierAccount $account,
         ?string $parcelTemplate = null,
         bool $forceNew = false,
+        ?callable $checkpoint = null,
     ): array {
         $shipment = $forceNew ? null : $this->findExistingShipment($order, $account);
         $reused = $shipment !== null;
 
         if ($shipment === null) {
-            $shipment = $this->createShipment($order, $account, $parcelTemplate);
+            if ($checkpoint !== null) {
+                $checkpoint('remote_creation_started', [
+                    'provider' => 'inpost',
+                    'started_at' => now()->toIso8601String(),
+                ]);
+            }
+
+            $shipment = $this->createShipment($order, $account, $parcelTemplate, $checkpoint);
         }
 
         $shipmentId = (string) $shipment['id'];
+
+        if ($checkpoint !== null) {
+            $checkpoint('remote_shipment_resolved', [
+                'provider' => 'inpost',
+                'shipment_id' => $shipmentId,
+                'reused_existing_shipment' => $reused,
+                'resolved_at' => now()->toIso8601String(),
+                'response_payload' => $shipment,
+            ]);
+        }
+
+        return $this->fetchExistingShipmentWithLabel($shipmentId, $account, $reused);
+    }
+
+    /**
+     * Wznawia wyłącznie pobranie etykiety dla wcześniej zapisanego ShipX ID.
+     * Ta metoda nigdy nie tworzy nowej przesyłki, dzięki czemu może być
+     * bezpiecznie wywołana po awarii procesu po stronie ERP.
+     *
+     * @return array{shipment_id:string,tracking_number:?string,contents:string,mime_type:string,response_payload:array<string,mixed>}
+     */
+    public function fetchExistingShipmentWithLabel(
+        string $shipmentId,
+        CourierAccount $account,
+        bool $reusedExistingShipment = false,
+    ): array {
+        $shipmentId = trim($shipmentId);
+
+        if ($shipmentId === '') {
+            throw new RuntimeException('Nie można wznowić pobierania etykiety InPost bez identyfikatora ShipX.');
+        }
+
         $shipment = $this->waitForConfirmation($account, $shipmentId);
-        $shipment['reused_existing_shipment'] = $reused;
+        $shipment['reused_existing_shipment'] = $reusedExistingShipment;
 
         return [
             'shipment_id' => $shipmentId,
@@ -77,6 +121,9 @@ final class InPostShipmentService
     private function findExistingShipment(ExternalOrder $order, CourierAccount $account): ?array
     {
         [$shipmentIds, $trackingNumbers] = $this->shipmentCandidatesFromMeta($order);
+        $cancelledIdentities = $this->cancelledShipmentIdentities($order);
+        $shipmentIds = array_values(array_diff($shipmentIds, $cancelledIdentities));
+        $trackingNumbers = array_values(array_diff($trackingNumbers, $cancelledIdentities));
 
         foreach ($shipmentIds as $shipmentId) {
             $response = $this->request($account)->get("/v1/shipments/{$shipmentId}");
@@ -84,7 +131,8 @@ final class InPostShipmentService
             if ($response->successful() && filled($response->json('id'))) {
                 $shipment = (array) $response->json();
 
-                if ((string) ($shipment['status'] ?? '') !== 'error') {
+                if ($this->shipmentCanBeReused($shipment)
+                    && ! $this->shipmentMatchesCancelledIdentity($shipment, $cancelledIdentities)) {
                     return $shipment;
                 }
             }
@@ -106,7 +154,9 @@ final class InPostShipmentService
         }
 
         foreach ((array) $response->json('items', []) as $shipment) {
-            if (! is_array($shipment) || (string) ($shipment['status'] ?? '') === 'error') {
+            if (! is_array($shipment)
+                || ! $this->shipmentCanBeReused($shipment)
+                || $this->shipmentMatchesCancelledIdentity($shipment, $cancelledIdentities)) {
                 continue;
             }
 
@@ -120,6 +170,52 @@ final class InPostShipmentService
         }
 
         return null;
+    }
+
+    /** @param array<string,mixed> $shipment */
+    private function shipmentCanBeReused(array $shipment): bool
+    {
+        return ! in_array(
+            mb_strtolower(trim((string) ($shipment['status'] ?? ''))),
+            self::NON_REUSABLE_SHIPMENT_STATUSES,
+            true,
+        );
+    }
+
+    /** @return list<string> */
+    private function cancelledShipmentIdentities(ExternalOrder $order): array
+    {
+        return collect((array) data_get(
+            $order->raw_payload,
+            'sempre_erp_split_reversal.cancelled_shipment_identities',
+            [],
+        ))
+            ->filter(fn (mixed $identity): bool => is_scalar($identity))
+            ->map(fn (mixed $identity): string => trim((string) $identity))
+            ->filter(fn (string $identity): bool => $identity !== '')
+            ->unique()
+            ->values()
+            ->all();
+    }
+
+    /**
+     * @param  array<string,mixed>  $shipment
+     * @param  list<string>  $cancelledIdentities
+     */
+    private function shipmentMatchesCancelledIdentity(array $shipment, array $cancelledIdentities): bool
+    {
+        if ($cancelledIdentities === []) {
+            return false;
+        }
+
+        return collect([
+            $shipment['id'] ?? null,
+            $shipment['shipment_id'] ?? null,
+            $shipment['tracking_number'] ?? null,
+        ])
+            ->filter(fn (mixed $identity): bool => is_scalar($identity))
+            ->map(fn (mixed $identity): string => trim((string) $identity))
+            ->contains(fn (string $identity): bool => in_array($identity, $cancelledIdentities, true));
     }
 
     /**
@@ -148,6 +244,11 @@ final class InPostShipmentService
                 $key = mb_strtolower((string) ($meta['key'] ?? ''));
 
                 if (! str_contains($key, 'inpost') && ! str_contains($key, 'shipx') && ! str_contains($key, 'easypack')) {
+                    continue;
+                }
+
+                if (str_contains($key, 'point') || str_contains($key, 'locker')
+                    || str_contains($key, 'machine') || str_contains($key, 'target')) {
                     continue;
                 }
 
@@ -227,23 +328,48 @@ final class InPostShipmentService
     /**
      * @return array<string, mixed>
      */
-    private function createShipment(ExternalOrder $order, CourierAccount $account, ?string $parcelTemplate = null): array
-    {
-        return $this->postShipment($account, $this->shipmentPayload($order, $account, $parcelTemplate));
+    /**
+     * @param  null|callable(string, array<string, mixed>): void  $checkpoint
+     * @return array<string, mixed>
+     */
+    private function createShipment(
+        ExternalOrder $order,
+        CourierAccount $account,
+        ?string $parcelTemplate = null,
+        ?callable $checkpoint = null,
+    ): array {
+        return $this->postShipment(
+            $account,
+            $this->shipmentPayload($order, $account, $parcelTemplate),
+            $checkpoint,
+        );
     }
 
     /**
      * @param  array<string, mixed>  $payload
+     * @param  null|callable(string, array<string, mixed>): void  $checkpoint
      * @return array<string, mixed>
      */
-    private function postShipment(CourierAccount $account, array $payload): array
-    {
+    private function postShipment(
+        CourierAccount $account,
+        array $payload,
+        ?callable $checkpoint = null,
+    ): array {
         $response = $this->request($account)->post(
             "/v1/organizations/{$account->organization_id}/shipments",
             $payload,
         );
 
         if ($response->failed()) {
+            if ($checkpoint !== null && $this->isDefinitiveCreationRejection($response->status())) {
+                $checkpoint('remote_creation_rejected', [
+                    'provider' => 'inpost',
+                    'rejected_at' => now()->toIso8601String(),
+                    'http_status' => $response->status(),
+                    'response_payload' => (array) $response->json(),
+                ]);
+            }
+
             throw new RuntimeException($this->errorMessage($response->json(), 'Nie udało się utworzyć przesyłki InPost (HTTP '.$response->status().').'));
         }
 
@@ -254,6 +380,18 @@ final class InPostShipmentService
         }
 
         return $data;
+    }
+
+    /**
+     * A timeout, throttling response or server-side failure after POST does not
+     * prove that ShipX did not create the shipment. Only a deterministic client
+     * rejection may make the durable attempt safe to submit again.
+     */
+    private function isDefinitiveCreationRejection(int $httpStatus): bool
+    {
+        return $httpStatus >= 400
+            && $httpStatus < 500
+            && ! in_array($httpStatus, [408, 425, 429, 499], true);
     }
 
     /**
@@ -331,6 +469,10 @@ final class InPostShipmentService
 
             if ($status === 'error') {
                 throw new RuntimeException($this->errorMessage($shipment, 'InPost odrzucił przesyłkę.'));
+            }
+
+            if (! $this->shipmentCanBeReused($shipment)) {
+                throw new RuntimeException('Przesyłka InPost została anulowana i nie można pobrać dla niej aktywnej etykiety.');
             }
 
             if ($status !== '' && ! in_array($status, self::LABEL_PENDING_STATUSES, true)) {

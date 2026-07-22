@@ -12,6 +12,8 @@ use Throwable;
 
 final class WooCommerceOrderStatusService
 {
+    private const NO_RESTOCK_PLUGIN_MINIMUM_VERSION = '0.5.9';
+
     public function __construct(
         private readonly WooCommerceClient $client,
     ) {}
@@ -53,6 +55,91 @@ final class WooCommerceOrderStatusService
         );
     }
 
+    public function assertCancellationStockDispositionSupported(
+        ExternalOrder $order,
+        bool $restoreStock,
+        string $cancellationUuid,
+    ): void {
+        if ($restoreStock) {
+            return;
+        }
+
+        $integration = $this->integrationFor($order);
+        $contractAvailable = $this->client->orderCancellationStockDispositionAvailable(
+            $integration,
+            self::NO_RESTOCK_PLUGIN_MINIMUM_VERSION,
+        );
+
+        if (! $contractAvailable) {
+            throw new RuntimeException(
+                'Anulowanie bez przywracania stanu wymaga aktywnej wtyczki Lemon ERP for WooCommerce '
+                .self::NO_RESTOCK_PLUGIN_MINIMUM_VERSION
+                .' lub nowszej. Najpierw zaktualizuj wtyczkę w tym sklepie; anulowanie zostało zatrzymane bez skutków ubocznych.',
+            );
+        }
+
+        // The capability read alone does not prove that the WooCommerce API
+        // key may write. Persist the harmless marker during preflight so an
+        // integration with read-only credentials fails before refunds,
+        // shipment cancellation or warehouse mutations begin.
+        $this->client->configureOrderCancellationStockDisposition(
+            $integration,
+            (string) $order->external_id,
+            false,
+            $cancellationUuid,
+            self::NO_RESTOCK_PLUGIN_MINIMUM_VERSION,
+        );
+    }
+
+    /**
+     * Mark the no-restock decision in WooCommerce before changing the order
+     * status. WooCommerce normally restores reduced stock on `cancelled`, so
+     * the remote plugin contract is mandatory for the false branch.
+     *
+     * @return array<string, mixed>
+     */
+    public function markCancelledForOrderCancellation(
+        ExternalOrder $order,
+        bool $restoreStock,
+        string $cancellationUuid,
+    ): array {
+        $confirmation = null;
+        $integration = $this->integrationFor($order);
+
+        if (! $restoreStock) {
+            $confirmation = $this->client->configureOrderCancellationStockDisposition(
+                $integration,
+                (string) $order->external_id,
+                false,
+                $cancellationUuid,
+                self::NO_RESTOCK_PLUGIN_MINIMUM_VERSION,
+            );
+        } elseif ($this->client->orderCancellationStockDispositionAvailable(
+            $integration,
+            self::NO_RESTOCK_PLUGIN_MINIMUM_VERSION,
+        )) {
+            $confirmation = $this->client->configureOrderCancellationStockDisposition(
+                $integration,
+                (string) $order->external_id,
+                true,
+                $cancellationUuid,
+                self::NO_RESTOCK_PLUGIN_MINIMUM_VERSION,
+            );
+        }
+
+        $result = $this->updateStatus(
+            $order,
+            settingsKey: null,
+            defaultStatus: 'cancelled',
+            operation: 'order_cancelled',
+        );
+
+        return $result + [
+            'restore_stock' => $restoreStock,
+            'stock_disposition_confirmation' => $confirmation,
+        ];
+    }
+
     /**
      * @return array<string, mixed>
      */
@@ -90,18 +177,7 @@ final class WooCommerceOrderStatusService
             throw new RuntimeException('Anulowanego albo zwróconego zamówienia nie można ponownie otworzyć zwykłą zmianą statusu.');
         }
 
-        $integration = WordpressIntegration::query()
-            ->when(
-                $order->wordpress_integration_id !== null,
-                fn ($query) => $query->whereKey($order->wordpress_integration_id),
-                fn ($query) => $query->where('sales_channel_id', $order->sales_channel_id),
-            )
-            ->where('sales_channel_id', $order->sales_channel_id)
-            ->first();
-
-        if (! $integration instanceof WordpressIntegration) {
-            throw new RuntimeException('Brak aktywnej integracji WooCommerce dla kanału tego zamówienia.');
-        }
+        $integration = $this->integrationFor($order);
 
         $status = $settingsKey !== null
             ? trim((string) data_get($integration->orderStatusSettings(), $settingsKey, $defaultStatus))
@@ -147,6 +223,24 @@ final class WooCommerceOrderStatusService
 
             throw $exception;
         }
+    }
+
+    private function integrationFor(ExternalOrder $order): WordpressIntegration
+    {
+        $integration = WordpressIntegration::query()
+            ->when(
+                $order->wordpress_integration_id !== null,
+                fn ($query) => $query->whereKey($order->wordpress_integration_id),
+                fn ($query) => $query->where('sales_channel_id', $order->sales_channel_id),
+            )
+            ->where('sales_channel_id', $order->sales_channel_id)
+            ->first();
+
+        if (! $integration instanceof WordpressIntegration) {
+            throw new RuntimeException('Brak aktywnej integracji WooCommerce dla kanału tego zamówienia.');
+        }
+
+        return $integration;
     }
 
     /**

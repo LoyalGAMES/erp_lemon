@@ -24,6 +24,7 @@ use App\Services\Orders\OrderEditingService;
 use App\Services\Orders\OrderFulfillmentStatusService;
 use App\Services\Orders\OrderMutationLock;
 use App\Services\Orders\OrderPaymentLinkService;
+use App\Services\Orders\OrderSplitReversalService;
 use App\Services\Orders\OrderSplitService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
@@ -54,6 +55,8 @@ class ExternalOrderController extends Controller
         OrderEditingService $editing,
         OrderPaymentLinkService $paymentLinks,
         OrderSettlementService $settlements,
+        OrderSplitService $splitter,
+        OrderSplitReversalService $splitReversalService,
     ): View {
         $order->load([
             'salesChannel',
@@ -114,6 +117,8 @@ class ExternalOrderController extends Controller
                 'cancelled',
                 'refunded',
             ], true);
+        $splitAvailability = $splitter->availability($order);
+        $splitReversal = $splitReversalService->availability($order);
 
         return view('orders.show', [
             'title' => 'Zamówienie '.($order->external_number ?: $order->external_id),
@@ -155,11 +160,16 @@ class ExternalOrderController extends Controller
             'automaticRefundOperationId' => (string) Str::uuid(),
             'manualRefundOperationId' => (string) Str::uuid(),
             'incomingPaymentOperationId' => (string) Str::uuid(),
+            'manualSplitOperationId' => (string) Str::uuid(),
+            'shippingDecisionSplitOperationId' => (string) Str::uuid(),
             'orderCancellation' => $cancellation,
             'orderOperationsLocked' => $orderOperationsLocked,
             'settlementOrder' => $settlementOrder,
             'settlementIsRoot' => (int) $settlementOrder->id === (int) $order->id,
             'settlementPayments' => $settlementPayments,
+            'splitAvailability' => $splitAvailability,
+            'splitReversal' => $splitReversal,
+            'splitFamily' => $splitReversal['family'],
         ]);
     }
 
@@ -566,7 +576,22 @@ class ExternalOrderController extends Controller
         };
 
         if ($notificationTrigger !== null && $before['status'] !== $freshOrder->status) {
-            $communication->sendOrderStatus($freshOrder, $notificationTrigger);
+            try {
+                $orderMutationLock->forOrderFamily(
+                    $freshOrder,
+                    function () use ($freshOrder, $notificationTrigger, $communication): void {
+                        $activeOrder = ExternalOrder::query()->find($freshOrder->id);
+
+                        if (! $activeOrder instanceof ExternalOrder || $activeOrder->status !== $freshOrder->status) {
+                            return;
+                        }
+
+                        $communication->sendOrderStatus($activeOrder, $notificationTrigger);
+                    },
+                );
+            } catch (Throwable $exception) {
+                $warnings[] = 'wiadomość: '.$exception->getMessage();
+            }
         }
 
         $audit->record('order.status_updated', $freshOrder, $before, [
@@ -590,6 +615,7 @@ class ExternalOrderController extends Controller
         Request $request,
         ExternalOrder $order,
         CustomerCommunicationService $communication,
+        OrderMutationLock $orderLock,
     ): RedirectResponse {
         $validated = $request->validate([
             'payment_url' => ['required', 'url', 'max:1000'],
@@ -601,7 +627,15 @@ class ExternalOrderController extends Controller
         }
 
         try {
-            $communication->sendPaymentReminderForOrder($order, $validated['payment_url']);
+            $orderLock->forOrderFamily($order, function () use ($order, $validated, $communication): void {
+                $freshOrder = ExternalOrder::query()->find($order->id);
+
+                if (! $freshOrder instanceof ExternalOrder) {
+                    throw new RuntimeException('Zamówienie zostało zarchiwizowane. Odśwież widok.');
+                }
+
+                $communication->sendPaymentReminderForOrder($freshOrder, $validated['payment_url']);
+            });
         } catch (RuntimeException $exception) {
             return back()->withInput()->with('error', $exception->getMessage());
         }
@@ -613,6 +647,7 @@ class ExternalOrderController extends Controller
         Request $request,
         ExternalOrder $order,
         CustomerCommunicationService $communication,
+        OrderMutationLock $orderLock,
     ): RedirectResponse {
         $validated = $request->validate([
             'subject' => ['required', 'string', 'max:160'],
@@ -620,7 +655,15 @@ class ExternalOrderController extends Controller
         ]);
 
         try {
-            $communication->sendManualForOrder($order, $validated['subject'], $validated['body']);
+            $orderLock->forOrderFamily($order, function () use ($order, $validated, $communication): void {
+                $freshOrder = ExternalOrder::query()->find($order->id);
+
+                if (! $freshOrder instanceof ExternalOrder) {
+                    throw new RuntimeException('Zamówienie zostało zarchiwizowane. Odśwież widok.');
+                }
+
+                $communication->sendManualForOrder($freshOrder, $validated['subject'], $validated['body']);
+            });
         } catch (RuntimeException $exception) {
             return back()->withInput()->with('error', $exception->getMessage());
         }
@@ -628,19 +671,34 @@ class ExternalOrderController extends Controller
         return back()->with('status', "Wiadomość do klienta zamówienia {$order->external_number} została wysłana.");
     }
 
-    public function storeNote(Request $request, ExternalOrder $order): RedirectResponse
-    {
+    public function storeNote(
+        Request $request,
+        ExternalOrder $order,
+        OrderMutationLock $orderLock,
+    ): RedirectResponse {
         $validated = $request->validate([
             'body' => ['required', 'string', 'max:3000'],
         ]);
 
-        InternalNote::query()->create([
-            'external_order_id' => $order->id,
-            'user_id' => Auth::id(),
-            'author_name' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
-            'body' => $validated['body'],
-            'metadata' => ['source' => 'order_view'],
-        ]);
+        try {
+            $orderLock->forOrderFamily($order, function () use ($order, $request, $validated): void {
+                $freshOrder = ExternalOrder::query()->find($order->id);
+
+                if (! $freshOrder instanceof ExternalOrder) {
+                    throw new RuntimeException('Zamówienie zostało zarchiwizowane. Odśwież widok.');
+                }
+
+                InternalNote::query()->create([
+                    'external_order_id' => $freshOrder->id,
+                    'user_id' => Auth::id(),
+                    'author_name' => Auth::user()?->name ?: (string) $request->server('PHP_AUTH_USER', 'ERP'),
+                    'body' => $validated['body'],
+                    'metadata' => ['source' => 'order_view'],
+                ]);
+            });
+        } catch (RuntimeException $exception) {
+            return back()->withInput()->with('error', $exception->getMessage());
+        }
 
         return back()->with('status', 'Notatka wewnętrzna została dodana.');
     }
@@ -840,6 +898,7 @@ class ExternalOrderController extends Controller
             'split_lines' => ['required', 'array'],
             'split_lines.*.quantity' => ['nullable', 'numeric', 'min:0'],
             'note' => ['nullable', 'string', 'max:1000'],
+            'split_request_uuid' => ['nullable', 'uuid'],
         ]);
 
         $quantities = collect($validated['split_lines'])
@@ -848,7 +907,12 @@ class ExternalOrderController extends Controller
             ->all();
 
         try {
-            $splitOrder = $splitter->split($order, $quantities, $validated['note'] ?? null);
+            $splitOrder = $splitter->split(
+                $order,
+                $quantities,
+                $validated['note'] ?? null,
+                requestUuid: $validated['split_request_uuid'] ?? (string) Str::uuid(),
+            );
         } catch (RuntimeException $exception) {
             return back()->with('error', $exception->getMessage());
         }
@@ -858,11 +922,53 @@ class ExternalOrderController extends Controller
             ->with('status', "Wydzielono zamówienie {$splitOrder->external_number}. Rezerwacje zostały przeliczone.");
     }
 
+    public function reverseSplit(
+        Request $request,
+        ExternalOrder $order,
+        OrderSplitReversalService $splitReversal,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'family_version' => ['required', 'string', 'size:64', 'regex:/\A[a-f0-9]{64}\z/'],
+            'note' => ['nullable', 'string', 'max:1000'],
+            'confirm_manual_shipping_cancellation' => ['nullable', 'boolean'],
+        ], [
+            'family_version.required' => 'Odśwież stronę i ponownie sprawdź części zamówienia przed cofnięciem rozdzielenia.',
+            'family_version.size' => 'Stan rodziny zamówień jest nieprawidłowy. Odśwież stronę i spróbuj ponownie.',
+            'family_version.regex' => 'Stan rodziny zamówień jest nieprawidłowy. Odśwież stronę i spróbuj ponownie.',
+        ]);
+
+        try {
+            $rootOrder = $splitReversal->reverse(
+                $order,
+                $validated['family_version'],
+                $validated['note'] ?? null,
+                (bool) ($validated['confirm_manual_shipping_cancellation'] ?? false),
+            );
+        } catch (Throwable $exception) {
+            if (! $exception instanceof RuntimeException) {
+                report($exception);
+            }
+
+            $details = $exception instanceof RuntimeException
+                ? $exception->getMessage()
+                : 'Wystąpił nieoczekiwany błąd. Operację można bezpiecznie ponowić; system wznowi ją od ostatniego zapisanego kroku.';
+
+            return back()
+                ->withInput()
+                ->with('error', 'Nie cofnięto rozdzielenia zamówienia. '.$details);
+        }
+
+        return redirect()
+            ->route('orders.show', $rootOrder)
+            ->with('status', "Cofnięto rozdzielenie zamówienia {$rootOrder->external_number}. Wszystkie aktywne części zostały scalone, a zamówienia częściowe zarchiwizowano.");
+    }
+
     public function shippingDecision(
         Request $request,
         ExternalOrder $order,
         OrderSplitService $splitter,
         ProductSegmentService $segments,
+        OrderMutationLock $orderLock,
     ): RedirectResponse {
         if ($order->hasCancellationOperation()
             || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
@@ -874,19 +980,43 @@ class ExternalOrderController extends Controller
 
         $validated = $request->validate([
             'decision' => ['required', 'string', 'in:ship_footwear_now,wait_for_all'],
+            'split_request_uuid' => ['nullable', 'uuid'],
         ]);
 
         $order->load('lines.product');
 
-        $raw = (array) $order->raw_payload;
-        $raw['sempre_erp_shipping_decision'] = [
+        $shippingDecision = [
             'decision' => $validated['decision'],
             'decided_by' => Auth::user()?->name,
             'decided_at' => now()->toISOString(),
         ];
-        $order->update(['raw_payload' => $raw]);
 
         if ($validated['decision'] === 'wait_for_all') {
+            try {
+                $order = $orderLock->forOrderFamily($order, function () use ($order, $shippingDecision): ExternalOrder {
+                    return DB::transaction(function () use ($order, $shippingDecision): ExternalOrder {
+                        $freshOrder = ExternalOrder::query()->lockForUpdate()->find($order->id);
+
+                        if (! $freshOrder instanceof ExternalOrder) {
+                            throw new RuntimeException('Zamówienie zostało zarchiwizowane. Odśwież widok.');
+                        }
+
+                        if ($freshOrder->hasCancellationOperation()
+                            || in_array($freshOrder->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
+                            throw new RuntimeException('Nie można zmienić sposobu wysyłki anulowanego zamówienia ani zamówienia w trakcie anulacji.');
+                        }
+
+                        $raw = (array) $freshOrder->raw_payload;
+                        $raw['sempre_erp_shipping_decision'] = $shippingDecision;
+                        $freshOrder->update(['raw_payload' => $raw]);
+
+                        return $freshOrder;
+                    }, 3);
+                });
+            } catch (RuntimeException $exception) {
+                return back()->with('error', $exception->getMessage());
+            }
+
             return back()->with('status', "Zamówienie {$order->external_number} zostanie wysłane w całości po skompletowaniu wszystkich pozycji.");
         }
 
@@ -910,6 +1040,8 @@ class ExternalOrderController extends Controller
                 $footwearQuantities,
                 'Wysyłka butów od razu — decyzja z widoku zamówienia.',
                 'ship_footwear_now',
+                ['shipping_decision' => $shippingDecision],
+                $validated['split_request_uuid'] ?? (string) Str::uuid(),
             );
         } catch (RuntimeException $exception) {
             return back()->with('error', $exception->getMessage());

@@ -12,6 +12,7 @@ use App\Models\OrderCancellationStep;
 use App\Models\PackingTask;
 use App\Models\ReturnCase;
 use App\Models\ShippingLabel;
+use App\Models\StockReservation;
 use App\Models\WarehouseDocument;
 use App\Services\Audit\AuditLogService;
 use App\Services\Communication\CustomerCommunicationService;
@@ -211,8 +212,21 @@ final class OrderCancellationService
         }
 
         try {
-            $this->runStep($cancellation, 'preflight', function () use ($root, $family): array {
-                $this->assertCancellable($family);
+            $completedPreflight = $cancellation->steps()
+                ->where('step', 'preflight')
+                ->whereIn('status', ['completed', 'attention_required'])
+                ->exists();
+
+            // Re-check an already recorded preflight on every retry. This
+            // upgrades old in-progress cancellations to the current safety
+            // contract and proves that the integration still has write access
+            // before any remaining operational step is resumed.
+            if ($completedPreflight) {
+                $this->assertCancellationPreflight($root, $family, $cancellation, $context);
+            }
+
+            $this->runStep($cancellation, 'preflight', function () use ($root, $family, $cancellation, $context): array {
+                $this->assertCancellationPreflight($root, $family, $cancellation, $context);
 
                 return [
                     'root_order_id' => $root->id,
@@ -334,43 +348,15 @@ final class OrderCancellationService
             $warnings[] = (string) ($refund['message'] ?? 'Zwrot płatności wymaga ręcznej obsługi.');
         }
 
-        $this->runStep($cancellation, 'warehouse_documents', function () use ($family, $context, $cancellation): array {
-            $cancelled = [];
-            $writeOffs = [];
-
-            foreach ($this->wzDocuments($family) as $document) {
-                if ($document->status === 'cancelled') {
-                    $cancelled[] = (int) $document->id;
-
-                    continue;
-                }
-
-                $wasPosted = $document->status === 'posted';
-                $lines = $document->lines()->get();
-                $this->documentPosting->cancel($document);
-                $cancelled[] = (int) $document->id;
-
-                if ($wasPosted && ! (bool) ($context['restore_stock'] ?? true)) {
-                    $rw = WarehouseDocument::query()->create([
-                        'number' => $this->documentNumbers->next('RW'),
-                        'type' => 'RW',
-                        'status' => 'draft',
-                        'source_warehouse_id' => $document->source_warehouse_id,
-                        'document_date' => now(),
-                        'external_reference' => $document->external_reference,
-                        'notes' => 'Rozchód po anulowaniu zamówienia bez przywracania towaru do sprzedaży.',
-                        'metadata' => ['order_cancellation_uuid' => $cancellation->uuid, 'source_wz_id' => $document->id],
-                    ]);
-                    foreach ($lines as $line) {
-                        $rw->lines()->create(['product_id' => $line->product_id, 'quantity' => $line->quantity]);
-                    }
-                    $this->documentPosting->post($rw);
-                    $writeOffs[] = $rw->id;
-                }
-            }
-
-            return ['cancelled_document_ids' => array_values(array_unique($cancelled)), 'write_off_document_ids' => $writeOffs];
-        });
+        $this->runStep(
+            $cancellation,
+            'warehouse_documents',
+            fn (): array => $this->cancelWarehouseDocuments(
+                $family,
+                $cancellation,
+                (bool) ($context['restore_stock'] ?? true),
+            ),
+        );
 
         $this->runStep($cancellation, 'inventory_and_packing', function () use ($family, $cancellation, $context): array {
             $tasks = 0;
@@ -428,8 +414,12 @@ final class OrderCancellationService
             $warnings[] = (string) $warning;
         }
 
-        $this->runStep($cancellation, 'woocommerce_and_local_status', function () use ($root, $family): array {
-            $result = $this->orderStatuses->updateManually($root->fresh() ?? $root, 'cancelled');
+        $this->runStep($cancellation, 'woocommerce_and_local_status', function () use ($root, $family, $cancellation, $context): array {
+            $result = $this->orderStatuses->markCancelledForOrderCancellation(
+                $root->fresh() ?? $root,
+                (bool) ($context['restore_stock'] ?? true),
+                (string) $cancellation->uuid,
+            );
             $ids = $family->pluck('id')->map(fn (mixed $id): int => (int) $id)->all();
 
             ExternalOrder::query()->whereIn('id', $ids)->update([
@@ -464,6 +454,7 @@ final class OrderCancellationService
                     'cancellation_uuid' => $cancellation->uuid,
                     'cancellation_reason' => $cancellation->reason,
                     'refund_status' => $cancellation->refund_status,
+                    'stock_restored' => (bool) ($context['restore_stock'] ?? true),
                     'problem_note' => $context['source'] === 'packing_problem'
                         ? $cancellation->reason
                         : null,
@@ -477,10 +468,12 @@ final class OrderCancellationService
             'status' => 'cancelled',
             'cancellation_status' => $finalStatus,
             'refund_status' => $cancellation->refund_status,
+            'stock_restored' => (bool) ($context['restore_stock'] ?? true),
         ], [
             'order_cancellation_id' => $cancellation->id,
             'order_cancellation_uuid' => $cancellation->uuid,
             'source' => $context['source'],
+            'restore_stock' => (bool) ($context['restore_stock'] ?? true),
             'family_order_ids' => $family->pluck('id')->all(),
             'warnings' => array_values(array_unique($warnings)),
         ]);
@@ -491,6 +484,442 @@ final class OrderCancellationService
             'attention_required' => $attentionRequired,
             'warnings' => array_values(array_unique(array_filter($warnings))),
         ];
+    }
+
+    /**
+     * Keep the warehouse decision atomic. In particular, a posted WZ must
+     * never remain cancelled without its compensating RW when the operator
+     * explicitly chose not to return the goods to saleable stock.
+     *
+     * For an unposted order the saleable quantity is held by active stock
+     * reservations rather than a posted WZ. Those reservations therefore
+     * become the source of the RW before they are released.
+     *
+     * @param  EloquentCollection<int, ExternalOrder>  $family
+     * @return array{cancelled_document_ids:list<int>,write_off_document_ids:list<int>,released_reservation_pairs:int}
+     */
+    private function cancelWarehouseDocuments(
+        EloquentCollection $family,
+        OrderCancellation $cancellation,
+        bool $restoreStock,
+    ): array {
+        return DB::transaction(function () use ($family, $cancellation, $restoreStock): array {
+            $documentIds = $this->wzDocuments($family)
+                ->pluck('id')
+                ->map(fn (mixed $id): int => (int) $id)
+                ->all();
+            $documents = WarehouseDocument::query()
+                ->whereIn('id', $documentIds)
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get();
+            // Lock both active and waiting rows before taking the quantity
+            // snapshot. A concurrent receipt must not be able to promote a
+            // waiting reservation after the RW was calculated but before
+            // syncForOrder() releases it.
+            $openReservations = $restoreStock
+                ? new EloquentCollection
+                : $this->openReservationsForFamily($family);
+            $reservations = $openReservations
+                ->filter(fn (StockReservation $reservation): bool => $reservation->status === 'active')
+                ->values();
+            $cancelled = [];
+            $writeOffs = [];
+            $postedReservationCoverage = [];
+            $ambiguousPostedCoverage = [];
+
+            foreach ($documents as $document) {
+                $hadPostedStockMovement = $document->status === 'posted'
+                    || ($document->status === 'cancelled' && $this->cancelledWzHadPostedStockMovement($document));
+                $quantities = $hadPostedStockMovement
+                    ? $this->warehouseDocumentQuantities($document)
+                    : [];
+
+                if ($hadPostedStockMovement) {
+                    $reservationIdentity = $this->warehouseDocumentReservationIdentity($document);
+
+                    if ($reservationIdentity !== null) {
+                        foreach ($quantities as $productId => $quantity) {
+                            $postedReservationCoverage[$reservationIdentity][$productId]
+                                = ($postedReservationCoverage[$reservationIdentity][$productId] ?? 0.0) + $quantity;
+                        }
+                    } elseif ($document->source_warehouse_id !== null) {
+                        foreach ($quantities as $productId => $quantity) {
+                            $ambiguousPostedCoverage[(int) $document->source_warehouse_id][$productId]
+                                = ($ambiguousPostedCoverage[(int) $document->source_warehouse_id][$productId] ?? 0.0) + $quantity;
+                        }
+                    }
+                }
+
+                if ($document->status !== 'cancelled') {
+                    $this->documentPosting->cancel($document);
+                    $document->refresh();
+                }
+
+                $cancelled[] = (int) $document->id;
+
+                if (! $restoreStock && $hadPostedStockMovement) {
+                    if ($document->source_warehouse_id === null) {
+                        throw new RuntimeException(
+                            "Dokument {$document->number} nie wskazuje magazynu źródłowego potrzebnego do rozchodu bez przywracania stanu.",
+                        );
+                    }
+
+                    $writeOffs[] = $this->ensureCancellationWriteOff(
+                        cancellation: $cancellation,
+                        sourceKey: 'wz:'.$document->id,
+                        warehouseId: (int) $document->source_warehouse_id,
+                        quantities: $quantities,
+                        externalReference: (string) ($document->external_reference ?: $family->first()?->external_number),
+                        sourceMetadata: [
+                            'source' => 'cancelled_posted_wz',
+                            'source_wz_id' => (int) $document->id,
+                            'source_wz_number' => (string) $document->number,
+                        ],
+                    );
+                }
+            }
+
+            if (! $restoreStock) {
+                $reservationGroups = $reservations->groupBy(
+                    fn (StockReservation $reservation): string => $this->reservationIdentity($reservation),
+                );
+
+                foreach ($reservationGroups->sortKeys() as $reservationIdentity => $warehouseReservations) {
+                    /** @var StockReservation $firstReservation */
+                    $firstReservation = $warehouseReservations->first();
+                    $warehouseId = (int) $firstReservation->warehouse_id;
+                    $quantities = [];
+
+                    foreach ($warehouseReservations as $reservation) {
+                        $productId = (int) $reservation->product_id;
+                        $quantities[$productId] = ($quantities[$productId] ?? 0.0) + (float) $reservation->quantity;
+                    }
+
+                    foreach ($quantities as $productId => $quantity) {
+                        if (($ambiguousPostedCoverage[$warehouseId][$productId] ?? 0.0) > 0) {
+                            throw new RuntimeException(
+                                'Starszy zaksięgowany WZ i aktywna rezerwacja obejmują ten sam produkt, ale WZ nie wskazuje jednoznacznie zamówienia. '
+                                .'Automatyczny rozchód został zatrzymany, aby nie odjąć towaru dwa razy.',
+                            );
+                        }
+
+                        $coveredByPostedWz = (float) ($postedReservationCoverage[$reservationIdentity][$productId] ?? 0.0);
+                        $quantities[$productId] = max(0.0, $quantity - $coveredByPostedWz);
+                    }
+
+                    $quantities = $this->normalizedWriteOffQuantities($quantities);
+
+                    if ($quantities === []) {
+                        continue;
+                    }
+
+                    $member = $family->first(
+                        fn (ExternalOrder $candidate): bool => (int) $candidate->sales_channel_id === (int) $firstReservation->sales_channel_id
+                            && (string) $candidate->external_id === (string) $firstReservation->external_order_id,
+                    );
+
+                    $writeOffs[] = $this->ensureCancellationWriteOff(
+                        cancellation: $cancellation,
+                        sourceKey: 'reservations:'.hash('sha256', (string) $reservationIdentity),
+                        warehouseId: $warehouseId,
+                        quantities: $quantities,
+                        externalReference: (string) ($member?->external_number ?: $member?->external_id),
+                        sourceMetadata: [
+                            'source' => 'active_stock_reservations',
+                            'source_sales_channel_id' => (int) $firstReservation->sales_channel_id,
+                            'source_external_order_id' => (string) $firstReservation->external_order_id,
+                            'source_reservation_ids' => $warehouseReservations
+                                ->pluck('id')
+                                ->map(fn (mixed $id): int => (int) $id)
+                                ->values()
+                                ->all(),
+                        ],
+                    );
+                }
+            }
+
+            // Releasing the reservations in the same outer transaction as the
+            // RW prevents the stock-sync worker from observing the temporary
+            // quantity between the write-off and reservation release.
+            $released = 0;
+
+            if (! $restoreStock) {
+                foreach ($family as $member) {
+                    $reservationResult = $this->reservations->syncForOrder($member->fresh() ?? $member);
+                    $released += (int) ($reservationResult['released'] ?? 0);
+                }
+            }
+
+            return [
+                'cancelled_document_ids' => array_values(array_unique($cancelled)),
+                'write_off_document_ids' => array_values(array_unique(array_map('intval', $writeOffs))),
+                'released_reservation_pairs' => $released,
+            ];
+        }, 3);
+    }
+
+    /**
+     * @param  EloquentCollection<int, ExternalOrder>  $family
+     * @return EloquentCollection<int, StockReservation>
+     */
+    private function openReservationsForFamily(EloquentCollection $family): EloquentCollection
+    {
+        $identities = $family
+            ->map(fn (ExternalOrder $member): array => [
+                'sales_channel_id' => (int) $member->sales_channel_id,
+                'external_order_id' => (string) $member->external_id,
+            ])
+            ->unique(fn (array $identity): string => $identity['sales_channel_id'].'|'.$identity['external_order_id'])
+            ->values();
+
+        if ($identities->isEmpty()) {
+            return new EloquentCollection;
+        }
+
+        return StockReservation::query()
+            ->whereIn('status', ['active', 'waiting'])
+            ->where(function ($query) use ($identities): void {
+                foreach ($identities as $identity) {
+                    $query->orWhere(function ($pair) use ($identity): void {
+                        $pair
+                            ->where('sales_channel_id', $identity['sales_channel_id'])
+                            ->where('external_order_id', $identity['external_order_id']);
+                    });
+                }
+            })
+            ->orderBy('warehouse_id')
+            ->orderBy('product_id')
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get();
+    }
+
+    private function reservationIdentity(StockReservation $reservation): string
+    {
+        return implode('|', [
+            (int) $reservation->sales_channel_id,
+            (string) $reservation->external_order_id,
+            (int) $reservation->warehouse_id,
+        ]);
+    }
+
+    private function warehouseDocumentReservationIdentity(WarehouseDocument $document): ?string
+    {
+        $salesChannelId = (int) data_get($document->metadata, 'sales_channel_id');
+        $externalOrderId = trim((string) data_get($document->metadata, 'external_order_id'));
+        $warehouseId = (int) $document->source_warehouse_id;
+
+        if ($salesChannelId <= 0 || $externalOrderId === '' || $warehouseId <= 0) {
+            return null;
+        }
+
+        return implode('|', [$salesChannelId, $externalOrderId, $warehouseId]);
+    }
+
+    private function cancelledWzHadPostedStockMovement(WarehouseDocument $document): bool
+    {
+        if ($document->posted_at !== null) {
+            return true;
+        }
+
+        return $document->ledgerEntries()
+            ->orderBy('id')
+            ->get()
+            ->contains(fn ($entry): bool => data_get($entry->metadata, 'source') !== 'warehouse_document_cancelled');
+    }
+
+    /** @return array<int, float> */
+    private function warehouseDocumentQuantities(WarehouseDocument $document): array
+    {
+        $quantities = [];
+
+        foreach ($document->lines()->orderBy('id')->lockForUpdate()->get() as $line) {
+            $productId = (int) $line->product_id;
+            $quantities[$productId] = ($quantities[$productId] ?? 0.0) + (float) $line->quantity;
+        }
+
+        return $this->normalizedWriteOffQuantities($quantities);
+    }
+
+    /**
+     * @param  array<int, float>  $quantities
+     * @param  array<string, mixed>  $sourceMetadata
+     */
+    private function ensureCancellationWriteOff(
+        OrderCancellation $cancellation,
+        string $sourceKey,
+        int $warehouseId,
+        array $quantities,
+        string $externalReference,
+        array $sourceMetadata,
+    ): int {
+        $quantities = $this->normalizedWriteOffQuantities($quantities);
+
+        if ($quantities === []) {
+            throw new RuntimeException('Nie można utworzyć rozchodu anulacji bez dodatnich ilości towaru.');
+        }
+
+        $fulfillmentKey = mb_substr(
+            'order-cancellation-rw:'.$cancellation->uuid.':'.$sourceKey,
+            0,
+            191,
+        );
+        $candidates = WarehouseDocument::withTrashed()
+            ->where('order_fulfillment_key', $fulfillmentKey)
+            ->lockForUpdate()
+            ->get();
+
+        // Reconcile documents created by the pre-contract implementation,
+        // which linked the RW only through JSON metadata.
+        if (str_starts_with($sourceKey, 'wz:')) {
+            $sourceWzId = (int) substr($sourceKey, 3);
+            $legacy = WarehouseDocument::withTrashed()
+                ->where('type', 'RW')
+                ->where('metadata->order_cancellation_uuid', $cancellation->uuid)
+                ->where('metadata->source_wz_id', $sourceWzId)
+                ->lockForUpdate()
+                ->get();
+            $candidates = $candidates
+                ->concat($legacy)
+                ->unique('id')
+                ->values();
+        }
+
+        if ($candidates->count() > 1) {
+            throw new RuntimeException(
+                'Znaleziono więcej niż jeden dokument RW dla tego samego źródła anulacji. Wymagana jest ręczna weryfikacja magazynu.',
+            );
+        }
+
+        /** @var WarehouseDocument|null $writeOff */
+        $writeOff = $candidates->first();
+
+        if (! $writeOff instanceof WarehouseDocument) {
+            $writeOff = WarehouseDocument::query()->create([
+                'number' => $this->documentNumbers->next('RW'),
+                'type' => 'RW',
+                'status' => 'draft',
+                'source_warehouse_id' => $warehouseId,
+                'document_date' => now(),
+                'external_reference' => mb_substr(trim($externalReference), 0, 255),
+                'order_fulfillment_key' => $fulfillmentKey,
+                'notes' => 'Rozchód po anulowaniu zamówienia bez przywracania towaru do sprzedaży.',
+                'metadata' => array_merge($sourceMetadata, [
+                    'order_cancellation_uuid' => (string) $cancellation->uuid,
+                    'order_cancellation_id' => (int) $cancellation->id,
+                    'stock_disposition' => 'do_not_restore',
+                ]),
+            ]);
+        } elseif ($writeOff->trashed()) {
+            throw new RuntimeException(
+                "Powiązany dokument RW {$writeOff->number} został usunięty. Wymagana jest ręczna weryfikacja magazynu.",
+            );
+        }
+
+        if (filled($writeOff->order_fulfillment_key)
+            && $writeOff->order_fulfillment_key !== $fulfillmentKey
+        ) {
+            throw new RuntimeException(
+                "Powiązany dokument RW {$writeOff->number} należy do innej operacji magazynowej.",
+            );
+        }
+
+        $linkedCancellationUuid = trim((string) data_get(
+            $writeOff->metadata,
+            'order_cancellation_uuid',
+        ));
+
+        if ($linkedCancellationUuid !== '' && $linkedCancellationUuid !== (string) $cancellation->uuid) {
+            throw new RuntimeException(
+                "Powiązany dokument RW {$writeOff->number} należy do innej anulacji.",
+            );
+        }
+
+        if ($writeOff->type !== 'RW'
+            || (int) $writeOff->source_warehouse_id !== $warehouseId
+            || ! in_array($writeOff->status, ['draft', 'posted'], true)
+        ) {
+            throw new RuntimeException(
+                "Powiązany dokument {$writeOff->number} nie jest bezpiecznym RW do wznowienia anulacji.",
+            );
+        }
+
+        $existingQuantities = $this->normalizedWriteOffQuantities(
+            $writeOff->lines()
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get()
+                ->groupBy('product_id')
+                ->map(fn ($lines): float => (float) $lines->sum(fn ($line): float => (float) $line->quantity))
+                ->mapWithKeys(fn (float $quantity, mixed $productId): array => [(int) $productId => $quantity])
+                ->all(),
+        );
+
+        if ($existingQuantities === [] && $writeOff->status === 'draft') {
+            foreach ($quantities as $productId => $quantity) {
+                $writeOff->lines()->create([
+                    'product_id' => $productId,
+                    'quantity' => $quantity,
+                    'metadata' => ['source' => 'order_cancellation_no_restock'],
+                ]);
+            }
+        } elseif (! $this->writeOffQuantitiesMatch($existingQuantities, $quantities)) {
+            throw new RuntimeException(
+                "Powiązany dokument RW {$writeOff->number} ma inne ilości niż źródło anulacji. Wymagana jest ręczna weryfikacja magazynu.",
+            );
+        }
+
+        $writeOff->update([
+            'order_fulfillment_key' => $fulfillmentKey,
+            'metadata' => array_merge((array) $writeOff->metadata, $sourceMetadata, [
+                'order_cancellation_uuid' => (string) $cancellation->uuid,
+                'order_cancellation_id' => (int) $cancellation->id,
+                'stock_disposition' => 'do_not_restore',
+            ]),
+        ]);
+
+        if ($writeOff->status === 'draft') {
+            $this->documentPosting->post($writeOff);
+            $writeOff->refresh();
+        }
+
+        return (int) $writeOff->id;
+    }
+
+    /** @param array<int, float|int|string> $quantities @return array<int, float> */
+    private function normalizedWriteOffQuantities(array $quantities): array
+    {
+        $normalized = [];
+
+        foreach ($quantities as $productId => $quantity) {
+            $productId = (int) $productId;
+            $quantity = round((float) $quantity, 4);
+
+            if ($productId > 0 && $quantity > 0) {
+                $normalized[$productId] = $quantity;
+            }
+        }
+
+        ksort($normalized, SORT_NUMERIC);
+
+        return $normalized;
+    }
+
+    /** @param array<int, float> $left @param array<int, float> $right */
+    private function writeOffQuantitiesMatch(array $left, array $right): bool
+    {
+        if (array_keys($left) !== array_keys($right)) {
+            return false;
+        }
+
+        foreach ($left as $productId => $quantity) {
+            if (abs($quantity - $right[$productId]) > 0.00005) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
@@ -513,6 +942,24 @@ final class OrderCancellationService
                 })->exists()) {
             throw new RuntimeException('Zamówienie zostało już zrealizowane albo paczka została odebrana przez kuriera. Użyj procesu zwrotu zamiast anulowania.');
         }
+    }
+
+    /**
+     * @param  EloquentCollection<int, ExternalOrder>  $family
+     * @param  array<string, mixed>  $context
+     */
+    private function assertCancellationPreflight(
+        ExternalOrder $root,
+        EloquentCollection $family,
+        OrderCancellation $cancellation,
+        array $context,
+    ): void {
+        $this->assertCancellable($family);
+        $this->orderStatuses->assertCancellationStockDispositionSupported(
+            $root,
+            (bool) ($context['restore_stock'] ?? true),
+            (string) $cancellation->uuid,
+        );
     }
 
     /**
@@ -563,11 +1010,18 @@ final class OrderCancellationService
 
             if ($cancellation->status === 'rejected') {
                 $metadata = (array) $cancellation->metadata;
+                $persistedContext = (array) ($metadata['context'] ?? []);
                 $metadata['source'] = $this->normalizedSource($context['source'] ?? null);
                 $metadata['context'] = [
                     'preserve_packing_problem' => (bool) ($context['preserve_packing_problem'] ?? false),
                     'suppress_default_customer_notification' => (bool) ($context['suppress_default_customer_notification'] ?? false),
-                    'restore_stock' => (bool) ($context['restore_stock'] ?? true),
+                    // A retry from a screen without this field must not silently
+                    // reverse the operator's earlier no-restock decision.
+                    'restore_stock' => array_key_exists('restore_stock', $context)
+                        ? (bool) $context['restore_stock']
+                        : (array_key_exists('restore_stock', $persistedContext)
+                            ? (bool) $persistedContext['restore_stock']
+                            : true),
                 ];
                 $cancellation->update([
                     'status' => 'requested',

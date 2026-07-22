@@ -91,6 +91,7 @@ final class WarehouseDocumentPostingService
 
                     $reserved = (float) $balance->quantity_reserved;
                     $previousOnHand = (float) $balance->quantity_on_hand;
+                    $sourceBaseline = $this->sourceBaseline($balance);
                     $balance->update([
                         'quantity_on_hand' => $newOnHand,
                         'quantity_available' => max(0, $newOnHand - $reserved),
@@ -112,6 +113,7 @@ final class WarehouseDocumentPostingService
                         'metadata' => [
                             'document_number' => $document->number,
                             'document_type' => $document->type,
+                            'source_balance_before_movement' => $sourceBaseline,
                         ],
                     ]);
                     $ledgerEntryIds[] = $ledgerEntry->id;
@@ -225,7 +227,12 @@ final class WarehouseDocumentPostingService
                         }
 
                         $reserved = (float) $balance->quantity_reserved;
-                        $balance->update([
+                        $sourceBaseline = $this->restorableSourceBaseline(
+                            $document,
+                            (int) $line->id,
+                            $balance,
+                        );
+                        $balanceUpdates = [
                             'quantity_on_hand' => $newOnHand,
                             'quantity_available' => max(0, $newOnHand - $reserved),
                             'source_sales_channel_id' => null,
@@ -233,7 +240,18 @@ final class WarehouseDocumentPostingService
                             'source_observed_at' => null,
                             'source_reflected_order_quantities' => null,
                             'recalculated_at' => $cancelledAt,
-                        ]);
+                        ];
+
+                        if ($sourceBaseline !== null) {
+                            $balanceUpdates = array_merge($balanceUpdates, [
+                                'source_sales_channel_id' => $sourceBaseline['sales_channel_id'],
+                                'source_available_quantity' => $sourceBaseline['available_quantity'],
+                                'source_observed_at' => $sourceBaseline['observed_at'],
+                                'source_reflected_order_quantities' => $sourceBaseline['reflected_order_quantities'],
+                            ]);
+                        }
+
+                        $balance->update($balanceUpdates);
 
                         $ledgerEntry = StockLedgerEntry::query()->create([
                             'warehouse_document_id' => $document->id,
@@ -248,6 +266,7 @@ final class WarehouseDocumentPostingService
                                 'document_type' => $document->type,
                                 'source' => 'warehouse_document_cancelled',
                                 'reverses_original_change' => $originalQuantityChange,
+                                'source_balance_restored' => $sourceBaseline !== null,
                             ],
                         ]);
 
@@ -387,6 +406,73 @@ final class WarehouseDocumentPostingService
     private function queueStockSync(array $triggers, string $reason): void
     {
         $this->stockSyncQueue->queueForTriggers($triggers, $reason);
+    }
+
+    /** @return array<string,mixed> */
+    private function sourceBaseline(StockBalance $balance): array
+    {
+        return [
+            'sales_channel_id' => $balance->source_sales_channel_id !== null
+                ? (int) $balance->source_sales_channel_id
+                : null,
+            'available_quantity' => $balance->source_available_quantity !== null
+                ? (string) $balance->source_available_quantity
+                : null,
+            'observed_at' => $balance->getRawOriginal('source_observed_at'),
+            'reflected_order_quantities' => (array) $balance->source_reflected_order_quantities,
+        ];
+    }
+
+    /** @return array<string,mixed>|null */
+    private function restorableSourceBaseline(
+        WarehouseDocument $document,
+        int $documentLineId,
+        StockBalance $balance,
+    ): ?array {
+        // A source snapshot imported after the WZ was posted supersedes the
+        // old baseline, so it must not be replaced with the older snapshot.
+        // The inverse warehouse movement below deliberately switches the
+        // balance to local mode because that newer snapshot predates the
+        // cancellation and can no longer be treated as current stock.
+        if ($balance->source_sales_channel_id !== null
+            || $balance->source_available_quantity !== null
+            || $balance->source_observed_at !== null
+            || (array) $balance->source_reflected_order_quantities !== []) {
+            return null;
+        }
+
+        $originalEntry = StockLedgerEntry::query()
+            ->where('warehouse_document_id', $document->id)
+            ->where('warehouse_document_line_id', $documentLineId)
+            ->where('warehouse_id', $balance->warehouse_id)
+            ->where('product_id', $balance->product_id)
+            ->orderBy('id')
+            ->get()
+            ->first(fn (StockLedgerEntry $entry): bool => is_array(
+                data_get($entry->metadata, 'source_balance_before_movement'),
+            ));
+
+        if (! $originalEntry instanceof StockLedgerEntry) {
+            return null;
+        }
+
+        $baseline = data_get($originalEntry->metadata, 'source_balance_before_movement');
+
+        if (! is_array($baseline)
+            || ! is_numeric($baseline['sales_channel_id'] ?? null)
+            || ! is_numeric($baseline['available_quantity'] ?? null)
+            || blank($baseline['observed_at'] ?? null)) {
+            return null;
+        }
+
+        $hasUnrelatedMovement = StockLedgerEntry::query()
+            ->where('warehouse_id', $balance->warehouse_id)
+            ->where('product_id', $balance->product_id)
+            ->where('id', '>', $originalEntry->id)
+            ->where('warehouse_document_id', '!=', $document->id)
+            ->exists();
+
+        return $hasUnrelatedMovement ? null : $baseline;
     }
 
     /**

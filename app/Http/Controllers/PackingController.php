@@ -263,13 +263,13 @@ class PackingController extends Controller
             'task_ids' => ['required', 'array', 'min:1'],
             'task_ids.*' => ['integer', 'exists:packing_tasks,id'],
             'reason' => ['required', 'string', 'max:1000'],
-            'restore_stock' => ['sometimes', 'boolean'],
+            'restore_stock' => ['required', 'boolean'],
         ]);
 
         $reason = trim((string) $data['reason']);
 
         try {
-            $result = $problems->reportTasks($data['task_ids'], $reason, (bool) ($data['restore_stock'] ?? true));
+            $result = $problems->reportTasks($data['task_ids'], $reason, (bool) $data['restore_stock']);
         } catch (RuntimeException $exception) {
             return $this->packingActionError($request, $exception->getMessage());
         }
@@ -462,13 +462,13 @@ class PackingController extends Controller
     {
         $data = $request->validate([
             'reason' => ['required', 'string', 'max:1000'],
-            'restore_stock' => ['sometimes', 'boolean'],
+            'restore_stock' => ['required', 'boolean'],
         ]);
 
         $reason = trim((string) $data['reason']);
 
         try {
-            $result = $problems->reportOrder($order, $reason, (bool) ($data['restore_stock'] ?? true));
+            $result = $problems->reportOrder($order, $reason, (bool) $data['restore_stock']);
         } catch (RuntimeException $exception) {
             return $this->packingActionError($request, $exception->getMessage());
         }

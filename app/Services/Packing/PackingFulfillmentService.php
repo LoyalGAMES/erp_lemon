@@ -442,6 +442,13 @@ final class PackingFulfillmentService
     {
         $order->refresh();
 
+        if ($order->familyHasSplitReversalOperation()) {
+            return [
+                'tasks' => 0,
+                'warnings' => ["Zamówienie {$order->external_number}: trwa niedokończone cofanie podziału."],
+            ];
+        }
+
         if ($order->hasCancellationOperation()
             || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
             return [
@@ -512,6 +519,13 @@ final class PackingFulfillmentService
 
         $transition = DB::transaction(function () use ($order, $context, $pickedUpAt, $wooSync): array {
             $lockedOrder = ExternalOrder::query()->lockForUpdate()->findOrFail($order->id);
+
+            if ($lockedOrder->familyHasSplitReversalOperation()) {
+                throw new RuntimeException(
+                    "Zamówienie {$lockedOrder->external_number}: trwa niedokończone cofanie podziału.",
+                );
+            }
+
             $lockedTasks = PackingTask::query()
                 ->where('external_order_id', $lockedOrder->id)
                 ->where('status', '!=', 'cancelled')
@@ -595,6 +609,8 @@ final class PackingFulfillmentService
      */
     private function undoPackedOrderWhileLocked(ExternalOrder $order, ?string $reason = null): array
     {
+        $order->refresh();
+        $this->assertOrderNotCancelling($order);
         $reason = trim((string) $reason);
         $rolledBackAt = now();
 
@@ -682,6 +698,12 @@ final class PackingFulfillmentService
 
     private function assertOrderNotCancelling(ExternalOrder $order): void
     {
+        if ($order->familyHasSplitReversalOperation()) {
+            throw new RuntimeException(
+                'Nie można kontynuować pakowania podczas niedokończonego cofania podziału zamówienia.',
+            );
+        }
+
         if ($order->hasCancellationOperation()
             || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
             throw new RuntimeException('Nie można kontynuować pakowania anulowanego zamówienia ani podczas trwającej anulacji.');
