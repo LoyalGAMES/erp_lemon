@@ -103,10 +103,13 @@ class PrintBridgeController extends Controller
             'message' => ['nullable', 'string', 'max:500'],
         ]);
 
-        $queue->assertLease($job, $data['lease_token'], (string) ($data['worker'] ?? ''), $data['station'], ['printing', 'printed']);
-        $job = $queue->markPrinted($job, $data['worker'] ?? null, [
-            'bridge_message' => $data['message'] ?? null,
-        ]);
+        $job = $queue->markPrinted(
+            $job,
+            $data['lease_token'],
+            (string) $data['worker'],
+            $data['station'],
+            ['bridge_message' => $data['message'] ?? null],
+        );
 
         return response()->json([
             'success' => true,
@@ -124,8 +127,13 @@ class PrintBridgeController extends Controller
             'error' => ['required', 'string', 'max:2000'],
         ]);
 
-        $queue->assertLease($job, $data['lease_token'], (string) ($data['worker'] ?? ''), $data['station'], ['printing', 'pending', 'failed']);
-        $job = $queue->markFailed($job, $data['error'], $data['worker'] ?? null);
+        $job = $queue->markFailed(
+            $job,
+            $data['error'],
+            $data['lease_token'],
+            (string) $data['worker'],
+            $data['station'],
+        );
 
         return response()->json([
             'success' => true,

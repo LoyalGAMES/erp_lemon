@@ -20,6 +20,7 @@ use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
 use Tests\TestCase;
 
 class PrintBridgeWorkflowTest extends TestCase
@@ -321,6 +322,55 @@ class PrintBridgeWorkflowTest extends TestCase
         $this->assertDatabaseHas('print_jobs', ['id' => $job->id, 'status' => 'printing']);
     }
 
+    public function test_stale_acknowledgements_cannot_resurrect_a_cancelled_print_job(): void
+    {
+        $label = $this->createLabel();
+        $queue = app(ShippingLabelPrintQueueService::class);
+        $station = [
+            'code' => 'station-1',
+            'name' => 'Stanowisko pakowania',
+            'printer_name' => 'Zebra ZD421',
+            'segment' => 'all',
+        ];
+
+        foreach (['printed', 'failed'] as $acknowledgement) {
+            $job = $queue->requeueForStation(
+                $label,
+                $station,
+                'test-stale-'.$acknowledgement,
+                $acknowledgement.'-'.str_repeat('1', 36),
+            );
+            $lease = str_repeat($acknowledgement === 'printed' ? 'd' : 'e', 64);
+            $job->forceFill([
+                'status' => 'printing',
+                'attempts' => 1,
+                'reserved_by' => 'PACK-PC-1',
+                'reserved_station' => 'station-1',
+                'reserved_at' => now(),
+                'lease_token' => $lease,
+            ])->save();
+            $stale = $job->fresh();
+            $job->forceFill([
+                'status' => 'cancelled',
+                'reserved_by' => null,
+                'reserved_station' => null,
+                'reserved_at' => null,
+                'lease_token' => null,
+            ])->save();
+
+            try {
+                if ($acknowledgement === 'printed') {
+                    $queue->markPrinted($stale, $lease, 'PACK-PC-1', 'station-1');
+                } else {
+                    $queue->markFailed($stale, 'stary błąd', $lease, 'PACK-PC-1', 'station-1');
+                }
+                $this->fail('Spóźnione potwierdzenie nie może zmienić anulowanego zadania.');
+            } catch (ConflictHttpException) {
+                $this->assertSame('cancelled', $job->fresh()->status);
+            }
+        }
+    }
+
     public function test_enqueuing_the_same_label_is_idempotent(): void
     {
         $label = $this->createLabel();
@@ -425,7 +475,12 @@ class PrintBridgeWorkflowTest extends TestCase
         $this->assertSame($active?->id, $bound?->id);
         $this->assertSame([$requestToken], data_get($bound?->metadata, 'manual_request_tokens'));
 
-        $printed = $queue->markPrinted($staleAcknowledgementModel, 'PACK-PC-1');
+        $printed = $queue->markPrinted(
+            $staleAcknowledgementModel,
+            str_repeat('c', 64),
+            'PACK-PC-1',
+            'station-1',
+        );
 
         $lostResponseRetry = $queue->requeueForStation($label, $station, 'packing.waiting.manual', $requestToken);
 

@@ -17,6 +17,7 @@ use App\Http\Controllers\KsefController;
 use App\Http\Controllers\LedgerController;
 use App\Http\Controllers\ModuleController;
 use App\Http\Controllers\OrderSettlementController;
+use App\Http\Controllers\PackedOrderPickingResetController;
 use App\Http\Controllers\PackingController;
 use App\Http\Controllers\ProductConfigurationController;
 use App\Http\Controllers\ProductController;
@@ -52,6 +53,8 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
     Route::middleware(EnsureErpRole::class.':settings')->group(function (): void {
         Route::post('/orders/{order}/split/historical-reconciliation', HistoricalSplitReconciliationController::class)
             ->name('orders.split.historical-reconciliation');
+        Route::post('/orders/{order}/reset-to-picking', PackedOrderPickingResetController::class)
+            ->name('orders.reset-to-picking');
         Route::get('/settings', SettingsController::class)->name('settings.index');
         Route::get('/settings/documents', [SettingsController::class, 'documents'])->name('settings.documents');
         Route::get('/settings/returns', [SettingsController::class, 'returns'])->name('settings.returns');

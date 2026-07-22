@@ -824,7 +824,7 @@
                                         <form class="order-rollback-form" method="POST" action="{{ route('packing.orders.unpack', $queuedOrder['id']) }}">
                                             @csrf
                                             <input name="reason" placeholder="Powód cofnięcia">
-                                            <button class="button secondary" type="submit">Cofnij</button>
+                                            <button class="button secondary" type="submit">Cofnij pakowanie — do etapu pakowania</button>
                                         </form>
                                     </div>
                                 @endforeach
@@ -1029,7 +1029,7 @@
                                 <form class="order-rollback-form" method="POST" action="{{ route('packing.orders.unpack', $historyOrder['order_id']) }}">
                                     @csrf
                                     <input name="reason" placeholder="Powód cofnięcia">
-                                    <button class="button secondary" type="submit">Cofnij pakowanie</button>
+                                    <button class="button secondary" type="submit">Cofnij pakowanie — do etapu pakowania</button>
                                 </form>
                             </div>
                         @endif

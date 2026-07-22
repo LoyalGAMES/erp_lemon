@@ -10,6 +10,9 @@ use App\Models\PackingTask;
 use App\Models\ShippingLabel;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Packing\PackingFulfillmentService;
+use Illuminate\Contracts\Cache\LockTimeoutException;
+use Illuminate\Support\Facades\Cache;
+use RuntimeException;
 use Throwable;
 
 /**
@@ -158,6 +161,8 @@ final class CourierPickupTrackingService
                 continue;
             }
 
+            $pickingResetRequestUuidAtStart = $this->pickingResetRequestUuid($order);
+
             try {
                 $status = $this->statusForLabel($label);
             } catch (Throwable $exception) {
@@ -216,10 +221,18 @@ final class CourierPickupTrackingService
             // na API trackingu. Aktualizujemy wyłącznie nadal aktywny rekord;
             // jeżeli anulowanie wygrało wyścig, stara odpowiedź kuriera jest
             // odrzucana i nigdy nie otwiera ponownie anulowanej przesyłki.
-            $updated = ShippingLabel::query()
-                ->whereKey($label->id)
-                ->where('status', $wasPickedUp ? 'picked_up' : 'generated')
-                ->update($trackingUpdates);
+            try {
+                $updated = $this->applyTrackingUpdatesWhileOrderIsStillEligible(
+                    $label,
+                    $wasPickedUp ? 'picked_up' : 'generated',
+                    $trackingUpdates,
+                    $pickingResetRequestUuidAtStart,
+                );
+            } catch (RuntimeException $exception) {
+                $warnings[] = $exception->getMessage();
+
+                continue;
+            }
 
             if ($updated !== 1) {
                 continue;
@@ -353,5 +366,69 @@ final class CourierPickupTrackingService
     private function retryDelayMinutes(int $attempts): int
     {
         return min(360, 5 * (2 ** min(6, max(0, $attempts - 1))));
+    }
+
+    /** @param array<string,mixed> $trackingUpdates */
+    private function applyTrackingUpdatesWhileOrderIsStillEligible(
+        ShippingLabel $label,
+        string $expectedLabelStatus,
+        array $trackingUpdates,
+        ?string $pickingResetRequestUuidAtStart,
+    ): int {
+        try {
+            return Cache::lock('packing-fulfillment-order-'.$label->external_order_id, 900)
+                ->block(15, fn (): int => Cache::lock('shipping-label-order-'.$label->external_order_id, 900)
+                    ->block(15, function () use (
+                        $label,
+                        $expectedLabelStatus,
+                        $trackingUpdates,
+                        $pickingResetRequestUuidAtStart,
+                    ): int {
+                        $currentLabel = ShippingLabel::query()
+                            ->with('order')
+                            ->whereKey($label->id)
+                            ->where('status', $expectedLabelStatus)
+                            ->first();
+                        $order = $currentLabel?->order;
+
+                        if (! $currentLabel instanceof ShippingLabel || ! $order instanceof ExternalOrder) {
+                            return 0;
+                        }
+
+                        $taskStatuses = PackingTask::query()
+                            ->where('external_order_id', $order->id)
+                            ->where('status', '!=', 'cancelled')
+                            ->pluck('status');
+
+                        if ($taskStatuses->isEmpty()
+                            || ! $taskStatuses->every(fn (string $status): bool => in_array($status, ['packed', 'shipped'], true))
+                            || $order->hasCancellationOperation()
+                            || in_array((string) $order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)
+                            || $this->pickingResetRequestUuid($order) !== $pickingResetRequestUuidAtStart) {
+                            return 0;
+                        }
+
+                        return ShippingLabel::query()
+                            ->whereKey($currentLabel->id)
+                            ->where('status', $expectedLabelStatus)
+                            ->update($trackingUpdates);
+                    }));
+        } catch (LockTimeoutException $exception) {
+            throw new RuntimeException(
+                'Pominięto zapis statusu przewoźnika, ponieważ zamówienie jest właśnie korygowane. Status zostanie sprawdzony ponownie.',
+                previous: $exception,
+            );
+        }
+    }
+
+    private function pickingResetRequestUuid(ExternalOrder $order): ?string
+    {
+        $uuid = mb_strtolower(trim((string) data_get(
+            $order->raw_payload,
+            'sempre_erp_picking_reset.request_uuid',
+            '',
+        )));
+
+        return $uuid !== '' ? $uuid : null;
     }
 }

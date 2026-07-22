@@ -7,6 +7,7 @@ namespace App\Services\Printing;
 use App\Models\PrintJob;
 use App\Models\ShippingLabel;
 use App\Services\Audit\AuditLogService;
+use App\Services\Shipping\ShippingLabelService;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Symfony\Component\HttpKernel\Exception\ConflictHttpException;
@@ -17,6 +18,7 @@ final class ShippingLabelPrintQueueService
 
     public function __construct(
         private readonly AuditLogService $audit,
+        private readonly ShippingLabelService $shippingLabels,
     ) {}
 
     /**
@@ -42,7 +44,8 @@ final class ShippingLabelPrintQueueService
             $stationCode,
             $deduplicationKey,
         ): PrintJob {
-            ShippingLabel::query()->whereKey($label->id)->lockForUpdate()->firstOrFail();
+            $label = ShippingLabel::query()->whereKey($label->id)->lockForUpdate()->firstOrFail();
+            $this->assertPreservedPickingResetLabelCanBePrinted($label);
 
             $existing = PrintJob::query()->where('deduplication_key', $deduplicationKey)->first();
             if (! $existing instanceof PrintJob) {
@@ -173,7 +176,8 @@ final class ShippingLabelPrintQueueService
             $stationCode,
             $deduplicationKey,
         ): PrintJob {
-            ShippingLabel::query()->whereKey($label->id)->lockForUpdate()->firstOrFail();
+            $label = ShippingLabel::query()->whereKey($label->id)->lockForUpdate()->firstOrFail();
+            $this->assertPreservedPickingResetLabelCanBePrinted($label);
 
             $jobsQuery = PrintJob::query()
                 ->where('shipping_label_id', $label->id)
@@ -302,10 +306,16 @@ final class ShippingLabelPrintQueueService
     /**
      * @param  array<string, mixed>  $metadata
      */
-    public function markPrinted(PrintJob $job, ?string $workerName = null, array $metadata = []): PrintJob
-    {
-        return DB::transaction(function () use ($job, $workerName, $metadata): PrintJob {
+    public function markPrinted(
+        PrintJob $job,
+        string $leaseToken,
+        string $workerName,
+        string $stationCode,
+        array $metadata = [],
+    ): PrintJob {
+        return DB::transaction(function () use ($job, $leaseToken, $workerName, $stationCode, $metadata): PrintJob {
             $locked = PrintJob::query()->lockForUpdate()->findOrFail($job->id);
+            $this->assertLease($locked, $leaseToken, $workerName, $stationCode, ['printing', 'printed']);
 
             if ($locked->status === 'printed') {
                 return $locked->fresh();
@@ -313,7 +323,7 @@ final class ShippingLabelPrintQueueService
 
             $locked->update([
                 'status' => 'printed',
-                'reserved_by' => $workerName ?: $locked->reserved_by,
+                'reserved_by' => $workerName,
                 'printed_at' => now(),
                 'failed_at' => null,
                 'last_error' => null,
@@ -323,38 +333,48 @@ final class ShippingLabelPrintQueueService
             $this->audit->record('print_job.printed', $locked, null, [
                 'shipping_label_id' => $locked->shipping_label_id,
                 'printer_name' => $locked->printer_name,
-                'worker' => $workerName ?: $locked->reserved_by,
+                'worker' => $workerName,
             ]);
 
             return $locked->fresh();
         });
     }
 
-    public function markFailed(PrintJob $job, string $error, ?string $workerName = null): PrintJob
-    {
-        if ($job->status !== 'printing') {
-            return $job->fresh();
-        }
-        $retry = $job->attempts < self::MAX_ATTEMPTS;
+    public function markFailed(
+        PrintJob $job,
+        string $error,
+        string $leaseToken,
+        string $workerName,
+        string $stationCode,
+    ): PrintJob {
+        return DB::transaction(function () use ($job, $error, $leaseToken, $workerName, $stationCode): PrintJob {
+            $locked = PrintJob::query()->lockForUpdate()->findOrFail($job->id);
+            $this->assertLease($locked, $leaseToken, $workerName, $stationCode, ['printing', 'pending', 'failed']);
 
-        $job->update([
-            'status' => $retry ? 'pending' : 'failed',
-            'reserved_by' => $workerName ?: $job->reserved_by,
-            'reserved_at' => null,
-            'next_attempt_at' => $retry ? now()->addSeconds(min(300, max(10, $job->attempts * 30))) : null,
-            'failed_at' => $retry ? null : now(),
-            'last_error' => mb_substr($error, 0, 2000),
-        ]);
+            if ($locked->status !== 'printing') {
+                return $locked->fresh();
+            }
 
-        $this->audit->record('print_job.failed', $job, null, [
-            'shipping_label_id' => $job->shipping_label_id,
-            'printer_name' => $job->printer_name,
-            'worker' => $workerName ?: $job->reserved_by,
-            'will_retry' => $retry,
-            'error' => mb_substr($error, 0, 500),
-        ]);
+            $retry = $locked->attempts < self::MAX_ATTEMPTS;
+            $locked->update([
+                'status' => $retry ? 'pending' : 'failed',
+                'reserved_by' => $workerName,
+                'reserved_at' => null,
+                'next_attempt_at' => $retry ? now()->addSeconds(min(300, max(10, $locked->attempts * 30))) : null,
+                'failed_at' => $retry ? null : now(),
+                'last_error' => mb_substr($error, 0, 2000),
+            ]);
 
-        return $job->fresh();
+            $this->audit->record('print_job.failed', $locked, null, [
+                'shipping_label_id' => $locked->shipping_label_id,
+                'printer_name' => $locked->printer_name,
+                'worker' => $workerName,
+                'will_retry' => $retry,
+                'error' => mb_substr($error, 0, 500),
+            ]);
+
+            return $locked->fresh();
+        });
     }
 
     public function assertLease(PrintJob $job, string $leaseToken, string $workerName, string $stationCode, array $allowedStatuses = ['printing']): void
@@ -409,6 +429,40 @@ final class ShippingLabelPrintQueueService
         }
 
         return 'pdf';
+    }
+
+    private function assertPreservedPickingResetLabelCanBePrinted(ShippingLabel $label): void
+    {
+        $order = $label->order()->first();
+
+        if ($order === null
+            || (string) data_get($order->raw_payload, 'sempre_erp_picking_reset.status') !== 'completed') {
+            return;
+        }
+
+        $preservedLabelIds = collect((array) data_get(
+            $order->raw_payload,
+            'sempre_erp_picking_reset.preserved_label_ids',
+            [],
+        ))->map(fn (mixed $id): int => (int) $id);
+
+        if (! $preservedLabelIds->contains((int) $label->id)) {
+            return;
+        }
+
+        $this->shippingLabels->assertPreservedPickingResetLabelCanBeReused($order, $label);
+
+        $taskStatuses = $order->packingTasks()
+            ->where('status', '!=', 'cancelled')
+            ->pluck('status');
+
+        if ((string) $order->fulfillment_status !== 'awaiting_courier'
+            || $taskStatuses->isEmpty()
+            || ! $taskStatuses->every(fn (string $status): bool => $status === 'packed')) {
+            throw new ConflictHttpException(
+                'Zachowana etykieta może zostać ponownie wydrukowana dopiero po ponownym spakowaniu całego zamówienia.',
+            );
+        }
     }
 
     private function releaseStaleReservations(): void

@@ -1320,10 +1320,12 @@ final class WooCommerceImportService
         array $splitAllocations,
         bool $hasActiveSplitChildren,
     ): array {
-        $splitReversalMarker = data_get($existingRawPayload, 'sempre_erp_split_reversal');
+        foreach (['sempre_erp_split_reversal', 'sempre_erp_picking_reset'] as $localMarkerKey) {
+            $localMarker = data_get($existingRawPayload, $localMarkerKey);
 
-        if (is_array($splitReversalMarker)) {
-            $item['sempre_erp_split_reversal'] = $splitReversalMarker;
+            if (is_array($localMarker)) {
+                $item[$localMarkerKey] = $localMarker;
+            }
         }
 
         if (! $hasActiveSplitChildren && $splitAllocations === []) {

@@ -28,6 +28,7 @@ use App\Services\Orders\OrderMutationLock;
 use App\Services\Orders\OrderPaymentLinkService;
 use App\Services\Orders\OrderSplitReversalService;
 use App\Services\Orders\OrderSplitService;
+use App\Services\Packing\PackedOrderPickingResetService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Packing\ProductSegmentService;
 use App\Services\Payments\OrderSettlementService;
@@ -60,6 +61,7 @@ class ExternalOrderController extends Controller
         OrderSplitService $splitter,
         OrderSplitReversalService $splitReversalService,
         HistoricalSplitReconciliationService $historicalSplitReconciliationService,
+        PackedOrderPickingResetService $packedOrderPickingResetService,
     ): View {
         $order->load([
             'salesChannel',
@@ -128,6 +130,11 @@ class ExternalOrderController extends Controller
             && ! is_array(data_get($splitReversal['root']->raw_payload, 'sempre_erp_split_original'))
                 ? $historicalSplitReconciliationService->preview($order)
                 : null;
+        $packedOrderPickingReset = Auth::user()?->isAdministrator() === true
+            && (in_array((string) $order->fulfillment_status, ['awaiting_courier', 'picking'], true)
+                || is_array(data_get($order->raw_payload, 'sempre_erp_picking_reset')))
+                    ? $packedOrderPickingResetService->preview($order)
+                    : null;
 
         return view('orders.show', [
             'title' => 'Zamówienie '.($order->external_number ?: $order->external_id),
@@ -179,6 +186,8 @@ class ExternalOrderController extends Controller
             'splitAvailability' => $splitAvailability,
             'splitReversal' => $splitReversal,
             'historicalSplitReconciliation' => $historicalSplitReconciliation,
+            'packedOrderPickingReset' => $packedOrderPickingReset,
+            'pickingResetOperationId' => (string) Str::uuid(),
             'splitFamily' => $splitReversal['family'],
         ]);
     }
@@ -854,6 +863,25 @@ class ExternalOrderController extends Controller
         ExternalOrder $order,
         ShippingLabelService $shippingLabels,
     ): RedirectResponse {
+        $pickingReset = data_get($order->raw_payload, 'sempre_erp_picking_reset');
+        $preservedLabel = is_array($pickingReset)
+            && (string) ($pickingReset['status'] ?? '') === 'completed'
+                ? ShippingLabel::query()
+                    ->shipments()
+                    ->where('external_order_id', $order->id)
+                    ->where('status', 'generated')
+                    ->latest('generated_at')
+                    ->latest('id')
+                    ->first()
+                : null;
+
+        if ($preservedLabel instanceof ShippingLabel) {
+            return back()->with(
+                'error',
+                'Dla tego zamówienia zachowano etykietę '.$preservedLabel->trackingIdentifier().'. Nie utworzono drugiej przesyłki; istniejąca etykieta zostanie użyta przy ponownym pakowaniu.',
+            );
+        }
+
         $data = $request->validate([
             'courier_account_id' => ['nullable', 'integer', 'exists:courier_accounts,id'],
         ]);

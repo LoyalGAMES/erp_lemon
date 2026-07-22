@@ -129,6 +129,7 @@ final class ShippingCancellationService
             return Cache::lock('shipping-label-order-'.$label->external_order_id, self::LOCK_SECONDS)
                 ->block(self::WAIT_SECONDS, function () use ($label): array {
                     $label = ShippingLabel::query()->with('courierAccount')->findOrFail($label->id);
+                    $this->assertNotPreservedPickingResetLabel($label);
                     $this->assertNotDispatched($label);
                     $printResult = $this->cancelPrintJobs(
                         new Collection([$label]),
@@ -730,6 +731,31 @@ final class ShippingCancellationService
             ->sort()
             ->values()
             ->all();
+    }
+
+    private function assertNotPreservedPickingResetLabel(ShippingLabel $label): void
+    {
+        $order = ExternalOrder::query()->find($label->external_order_id);
+
+        if (! $order instanceof ExternalOrder
+            || (string) data_get($order->raw_payload, 'sempre_erp_picking_reset.status') !== 'completed') {
+            return;
+        }
+
+        $preservedLabelIds = collect((array) data_get(
+            $order->raw_payload,
+            'sempre_erp_picking_reset.preserved_label_ids',
+            [],
+        ))
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->unique();
+
+        if ($preservedLabelIds->contains((int) $label->id)) {
+            throw new RuntimeException(
+                'Ta etykieta została zachowana podczas cofnięcia zamówienia do kompletacji i ma zostać użyta przy ponownym pakowaniu. Nie można jej usunąć z poziomu zamówienia.',
+            );
+        }
     }
 
     /**

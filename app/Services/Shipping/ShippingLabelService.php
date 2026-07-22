@@ -71,6 +71,27 @@ final class ShippingLabelService
         }
     }
 
+    public function assertPreservedPickingResetLabelCanBeReused(
+        ExternalOrder $order,
+        ShippingLabel $label,
+    ): void {
+        $order = ExternalOrder::query()->findOrFail($order->id);
+
+        if (! $this->hasCompletedPickingReset($order)) {
+            return;
+        }
+
+        $preservedLabel = $this->preservedPickingResetLabel($order);
+
+        if (! $preservedLabel instanceof ShippingLabel || (int) $preservedLabel->id !== (int) $label->id) {
+            throw new RuntimeException(
+                'Zapisana etykieta nie odpowiada etykiecie zachowanej podczas cofnięcia do kompletacji. Wymagana jest ręczna weryfikacja.',
+            );
+        }
+
+        $this->assertPreservedPickingResetFinancialState($order);
+    }
+
     private function registerManualShipmentWhileLocked(
         ExternalOrder $order,
         string $provider,
@@ -83,6 +104,17 @@ final class ShippingLabelService
         }
 
         $this->ensureSplitReversalNotInProgress($order);
+
+        if ($this->hasCompletedPickingReset($order)) {
+            $preservedLabel = $this->preservedPickingResetLabel($order);
+            $tracking = $preservedLabel?->trackingIdentifier();
+
+            throw new RuntimeException(
+                $tracking
+                    ? "Dla tego zamówienia zachowano etykietę {$tracking}. Nie można dopisać drugiej przesyłki."
+                    : 'Zamówienie ma zapisane cofnięcie do kompletacji z zachowaniem etykiety, ale etykiety nie udało się odnaleźć. Wymagana jest ręczna weryfikacja.',
+            );
+        }
 
         $provider = mb_strtolower(trim($provider));
         $trackingNumber = trim($trackingNumber);
@@ -153,6 +185,26 @@ final class ShippingLabelService
         if ($order->hasCancellationOperation()
             || in_array($order->status, ['cancellation-pending', 'cancelled', 'refunded'], true)) {
             throw new RuntimeException('Nie można wygenerować etykiety dla anulowanego zamówienia ani podczas trwającej anulacji.');
+        }
+
+        if ($this->hasCompletedPickingReset($order)) {
+            $preservedLabel = $this->preservedPickingResetLabel($order);
+
+            if (! $preservedLabel instanceof ShippingLabel) {
+                throw new RuntimeException(
+                    'Zamówienie ma zapisane cofnięcie do kompletacji z zachowaniem etykiety, ale etykiety nie udało się odnaleźć. Wymagana jest ręczna weryfikacja.',
+                );
+            }
+
+            $this->assertPreservedPickingResetLabelCanBeReused($order, $preservedLabel);
+
+            if ($forceNew) {
+                throw new RuntimeException(
+                    'Dla tego zamówienia zachowano etykietę '.$preservedLabel->trackingIdentifier().'. Nie można wygenerować drugiej przesyłki; użyj istniejącej etykiety.',
+                );
+            }
+
+            return $preservedLabel;
         }
 
         $pendingAttempt = $this->pendingDirectGenerationAttempt($order);
@@ -1243,6 +1295,71 @@ final class ShippingLabelService
         if ($order->familyHasSplitReversalOperation()) {
             throw new RuntimeException(
                 'Nie można wygenerować ani wznowić etykiety, dopóki nie zostanie dokończone cofnięcie podziału zamówienia.',
+            );
+        }
+    }
+
+    private function hasCompletedPickingReset(ExternalOrder $order): bool
+    {
+        return (string) data_get($order->raw_payload, 'sempre_erp_picking_reset.status') === 'completed';
+    }
+
+    private function preservedPickingResetLabel(ExternalOrder $order): ?ShippingLabel
+    {
+        $labelIds = collect((array) data_get(
+            $order->raw_payload,
+            'sempre_erp_picking_reset.preserved_label_ids',
+            [],
+        ))
+            ->map(fn (mixed $id): int => (int) $id)
+            ->filter(fn (int $id): bool => $id > 0)
+            ->unique()
+            ->values();
+
+        if ($labelIds->count() !== 1) {
+            return null;
+        }
+
+        return ShippingLabel::query()
+            ->shipments()
+            ->where('external_order_id', $order->id)
+            ->whereKey($labelIds->first())
+            ->where('status', 'generated')
+            ->first();
+    }
+
+    private function assertPreservedPickingResetFinancialState(ExternalOrder $order): void
+    {
+        $snapshot = data_get($order->raw_payload, 'sempre_erp_picking_reset.financial_snapshot');
+
+        if (! is_array($snapshot)
+            || ! array_key_exists('cash_on_delivery', $snapshot)
+            || ! is_numeric($snapshot['order_total'] ?? null)
+            || trim((string) ($snapshot['currency'] ?? '')) === '') {
+            throw new RuntimeException(
+                'Brak pełnego zapisu finansowego z chwili zachowania etykiety. Przed ponownym użyciem wymagana jest ręczna weryfikacja.',
+            );
+        }
+
+        $currentCashOnDelivery = $this->paymentMethods->isCashOnDelivery($order);
+        $savedCashOnDelivery = (bool) $snapshot['cash_on_delivery'];
+        $currentCurrency = strtoupper(trim((string) $order->currency));
+        $savedCurrency = strtoupper(trim((string) $snapshot['currency']));
+
+        if ($currentCashOnDelivery !== $savedCashOnDelivery
+            || abs(round((float) $order->total_gross, 2) - round((float) $snapshot['order_total'], 2)) > 0.009
+            || $currentCurrency !== $savedCurrency) {
+            throw new RuntimeException(
+                'Kwota, waluta albo sposób płatności zamówienia zmieniły się po zachowaniu etykiety. Nie można jej automatycznie użyć.',
+            );
+        }
+
+        if ($savedCashOnDelivery
+            && (! is_numeric($snapshot['cod_amount'] ?? null)
+                || abs(round((float) $snapshot['cod_amount'], 2) - round((float) $order->total_gross, 2)) > 0.009
+                || strtoupper(trim((string) ($snapshot['cod_currency'] ?? ''))) !== $currentCurrency)) {
+            throw new RuntimeException(
+                'Zapis COD zachowanej etykiety nie odpowiada bieżącej kwocie lub walucie zamówienia.',
             );
         }
     }

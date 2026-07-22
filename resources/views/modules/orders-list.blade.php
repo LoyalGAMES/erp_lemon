@@ -236,6 +236,7 @@
                                 <div class="order-meta">ERP: <span @class(['status', $statusTone($order->fulfillment_status)])>{{ match ($order->fulfillment_status) {
                                     'awaiting_courier' => 'oczekuje na kuriera',
                                     'ready_to_pack' => 'do pakowania',
+                                    'picking' => 'kompletacja',
                                     'shipped' => 'wysłane',
                                     default => $order->fulfillment_status,
                                 } }}</span></div>

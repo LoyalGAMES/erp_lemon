@@ -42,9 +42,17 @@
             ?: $thumbnailService->thumbnailUrl(is_string($source) ? $source : null, 72, 88);
     };
     $shipmentLabels = $order->shippingLabels->where('purpose', 'shipment');
+    $preservedResetLabelIds = collect((array) data_get($order->raw_payload, 'sempre_erp_picking_reset.preserved_label_ids', []))
+        ->map(fn ($id): int => (int) $id)
+        ->filter()
+        ->values();
+    $hasPreservedResetLabel = (string) data_get($order->raw_payload, 'sempre_erp_picking_reset.status') === 'completed'
+        && $shipmentLabels->contains(fn ($label): bool => (string) $label->status === 'generated'
+            && $preservedResetLabelIds->contains((int) $label->id));
     $fulfillmentStatusLabel = match ($order->fulfillment_status) {
         'awaiting_courier' => 'Oczekuje na kuriera',
         'ready_to_pack' => 'Do pakowania',
+        'picking' => 'Kompletacja',
         'shipped' => 'Wysłane',
         default => $order->fulfillment_status ?: 'Nie rozpoczęto',
     };
@@ -755,6 +763,81 @@
                 </table>
             </div>
             <div class="order-section-body">
+                @if (is_array($packedOrderPickingReset))
+                    @if ($packedOrderPickingReset['completed'])
+                        <div class="alert" style="margin: 0 0 14px;">
+                            @if ((string) $order->fulfillment_status === 'picking')
+                                <strong>Zamówienie jest ponownie w kompletacji.</strong>
+                                Towary mają aktywne rezerwacje, a etykieta
+                                {{ implode(', ', (array) data_get($order->raw_payload, 'sempre_erp_picking_reset.preserved_tracking_numbers', [])) ?: 'zapisana wcześniej' }}
+                                pozostaje do wykorzystania przy ponownym pakowaniu.
+                            @else
+                                <strong>Cofnięcie do kompletacji zostało wcześniej wykonane.</strong>
+                                Bieżący etap zamówienia: {{ $fulfillmentStatusLabel }}.
+                            @endif
+                        </div>
+                    @elseif ($packedOrderPickingReset['available'])
+                        @php
+                            $pickingResetPlan = $packedOrderPickingReset['plan'];
+                        @endphp
+                        <div class="alert warning" style="margin: 0 0 14px;">
+                            <strong>Cofnięcie do kompletacji — towar wraca na półkę.</strong>
+                            <p>
+                                System wyzeruje zebranie wszystkich pozycji, odwróci zaksięgowany WZ
+                                {{ implode(', ', $pickingResetPlan['wz_numbers']) }}, odtworzy rezerwacje i utworzy nowy szkic WZ.
+                                Etykieta {{ implode(', ', $pickingResetPlan['preserved_tracking_numbers']) }} nie zostanie anulowana ani zmieniona.
+                            </p>
+                            <ul>
+                                @foreach ($pickingResetPlan['balance_changes'] as $change)
+                                    <li>
+                                        {{ $change['sku'] }} · {{ $change['warehouse_code'] ?: '#'.$change['warehouse_id'] }}:
+                                        stan {{ $qty($change['on_hand_before']) }} → {{ $qty($change['on_hand_after']) }},
+                                        rezerwacja {{ $qty($change['reserved_before']) }} → {{ $qty($change['reserved_after']) }},
+                                        dostępne pozostanie {{ $qty($change['available_after']) }}.
+                                    </li>
+                                @endforeach
+                            </ul>
+                            <form method="POST" action="{{ route('orders.reset-to-picking', $order) }}" onsubmit="return confirm('Cofnąć zamówienie {{ $order->external_number }} do kompletacji? Towary muszą fizycznie znajdować się na półce. Istniejąca etykieta pozostanie aktywna.');">
+                                @csrf
+                                <input type="hidden" name="expected_version" value="{{ $packedOrderPickingReset['version'] }}">
+                                <input type="hidden" name="request_uuid" value="{{ $pickingResetOperationId }}">
+                                <label>Wpisz numer zamówienia: <strong>{{ $order->external_number }}</strong>
+                                    <input name="typed_order_number" value="{{ old('typed_order_number') }}" required autocomplete="off">
+                                </label>
+                                <label style="margin-top: 10px;">Powód korekty
+                                    <textarea name="reason" rows="2" maxlength="1000" required placeholder="np. ponowna kompletacja całego zamówienia">{{ old('reason') }}</textarea>
+                                </label>
+                                <label style="display: flex; gap: 8px; align-items: flex-start; margin-top: 10px;">
+                                    <input type="checkbox" name="confirm_goods_returned" value="1" required @checked(old('confirm_goods_returned'))>
+                                    <span>Potwierdzam, że wszystkie towary z paczki są fizycznie odłożone na półkę.</span>
+                                </label>
+                                <label style="display: flex; gap: 8px; align-items: flex-start; margin-top: 8px;">
+                                    <input type="checkbox" name="confirm_preserve_label" value="1" required @checked(old('confirm_preserve_label'))>
+                                    <span>Potwierdzam, że przesyłka nie została odebrana przez kuriera, a etykieta {{ implode(', ', $pickingResetPlan['preserved_tracking_numbers']) }} ma pozostać aktywna i będzie użyta dopiero po ponownym spakowaniu.</span>
+                                </label>
+                                @if ($pickingResetPlan['cash_on_delivery'])
+                                    <label style="display: flex; gap: 8px; align-items: flex-start; margin-top: 8px;">
+                                        <input type="checkbox" name="confirm_cod_amount" value="1" required @checked(old('confirm_cod_amount'))>
+                                        <span>Potwierdzam COD {{ number_format((float) $pickingResetPlan['total_gross'], 2, ',', ' ') }} {{ $pickingResetPlan['currency'] }} na zachowywanej etykiecie.</span>
+                                    </label>
+                                @endif
+                                <div class="inline-actions" style="margin-top: 12px;">
+                                    <button class="button danger" type="submit">Cofnij do kompletacji</button>
+                                </div>
+                            </form>
+                        </div>
+                    @elseif ((string) $order->fulfillment_status === 'awaiting_courier')
+                        <div class="alert warning" style="margin: 0 0 14px;">
+                            <strong>Nie można bezpiecznie cofnąć do kompletacji.</strong>
+                            <ul style="margin-bottom: 0;">
+                                @foreach ($packedOrderPickingReset['reasons'] as $reason)
+                                    <li>{{ $reason }}</li>
+                                @endforeach
+                            </ul>
+                        </div>
+                    @endif
+                @endif
+
                 <div class="shipping-label-list">
                     @forelse ($order->shippingLabels as $label)
                         @php
@@ -792,7 +875,11 @@
                                 @if ($trackingUrl)
                                     <a class="button" href="{{ $trackingUrl }}" target="_blank" rel="noopener noreferrer" aria-label="Śledź przesyłkę {{ $label->trackingIdentifier() }}">Śledź paczkę</a>
                                 @endif
-                                @if ($label->purpose === 'shipment' && ! $orderOperationsLocked && ! in_array(mb_strtolower((string) $label->status), ['picked_up', 'delivered'], true) && ! $label->picked_up_at)
+                                @if ($label->purpose === 'shipment'
+                                    && ! $orderOperationsLocked
+                                    && ! ($hasPreservedResetLabel && $preservedResetLabelIds->contains((int) $label->id))
+                                    && ! in_array(mb_strtolower((string) $label->status), ['picked_up', 'delivered'], true)
+                                    && ! $label->picked_up_at)
                                     <form method="POST" action="{{ route('orders.labels.destroy', [$order, $label]) }}" onsubmit="return confirm('Anulować przesyłkę u przewoźnika i usunąć tę etykietę?');">
                                         @csrf
                                         @method('DELETE')
@@ -806,7 +893,11 @@
                     @endforelse
                 </div>
 
-                @if (! $orderOperationsLocked)
+                @if ($hasPreservedResetLabel)
+                    <div class="alert" style="margin: 12px 0 0;">
+                        Istniejąca etykieta zostanie użyta ponownie. Jej usunięcie oraz utworzenie drugiej przesyłki są zablokowane.
+                    </div>
+                @elseif (! $orderOperationsLocked)
                     <form class="order-label-form" method="POST" action="{{ route('orders.label.generate', $order) }}">
                         @csrf
                         <select name="courier_account_id" aria-label="Konto nadawcze">

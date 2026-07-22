@@ -110,6 +110,31 @@ class WooCommerceSplitReimportTest extends TestCase
         $this->assertNotNull(ExternalOrder::withTrashed()->findOrFail($child->id)->deleted_at);
     }
 
+    public function test_reimport_preserves_completed_picking_reset_marker_without_an_active_split(): void
+    {
+        [$integration, $rootOrder] = $this->integrationAndRootOrder('5251');
+        $marker = [
+            'version' => 1,
+            'status' => 'completed',
+            'request_uuid' => '11111111-2222-4333-8444-555555555555',
+            'preserved_label_ids' => [83],
+            'preserved_tracking_numbers' => ['523000013688150127510323'],
+        ];
+        $rootOrder->forceFill([
+            'raw_payload' => [
+                'source' => 'local-picking-reset',
+                'sempre_erp_picking_reset' => $marker,
+            ],
+        ])->save();
+        $this->fakeOrderPages($this->remoteOrder('5251'));
+
+        app(WooCommerceImportService::class)->importOrders($integration);
+
+        $raw = (array) $rootOrder->fresh()->raw_payload;
+        $this->assertSame($marker, data_get($raw, 'sempre_erp_picking_reset'));
+        $this->assertSame('5251', (string) ($raw['number'] ?? ''));
+    }
+
     public function test_reimport_fails_without_changing_the_order_when_split_parts_exceed_the_remote_total(): void
     {
         [$integration, $rootOrder] = $this->integrationAndRootOrder('5301');

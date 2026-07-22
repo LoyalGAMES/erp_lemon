@@ -215,7 +215,7 @@ final class PackingFulfillmentService
 
     private function generatedLabelFor(ExternalOrder $order): ?ShippingLabel
     {
-        return ShippingLabel::query()
+        $label = ShippingLabel::query()
             ->shipments()
             ->where('external_order_id', $order->id)
             ->where('status', 'generated')
@@ -223,6 +223,12 @@ final class PackingFulfillmentService
             ->latest('generated_at')
             ->latest('id')
             ->first();
+
+        if ($label instanceof ShippingLabel) {
+            $this->shippingLabels->assertPreservedPickingResetLabelCanBeReused($order, $label);
+        }
+
+        return $label;
     }
 
     /**
@@ -595,7 +601,8 @@ final class PackingFulfillmentService
     {
         try {
             return Cache::lock($this->orderLockKey($order), self::ORDER_LOCK_SECONDS)
-                ->block(15, fn (): array => $this->undoPackedOrderWhileLocked($order, $reason));
+                ->block(15, fn (): array => Cache::lock('shipping-label-order-'.$order->id, self::ORDER_LOCK_SECONDS)
+                    ->block(15, fn (): array => $this->undoPackedOrderWhileLocked($order, $reason)));
         } catch (LockTimeoutException $exception) {
             throw new RuntimeException(
                 'To zamówienie jest właśnie pakowane albo aktualizowane po odbiorze przez kuriera. Spróbuj ponownie za chwilę.',
@@ -611,6 +618,18 @@ final class PackingFulfillmentService
     {
         $order->refresh();
         $this->assertOrderNotCancelling($order);
+
+        $hasCourierPickupEvidence = ShippingLabel::query()
+            ->shipments()
+            ->where('external_order_id', $order->id)
+            ->whereIn('status', ['generated', 'picked_up', 'delivered'])
+            ->get()
+            ->contains(fn (ShippingLabel $label): bool => $label->hasCourierPickupEvidence());
+
+        if ($hasCourierPickupEvidence) {
+            throw new RuntimeException('Nie można cofnąć pakowania, ponieważ przewoźnik potwierdził już odbiór przesyłki.');
+        }
+
         $reason = trim((string) $reason);
         $rolledBackAt = now();
 
