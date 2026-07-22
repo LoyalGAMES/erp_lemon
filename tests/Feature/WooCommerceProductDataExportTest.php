@@ -180,7 +180,7 @@ class WooCommerceProductDataExportTest extends TestCase
             $meta = collect($request['meta_data'])->pluck('value', 'key');
 
             return $request['catalog_visibility'] === 'hidden'
-                && ! array_key_exists('low_stock_amount', $request->data())
+                && $request['low_stock_amount'] === ''
                 && $request['images'][0]['src'] === 'https://shop.test/wp-content/uploads/legacy.jpg'
                 && $meta['lemon_shipping_days'] === ''
                 && $meta['lemon_shipping_text'] === ''
@@ -2582,7 +2582,7 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/124'
             && $request['description'] === '<p>Opis rodzica</p>'
-            && ! array_key_exists('regular_price', $request->data())
+            && ($request['regular_price'] ?? null) === ''
             && $request['menu_order'] === 10);
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/223/variations/224?lang=en'
@@ -2713,7 +2713,7 @@ class WooCommerceProductDataExportTest extends TestCase
         Http::assertSent(fn ($request): bool => $request->method() === 'PUT'
             && $request->url() === 'https://shop.test/wp-json/wc/v3/products/123/variations/456'
             && $request['description'] === '<p>Opis PL rodzica</p>'
-            && ! array_key_exists('regular_price', $request->data())
+            && ($request['regular_price'] ?? null) === ''
             && $request['menu_order'] === 20
             && $request['attributes'][0] === ['id' => 70, 'option' => 'M']
             && ! array_key_exists('date_created', $request->data())

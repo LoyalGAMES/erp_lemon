@@ -1883,9 +1883,11 @@ final class ProductDataExportService
             $payload['date_created'] = $this->dateTimeWithOffset($publicationDate);
         }
 
-        if ($lowStockAmount !== null && $lowStockAmount !== '') {
-            $payload['low_stock_amount'] = $lowStockAmount;
-        }
+        // Always send the key: omitting it would leave the previous threshold
+        // in WooCommerce forever after the operator clears the field in ERP.
+        $payload['low_stock_amount'] = $lowStockAmount !== null && $lowStockAmount !== ''
+            ? $lowStockAmount
+            : '';
 
         if (! $isVariation) {
             if ($hasLanguageContent) {
@@ -1924,9 +1926,13 @@ final class ProductDataExportService
             unset($payload['sold_individually'], $payload['date_created']);
         }
 
-        if ($retailPrice !== null && $retailPrice !== '') {
-            $payload['regular_price'] = $this->decimal($retailPrice, 2);
-        }
+        // Mirror the sale_price contract below: an empty value must reach Woo
+        // as '' so a price cleared in ERP actually clears in the shop instead
+        // of silently selling at the stale amount. variationPayload() relies on
+        // the '' sentinel to inherit the parent family price.
+        $payload['regular_price'] = $retailPrice !== null && $retailPrice !== ''
+            ? $this->decimal($retailPrice, 2)
+            : '';
 
         $payload['sale_price'] = $salePrice !== null && $salePrice !== ''
             ? $this->decimal($salePrice, 2)
@@ -2249,8 +2255,10 @@ final class ProductDataExportService
             '_sempre_erp_stock_verification_required' => $product->requiresStockVerification() ? '1' : '0',
             '_sempre_erp_updated_at' => now()->toIso8601String(),
         ])
-            ->filter(fn ($value): bool => $value !== null && $value !== '')
-            ->map(fn ($value, string $key): array => ['key' => $key, 'value' => $value])
+            // Send every key, coercing null to ''. Filtering empties out meant
+            // a value cleared in ERP never overwrote its Woo meta, so the shop
+            // kept stale tags, producer, EN content etc. indefinitely.
+            ->map(fn ($value, string $key): array => ['key' => $key, 'value' => $value ?? ''])
             ->values()
             ->all();
 
