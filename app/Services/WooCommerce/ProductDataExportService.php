@@ -93,6 +93,7 @@ final class ProductDataExportService
             );
             if (! $isVariation) {
                 $this->removePendingVariants($product, $integration, $mapping);
+                $this->pruneDeadLegacyTranslationSnapshot($product, $integration);
             }
             $payload = $variantParent instanceof Product
                 ? $this->variationPayload(
@@ -1103,6 +1104,66 @@ final class ProductDataExportService
     /**
      * @return array<string, array{product_id:string,variation_id:?string,sku:?string}>
      */
+    /**
+     * The imported `woocommerce_translations` snapshot is only a hint. When an
+     * operator permanently deletes a translated post in Woo, a stale snapshot
+     * entry would keep reporting the translation as existing, so
+     * hasMissingTranslationReferences() never lets createTranslations() rebuild
+     * it — the family stays monolingual forever. Verify each snapshot entry
+     * against live Woo once per full export and drop the confirmed-dead ones;
+     * anything but a definitive 404 propagates so a transient fault can never
+     * erase a valid reference. Alias-backed families skip the check entirely
+     * (aliases are authoritative and actively maintained).
+     */
+    private function pruneDeadLegacyTranslationSnapshot(
+        Product $product,
+        WordpressIntegration $integration,
+    ): void {
+        $snapshot = (array) data_get($product->attributes, 'woocommerce_translations', []);
+
+        if ($snapshot === []) {
+            return;
+        }
+
+        if (ProductChannelAlias::query()
+            ->where('product_id', $product->id)
+            ->whereNotNull('language')
+            ->exists()) {
+            return;
+        }
+
+        $dead = [];
+
+        foreach ($snapshot as $language => $reference) {
+            $externalProductId = trim((string) (is_array($reference) ? ($reference['product_id'] ?? '') : ''));
+
+            if ($externalProductId === '') {
+                continue;
+            }
+
+            try {
+                $this->client->productById($integration, $externalProductId);
+            } catch (RequestException $exception) {
+                if ($exception->response?->status() !== 404) {
+                    throw $exception;
+                }
+
+                $dead[] = $language;
+            }
+        }
+
+        if ($dead === []) {
+            return;
+        }
+
+        $attributes = (array) $product->attributes;
+        $attributes['woocommerce_translations'] = collect($snapshot)
+            ->except($dead)
+            ->all();
+        $product->forceFill(['attributes' => $attributes])->save();
+        $product->refresh();
+    }
+
     private function translationReferences(Product $product, int $salesChannelId): array
     {
         $canonicalHandoffTargets = $this->canonicalTranslationHandoffTargets($product);
