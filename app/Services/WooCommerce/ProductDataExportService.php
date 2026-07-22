@@ -1885,9 +1885,12 @@ final class ProductDataExportService
 
         // Always send the key: omitting it would leave the previous threshold
         // in WooCommerce forever after the operator clears the field in ERP.
+        // Cleared value must be JSON null — the REST schema types this field
+        // integer|null and rejects '' with rest_invalid_param (unlike the
+        // string-typed prices, where '' is the documented clear sentinel).
         $payload['low_stock_amount'] = $lowStockAmount !== null && $lowStockAmount !== ''
             ? $lowStockAmount
-            : '';
+            : null;
 
         if (! $isVariation) {
             if ($hasLanguageContent) {
@@ -4239,6 +4242,14 @@ final class ProductDataExportService
             }
         }
 
-        return array_filter($payload, fn ($value): bool => $value !== null);
+        // `low_stock_amount` is typed integer|null in the Woo REST schema:
+        // null is its only clear-value ('' is rejected with
+        // rest_invalid_param), so it must survive the null sweep — otherwise
+        // a threshold cleared in ERP can never clear in WooCommerce.
+        return array_filter(
+            $payload,
+            fn ($value, string $key): bool => $value !== null || $key === 'low_stock_amount',
+            ARRAY_FILTER_USE_BOTH,
+        );
     }
 }
