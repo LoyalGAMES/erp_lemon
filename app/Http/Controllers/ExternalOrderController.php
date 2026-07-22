@@ -19,6 +19,8 @@ use App\Services\Audit\AuditLogService;
 use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Communication\CustomerMailPresentationService;
 use App\Services\Inventory\StockReservationService;
+use App\Services\Orders\HistoricalSplitReconciliationService;
+use App\Services\Orders\HistoricalSplitSnapshot;
 use App\Services\Orders\OrderCancellationService;
 use App\Services\Orders\OrderEditingService;
 use App\Services\Orders\OrderFulfillmentStatusService;
@@ -57,6 +59,7 @@ class ExternalOrderController extends Controller
         OrderSettlementService $settlements,
         OrderSplitService $splitter,
         OrderSplitReversalService $splitReversalService,
+        HistoricalSplitReconciliationService $historicalSplitReconciliationService,
     ): View {
         $order->load([
             'salesChannel',
@@ -119,6 +122,12 @@ class ExternalOrderController extends Controller
             ], true);
         $splitAvailability = $splitter->availability($order);
         $splitReversal = $splitReversalService->availability($order);
+        $historicalSplitReconciliation = Auth::user()?->isAdministrator() === true
+            && $splitReversal['family']->count() > 1
+            && ! $splitReversal['available']
+            && ! is_array(data_get($splitReversal['root']->raw_payload, 'sempre_erp_split_original'))
+                ? $historicalSplitReconciliationService->preview($order)
+                : null;
 
         return view('orders.show', [
             'title' => 'Zamówienie '.($order->external_number ?: $order->external_id),
@@ -169,6 +178,7 @@ class ExternalOrderController extends Controller
             'settlementPayments' => $settlementPayments,
             'splitAvailability' => $splitAvailability,
             'splitReversal' => $splitReversal,
+            'historicalSplitReconciliation' => $historicalSplitReconciliation,
             'splitFamily' => $splitReversal['family'],
         ]);
     }
@@ -927,6 +937,15 @@ class ExternalOrderController extends Controller
         ExternalOrder $order,
         OrderSplitReversalService $splitReversal,
     ): RedirectResponse {
+        $actor = Auth::user();
+        $reversalRoot = $splitReversal->availability($order)['root'];
+        $historicalSnapshot = data_get($reversalRoot->raw_payload, 'sempre_erp_split_original');
+
+        if (HistoricalSplitSnapshot::isVerified(is_array($historicalSnapshot) ? $historicalSnapshot : null)
+            && (! $actor instanceof User || ! $actor->isAdministrator())) {
+            abort(403, 'Tylko administrator może cofnąć zweryfikowany historyczny podział.');
+        }
+
         $validated = $request->validate([
             'family_version' => ['required', 'string', 'size:64', 'regex:/\A[a-f0-9]{64}\z/'],
             'note' => ['nullable', 'string', 'max:1000'],
@@ -943,6 +962,7 @@ class ExternalOrderController extends Controller
                 $validated['family_version'],
                 $validated['note'] ?? null,
                 (bool) ($validated['confirm_manual_shipping_cancellation'] ?? false),
+                $actor instanceof User ? $actor : null,
             );
         } catch (Throwable $exception) {
             if (! $exception instanceof RuntimeException) {

@@ -441,7 +441,15 @@
                 </div>
 
                 @if ($splitReversal['available'])
-                    <form method="POST" action="{{ route('orders.split.reverse', $order) }}" style="margin-top: 14px;" onsubmit="return confirm('Cofnąć rozdzielenie całej rodziny? System wyzeruje kompletację, anuluje niewysłane przesyłki i odwróci dokumenty powstałe po podziale. Zamówienia częściowe zostaną zarchiwizowane.');">
+                    @php
+                        $historicalBaseline = (int) data_get($splitReversal['root']->raw_payload, 'sempre_erp_split_original.version', 0) === 5;
+                    @endphp
+                    @if ($historicalBaseline && Auth::user()?->isAdministrator() !== true)
+                        <div class="alert warning" style="margin: 14px 0 0;">
+                            Zweryfikowany historyczny podział może cofnąć wyłącznie administrator.
+                        </div>
+                    @else
+                        <form method="POST" action="{{ route('orders.split.reverse', $order) }}" style="margin-top: 14px;" onsubmit="return confirm('{{ $historicalBaseline ? 'Cofnąć historyczne rozdzielenie? System zachowa zatwierdzone pakowanie, starszy WZ i starszą etykietę, a odwróci wyłącznie operacje wykonane po podziale.' : 'Cofnąć rozdzielenie całej rodziny? System przywróci kompletację do stanu sprzed podziału, anuluje niewysłane przesyłki i odwróci dokumenty powstałe po podziale.' }}');">
                         @csrf
                         @method('DELETE')
                         <input type="hidden" name="family_version" value="{{ $splitReversal['version'] }}">
@@ -449,7 +457,11 @@
                             <textarea name="note" rows="2" maxlength="1000" placeholder="np. klient chce jedną przesyłkę">{{ old('note') }}</textarea>
                         </label>
                         <p class="muted" style="margin: 10px 0 0;">
-                            Można cofnąć każdy etap kompletacji i pakowania do momentu faktycznego wysłania. Zadania obu części wrócą do początku, a etykiety, kolejka druku, WZ i dokumenty sprzedaży powstałe po podziale zostaną bezpiecznie odwrócone.
+                            @if ($historicalBaseline)
+                                Zostanie przywrócony zatwierdzony stan dokładnie sprzed podziału. Starsze pakowanie, WZ i etykieta pozostaną bez zmian; system odwróci tylko późniejsze operacje części zamówienia.
+                            @else
+                                Można cofnąć każdy etap kompletacji i pakowania do momentu faktycznego wysłania. Zadania wrócą do stanu sprzed podziału, a etykiety, kolejka druku, WZ i dokumenty sprzedaży powstałe później zostaną bezpiecznie odwrócone.
+                            @endif
                         </p>
                         @if ($splitReversal['shipping_confirmation_required'])
                             <div class="alert warning" style="margin: 12px 0 0;">
@@ -468,7 +480,8 @@
                         <div class="inline-actions" style="margin-top: 12px;">
                             <button class="button danger" type="submit">Cofnij rozdzielenie zamówienia</button>
                         </div>
-                    </form>
+                        </form>
+                    @endif
                 @else
                     <div class="alert warning" style="margin: 14px 0 0;">
                         <strong>Nie można teraz cofnąć rozdzielenia.</strong>
@@ -478,6 +491,71 @@
                             @endforeach
                         </ul>
                     </div>
+                    @if (is_array($historicalSplitReconciliation) && $historicalSplitReconciliation['available'])
+                        @php
+                            $historicalPlan = $historicalSplitReconciliation['plan'];
+                        @endphp
+                        <div class="alert warning" style="margin: 14px 0 0;">
+                            <strong>Można bezpiecznie uzgodnić ten historyczny podział.</strong>
+                            <p>System odtworzył dokładny plan na podstawie pierwszej części, zadań pakowania, etykiet, WZ i ruchów magazynowych. Zatwierdzenie zapisze stan bazowy; dopiero potem pojawi się właściwe cofnięcie.</p>
+                            <ul>
+                                <li>
+                                    Kwota po scaleniu: <strong>{{ number_format((float) $historicalPlan['restored_total_gross'], 2, ',', ' ') }} {{ $order->currency }}</strong>
+                                    @if ($historicalPlan['cash_on_delivery'])
+                                        — tyle samo wynosi potwierdzana kwota COD zachowywanej przesyłki
+                                    @endif
+                                    .
+                                </li>
+                                <li>Zachowane zadania pakowania: #{{ implode(', #', $historicalPlan['preserve_task_ids']) }}.</li>
+                                <li>Zachowany WZ: {{ implode(', ', $historicalPlan['preserve_wz_numbers']) ?: 'brak' }}.</li>
+                                <li>Zachowana etykieta: {{ implode(', ', $historicalPlan['preserve_label_numbers']) ?: 'brak' }}.</li>
+                                <li>Cofany WZ: {{ implode(', ', $historicalPlan['reverse_wz_numbers']) ?: 'brak' }}.</li>
+                                <li>Archiwizowane części: #{{ implode(', #', $historicalPlan['archive_child_order_ids']) }}.</li>
+                                @foreach ($historicalPlan['balance_changes'] as $balanceChange)
+                                    <li>Stan {{ $balanceChange['sku'] ?: 'produktu #'.$balanceChange['product_id'] }}: {{ $balanceChange['quantity_on_hand_before'] }} → {{ $balanceChange['quantity_on_hand_after'] }} (zmiana {{ (float) $balanceChange['change'] >= 0 ? '+' : '' }}{{ $balanceChange['change'] }}).</li>
+                                @endforeach
+                            </ul>
+                        </div>
+                        <form method="POST" action="{{ route('orders.split.historical-reconciliation', $order) }}" style="margin-top: 14px;" onsubmit="return confirm('Zapisać zweryfikowany stan sprzed historycznego podziału? Po tej operacji trzeba jeszcze wykonać właściwe cofnięcie rozdzielenia.');">
+                            @csrf
+                            <input type="hidden" name="family_version" value="{{ $historicalSplitReconciliation['version'] }}">
+                            <input type="hidden" name="plan_digest" value="{{ $historicalSplitReconciliation['plan_digest'] }}">
+                            <input type="hidden" name="reconciliation_request_uuid" value="{{ old('reconciliation_request_uuid', (string) \Illuminate\Support\Str::uuid()) }}">
+                            <label>Powód uzgodnienia
+                                <textarea name="reason" rows="2" minlength="10" maxlength="1000" required placeholder="np. cofnięcie omyłkowego historycznego podziału">{{ old('reason') }}</textarea>
+                            </label>
+                            <label>Wpisz numer zamówienia głównego: <strong>{{ $historicalSplitReconciliation['root']->external_number }}</strong>
+                                <input type="text" name="typed_order_number" maxlength="100" required autocomplete="off" value="{{ old('typed_order_number') }}">
+                            </label>
+                            <div style="display: grid; gap: 9px; margin-top: 12px;">
+                                <label style="display: flex; gap: 8px; align-items: flex-start;">
+                                    <input type="checkbox" name="confirm_carrier_not_handed_over" value="1" required @checked(old('confirm_carrier_not_handed_over'))>
+                                    <span>Potwierdzam, że zachowywana przesyłka nie została przekazana kurierowi.</span>
+                                </label>
+                                <label style="display: flex; gap: 8px; align-items: flex-start;">
+                                    <input type="checkbox" name="confirm_package_matches_preserved_wz" value="1" required @checked(old('confirm_package_matches_preserved_wz'))>
+                                    <span>Potwierdzam, że zachowywana paczka fizycznie zawiera towary zgodne ze starszym WZ.</span>
+                                </label>
+                                <label style="display: flex; gap: 8px; align-items: flex-start;">
+                                    <input type="checkbox" name="confirm_duplicate_items_returned" value="1" required @checked(old('confirm_duplicate_items_returned'))>
+                                    <span>Potwierdzam, że sztuki pobrane drugi raz dla części zamówienia zostały fizycznie odłożone na stan.</span>
+                                </label>
+                                <label style="display: flex; gap: 8px; align-items: flex-start;">
+                                    <input type="checkbox" name="confirm_financial_total_verified" value="1" required @checked(old('confirm_financial_total_verified'))>
+                                    <span>
+                                        Potwierdzam kwotę źródłową {{ number_format((float) $historicalPlan['restored_total_gross'], 2, ',', ' ') }} {{ $order->currency }}
+                                        @if ($historicalPlan['cash_on_delivery'])
+                                            oraz kwotę COD {{ number_format((float) $historicalPlan['restored_cod_amount'], 2, ',', ' ') }} {{ $order->currency }} zachowywanej przesyłki
+                                        @endif
+                                        .
+                                    </span>
+                                </label>
+                            </div>
+                            <div class="inline-actions" style="margin-top: 12px;">
+                                <button class="button danger" type="submit">Zatwierdź stan sprzed podziału</button>
+                            </div>
+                        </form>
+                    @endif
                 @endif
             </div>
         </article>

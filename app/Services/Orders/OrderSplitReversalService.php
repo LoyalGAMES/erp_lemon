@@ -18,6 +18,8 @@ use App\Models\ReturnCase;
 use App\Models\ShippingLabel;
 use App\Models\StockBalance;
 use App\Models\StockLedgerEntry;
+use App\Models\StockReservation;
+use App\Models\User;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\Audit\AuditLogService;
@@ -75,7 +77,8 @@ final class OrderSplitReversalService
         $family = $this->familyOrders($order);
         $root = $this->rootOrder($order, $family);
         $lines = $this->familyLines($family);
-        $reasons = $this->blockers($root, $family, $lines);
+        $snapshot = $this->originalSnapshot($root);
+        $reasons = $this->blockers($root, $family, $lines, $snapshot);
         $shippingConfirmationReasons = $this->shippingConfirmationReasons($family);
 
         return [
@@ -89,13 +92,50 @@ final class OrderSplitReversalService
         ];
     }
 
+    /**
+     * Simulate normal reversal against a server-built historical snapshot. This
+     * never mutates the order and is used only by the administrator-only
+     * reconciliation flow before the snapshot is adopted.
+     *
+     * @param  array<string,mixed>  $snapshot
+     * @return array{available:bool,reasons:list<string>}
+     */
+    public function availabilityAgainstSnapshot(ExternalOrder $order, array $snapshot): array
+    {
+        if (! HistoricalSplitSnapshot::isVerified($snapshot)) {
+            return [
+                'available' => false,
+                'reasons' => ['Historyczny zapis stanu początkowego ma nieprawidłowy format.'],
+            ];
+        }
+
+        $family = $this->familyOrders($order);
+        $root = $this->rootOrder($order, $family);
+        $lines = $this->familyLines($family);
+        $reasons = $this->blockers($root, $family, $lines, $snapshot);
+
+        return [
+            'available' => $reasons === [],
+            'reasons' => $reasons,
+        ];
+    }
+
     public function reverse(
         ExternalOrder $order,
         string $expectedFamilyVersion,
         ?string $note = null,
         bool $confirmManualShippingCancellation = false,
+        ?User $actor = null,
     ): ExternalOrder {
-        return $this->orderLock->forSplitReversal($order, function () use ($order, $expectedFamilyVersion, $note, $confirmManualShippingCancellation): ExternalOrder {
+        $authorizationFamily = $this->familyOrders($order);
+        $authorizationRoot = $this->rootOrder($order, $authorizationFamily);
+
+        if (HistoricalSplitSnapshot::isVerified($this->originalSnapshot($authorizationRoot))
+            && (! $actor instanceof User || ! $actor->isAdministrator())) {
+            throw new RuntimeException('Tylko administrator może wykonać cofnięcie zweryfikowanego historycznego podziału.');
+        }
+
+        return $this->orderLock->forSplitReversal($order, function () use ($order, $expectedFamilyVersion, $note, $confirmManualShippingCancellation, $actor): ExternalOrder {
             $familyIds = $this->familyOrders($order)->pluck('id')->map(fn (mixed $id): int => (int) $id)->all();
 
             try {
@@ -107,6 +147,7 @@ final class OrderSplitReversalService
                         $expectedFamilyVersion,
                         $note,
                         $confirmManualShippingCancellation,
+                        $actor,
                     ),
                 );
             } catch (LockTimeoutException $exception) {
@@ -123,8 +164,9 @@ final class OrderSplitReversalService
         string $expectedFamilyVersion,
         ?string $note,
         bool $confirmManualShippingCancellation,
+        ?User $actor,
     ): ExternalOrder {
-        $prepared = $this->prepareReversal($order, $expectedFamilyVersion, $note);
+        $prepared = $this->prepareReversal($order, $expectedFamilyVersion, $note, $actor);
         $operationUuid = $prepared['operation_uuid'];
         $reason = trim((string) $note) !== ''
             ? trim((string) $note)
@@ -290,8 +332,9 @@ final class OrderSplitReversalService
         ExternalOrder $order,
         string $expectedFamilyVersion,
         ?string $note,
+        ?User $actor,
     ): array {
-        return DB::transaction(function () use ($order, $expectedFamilyVersion, $note): array {
+        return DB::transaction(function () use ($order, $expectedFamilyVersion, $note, $actor): array {
             $fresh = ExternalOrder::query()->findOrFail($order->id);
             $rootId = (int) ($fresh->split_root_order_id ?: $fresh->id);
             $family = ExternalOrder::query()
@@ -317,13 +360,19 @@ final class OrderSplitReversalService
                 throw new RuntimeException('Rodzina zamówienia zmieniła się od otwarcia strony. Odśwież widok i sprawdź ją przed ponownym cofnięciem.');
             }
 
-            $reasons = $this->blockers($root, $family, $lines);
+            $snapshot = $this->originalSnapshot($root);
+
+            if (HistoricalSplitSnapshot::isVerified($snapshot)
+                && (! $actor instanceof User || ! $actor->isAdministrator())) {
+                throw new RuntimeException('Tylko administrator może wykonać cofnięcie zweryfikowanego historycznego podziału.');
+            }
+
+            $reasons = $this->blockers($root, $family, $lines, $snapshot);
 
             if ($reasons !== []) {
                 throw new RuntimeException(implode(' ', $reasons));
             }
 
-            $snapshot = $this->originalSnapshot($root);
             $splitStartedAt = $this->splitStartedAt($root, $family, $snapshot);
             $raw = (array) $root->raw_payload;
             $operation = data_get($raw, 'sempre_erp_split_reversal_operation');
@@ -353,12 +402,13 @@ final class OrderSplitReversalService
                 'split_started_at' => $splitStartedAt->toISOString(),
                 'artifact_cutoff' => $this->postSplitArtifactCutoff($root, $family, $snapshot)->toISOString(),
                 'original_status' => $this->originalStatus($root, $snapshot, $family),
-                'sent_post_split_customer_message' => CustomerMessage::query()
-                    ->whereIn('external_order_id', $family->pluck('id'))
-                    ->whereIn('trigger', ['order_partial_created', 'order_packed'])
-                    ->where('status', 'sent')
-                    ->where('created_at', '>=', $splitStartedAt)
-                    ->exists(),
+                'sent_post_split_customer_message' => ! HistoricalSplitSnapshot::isVerified($snapshot)
+                    && CustomerMessage::query()
+                        ->whereIn('external_order_id', $family->pluck('id'))
+                        ->whereIn('trigger', ['order_partial_created', 'order_packed'])
+                        ->where('status', 'sent')
+                        ->where('created_at', '>=', $splitStartedAt)
+                        ->exists(),
             ];
         }, 3);
     }
@@ -393,6 +443,8 @@ final class OrderSplitReversalService
                 throw new RuntimeException('Stan operacji cofnięcia zmienił się. Odśwież zamówienie i spróbuj ponownie.');
             }
 
+            $snapshot = $this->originalSnapshot($root);
+
             // Cancelling a posted WZ releases physical stock. It must happen
             // in the same database transaction that recreates the restored
             // root reservations; otherwise a later remote-step failure could
@@ -402,6 +454,7 @@ final class OrderSplitReversalService
                 $artifactCutoff,
                 $operationUuid,
                 $reason,
+                $snapshot,
             );
             $effects['warehouse_document_ids'] = $warehouseDocuments;
 
@@ -417,7 +470,6 @@ final class OrderSplitReversalService
 
             $children = $family->where('id', '!=', $root->id)->values();
             $before = $this->auditSnapshot($family, $lines);
-            $snapshot = $this->originalSnapshot($root);
             $restoredLines = $snapshot !== null
                 ? $this->linesFromSnapshot($snapshot)
                 : $this->mergeCurrentLines($root, $lines);
@@ -499,49 +551,129 @@ final class OrderSplitReversalService
                 ->orderBy('id')
                 ->lockForUpdate()
                 ->get();
-            $rootExternalLineIds = $root->lines
-                ->map(fn (ExternalOrderLine $line): string => (string) ($line->external_line_id ?: 'line-'.$line->id))
-                ->all();
-            $activatedRootLineIds = [];
+            $preservedPackingTasks = HistoricalSplitSnapshot::isVerified($snapshot)
+                ? HistoricalSplitSnapshot::preservedPackingTasks($snapshot)
+                : [];
 
-            foreach ($packingTasks as $task) {
-                $metadata = (array) $task->metadata;
-                $metadata['split_reversal'] = [
-                    'root_order_id' => $root->id,
-                    'previous_order_id' => $task->external_order_id,
-                    'previous_status' => $task->status,
-                    'previous_quantity_picked' => (string) $task->quantity_picked,
-                    'previous_picked_at' => $task->picked_at?->toISOString(),
-                    'previous_packed_at' => $task->packed_at?->toISOString(),
-                    'previous_packing_completion' => $metadata['packing_completion'] ?? null,
-                    'previous_packing_problem' => $metadata['packing_problem'] ?? null,
-                    'previous_courier_pickup' => $metadata['courier_pickup'] ?? null,
-                    'reversed_at' => now()->toISOString(),
-                ];
-                unset($metadata['packing_completion'], $metadata['packing_problem'], $metadata['courier_pickup']);
+            if (HistoricalSplitSnapshot::isVerified($snapshot)) {
+                $rootLinesByCanonical = $root->lines->keyBy(
+                    fn (ExternalOrderLine $line): string => (string) $this->canonicalExternalLineId($line),
+                );
+                $restoredTaskIds = [];
 
-                $externalLineId = (string) $task->external_line_id;
-                $activateOnRoot = (int) $task->external_order_id === (int) $root->id
-                    && in_array($externalLineId, $rootExternalLineIds, true)
-                    && ! isset($activatedRootLineIds[$externalLineId]);
+                foreach ($packingTasks as $task) {
+                    $saved = $preservedPackingTasks[(int) $task->id] ?? null;
+                    $previousMetadata = (array) $task->metadata;
+                    $auditMetadata = [
+                        'root_order_id' => $root->id,
+                        'previous_order_id' => $task->external_order_id,
+                        'previous_status' => $task->status,
+                        'previous_quantity_picked' => (string) $task->quantity_picked,
+                        'previous_picked_at' => $task->picked_at?->toISOString(),
+                        'previous_packed_at' => $task->packed_at?->toISOString(),
+                        'reversed_at' => now()->toISOString(),
+                    ];
 
-                if ($activateOnRoot) {
-                    $activatedRootLineIds[$externalLineId] = true;
-                    $task->update([
-                        'status' => 'open',
-                        'quantity_picked' => 0,
-                        'picked_at' => null,
-                        'packed_at' => null,
-                        'metadata' => $metadata,
-                    ]);
-                } else {
+                    if (is_array($saved)) {
+                        $canonical = (string) ($saved['canonical_external_line_id'] ?? '');
+                        $rootLine = $rootLinesByCanonical->get($canonical);
+
+                        if (! $rootLine instanceof ExternalOrderLine) {
+                            throw new RuntimeException("Nie można ponownie powiązać zachowanego zadania #{$task->id} z pozycją {$canonical}.");
+                        }
+
+                        $metadata = (array) ($saved['metadata'] ?? []);
+                        $metadata['split_reversal'] = $auditMetadata + [
+                            'historical_baseline_preserved' => true,
+                        ];
+                        $task->update([
+                            'external_order_id' => $root->id,
+                            'external_order_line_id' => $rootLine->id,
+                            'external_line_id' => $rootLine->external_line_id,
+                            'product_id' => $rootLine->product_id,
+                            'order_number' => $root->external_number,
+                            'sku' => $rootLine->sku,
+                            'quantity_required' => (float) ($saved['quantity_required'] ?? $rootLine->quantity),
+                            'quantity_picked' => (float) ($saved['quantity_picked'] ?? 0),
+                            'status' => (string) ($saved['status'] ?? 'open'),
+                            'courier' => $saved['courier'] ?? $task->courier,
+                            'size_label' => $saved['size_label'] ?? $task->size_label,
+                            'order_date' => $this->historicalTaskDate(
+                                $saved['order_date'] ?? $task->order_date,
+                            ),
+                            'picked_at' => $this->historicalTaskDate($saved['picked_at'] ?? null),
+                            'packed_at' => $this->historicalTaskDate($saved['packed_at'] ?? null),
+                            'metadata' => $metadata,
+                        ]);
+                        $restoredTaskIds[] = (int) $task->id;
+
+                        continue;
+                    }
+
+                    $previousMetadata['split_reversal'] = $auditMetadata;
+                    unset(
+                        $previousMetadata['packing_completion'],
+                        $previousMetadata['packing_problem'],
+                        $previousMetadata['courier_pickup'],
+                    );
                     $task->update([
                         'status' => 'cancelled',
                         'quantity_picked' => 0,
                         'picked_at' => null,
                         'packed_at' => null,
-                        'metadata' => $metadata,
+                        'metadata' => $previousMetadata,
                     ]);
+                }
+
+                if (collect($restoredTaskIds)->sort()->values()->all()
+                    !== collect(array_keys($preservedPackingTasks))->sort()->values()->all()) {
+                    throw new RuntimeException('Nie odtworzono wszystkich zadań pakowania zapisanych przed historycznym podziałem.');
+                }
+            } else {
+                $rootExternalLineIds = $root->lines
+                    ->map(fn (ExternalOrderLine $line): string => (string) ($line->external_line_id ?: 'line-'.$line->id))
+                    ->all();
+                $activatedRootLineIds = [];
+
+                foreach ($packingTasks as $task) {
+                    $metadata = (array) $task->metadata;
+                    $metadata['split_reversal'] = [
+                        'root_order_id' => $root->id,
+                        'previous_order_id' => $task->external_order_id,
+                        'previous_status' => $task->status,
+                        'previous_quantity_picked' => (string) $task->quantity_picked,
+                        'previous_picked_at' => $task->picked_at?->toISOString(),
+                        'previous_packed_at' => $task->packed_at?->toISOString(),
+                        'previous_packing_completion' => $metadata['packing_completion'] ?? null,
+                        'previous_packing_problem' => $metadata['packing_problem'] ?? null,
+                        'previous_courier_pickup' => $metadata['courier_pickup'] ?? null,
+                        'reversed_at' => now()->toISOString(),
+                    ];
+                    unset($metadata['packing_completion'], $metadata['packing_problem'], $metadata['courier_pickup']);
+
+                    $externalLineId = (string) $task->external_line_id;
+                    $activateOnRoot = (int) $task->external_order_id === (int) $root->id
+                        && in_array($externalLineId, $rootExternalLineIds, true)
+                        && ! isset($activatedRootLineIds[$externalLineId]);
+
+                    if ($activateOnRoot) {
+                        $activatedRootLineIds[$externalLineId] = true;
+                        $task->update([
+                            'status' => 'open',
+                            'quantity_picked' => 0,
+                            'picked_at' => null,
+                            'packed_at' => null,
+                            'metadata' => $metadata,
+                        ]);
+                    } else {
+                        $task->update([
+                            'status' => 'cancelled',
+                            'quantity_picked' => 0,
+                            'picked_at' => null,
+                            'packed_at' => null,
+                            'metadata' => $metadata,
+                        ]);
+                    }
                 }
             }
 
@@ -580,9 +712,16 @@ final class OrderSplitReversalService
             }
 
             $this->reservations->syncForOrder($root);
-            $this->packingTasks->syncForOrder($root);
+
+            if (! HistoricalSplitSnapshot::isVerified($snapshot) || $preservedPackingTasks !== []) {
+                $this->packingTasks->syncForOrder($root);
+            }
 
             $root = $root->fresh('lines') ?? $root;
+
+            if (HistoricalSplitSnapshot::isVerified($snapshot)) {
+                $this->verifyHistoricalPostconditions($root, $snapshot, $operationUuid);
+            }
 
             if ($shouldNotifyCustomer) {
                 $this->communication->queueOrderStatus(
@@ -622,8 +761,12 @@ final class OrderSplitReversalService
      * @param  EloquentCollection<int, ExternalOrderLine>  $lines
      * @return list<string>
      */
-    private function blockers(ExternalOrder $root, EloquentCollection $family, EloquentCollection $lines): array
-    {
+    private function blockers(
+        ExternalOrder $root,
+        EloquentCollection $family,
+        EloquentCollection $lines,
+        ?array $snapshot,
+    ): array {
         $integrityReasons = $this->familyIntegrityBlockers($root, $family);
 
         if ($integrityReasons !== []) {
@@ -638,9 +781,15 @@ final class OrderSplitReversalService
         $orderIds = $family->pluck('id')->map(fn (mixed $id): int => (int) $id)->all();
         $childIds = $family->where('id', '!=', $root->id)->pluck('id')->map(fn (mixed $id): int => (int) $id)->all();
         $lineIds = $lines->pluck('id')->map(fn (mixed $id): int => (int) $id)->all();
-        $snapshot = $this->originalSnapshot($root);
         $splitStartedAt = $this->splitStartedAt($root, $family, $snapshot);
         $artifactCutoff = $this->postSplitArtifactCutoff($root, $family, $snapshot);
+
+        if (HistoricalSplitSnapshot::isVerified($snapshot)) {
+            $reasons = [
+                ...$reasons,
+                ...$this->verifiedHistoricalSnapshotBlockers($root, $family, $lines, $snapshot, $artifactCutoff),
+            ];
+        }
 
         if (OrderCancellation::query()
             ->whereIn('external_order_id', $orderIds)
@@ -661,17 +810,28 @@ final class OrderSplitReversalService
             $reasons[] = 'Jedna z części została już wysłana albo odebrana przez kuriera. Cofnięcie podziału jest wtedy niedostępne.';
         }
 
-        if (ShippingLabel::query()
+        $olderActiveLabels = ShippingLabel::query()
             ->shipments()
             ->whereIn('external_order_id', $orderIds)
             ->where('created_at', '<', $artifactCutoff)
             ->where('status', '!=', 'cancelled')
-            ->exists()) {
+            ->orderBy('id')
+            ->get();
+
+        if ($olderActiveLabels->contains(fn (ShippingLabel $label): bool => ! $this->isPreservedHistoricalLabel(
+            $label,
+            $snapshot,
+        ))) {
             $reasons[] = 'Rodzina ma aktywną etykietę starszą niż podział. Wymagana jest ręczna weryfikacja przewoźnika.';
         }
 
-        if ($family->contains(function (ExternalOrder $member) use ($artifactCutoff): bool {
-            $identities = $this->shipmentIdentities((array) $member->raw_payload);
+        $preservedShipmentIdentities = $this->preservedShipmentIdentities($snapshot, $olderActiveLabels);
+
+        if ($family->contains(function (ExternalOrder $member) use ($artifactCutoff, $preservedShipmentIdentities): bool {
+            $identities = collect($this->shipmentIdentities((array) $member->raw_payload))
+                ->reject(fn (string $identity): bool => in_array($identity, $preservedShipmentIdentities, true))
+                ->values()
+                ->all();
 
             if ($identities === []) {
                 return false;
@@ -694,7 +854,8 @@ final class OrderSplitReversalService
         $wzDocuments = $this->wzDocumentsForFamily($family);
 
         if ($wzDocuments->contains(fn (WarehouseDocument $document): bool => $document->created_at?->lt($artifactCutoff)
-            && $document->status !== 'cancelled')) {
+            && $document->status !== 'cancelled'
+            && ! $this->isPreservedHistoricalWarehouseDocument($document, $snapshot))) {
             $reasons[] = 'Rodzina ma aktywny dokument WZ starszy niż podział. Nie można go automatycznie przypisać do pracy po rozdzieleniu.';
         }
 
@@ -742,7 +903,7 @@ final class OrderSplitReversalService
             $reasons[] = 'Dane handlowe zamówienia w WooCommerce zmieniły się po podziale. Automatyczne przywrócenie mogłoby zostać nadpisane lub odtworzyć nieaktualne kwoty, adres albo pozycje; wymagana jest ręczna weryfikacja.';
         }
 
-        if ($this->originalSnapshot($root) === null) {
+        if ($snapshot === null) {
             $legacyBaselinePayload = $this->legacyBaselinePayload($root, $family);
 
             if ($legacyBaselinePayload === null) {
@@ -785,9 +946,565 @@ final class OrderSplitReversalService
             if ($lineageReason !== null) {
                 $reasons[] = $lineageReason;
             }
+        } elseif (HistoricalSplitSnapshot::isVerified($snapshot)) {
+            $baselinePayload = is_array($snapshot['raw_payload'] ?? null)
+                ? $snapshot['raw_payload']
+                : null;
+            $lineageReason = $baselinePayload !== null
+                ? $this->lineageProblem($lines, $baselinePayload)
+                : 'Zweryfikowany zapis historyczny nie zawiera pełnego payloadu WooCommerce.';
+
+            if ($lineageReason !== null) {
+                $reasons[] = $lineageReason;
+            }
         }
 
         return array_values(array_unique($reasons));
+    }
+
+    /**
+     * @param  EloquentCollection<int,ExternalOrder>  $family
+     * @param  EloquentCollection<int,ExternalOrderLine>  $lines
+     * @param  array<string,mixed>  $snapshot
+     * @return list<string>
+     */
+    private function verifiedHistoricalSnapshotBlockers(
+        ExternalOrder $root,
+        EloquentCollection $family,
+        EloquentCollection $lines,
+        array $snapshot,
+        CarbonInterface $artifactCutoff,
+    ): array {
+        $reasons = [];
+        $familyIds = $family->pluck('id')->map(fn (mixed $id): int => (int) $id)->sort()->values()->all();
+        $snapshotFamilyIds = collect((array) data_get($snapshot, 'legacy_adoption.family_order_ids', []))
+            ->map(fn (mixed $id): int => (int) $id)->sort()->values()->all();
+
+        if ((int) data_get($snapshot, 'legacy_adoption.root_order_id', 0) !== (int) $root->id
+            || $snapshotFamilyIds !== $familyIds) {
+            $reasons[] = 'Zweryfikowany zapis historyczny nie odpowiada bieżącej rodzinie zamówień.';
+        }
+
+        $orderIds = $familyIds;
+        $preservedLabelFingerprints = HistoricalSplitSnapshot::preservedLabelFingerprints($snapshot);
+        $preservedLabels = ShippingLabel::query()
+            ->shipments()
+            ->whereIn('id', array_keys($preservedLabelFingerprints))
+            ->orderBy('id')
+            ->get();
+
+        if ($preservedLabels->count() !== count($preservedLabelFingerprints)) {
+            $reasons[] = 'Nie znaleziono wszystkich etykiet zatwierdzonych jako stan sprzed podziału.';
+        }
+
+        foreach ($preservedLabels as $label) {
+            if (! in_array((int) $label->external_order_id, $orderIds, true)
+                || $label->created_at?->gte($artifactCutoff) === true
+                || (string) $label->status === 'cancelled'
+                || $label->hasCourierPickupEvidence()
+                || ! hash_equals(
+                    (string) ($preservedLabelFingerprints[(int) $label->id] ?? ''),
+                    HistoricalSplitSnapshot::shippingLabelFingerprint($label),
+                )) {
+                $reasons[] = 'Etykieta zatwierdzona jako stan sprzed podziału zmieniła się albo zawiera dowód nadania.';
+                break;
+            }
+        }
+
+        $preservedDocumentFingerprints = HistoricalSplitSnapshot::preservedWarehouseDocumentFingerprints($snapshot);
+        $preservedDocuments = WarehouseDocument::query()
+            ->with(['lines', 'ledgerEntries'])
+            ->whereIn('id', array_keys($preservedDocumentFingerprints))
+            ->orderBy('id')
+            ->get();
+
+        if ($preservedDocuments->count() !== count($preservedDocumentFingerprints)) {
+            $reasons[] = 'Nie znaleziono wszystkich dokumentów WZ zatwierdzonych jako stan sprzed podziału.';
+        }
+
+        foreach ($preservedDocuments as $document) {
+            if ($document->created_at?->gte($artifactCutoff) === true
+                || (string) $document->status !== 'posted'
+                || ! hash_equals(
+                    (string) ($preservedDocumentFingerprints[(int) $document->id] ?? ''),
+                    HistoricalSplitSnapshot::warehouseDocumentFingerprint($document),
+                )) {
+                $reasons[] = 'Dokument WZ zatwierdzony jako stan sprzed podziału zmienił się.';
+                break;
+            }
+        }
+
+        $preservedTasks = HistoricalSplitSnapshot::preservedPackingTasks($snapshot);
+        $tasks = PackingTask::query()
+            ->whereIn('id', array_keys($preservedTasks))
+            ->orderBy('id')
+            ->get();
+
+        if ($tasks->count() !== count($preservedTasks)) {
+            $reasons[] = 'Nie znaleziono wszystkich zadań pakowania zatwierdzonych jako stan sprzed podziału.';
+        }
+
+        foreach ($tasks as $task) {
+            $saved = $preservedTasks[(int) $task->id] ?? [];
+
+            if ((int) $task->external_order_id !== (int) $root->id
+                || $task->created_at?->gte($artifactCutoff) === true
+                || (string) $task->status === 'shipped'
+                || ! hash_equals(
+                    (string) ($saved['fingerprint'] ?? ''),
+                    HistoricalSplitSnapshot::packingTaskFingerprint($task),
+                )) {
+                $reasons[] = 'Zadanie pakowania zatwierdzone jako stan sprzed podziału zmieniło się.';
+                break;
+            }
+        }
+
+        $allPreSplitTaskIds = PackingTask::query()
+            ->where('external_order_id', $root->id)
+            ->where('created_at', '<', $artifactCutoff)
+            ->orderBy('id')
+            ->pluck('id')
+            ->map(fn (mixed $id): int => (int) $id)
+            ->values()
+            ->all();
+        $snapshotTaskIds = collect(array_keys($preservedTasks))->sort()->values()->all();
+
+        if (collect($allPreSplitTaskIds)->sort()->values()->all() !== $snapshotTaskIds) {
+            $reasons[] = 'Lista zadań pakowania sprzed podziału zmieniła się.';
+        }
+
+        $reversedArtifacts = (array) data_get($snapshot, 'reversed_artifacts', []);
+        $reversedTaskFingerprints = $this->artifactFingerprintMap((array) ($reversedArtifacts['packing_tasks'] ?? []));
+        $reversedLabels = (array) ($reversedArtifacts['shipping_labels'] ?? []);
+        $reversedDocumentFingerprints = $this->artifactFingerprintMap((array) ($reversedArtifacts['warehouse_documents'] ?? []));
+        $currentPostSplitTasks = PackingTask::query()
+            ->whereIn('external_order_id', $orderIds)
+            ->whereNotIn('id', array_keys($preservedTasks))
+            ->orderBy('id')
+            ->get();
+        $currentPostSplitLabels = ShippingLabel::query()
+            ->shipments()
+            ->whereIn('external_order_id', $orderIds)
+            ->where('created_at', '>=', $artifactCutoff)
+            ->orderBy('id')
+            ->get();
+        $currentPostSplitDocuments = $this->wzDocumentsForFamily($family)
+            ->filter(fn (WarehouseDocument $document): bool => $document->created_at?->gte($artifactCutoff) === true)
+            ->values();
+
+        if (! $this->artifactCollectionMatches(
+            $currentPostSplitTasks,
+            $reversedTaskFingerprints,
+            fn (PackingTask $task): string => HistoricalSplitSnapshot::packingTaskFingerprint($task),
+        )) {
+            $reasons[] = 'Lista lub stan zadań przeznaczonych do cofnięcia zmieniły się.';
+        }
+
+        if (! $this->historicalReversedLabelCollectionMatches(
+            $currentPostSplitLabels,
+            $reversedLabels,
+            $root,
+        )) {
+            $reasons[] = 'Lista lub stan etykiet przeznaczonych do cofnięcia zmieniły się.';
+        }
+
+        if (! $this->artifactCollectionMatches(
+            $currentPostSplitDocuments,
+            $reversedDocumentFingerprints,
+            fn (WarehouseDocument $document): string => HistoricalSplitSnapshot::warehouseDocumentFingerprint($document),
+        )) {
+            $reasons[] = 'Lista lub stan dokumentów WZ przeznaczonych do cofnięcia zmieniły się.';
+        }
+
+        $preservedIdentities = $preservedLabels
+            ->flatMap(fn (ShippingLabel $label): array => [
+                trim((string) $label->label_number),
+                trim((string) $label->tracking_number),
+            ])->filter()->unique();
+        $reversedIdentities = $currentPostSplitLabels
+            ->flatMap(fn (ShippingLabel $label): array => [
+                trim((string) $label->label_number),
+                trim((string) $label->tracking_number),
+            ])->filter()->unique();
+
+        if ($preservedIdentities->intersect($reversedIdentities)->isNotEmpty()) {
+            $reasons[] = 'Etykieta zachowywana i etykieta cofana wskazują tę samą przesyłkę. Wymagana jest indywidualna weryfikacja przewoźnika.';
+        }
+
+        foreach ((array) data_get($snapshot, 'legacy_adoption.warehouse_verification.expected_balance_deltas', []) as $expectedBalance) {
+            if (! is_array($expectedBalance)
+                || ! is_numeric($expectedBalance['warehouse_id'] ?? null)
+                || ! is_numeric($expectedBalance['product_id'] ?? null)
+                || ! is_numeric($expectedBalance['quantity_on_hand_before'] ?? null)) {
+                $reasons[] = 'Plan historyczny zawiera niepełną kontrolę stanu magazynowego.';
+
+                continue;
+            }
+
+            $balance = StockBalance::query()
+                ->where('warehouse_id', (int) $expectedBalance['warehouse_id'])
+                ->where('product_id', (int) $expectedBalance['product_id'])
+                ->first();
+
+            if (! $balance instanceof StockBalance
+                || abs((float) $balance->quantity_on_hand - (float) $expectedBalance['quantity_on_hand_before']) > 0.00001) {
+                $reasons[] = 'Stan magazynowy zmienił się od przygotowania historycznego planu. Wymagany jest nowy podgląd.';
+                break;
+            }
+        }
+
+        return array_values(array_unique($reasons));
+    }
+
+    /** @param array<string,mixed> $snapshot */
+    private function verifyHistoricalPostconditions(
+        ExternalOrder $root,
+        array $snapshot,
+        string $operationUuid,
+    ): void {
+        if (abs((float) $root->total_gross - (float) ($snapshot['total_gross'] ?? 0)) > 0.009) {
+            throw new RuntimeException('Kontrola końcowa wykryła nieprawidłową kwotę po scaleniu.');
+        }
+
+        if (! is_numeric(data_get($root->raw_payload, 'total'))
+            || abs((float) data_get($root->raw_payload, 'total') - (float) ($snapshot['total_gross'] ?? 0)) > 0.009) {
+            throw new RuntimeException('Kontrola końcowa wykryła nieprawidłową kwotę źródłową po scaleniu.');
+        }
+
+        $preservedShipmentIdentities = collect((array) data_get(
+            $snapshot,
+            'preserved_artifacts.shipping_labels',
+            [],
+        ))->filter(fn (mixed $label): bool => is_array($label))
+            ->flatMap(fn (array $label): array => [
+                trim((string) ($label['label_number'] ?? '')),
+                trim((string) ($label['tracking_number'] ?? '')),
+            ])->filter(fn (string $identity): bool => $identity !== '')
+            ->unique()->values()->all();
+        $unexpectedShipmentIdentities = collect($this->shipmentIdentities((array) $root->raw_payload))
+            ->reject(fn (string $identity): bool => in_array($identity, $preservedShipmentIdentities, true));
+
+        if ($unexpectedShipmentIdentities->isNotEmpty()) {
+            throw new RuntimeException('Kontrola końcowa wykryła identyfikator anulowanej przesyłki w scalonym zamówieniu.');
+        }
+
+        if ((string) $root->fulfillment_status !== (string) ($snapshot['fulfillment_status'] ?? '')) {
+            throw new RuntimeException('Kontrola końcowa wykryła nieprawidłowy etap pakowania po scaleniu.');
+        }
+
+        $expectedLines = collect((array) ($snapshot['lines'] ?? []))
+            ->mapWithKeys(fn (array $line): array => [
+                (string) ($line['canonical_external_line_id'] ?? $line['external_line_id'] ?? '') => (string) ($line['quantity'] ?? 0),
+            ])->sortKeys()->all();
+        $actualLines = $root->lines
+            ->mapWithKeys(fn (ExternalOrderLine $line): array => [
+                (string) $this->canonicalExternalLineId($line) => (string) $line->quantity,
+            ])->sortKeys()->all();
+
+        if (array_keys($expectedLines) !== array_keys($actualLines)
+            || collect($expectedLines)->contains(function (mixed $quantity, string $canonical) use ($actualLines): bool {
+                return abs((float) $quantity - (float) ($actualLines[$canonical] ?? 0)) > 0.00001;
+            })) {
+            throw new RuntimeException('Kontrola końcowa wykryła nieprawidłowe pozycje po scaleniu.');
+        }
+
+        foreach (HistoricalSplitSnapshot::preservedPackingTasks($snapshot) as $taskId => $saved) {
+            $task = PackingTask::query()->find($taskId);
+            $canonical = (string) ($saved['canonical_external_line_id'] ?? '');
+
+            if (! $task instanceof PackingTask) {
+                throw new RuntimeException("Kontrola końcowa nie znalazła zachowywanego zadania pakowania #{$taskId}.");
+            }
+
+            $taskProblems = array_keys(array_filter([
+                'zamówienie' => (int) $task->external_order_id !== (int) $root->id,
+                'status' => (string) $task->status !== (string) ($saved['status'] ?? ''),
+                'ilość wymagana' => abs((float) $task->quantity_required - (float) ($saved['quantity_required'] ?? 0)) > 0.00001,
+                'ilość zebrana' => abs((float) $task->quantity_picked - (float) ($saved['quantity_picked'] ?? 0)) > 0.00001,
+                'czas zebrania' => $task->picked_at?->toISOString() !== ($saved['picked_at'] ?? null),
+                'czas pakowania' => $task->packed_at?->toISOString() !== ($saved['packed_at'] ?? null),
+                'powiązanie pozycji' => ! $task->orderLine instanceof ExternalOrderLine
+                    || (string) $this->canonicalExternalLineId($task->orderLine) !== $canonical,
+            ]));
+
+            if ($taskProblems !== []) {
+                throw new RuntimeException(
+                    "Kontrola końcowa wykryła nieprawidłowe odtworzenie zadania pakowania #{$taskId}: "
+                    .implode(', ', $taskProblems).'.',
+                );
+            }
+        }
+
+        $reversedTasks = $this->artifactFingerprintMap((array) data_get(
+            $snapshot,
+            'reversed_artifacts.packing_tasks',
+            [],
+        ));
+
+        foreach (array_keys($reversedTasks) as $taskId) {
+            $task = PackingTask::query()->find($taskId);
+
+            if (! $task instanceof PackingTask
+                || (string) $task->status !== 'cancelled'
+                || abs((float) $task->quantity_picked) > 0.00001
+                || $task->picked_at !== null
+                || $task->packed_at !== null
+                || (int) data_get($task->metadata, 'split_reversal.root_order_id', 0) !== (int) $root->id) {
+                throw new RuntimeException("Kontrola końcowa wykryła niepełne cofnięcie zadania pakowania #{$taskId}.");
+            }
+        }
+
+        foreach (HistoricalSplitSnapshot::preservedWarehouseDocumentFingerprints($snapshot) as $documentId => $fingerprint) {
+            $document = WarehouseDocument::query()->with(['lines', 'ledgerEntries'])->find($documentId);
+
+            if (! $document instanceof WarehouseDocument
+                || (string) $document->status !== 'posted'
+                || ! hash_equals($fingerprint, HistoricalSplitSnapshot::warehouseDocumentFingerprint($document))) {
+                throw new RuntimeException("Kontrola końcowa wykryła zmianę zachowywanego dokumentu WZ #{$documentId}.");
+            }
+        }
+
+        foreach (HistoricalSplitSnapshot::preservedLabelFingerprints($snapshot) as $labelId => $fingerprint) {
+            $label = ShippingLabel::query()->find($labelId);
+
+            if (! $label instanceof ShippingLabel
+                || (string) $label->status === 'cancelled'
+                || ! hash_equals($fingerprint, HistoricalSplitSnapshot::shippingLabelFingerprint($label))) {
+                throw new RuntimeException("Kontrola końcowa wykryła zmianę zachowywanej etykiety #{$labelId}.");
+            }
+        }
+
+        $reversedLabels = $this->artifactFingerprintMap((array) data_get(
+            $snapshot,
+            'reversed_artifacts.shipping_labels',
+            [],
+        ));
+
+        foreach (array_keys($reversedLabels) as $labelId) {
+            $label = ShippingLabel::query()->find($labelId);
+
+            if (! $label instanceof ShippingLabel
+                || (string) $label->status !== 'cancelled'
+                || ! hash_equals(
+                    $operationUuid,
+                    (string) data_get($label->response_payload, 'split_reversal.operation_uuid', ''),
+                )
+                || ! str_starts_with(
+                    (string) $label->idempotency_key,
+                    'split-reverted:'.$operationUuid.':',
+                )) {
+                throw new RuntimeException("Kontrola końcowa wykryła niepełne zarchiwizowanie etykiety #{$labelId}.");
+            }
+        }
+
+        $reversedDocuments = $this->artifactFingerprintMap((array) data_get(
+            $snapshot,
+            'reversed_artifacts.warehouse_documents',
+            [],
+        ));
+
+        foreach (array_keys($reversedDocuments) as $documentId) {
+            $document = WarehouseDocument::withTrashed()->with('ledgerEntries')->find($documentId);
+
+            if (! $document instanceof WarehouseDocument
+                || (string) $document->status !== 'cancelled'
+                || $document->deleted_at === null
+                || ! $this->cancelledWarehouseDocumentHasCompleteLedgerPair($document, $document->ledgerEntries)) {
+                throw new RuntimeException("Kontrola końcowa wykryła niepełne odwrócenie dokumentu WZ #{$documentId}.");
+            }
+        }
+
+        foreach ((array) data_get($snapshot, 'legacy_adoption.warehouse_verification.expected_balance_deltas', []) as $expectedBalance) {
+            $balance = is_array($expectedBalance)
+                ? StockBalance::query()
+                    ->where('warehouse_id', (int) ($expectedBalance['warehouse_id'] ?? 0))
+                    ->where('product_id', (int) ($expectedBalance['product_id'] ?? 0))
+                    ->first()
+                : null;
+
+            if (! $balance instanceof StockBalance
+                || ! is_numeric($expectedBalance['quantity_on_hand_after'] ?? null)
+                || abs((float) $balance->quantity_on_hand - (float) $expectedBalance['quantity_on_hand_after']) > 0.00001) {
+                throw new RuntimeException('Kontrola końcowa wykryła inną niż zatwierdzona zmianę stanu magazynowego.');
+            }
+        }
+
+        $expectedChildIds = collect((array) data_get($snapshot, 'legacy_adoption.family_order_ids', []))
+            ->map(fn (mixed $id): int => (int) $id)
+            ->reject(fn (int $id): bool => $id === (int) $root->id)
+            ->sort()->values()->all();
+        $archivedChildren = ExternalOrder::withTrashed()
+            ->whereIn('id', $expectedChildIds)
+            ->orderBy('id')
+            ->get();
+
+        if ($archivedChildren->pluck('id')->map(fn (mixed $id): int => (int) $id)->sort()->values()->all() !== $expectedChildIds
+            || $archivedChildren->contains(fn (ExternalOrder $child): bool => $child->deleted_at === null
+                || (string) $child->status !== 'split-reverted'
+                || (int) data_get($child->raw_payload, 'sempre_erp_split_reversal.root_order_id', 0) !== (int) $root->id)) {
+            throw new RuntimeException('Kontrola końcowa wykryła niepełne zarchiwizowanie części zamówienia.');
+        }
+
+        if (HistoricalSplitSnapshot::preservedWarehouseDocumentFingerprints($snapshot) !== []
+            && StockReservation::query()
+                ->where('sales_channel_id', $root->sales_channel_id)
+                ->where('external_order_id', $root->external_id)
+                ->whereIn('status', ['active', 'waiting'])
+                ->exists()) {
+            throw new RuntimeException('Kontrola końcowa wykryła rezerwację mimo zachowanego zaksięgowanego WZ.');
+        }
+    }
+
+    /** @param list<array<string,mixed>> $items @return array<int,string> */
+    private function artifactFingerprintMap(array $items): array
+    {
+        return collect($items)
+            ->filter(fn (mixed $item): bool => is_array($item)
+                && (int) ($item['id'] ?? 0) > 0
+                && filled($item['fingerprint'] ?? null))
+            ->mapWithKeys(fn (array $item): array => [
+                (int) $item['id'] => (string) $item['fingerprint'],
+            ])->all();
+    }
+
+    private function historicalTaskDate(mixed $value): ?CarbonImmutable
+    {
+        if ($value instanceof CarbonInterface) {
+            return CarbonImmutable::instance($value)->setTimezone((string) config('app.timezone'));
+        }
+
+        if (blank($value)) {
+            return null;
+        }
+
+        return CarbonImmutable::parse((string) $value)
+            ->setTimezone((string) config('app.timezone'));
+    }
+
+    /** @param Collection<int,mixed> $artifacts @param array<int,string> $expected */
+    private function artifactCollectionMatches(
+        Collection $artifacts,
+        array $expected,
+        callable $fingerprint,
+    ): bool {
+        $actualIds = $artifacts->pluck('id')->map(fn (mixed $id): int => (int) $id)->sort()->values()->all();
+        $expectedIds = collect(array_keys($expected))->sort()->values()->all();
+
+        if ($actualIds !== $expectedIds) {
+            return false;
+        }
+
+        return $artifacts->every(fn (mixed $artifact): bool => hash_equals(
+            (string) ($expected[(int) $artifact->id] ?? ''),
+            (string) $fingerprint($artifact),
+        ));
+    }
+
+    /** @param Collection<int,ShippingLabel> $labels @param list<array<string,mixed>> $expected */
+    private function historicalReversedLabelCollectionMatches(
+        Collection $labels,
+        array $expected,
+        ExternalOrder $root,
+    ): bool {
+        $expectedById = collect($expected)
+            ->filter(fn (mixed $item): bool => is_array($item)
+                && (int) ($item['id'] ?? 0) > 0
+                && filled($item['fingerprint'] ?? null)
+                && filled($item['cancelled_fingerprint'] ?? null))
+            ->keyBy(fn (array $item): int => (int) $item['id']);
+        $actualIds = $labels->pluck('id')->map(fn (mixed $id): int => (int) $id)->sort()->values()->all();
+        $expectedIds = $expectedById->keys()->map(fn (mixed $id): int => (int) $id)->sort()->values()->all();
+
+        if ($actualIds !== $expectedIds) {
+            return false;
+        }
+
+        $operationUuid = trim((string) data_get(
+            $root->raw_payload,
+            'sempre_erp_split_reversal_operation.uuid',
+            '',
+        ));
+
+        return $labels->every(function (ShippingLabel $label) use ($expectedById, $operationUuid): bool {
+            $saved = $expectedById->get((int) $label->id);
+
+            if (! is_array($saved)) {
+                return false;
+            }
+
+            $currentFingerprint = HistoricalSplitSnapshot::shippingLabelFingerprint($label);
+
+            if (hash_equals((string) $saved['fingerprint'], $currentFingerprint)) {
+                return true;
+            }
+
+            return $operationUuid !== ''
+                && (string) $label->status === 'cancelled'
+                && hash_equals((string) $saved['cancelled_fingerprint'], $currentFingerprint)
+                && hash_equals(
+                    $operationUuid,
+                    (string) data_get($label->response_payload, 'cancellation.operation_uuid', ''),
+                );
+        });
+    }
+
+    /** @param array<string,mixed>|null $snapshot */
+    private function isPreservedHistoricalLabel(ShippingLabel $label, ?array $snapshot): bool
+    {
+        if (! HistoricalSplitSnapshot::isVerified($snapshot)) {
+            return false;
+        }
+
+        $fingerprints = HistoricalSplitSnapshot::preservedLabelFingerprints($snapshot);
+
+        return isset($fingerprints[(int) $label->id])
+            && hash_equals(
+                (string) $fingerprints[(int) $label->id],
+                HistoricalSplitSnapshot::shippingLabelFingerprint($label),
+            );
+    }
+
+    /** @param array<string,mixed>|null $snapshot */
+    private function isPreservedHistoricalWarehouseDocument(
+        WarehouseDocument $document,
+        ?array $snapshot,
+    ): bool {
+        if (! HistoricalSplitSnapshot::isVerified($snapshot)) {
+            return false;
+        }
+
+        $fingerprints = HistoricalSplitSnapshot::preservedWarehouseDocumentFingerprints($snapshot);
+
+        return isset($fingerprints[(int) $document->id])
+            && hash_equals(
+                (string) $fingerprints[(int) $document->id],
+                HistoricalSplitSnapshot::warehouseDocumentFingerprint($document),
+            );
+    }
+
+    /**
+     * @param  array<string,mixed>|null  $snapshot
+     * @param  EloquentCollection<int,ShippingLabel>  $olderActiveLabels
+     * @return list<string>
+     */
+    private function preservedShipmentIdentities(
+        ?array $snapshot,
+        EloquentCollection $olderActiveLabels,
+    ): array {
+        if (! HistoricalSplitSnapshot::isVerified($snapshot)) {
+            return [];
+        }
+
+        return $olderActiveLabels
+            ->filter(fn (ShippingLabel $label): bool => $this->isPreservedHistoricalLabel($label, $snapshot))
+            ->flatMap(fn (ShippingLabel $label): array => [
+                trim((string) $label->label_number),
+                trim((string) $label->tracking_number),
+            ])
+            ->filter(fn (string $identity): bool => $identity !== '')
+            ->unique()
+            ->values()
+            ->all();
     }
 
     /** @param list<int> $orderIds */
@@ -1154,11 +1871,15 @@ final class OrderSplitReversalService
     {
         $snapshot = data_get($root->raw_payload, 'sempre_erp_split_original');
 
-        return is_array($snapshot)
-            && in_array((int) ($snapshot['version'] ?? 0), [1, 2, 3, 4], true)
-            && is_array($snapshot['lines'] ?? null)
-                ? $snapshot
-                : null;
+        if (! is_array($snapshot) || ! is_array($snapshot['lines'] ?? null)) {
+            return null;
+        }
+
+        if (in_array((int) ($snapshot['version'] ?? 0), [1, 2, 3, 4], true)) {
+            return $snapshot;
+        }
+
+        return HistoricalSplitSnapshot::isVerified($snapshot) ? $snapshot : null;
     }
 
     /** @param EloquentCollection<int,ExternalOrder> $family */
@@ -1441,6 +2162,20 @@ final class OrderSplitReversalService
         );
 
         if (is_array($snapshotRaw)) {
+            if (HistoricalSplitSnapshot::isVerified($snapshot)) {
+                $preservedIdentities = collect((array) data_get(
+                    $snapshot,
+                    'preserved_artifacts.shipping_labels',
+                    [],
+                ))->filter(fn (mixed $label): bool => is_array($label))
+                    ->flatMap(fn (array $label): array => [
+                        trim((string) ($label['label_number'] ?? '')),
+                        trim((string) ($label['tracking_number'] ?? '')),
+                    ])->filter(fn (string $identity): bool => $identity !== '')
+                    ->unique()->values()->all();
+                $raw = $this->withOnlyPreservedShipmentIdentities($raw, $preservedIdentities);
+            }
+
             return $raw;
         }
 
@@ -1480,6 +2215,56 @@ final class OrderSplitReversalService
         return $raw;
     }
 
+    /** @param array<string,mixed> $raw @param list<string> $preservedIdentities @return array<string,mixed> */
+    private function withOnlyPreservedShipmentIdentities(
+        array $raw,
+        array $preservedIdentities,
+    ): array {
+        foreach (array_keys($raw) as $key) {
+            if (! $this->isShipmentIdentityKey((string) $key)) {
+                continue;
+            }
+
+            $value = $raw[$key] ?? null;
+
+            if (! is_scalar($value)
+                || ! in_array(trim((string) $value), $preservedIdentities, true)) {
+                unset($raw[$key]);
+            }
+        }
+
+        $raw['meta_data'] = collect((array) ($raw['meta_data'] ?? []))
+            ->reject(function (mixed $meta) use ($preservedIdentities): bool {
+                if (! is_array($meta)
+                    || ! $this->isShipmentIdentityKey((string) ($meta['key'] ?? ''))) {
+                    return false;
+                }
+
+                return ! is_scalar($meta['value'] ?? null)
+                    || ! in_array(trim((string) $meta['value']), $preservedIdentities, true);
+            })->values()->all();
+
+        foreach ((array) ($raw['shipping_lines'] ?? []) as $index => $shippingLine) {
+            if (! is_array($shippingLine)) {
+                continue;
+            }
+
+            $shippingLine['meta_data'] = collect((array) ($shippingLine['meta_data'] ?? []))
+                ->reject(function (mixed $meta) use ($preservedIdentities): bool {
+                    if (! is_array($meta)
+                        || ! $this->isShipmentIdentityKey((string) ($meta['key'] ?? ''))) {
+                        return false;
+                    }
+
+                    return ! is_scalar($meta['value'] ?? null)
+                        || ! in_array(trim((string) $meta['value']), $preservedIdentities, true);
+                })->values()->all();
+            $raw['shipping_lines'][$index] = $shippingLine;
+        }
+
+        return $raw;
+    }
+
     /**
      * WooCommerce can keep shipment metadata after the carrier shipment has
      * been cancelled. Persist exact cancelled identities so a later order
@@ -1493,6 +2278,20 @@ final class OrderSplitReversalService
         CarbonInterface $artifactCutoff,
         string $operationUuid,
     ): array {
+        $activeIdentities = ShippingLabel::query()
+            ->shipments()
+            ->whereIn('external_order_id', $family->pluck('id'))
+            ->where('status', '!=', 'cancelled')
+            ->get(['label_number', 'tracking_number'])
+            ->flatMap(fn (ShippingLabel $label): array => [
+                trim((string) $label->label_number),
+                trim((string) $label->tracking_number),
+            ])
+            ->filter(fn (string $identity): bool => $identity !== '')
+            ->unique()
+            ->values()
+            ->all();
+
         return ShippingLabel::query()
             ->shipments()
             ->whereIn('external_order_id', $family->pluck('id'))
@@ -1509,6 +2308,7 @@ final class OrderSplitReversalService
             ])
             ->map(fn (mixed $identity): string => trim((string) $identity))
             ->filter(fn (string $identity): bool => $identity !== '')
+            ->reject(fn (string $identity): bool => in_array($identity, $activeIdentities, true))
             ->unique()
             ->values()
             ->all();
@@ -1882,6 +2682,7 @@ final class OrderSplitReversalService
         CarbonInterface $splitStartedAt,
         string $operationUuid,
         string $reason,
+        ?array $snapshot,
     ): array {
         $family = ExternalOrder::query()->whereIn('id', $familyOrderIds)->orderBy('id')->get();
         $archived = [];
@@ -1892,6 +2693,10 @@ final class OrderSplitReversalService
         // restores that baseline after all newer movements are gone.
         foreach ($this->wzDocumentsForFamily($family)->sortByDesc('id') as $document) {
             if ($document->created_at?->lt($splitStartedAt)) {
+                if ($this->isPreservedHistoricalWarehouseDocument($document, $snapshot)) {
+                    continue;
+                }
+
                 if ($document->status !== 'cancelled') {
                     throw new RuntimeException("Dokument {$document->number} powstał przed podziałem.");
                 }

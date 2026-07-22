@@ -10,6 +10,7 @@ use App\Http\Controllers\ExternalOrderController;
 use App\Http\Controllers\ExternalOrderFulfillmentController;
 use App\Http\Controllers\ExternalOrderInvoiceController;
 use App\Http\Controllers\GoogleWorkspaceMailController;
+use App\Http\Controllers\HistoricalSplitReconciliationController;
 use App\Http\Controllers\IntegrationController;
 use App\Http\Controllers\InvoiceController;
 use App\Http\Controllers\KsefController;
@@ -49,6 +50,8 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
     Route::get('/', DashboardController::class)->name('dashboard');
     Route::get('/products/image-thumbnail', ProductImageThumbnailController::class)->name('products.image-thumbnail');
     Route::middleware(EnsureErpRole::class.':settings')->group(function (): void {
+        Route::post('/orders/{order}/split/historical-reconciliation', HistoricalSplitReconciliationController::class)
+            ->name('orders.split.historical-reconciliation');
         Route::get('/settings', SettingsController::class)->name('settings.index');
         Route::get('/settings/documents', [SettingsController::class, 'documents'])->name('settings.documents');
         Route::get('/settings/returns', [SettingsController::class, 'returns'])->name('settings.returns');
