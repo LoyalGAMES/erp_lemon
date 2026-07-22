@@ -189,6 +189,43 @@
                     <div><span>Upload faktur</span><strong>{{ $integrations->where('invoice_upload_enabled', true)->count() }}</strong></div>
                 </div>
             </article>
+
+            <article class="card integration-help-card" id="english-translation-report">
+                <div class="panel-header">
+                    <span>Tłumaczenia EN</span>
+                    <span>{{ $englishTranslationReport['healthy'] }} / {{ $englishTranslationReport['total'] }} rodzin</span>
+                </div>
+                <div class="integration-health-list">
+                    <div><span>Bez tłumaczenia EN</span><strong>{{ $englishTranslationReport['missing'] }}</strong></div>
+                    <div><span>Jednojęzyczne (celowo, brak treści EN)</span><strong>{{ $englishTranslationReport['monolingual'] }}</strong></div>
+                    <div><span>W trakcie naprawy (zakolejkowane)</span><strong>{{ $englishTranslationReport['queued'] }}</strong></div>
+                    <div><span>Czeka na pierwszy przebieg automatu</span><strong>{{ $englishTranslationReport['unprocessed'] }}</strong></div>
+                    <div><span>Niespięty post EN — decyzja operatora</span><strong>{{ $englishTranslationReport['live_ref'] }}</strong></div>
+                    <div><span>Wspólne warianty — do rozplątania</span><strong>{{ $englishTranslationReport['shared_children'] }}</strong></div>
+                    <div><span>Po 3 porażkach — wymaga człowieka</span><strong>{{ $englishTranslationReport['failed_manual'] }}</strong></div>
+                    <div><span>Błędy weryfikacji (ponawiane co dobę)</span><strong>{{ $englishTranslationReport['check_failed'] }}</strong></div>
+                </div>
+                @foreach ([
+                    'Niespięte posty EN (spnij w Polylang albo usuń trwale post)' => ['rows' => $englishTranslationReport['live_ref_rows'], 'detail' => 'post EN #'],
+                    'Rodziny po 3 nieudanych eksportach' => ['rows' => $englishTranslationReport['failed_manual_rows'], 'detail' => ''],
+                    'Wspólne warianty (bliźniaki do rozplątania)' => ['rows' => $englishTranslationReport['shared_children_rows'], 'detail' => ''],
+                    'Błędy weryfikacji' => ['rows' => $englishTranslationReport['check_failed_rows'], 'detail' => ''],
+                ] as $sectionTitle => $section)
+                    @if ($section['rows'] !== [])
+                        <div class="toolbar-note" style="margin-top: 10px; font-weight: 760;">{{ $sectionTitle }} (max 20):</div>
+                        <ul style="margin: 4px 0 0 18px; font-size: 12px;">
+                            @foreach ($section['rows'] as $row)
+                                <li>
+                                    <strong>{{ $row['sku'] }}</strong> — {{ \Illuminate\Support\Str::limit($row['name'], 40) }}
+                                    @if ($row['detail'] !== '')
+                                        <em>({{ $section['detail'] }}{{ \Illuminate\Support\Str::limit($row['detail'], 90) }})</em>
+                                    @endif
+                                </li>
+                            @endforeach
+                        </ul>
+                    @endif
+                @endforeach
+            </article>
         </div>
 
         <section class="integration-store-list" aria-label="Aktywne integracje WooCommerce">

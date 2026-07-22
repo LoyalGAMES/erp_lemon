@@ -124,6 +124,7 @@ class EnglishTranslationRepairCommandTest extends TestCase
             (array) data_get($dead->fresh()->attributes, 'woocommerce_translations'),
         );
         $this->assertNotNull(data_get($deadMapping->fresh()->metadata, 'english_translation_repair.checked_at'));
+        $this->assertSame('queued', data_get($deadMapping->fresh()->metadata, 'english_translation_repair.status'));
 
         // Live-ref family: snapshot intact, marker set, no export queued for it.
         $this->assertSame(
@@ -131,6 +132,8 @@ class EnglishTranslationRepairCommandTest extends TestCase
             (string) data_get($live->fresh()->attributes, 'woocommerce_translations.en.product_id'),
         );
         $this->assertNotNull(data_get($liveMapping->fresh()->metadata, 'english_translation_repair.checked_at'));
+        $this->assertSame('live_ref_manual', data_get($liveMapping->fresh()->metadata, 'english_translation_repair.status'));
+        $this->assertSame('556', data_get($liveMapping->fresh()->metadata, 'english_translation_repair.live_ref'));
 
         // Second run within the daily window queues nothing new.
         $this->artisan('erp:dispatch-english-translation-repair', ['--limit' => 10])
