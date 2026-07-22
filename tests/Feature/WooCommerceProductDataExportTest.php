@@ -1439,6 +1439,8 @@ class WooCommerceProductDataExportTest extends TestCase
                 'sku' => 'POLYLANG-SKU',
                 'name' => 'English product',
             ]),
+            // snapshot-liveness preflight (fresh read with cache-buster query)
+            'https://shop.test/wp-json/wc/v3/products/124*' => Http::response(['id' => 124, 'sku' => 'POLYLANG-SKU']),
         ]);
 
         $channel = SalesChannel::query()->create([
@@ -1498,6 +1500,8 @@ class WooCommerceProductDataExportTest extends TestCase
                 'id' => 124,
                 'sku' => 'SKU-HIDDEN',
             ]),
+            // snapshot-liveness preflight (fresh read with cache-buster query)
+            'https://shop.test/wp-json/wc/v3/products/124*' => Http::response(['id' => 124, 'sku' => 'SKU-HIDDEN']),
         ]);
 
         $channel = SalesChannel::query()->create([
@@ -3950,6 +3954,8 @@ class WooCommerceProductDataExportTest extends TestCase
         $this->fakeWooWithGlobalAttributes([
             'https://shop.test/wp-json/wc/v3/products/123' => Http::response(['id' => 123, 'sku' => 'SKU-I18N']),
             'https://shop.test/wp-json/wc/v3/products/124?lang=en' => Http::response(['id' => 124, 'sku' => 'SKU-I18N']),
+            // snapshot-liveness preflight (fresh read with cache-buster query)
+            'https://shop.test/wp-json/wc/v3/products/124*' => Http::response(['id' => 124, 'sku' => 'SKU-I18N']),
         ]);
         $channel = SalesChannel::query()->create([
             'code' => 'B2C',
@@ -4125,6 +4131,8 @@ class WooCommerceProductDataExportTest extends TestCase
             'https://shop.test/wp-json/wc-lemon-erp/v1/catalog/products/translations/capabilities' => Http::response($this->readyProductTranslationCapabilities()),
             'https://shop.test/wp-json/wc/v3/products/123' => Http::response(['id' => 123, 'sku' => 'SKU-FULL']),
             'https://shop.test/wp-json/wc/v3/products/124?lang=en' => Http::response(['id' => 124, 'sku' => 'SKU-FULL']),
+            // snapshot-liveness preflight (fresh read with cache-buster query)
+            'https://shop.test/wp-json/wc/v3/products/124*' => Http::response(['id' => 124, 'sku' => 'SKU-FULL']),
         ]);
 
         $channel = SalesChannel::query()->create([
@@ -4956,6 +4964,13 @@ class WooCommerceProductDataExportTest extends TestCase
                     'id' => (int) basename((string) parse_url($url, PHP_URL_PATH)),
                     'sku' => (string) ($request['sku'] ?? ''),
                 ]);
+            }
+
+            // snapshot-liveness preflight (fresh read with cache-buster query)
+            if ($request->method() === 'GET'
+                && parse_url($url, PHP_URL_PATH) === '/wp-json/wc/v3/products/223'
+            ) {
+                return Http::response(['id' => 223, 'sku' => 'LEGACY-EN']);
             }
 
             throw new \RuntimeException('Unexpected request: '.$request->method().' '.$url);
