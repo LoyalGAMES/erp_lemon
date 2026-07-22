@@ -122,6 +122,15 @@ final class OrderSplitHistoricalReconciliationTest extends TestCase
             data_get($snapshot, 'legacy_adoption.adopted_by_role'),
         );
 
+        $rootAfterAdoption = $root->fresh();
+        $rootRaw = (array) $rootAfterAdoption->raw_payload;
+        $storedSnapshot = (array) data_get($rootRaw, 'sempre_erp_split_original');
+        $storedSnapshot['captured_at'] = CarbonImmutable::parse(
+            (string) $storedSnapshot['captured_at'],
+        )->subHours(2)->toISOString();
+        $rootRaw['sempre_erp_split_original'] = $storedSnapshot;
+        $rootAfterAdoption->update(['raw_payload' => $rootRaw]);
+
         $availability = app(OrderSplitReversalService::class)->availability($child->fresh());
         $this->assertTrue($availability['available'], implode(' ', $availability['reasons']));
         $this->assertFalse($availability['shipping_confirmation_required']);
@@ -719,6 +728,35 @@ final class OrderSplitHistoricalReconciliationTest extends TestCase
         $this->assertSame([$fixture['preserved_wz']->id], $preview['plan']['preserve_wz_ids']);
         $this->assertSame([$fixture['child_label']->id], $preview['plan']['reverse_label_ids']);
         $this->assertSame([$fixture['duplicate_wz']->id], $preview['plan']['reverse_wz_ids']);
+
+        $snapshotWithOffsetAuditTimestamp = $preview['snapshot'];
+        $this->assertIsArray($snapshotWithOffsetAuditTimestamp);
+        $snapshotWithOffsetAuditTimestamp['captured_at'] = CarbonImmutable::parse(
+            (string) $snapshotWithOffsetAuditTimestamp['captured_at'],
+        )->subHours(2)->toISOString();
+
+        $simulated = app(OrderSplitReversalService::class)->availabilityAgainstSnapshot(
+            $fixture['child']->fresh(),
+            $snapshotWithOffsetAuditTimestamp,
+        );
+
+        $this->assertTrue($simulated['available'], implode(' ', $simulated['reasons']));
+
+        data_set(
+            $snapshotWithOffsetAuditTimestamp,
+            'legacy_adoption.source_order_id',
+            $fixture['root']->id,
+        );
+        $invalidSource = app(OrderSplitReversalService::class)->availabilityAgainstSnapshot(
+            $fixture['child']->fresh(),
+            $snapshotWithOffsetAuditTimestamp,
+        );
+
+        $this->assertFalse($invalidSource['available']);
+        $this->assertStringContainsString(
+            'Nie można potwierdzić źródłowej części',
+            implode(' ', $invalidSource['reasons']),
+        );
     }
 
     public function test_preview_rejects_artifacts_created_before_the_split_but_finalized_after_it(): void

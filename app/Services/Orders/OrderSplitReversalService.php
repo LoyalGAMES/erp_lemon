@@ -171,8 +171,13 @@ final class OrderSplitReversalService
         $reason = trim((string) $note) !== ''
             ? trim((string) $note)
             : 'Cofnięcie rozdzielenia zamówienia i pracy wykonanej po podziale.';
-        $artifactCutoff = CarbonImmutable::parse($prepared['artifact_cutoff'])
-            ->setTimezone((string) config('app.timezone'));
+        $artifactCutoff = $prepared['artifact_cutoff'];
+
+        if (! $artifactCutoff instanceof CarbonInterface) {
+            throw new RuntimeException('Nie można potwierdzić czasu granicznego cofnięcia podziału.');
+        }
+
+        $artifactCutoff = CarbonImmutable::instance($artifactCutoff);
 
         try {
             $shipping = $this->shippingCancellation->cancelForOrderIdsWhileLocked(
@@ -324,7 +329,7 @@ final class OrderSplitReversalService
      *     family_order_ids:list<int>,
      *     operation_uuid:string,
      *     split_started_at:string,
-     *     artifact_cutoff:string,
+     *     artifact_cutoff:CarbonImmutable,
      *     original_status:string,
      *     sent_post_split_customer_message:bool
      * }
@@ -401,7 +406,7 @@ final class OrderSplitReversalService
                 'family_order_ids' => $family->pluck('id')->map(fn (mixed $id): int => (int) $id)->all(),
                 'operation_uuid' => (string) $operation['uuid'],
                 'split_started_at' => $splitStartedAt->toISOString(),
-                'artifact_cutoff' => $this->postSplitArtifactCutoff($root, $family, $snapshot)->toISOString(),
+                'artifact_cutoff' => $this->postSplitArtifactCutoff($root, $family, $snapshot),
                 'original_status' => $this->originalStatus($root, $snapshot, $family),
                 'sent_post_split_customer_message' => ! HistoricalSplitSnapshot::isVerified($snapshot)
                     && CustomerMessage::query()
@@ -980,10 +985,19 @@ final class OrderSplitReversalService
         $familyIds = $family->pluck('id')->map(fn (mixed $id): int => (int) $id)->sort()->values()->all();
         $snapshotFamilyIds = collect((array) data_get($snapshot, 'legacy_adoption.family_order_ids', []))
             ->map(fn (mixed $id): int => (int) $id)->sort()->values()->all();
+        $sourceOrderId = (int) data_get($snapshot, 'legacy_adoption.source_order_id', 0);
+        $sourceOrder = $family->firstWhere('id', $sourceOrderId);
 
         if ((int) data_get($snapshot, 'legacy_adoption.root_order_id', 0) !== (int) $root->id
             || $snapshotFamilyIds !== $familyIds) {
             $reasons[] = 'Zweryfikowany zapis historyczny nie odpowiada bieżącej rodzinie zamówień.';
+        }
+
+        if (! $sourceOrder instanceof ExternalOrder
+            || (int) $sourceOrder->id === (int) $root->id
+            || (int) $sourceOrder->split_parent_order_id !== (int) $root->id
+            || $sourceOrder->created_at === null) {
+            $reasons[] = 'Nie można potwierdzić źródłowej części wyznaczającej czas historycznego podziału.';
         }
 
         $orderIds = $familyIds;
@@ -2562,6 +2576,20 @@ final class OrderSplitReversalService
         EloquentCollection $family,
         ?array $snapshot,
     ): CarbonImmutable {
+        if (HistoricalSplitSnapshot::isVerified($snapshot)) {
+            $sourceOrderId = (int) data_get($snapshot, 'legacy_adoption.source_order_id', 0);
+            $sourceOrder = $family->firstWhere('id', $sourceOrderId);
+
+            if ($sourceOrder instanceof ExternalOrder && $sourceOrder->created_at !== null) {
+                // Historical reconciliation records the exact physical child
+                // whose database timestamp marks the split. Use that model
+                // timestamp for every database and in-memory comparison so a
+                // serialized UTC audit timestamp cannot shift the wall-clock
+                // boundary used by timezone-naive datetime columns.
+                return CarbonImmutable::instance($sourceOrder->created_at)->startOfSecond();
+            }
+        }
+
         $capturedAt = $snapshot['captured_at'] ?? null;
 
         if (filled($capturedAt)) {
