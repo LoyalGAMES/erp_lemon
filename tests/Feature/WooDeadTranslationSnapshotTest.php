@@ -160,6 +160,45 @@ class WooDeadTranslationSnapshotTest extends TestCase
         );
     }
 
+    public function test_self_referencing_entry_is_dropped_without_http_even_when_marked_verified(): void
+    {
+        [$product, $exporter, $integration] = $this->familyWithSnapshot();
+        // The exact Buty KESJA Czarne deadlock: the snapshot claims the EN
+        // translation is the family's own PL post, and an older prune already
+        // stamped the family as verified-alive (the self-ref IS alive).
+        $attributes = (array) $product->attributes;
+        $attributes['woocommerce_translations'] = [
+            'en' => ['product_id' => '123', 'variation_id' => null, 'sku' => 'SKU-SNAPSHOT'],
+        ];
+        $attributes['woocommerce_translations_verified_at'] = now()->subHour()->toISOString();
+        $product->forceFill(['attributes' => $attributes])->save();
+        Http::fake();
+
+        $exporter->pruneDeadLegacyTranslationSnapshot($product->fresh(), $integration);
+
+        Http::assertNothingSent();
+        $this->assertNull(data_get($product->fresh()->attributes, 'woocommerce_translations.en'));
+        $this->assertNull(data_get($product->fresh()->attributes, 'woocommerce_translations_verified_at'));
+    }
+
+    public function test_translation_references_ignore_a_self_referencing_snapshot_entry(): void
+    {
+        [$product, , $integration] = $this->familyWithSnapshot();
+        $attributes = (array) $product->attributes;
+        $attributes['woocommerce_translations'] = [
+            'en' => ['product_id' => '123', 'variation_id' => null, 'sku' => 'SKU-SNAPSHOT'],
+        ];
+        $product->forceFill(['attributes' => $attributes])->save();
+
+        // Through the repair command's classifier: a self-ref must NOT read as
+        // an existing translation, so the family is a create-candidate.
+        \Illuminate\Support\Facades\Bus::fake();
+        $this->artisan('erp:dispatch-english-translation-repair', ['--limit' => 5])
+            ->assertExitCode(0);
+
+        \Illuminate\Support\Facades\Bus::assertDispatched(\App\Jobs\ExportWooCommerceProductDataJob::class);
+    }
+
     public function test_languages_outside_the_export_set_are_not_verified(): void
     {
         [$product, $exporter, $integration] = $this->familyWithSnapshot();
