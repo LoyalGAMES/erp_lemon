@@ -685,6 +685,42 @@ final class OrderSplitHistoricalReconciliationTest extends TestCase
         $this->assertNull(data_get($fixture['root']->fresh()->raw_payload, 'sempre_erp_split_original'));
     }
 
+    public function test_preview_compares_utc_snapshot_cutoff_in_the_application_timezone(): void
+    {
+        $fixture = $this->legacy845095Family();
+        $splitAt = CarbonImmutable::instance($fixture['child']->created_at)->startOfSecond();
+
+        foreach ($fixture['root_tasks'] as $task) {
+            $task->update([
+                'picked_at' => $splitAt->subMinutes(15),
+                'packed_at' => $splitAt->subMinutes(10),
+            ]);
+            $this->forceTimestamps($task, $splitAt->subMinutes(30));
+        }
+
+        $fixture['preserved_label']->update(['generated_at' => $splitAt->subMinutes(5)]);
+        $this->forceTimestamps($fixture['preserved_label'], $splitAt->subMinutes(20));
+        $fixture['preserved_wz']->update(['posted_at' => $splitAt->subMinutes(5)]);
+        $this->forceTimestamps($fixture['preserved_wz'], $splitAt->subMinutes(25));
+
+        foreach ($fixture['preserved_wz']->ledgerEntries as $entry) {
+            $entry->update(['posted_at' => $splitAt->subMinutes(5)]);
+            $this->forceTimestamps($entry, $splitAt->subMinutes(5));
+        }
+
+        $preview = app(HistoricalSplitReconciliationService::class)->preview($fixture['child']->fresh());
+
+        $this->assertTrue($preview['available'], implode(' ', $preview['reasons']));
+        $this->assertEqualsCanonicalizing(
+            collect($fixture['root_tasks'])->pluck('id')->all(),
+            $preview['plan']['preserve_task_ids'],
+        );
+        $this->assertSame([$fixture['preserved_label']->id], $preview['plan']['preserve_label_ids']);
+        $this->assertSame([$fixture['preserved_wz']->id], $preview['plan']['preserve_wz_ids']);
+        $this->assertSame([$fixture['child_label']->id], $preview['plan']['reverse_label_ids']);
+        $this->assertSame([$fixture['duplicate_wz']->id], $preview['plan']['reverse_wz_ids']);
+    }
+
     public function test_preview_rejects_artifacts_created_before_the_split_but_finalized_after_it(): void
     {
         $fixture = $this->legacy845095Family();

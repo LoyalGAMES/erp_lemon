@@ -171,7 +171,8 @@ final class OrderSplitReversalService
         $reason = trim((string) $note) !== ''
             ? trim((string) $note)
             : 'Cofnięcie rozdzielenia zamówienia i pracy wykonanej po podziale.';
-        $artifactCutoff = CarbonImmutable::parse($prepared['artifact_cutoff']);
+        $artifactCutoff = CarbonImmutable::parse($prepared['artifact_cutoff'])
+            ->setTimezone((string) config('app.timezone'));
 
         try {
             $shipping = $this->shippingCancellation->cancelForOrderIdsWhileLocked(
@@ -2565,10 +2566,12 @@ final class OrderSplitReversalService
 
         if (filled($capturedAt)) {
             try {
-                // `created_at` columns use second precision. Comparing them to
-                // a JSON timestamp with microseconds could classify an artifact
-                // created immediately after the split as older than the split.
-                return CarbonImmutable::parse((string) $capturedAt)->startOfSecond();
+                // Snapshot timestamps are serialized in UTC, while database
+                // datetime columns are formatted in the application timezone.
+                // Normalize before second-precision database comparisons.
+                return CarbonImmutable::parse((string) $capturedAt)
+                    ->setTimezone((string) config('app.timezone'))
+                    ->startOfSecond();
             } catch (Throwable) {
                 // Legacy snapshot with an invalid timestamp falls back to the
                 // first physical child, which is the safest known split time.
