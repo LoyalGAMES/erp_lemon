@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Http\Controllers;
 
 use App\Models\IntegrationSyncLog;
+use App\Models\ProductChannelMapping;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Services\Audit\AuditLogService;
@@ -36,6 +37,7 @@ class IntegrationController extends Controller
         LemonErpWooCommercePluginPackageService $woocommercePlugin,
     ): View {
         return view('integrations.index', [
+            'englishTranslationReport' => $this->englishTranslationReport(),
             'integrations' => WordpressIntegration::query()
                 ->with('salesChannel')
                 ->latest()
@@ -695,5 +697,75 @@ class IntegrationController extends Controller
             'started_at' => now(),
             'finished_at' => in_array($status, ['queued', 'running'], true) ? null : now(),
         ]);
+    }
+
+    /**
+     * Why is the English catalog smaller than the Polish one? Aggregates the
+     * repair scheduler's persisted per-family classification so the operator
+     * sees exact counts and the concrete SKUs that need a human decision.
+     *
+     * @return array<string, mixed>
+     */
+    private function englishTranslationReport(): array
+    {
+        $base = fn () => ProductChannelMapping::query()
+            ->whereNull('external_variation_id')
+            ->where('external_product_id', '!=', '')
+            ->whereHas('salesChannel', fn ($query) => $query
+                ->where('type', 'woocommerce')
+                ->where('is_active', true))
+            ->whereHas('product', fn ($query) => $query
+                ->where('is_active', true)
+                ->whereNull('archived_at')
+                ->where('is_translation', false));
+        $missingAlias = fn () => $base()->whereNotExists(fn ($query) => $query
+            ->select(DB::raw(1))
+            ->from('product_channel_aliases')
+            ->whereColumn('product_channel_aliases.product_id', 'product_channel_mappings.product_id')
+            ->whereColumn('product_channel_aliases.sales_channel_id', 'product_channel_mappings.sales_channel_id')
+            ->where('product_channel_aliases.language', 'en'));
+        $status = fn (string $status) => $missingAlias()
+            ->where('metadata->english_translation_repair->status', $status);
+        $rows = fn ($query, string $detailKey) => $query
+            ->with('product:id,sku,name')
+            ->orderBy('product_id')
+            ->limit(20)
+            ->get()
+            ->map(fn (ProductChannelMapping $mapping): array => [
+                'sku' => (string) $mapping->product?->sku,
+                'name' => (string) $mapping->product?->name,
+                'detail' => (string) data_get($mapping->metadata, "english_translation_repair.{$detailKey}", ''),
+            ])
+            ->all();
+
+        $total = $base()->count();
+        $missing = $missingAlias()->count();
+        $monolingual = $missingAlias()
+            ->whereHas('product', fn ($query) => $query->whereNull('attributes->master->content->en'))
+            ->count();
+        $failuresQuery = fn () => $missingAlias()
+            ->where('metadata->english_translation_repair->failure_count', '>=', 3);
+
+        return [
+            'total' => $total,
+            'healthy' => $total - $missing,
+            'missing' => $missing,
+            'monolingual' => $monolingual,
+            'live_ref' => $status('live_ref_manual')->count(),
+            'live_ref_rows' => $rows($status('live_ref_manual'), 'live_ref'),
+            'shared_children' => $status('shared_children')->count(),
+            'shared_children_rows' => $rows($status('shared_children'), 'status'),
+            'check_failed' => $status('check_failed')->count(),
+            'check_failed_rows' => $rows($status('check_failed'), 'check_error'),
+            'failed_manual' => $failuresQuery()->count(),
+            'failed_manual_rows' => $rows($failuresQuery(), 'last_error'),
+            'queued' => $status('queued')->count(),
+            'unprocessed' => max(0, $missing - $monolingual
+                - $status('live_ref_manual')->count()
+                - $status('shared_children')->count()
+                - $status('check_failed')->count()
+                - $failuresQuery()->count()
+                - $status('queued')->count()),
+        ];
     }
 }

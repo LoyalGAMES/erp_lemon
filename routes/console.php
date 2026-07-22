@@ -1013,6 +1013,7 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
                 ->where('parent_product_id', '!=', $product->id)
                 ->exists()) {
                 $counts['shared_children']++;
+                $writeMarker($mapping, ['status' => 'shared_children']);
                 $rows[] = [$product->sku, 'wspólne warianty z innym rodzicem — rozdziel ręcznie'];
 
                 continue;
@@ -1071,13 +1072,13 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
 
             try {
                 $exporter->pruneDeadLegacyTranslationSnapshot($product, $integration);
-                $writeMarker($mapping);
             } catch (Throwable $exception) {
                 // One family with an unreachable ref must not wedge the sweep
                 // (head-of-line) nor be retried every 5 minutes: mark it
                 // checked, report, and move on — the daily window retries it.
                 report($exception);
                 $writeMarker($mapping, [
+                    'status' => 'check_failed',
                     'check_error' => str($exception->getMessage())->limit(300)->toString(),
                 ]);
                 $counts['check_failed']++;
@@ -1098,6 +1099,7 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
                 // it; adopting blind would guess. Leave the decision to the
                 // operator, re-checking at most daily.
                 $counts['live_ref_manual']++;
+                $writeMarker($mapping, ['status' => 'live_ref_manual', 'live_ref' => (string) $liveRef]);
                 $rows[] = [$product->sku, "istnieje niespięty post EN #{$liveRef} — spięcie/kasacja to decyzja operatora"];
 
                 if ($counts['checked'] >= $checkLimit) {
@@ -1110,6 +1112,7 @@ Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families 
             // The bounded repair queue keeps heavy rebuild exports away from
             // the default lane (stock sync) and behind woocommerce-critical
             // (operator publishes) on the shared worker.
+            $writeMarker($mapping, ['status' => 'queued']);
             ExportWooCommerceProductDataJob::dispatch((int) $product->id)
                 ->onConnection('database')
                 ->onQueue(WooOwnedVariantAxisRepairService::REPAIR_QUEUE);
