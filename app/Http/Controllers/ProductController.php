@@ -2089,6 +2089,11 @@ class ProductController extends Controller
             'gs1' => (array) data_get($existingMaster, 'gs1', []),
             'copy' => (array) data_get($existingMaster, 'copy', []),
             'inheritance' => (array) data_get($existingMaster, 'inheritance', []),
+            // Machine state, not form data: the axis-repair synchronized stamp
+            // lives here. Rebuilding master without it meant every ordinary
+            // save re-armed protectedMappedLegacyVariantAttribute() and the
+            // next export resurrected the legacy `wariant` axis in Woo.
+            'maintenance' => (array) data_get($existingMaster, 'maintenance', []),
         ];
     }
 

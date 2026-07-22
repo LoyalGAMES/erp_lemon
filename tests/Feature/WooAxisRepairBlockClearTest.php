@@ -112,6 +112,21 @@ class WooAxisRepairBlockClearTest extends TestCase
                 ],
             ]),
         ])->save();
+        $child = $this->product('BLS-HEROS-36', 'Klapki HEROS Beżowe - 36');
+        $child->forceFill([
+            'attributes' => array_merge((array) $child->attributes, [
+                'woocommerce_variation_attributes' => [
+                    ['name' => 'wariant', 'option' => '36'],
+                    ['name' => 'Rozmiar', 'option' => '36'],
+                ],
+            ]),
+        ])->save();
+        ProductRelation::query()->create([
+            'parent_product_id' => $parent->id,
+            'child_product_id' => $child->id,
+            'relation_type' => 'variant',
+            'sort_order' => 10,
+        ]);
         ProductChannelMapping::query()->create([
             'product_id' => $parent->id,
             'sales_channel_id' => $channel->id,
@@ -137,6 +152,46 @@ class WooAxisRepairBlockClearTest extends TestCase
             $stampedState['revision'] ?? null,
         ));
         $this->assertSame('Rozmiar', $stampedState['variant_attribute'] ?? null);
+
+        // Suspenders: the legacy raw axis is scrubbed from both snapshots, so
+        // even a later save that loses the stamp cannot re-arm the protection.
+        $parentSnapshot = collect((array) data_get($parent->fresh()->attributes, 'woocommerce_attributes'));
+        $this->assertSame(['Rozmiar'], $parentSnapshot->pluck('name')->all());
+        $childSnapshot = collect((array) data_get($child->fresh()->attributes, 'woocommerce_variation_attributes'));
+        $this->assertSame(['Rozmiar'], $childSnapshot->pluck('name')->all());
+    }
+
+    public function test_synchronized_stamp_survives_an_ordinary_product_save(): void
+    {
+        $parent = $this->product('BLS-STAMP', 'Produkt ze stemplem');
+        $attributes = (array) $parent->attributes;
+        data_set($attributes, 'master.'.WooOwnedVariantAxisRepairService::STATE_PATH, [
+            'revision' => WooOwnedVariantAxisRepairService::REVISION,
+            'variant_attribute' => 'Rozmiar',
+            'synchronized_at' => now()->toISOString(),
+            'released_by_operator' => true,
+        ]);
+        $parent->forceFill(['attributes' => $attributes])->save();
+
+        $this->put(route('products.update', $parent), [
+            'sku' => 'BLS-STAMP',
+            'name' => 'Produkt ze stemplem po edycji',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'is_active' => '1',
+            'publication_status' => 'publish',
+            'product_type' => 'simple',
+        ])->assertRedirect(route('products.edit', $parent));
+
+        $state = (array) data_get(
+            $parent->fresh()->masterData(),
+            WooOwnedVariantAxisRepairService::STATE_PATH,
+            [],
+        );
+        $this->assertTrue(
+            WooOwnedVariantAxisRepairService::isSynchronizedRevision($state['revision'] ?? null),
+            'Zwykły zapis produktu nie może ścierać stempla synchronizacji osi.',
+        );
     }
 
     public function test_dry_run_reports_without_clearing(): void

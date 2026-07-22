@@ -3828,7 +3828,47 @@ final class WooOwnedVariantAxisRepairService
                         'released_by_operator' => true,
                     ]);
                     $attributes['master'] = $master;
+                    // Belt AND suspenders: the successful official repair also
+                    // replaces the Woo snapshot with the verified canonical
+                    // attributes. Without scrubbing, a later ordinary save that
+                    // loses the stamp would let the legacy raw axis in this
+                    // snapshot re-arm the export protection and resurrect
+                    // `wariant` in Woo — exactly what happened on KESJA.
+                    $isLegacyAxisName = fn (mixed $name): bool => ($name = trim((string) $name)) !== ''
+                        && ($this->legacySizeAxis->isLegacyGeneric($name)
+                            || app(ProductVariantAxisNameResolver::class)->isLegacyPluralSizeAlias($name));
+                    $attributes['woocommerce_attributes'] = collect((array) ($attributes['woocommerce_attributes'] ?? []))
+                        ->reject(fn (mixed $attribute): bool => is_array($attribute)
+                            && ($isLegacyAxisName($attribute['name'] ?? null)
+                                || $isLegacyAxisName($attribute['slug'] ?? null)))
+                        ->values()
+                        ->all();
                     $root->forceFill(['attributes' => $attributes])->save();
+
+                    ProductRelation::query()
+                        ->where('parent_product_id', $rootId)
+                        ->where('relation_type', 'variant')
+                        ->pluck('child_product_id')
+                        ->each(function (mixed $childId) use ($isLegacyAxisName): void {
+                            $child = Product::query()->lockForUpdate()->find((int) $childId);
+
+                            if (! $child instanceof Product) {
+                                return;
+                            }
+
+                            $childAttributes = (array) $child->attributes;
+                            $rows = collect((array) ($childAttributes['woocommerce_variation_attributes'] ?? []))
+                                ->reject(fn (mixed $attribute): bool => is_array($attribute)
+                                    && ($isLegacyAxisName($attribute['name'] ?? null)
+                                        || $isLegacyAxisName($attribute['slug'] ?? null)))
+                                ->values()
+                                ->all();
+
+                            if ($rows !== ($childAttributes['woocommerce_variation_attributes'] ?? null)) {
+                                $childAttributes['woocommerce_variation_attributes'] = $rows;
+                                $child->forceFill(['attributes' => $childAttributes])->save();
+                            }
+                        });
                 }
             }
 
