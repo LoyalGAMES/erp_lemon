@@ -1,8 +1,10 @@
 <?php
 
+use App\Jobs\ExportWooCommerceProductDataJob;
 use App\Models\AuditLog;
 use App\Models\Invoice;
 use App\Models\Product;
+use App\Models\ProductChannelAlias;
 use App\Models\ProductChannelMapping;
 use App\Models\ProductParameterDefinition;
 use App\Models\ProductRelation;
@@ -891,6 +893,175 @@ Artisan::command('erp:clear-woo-axis-repair-block {--sku= : Limit to a single va
     return 0;
 })->purpose('Clear a stuck WooCommerce axis-repair manual_review block after a manual Woo fix so the normal full export can rebuild the family.');
 
+Artisan::command('erp:dispatch-english-translation-repair {--limit=3 : Families queued per run} {--dry-run : Classify without pruning or queueing} {--sku= : Limit to a single family}', function (
+    ProductDataExportService $exporter,
+    WooOwnedVariantAxisRepairService $axisRepair,
+): int {
+    $limit = max(1, (int) $this->option('limit'));
+    $dryRun = (bool) $this->option('dry-run');
+    $skuOption = trim((string) $this->option('sku'));
+
+    // Only channels that actually export English can miss an English copy.
+    $integrations = WordpressIntegration::query()
+        ->with('salesChannel')
+        ->get()
+        ->filter(fn (WordpressIntegration $integration): bool => $integration->salesChannel?->type === 'woocommerce'
+            && (bool) $integration->salesChannel?->is_active
+            && in_array('en', $integration->productExportLanguages(), true));
+
+    if ($integrations->isEmpty()) {
+        $this->info('Brak integracji WooCommerce z eksportem języka angielskiego.');
+
+        return 0;
+    }
+
+    $counts = [
+        'healthy' => 0,
+        'monolingual' => 0,
+        'axis_blocked' => 0,
+        'shared_children' => 0,
+        'recently_checked' => 0,
+        'live_ref_manual' => 0,
+        'queued' => 0,
+    ];
+    $rows = [];
+
+    foreach ($integrations as $integration) {
+        $channelId = (int) $integration->sales_channel_id;
+        $mappings = ProductChannelMapping::query()
+            ->where('sales_channel_id', $channelId)
+            ->whereNull('external_variation_id')
+            ->where('external_product_id', '!=', '')
+            ->orderBy('product_id')
+            ->with('product')
+            ->get();
+
+        foreach ($mappings as $mapping) {
+            $product = $mapping->product;
+
+            if (! $product instanceof Product
+                || ! $product->is_active
+                || $product->isArchived()
+                || ($skuOption !== '' && $product->sku !== $skuOption)
+            ) {
+                continue;
+            }
+
+            // A deliberately monolingual legacy record must stay monolingual —
+            // the same rule the exporter itself applies (exportLanguages()).
+            if (! is_array(data_get($product->masterData(), 'content.en'))) {
+                $counts['monolingual']++;
+
+                continue;
+            }
+
+            if (ProductChannelAlias::query()
+                ->where('product_id', $product->id)
+                ->where('sales_channel_id', $channelId)
+                ->where('language', 'en')
+                ->exists()) {
+                $counts['healthy']++;
+
+                continue;
+            }
+
+            if ($axisRepair->blocksFullExport($product)) {
+                $counts['axis_blocked']++;
+
+                continue;
+            }
+
+            // A child claimed by two parents means an unresolved translation-row
+            // twin (the KESJA Shoes Black case) — deduplicate manually first.
+            $childIds = ProductRelation::query()
+                ->where('parent_product_id', $product->id)
+                ->where('relation_type', 'variant')
+                ->pluck('child_product_id');
+            if ($childIds->isNotEmpty() && ProductRelation::query()
+                ->whereIn('child_product_id', $childIds->all())
+                ->where('relation_type', 'variant')
+                ->where('parent_product_id', '!=', $product->id)
+                ->exists()) {
+                $counts['shared_children']++;
+                $rows[] = [$product->sku, 'wspólne warianty z innym rodzicem — rozdziel ręcznie'];
+
+                continue;
+            }
+
+            // One remote check per family per day keeps the loop gentle when a
+            // family cannot be healed automatically (live-but-unlinked EN post)
+            // or its queued export has not produced an alias yet.
+            $checkedAt = data_get($mapping->metadata, 'english_translation_repair.checked_at');
+            if (filled($checkedAt) && now()->subDay()->lt(\Illuminate\Support\Carbon::parse((string) $checkedAt))) {
+                $counts['recently_checked']++;
+
+                continue;
+            }
+
+            if ($dryRun) {
+                $counts['queued']++;
+                $snapshotRef = data_get($product->attributes, 'woocommerce_translations.en.product_id');
+                $rows[] = [$product->sku, $snapshotRef
+                    ? "kandydat (snapshot en -> {$snapshotRef} do weryfikacji)"
+                    : 'kandydat (brak referencji — eksport utworzy EN)'];
+
+                if ($counts['queued'] >= $limit) {
+                    break 2;
+                }
+
+                continue;
+            }
+
+            $exporter->pruneDeadLegacyTranslationSnapshot($product, $integration);
+
+            $metadata = (array) $mapping->metadata;
+            data_set($metadata, 'english_translation_repair.checked_at', now()->toISOString());
+            $mapping->forceFill(['metadata' => $metadata])->save();
+
+            $liveRef = data_get($product->fresh()->attributes, 'woocommerce_translations.en.product_id');
+
+            if (filled($liveRef)) {
+                // The referenced EN post exists but is not our linked
+                // translation (no alias). Creating another copy would duplicate
+                // it; adopting blind would guess. Leave the decision to the
+                // operator, re-checking at most daily.
+                $counts['live_ref_manual']++;
+                $rows[] = [$product->sku, "istnieje niespięty post EN #{$liveRef} — spięcie/kasacja to decyzja operatora"];
+
+                continue;
+            }
+
+            ExportWooCommerceProductDataJob::dispatch((int) $product->id)
+                ->onConnection('database');
+            $counts['queued']++;
+            $rows[] = [$product->sku, 'zakolejkowano pełny eksport (utworzy i zepnie EN)'];
+
+            if ($counts['queued'] >= $limit) {
+                break 2;
+            }
+        }
+    }
+
+    if ($rows !== []) {
+        $this->table(['sku', 'status'], $rows);
+    }
+
+    $this->info(sprintf(
+        '%s zdrowe=%d, jednojęzyczne=%d, oś-w-naprawie=%d, wspólne-warianty=%d, sprawdzone-ostatnio=%d, żywy-niespięty-post=%d, %s=%d.',
+        $dryRun ? '[DRY-RUN]' : 'English repair:',
+        $counts['healthy'],
+        $counts['monolingual'],
+        $counts['axis_blocked'],
+        $counts['shared_children'],
+        $counts['recently_checked'],
+        $counts['live_ref_manual'],
+        $dryRun ? 'kandydaci' : 'zakolejkowane',
+        $counts['queued'],
+    ));
+
+    return 0;
+})->purpose('Automatically rebuild missing English translations: prune dead snapshot refs and queue full exports for safe families; report the ones needing a human.');
+
 Artisan::command('erp:refresh-ksef-submissions {--limit=25 : Maximum number of KSeF submissions to refresh} {--minutes=2 : Refresh submissions older than this many minutes}', function (): int {
     $limit = max(1, (int) $this->option('limit'));
     $minutes = max(0, (int) $this->option('minutes'));
@@ -1197,6 +1368,11 @@ Schedule::command('erp:dispatch-woo-owned-variant-axis-repair --limit=20 --stale
 
 Schedule::command('erp:dispatch-woocommerce-product-creation-recovery --limit=10 --stale-minutes=120')
     ->everyMinute()
+    ->withoutOverlapping(10)
+    ->runInBackground();
+
+Schedule::command('erp:dispatch-english-translation-repair --limit=3')
+    ->cron('*/5 * * * *')
     ->withoutOverlapping(10)
     ->runInBackground();
 

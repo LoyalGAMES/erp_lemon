@@ -1115,7 +1115,7 @@ final class ProductDataExportService
      * erase a valid reference. Alias-backed families skip the check entirely
      * (aliases are authoritative and actively maintained).
      */
-    private function pruneDeadLegacyTranslationSnapshot(
+    public function pruneDeadLegacyTranslationSnapshot(
         Product $product,
         WordpressIntegration $integration,
     ): void {
