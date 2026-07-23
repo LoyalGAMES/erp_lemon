@@ -16,6 +16,7 @@ use App\Models\ReturnCase;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
 use App\Models\Warehouse;
+use App\Models\WarehouseDocument;
 use App\Services\Communication\MailSettingsService;
 use App\Services\Payments\MbankTransferBasketSettingsService;
 use App\Services\Payments\PayuRefundService;
@@ -231,6 +232,180 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
             ->assertSee('Etykiety wymiany i zwrotu')
             ->assertSee('LBL-EX-1')
             ->assertSee('Historia zwrotu');
+    }
+
+    public function test_return_card_clearly_shows_a_confirmed_payout(): void
+    {
+        $order = $this->createOrder([
+            'payment_method' => 'payu',
+            'payment_method_title' => 'PayU',
+        ]);
+        $returnCase = $this->createReturnCase($order, ['status' => 'corrected']);
+        $invoice = $this->createCorrectionInvoice($order, -123.45);
+        $returnCase->update(['correction_invoice_id' => $invoice->id]);
+        $this->markReturnReceived($returnCase);
+
+        CustomerPayment::query()->create([
+            'external_order_id' => $order->id,
+            'return_case_id' => $returnCase->id,
+            'direction' => 'outgoing',
+            'source' => 'erp',
+            'purpose' => 'return_refund',
+            'method' => 'payu',
+            'status' => 'paid',
+            'amount' => 123.45,
+            'currency' => 'PLN',
+            'reference' => 'PAYU-REF-808639',
+            'paid_at' => now(),
+        ]);
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Status pieniędzy')
+            ->assertSee('Wypłacono')
+            ->assertSee('Wypłata potwierdzona')
+            ->assertSee('123,45 PLN')
+            ->assertSee('PAYU-REF-808639')
+            ->assertDontSee('Wyślij refund PayU');
+    }
+
+    public function test_return_card_marks_pending_refund_without_suggesting_a_duplicate_payout(): void
+    {
+        $order = $this->createOrder([
+            'payment_method' => 'payu',
+            'payment_method_title' => 'PayU',
+        ]);
+        $returnCase = $this->createReturnCase($order, ['status' => 'corrected']);
+        $invoice = $this->createCorrectionInvoice($order, -123.45);
+        $returnCase->update(['correction_invoice_id' => $invoice->id]);
+        $this->markReturnReceived($returnCase);
+
+        CustomerPayment::query()->create([
+            'external_order_id' => $order->id,
+            'return_case_id' => $returnCase->id,
+            'direction' => 'outgoing',
+            'source' => 'erp',
+            'purpose' => 'return_refund',
+            'method' => 'payu',
+            'status' => 'pending',
+            'amount' => 123.45,
+            'currency' => 'PLN',
+            'reference' => 'PAYU-PENDING-1',
+            'requested_at' => now(),
+        ]);
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Wypłata oczekuje')
+            ->assertSee('Poczekaj na potwierdzenie')
+            ->assertSee('operator płatności nie potwierdził jeszcze wypłaty')
+            ->assertDontSee('Wyślij refund PayU');
+    }
+
+    public function test_return_card_requires_verification_when_paid_and_pending_refunds_coexist(): void
+    {
+        $order = $this->createOrder([
+            'payment_method' => 'payu',
+            'payment_method_title' => 'PayU',
+        ]);
+        $returnCase = $this->createReturnCase($order, ['status' => 'corrected']);
+        $invoice = $this->createCorrectionInvoice($order, -123.45);
+        $returnCase->update(['correction_invoice_id' => $invoice->id]);
+        $this->markReturnReceived($returnCase);
+
+        CustomerPayment::query()->create([
+            'external_order_id' => $order->id,
+            'return_case_id' => $returnCase->id,
+            'direction' => 'outgoing',
+            'source' => 'erp',
+            'purpose' => 'return_refund',
+            'method' => 'payu',
+            'status' => 'paid',
+            'amount' => 50,
+            'currency' => 'PLN',
+            'reference' => 'PAYU-PAID-PART',
+            'paid_at' => now()->subMinute(),
+        ]);
+        CustomerPayment::query()->create([
+            'external_order_id' => $order->id,
+            'return_case_id' => $returnCase->id,
+            'direction' => 'outgoing',
+            'source' => 'erp',
+            'purpose' => 'return_refund',
+            'method' => 'payu',
+            'status' => 'pending',
+            'amount' => 73.45,
+            'currency' => 'PLN',
+            'reference' => 'PAYU-PENDING-PART',
+            'requested_at' => now(),
+        ]);
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Wypłata do weryfikacji')
+            ->assertSee('Potwierdzono 50,00 PLN, ale kolejna operacja na 73,45 PLN nadal oczekuje')
+            ->assertSee('Sprawdź przed ponowną wypłatą')
+            ->assertDontSee('Wyślij refund PayU');
+    }
+
+    public function test_return_card_does_not_present_an_accounting_only_woo_refund_as_paid(): void
+    {
+        $order = $this->createOrder([
+            'total' => '150.00',
+            'date_paid' => now()->toISOString(),
+            'payment_method' => 'payu',
+            'payment_method_title' => 'PayU',
+            'refunds' => [[
+                'id' => 808639,
+                'amount' => '123.45',
+                'refunded_payment' => false,
+            ]],
+        ]);
+        $returnCase = $this->createReturnCase($order, ['status' => 'corrected']);
+        $invoice = $this->createCorrectionInvoice($order, -123.45);
+        $returnCase->update(['correction_invoice_id' => $invoice->id]);
+        $this->markReturnReceived($returnCase);
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Tylko zapis w WooCommerce')
+            ->assertSee('ERP nie ma potwierdzenia, że pieniądze rzeczywiście wyszły')
+            ->assertSee('Wykonaj faktyczną wypłatę')
+            ->assertDontSee('ERP ma potwierdzenie wypłaty przypisanej do tej karty zwrotu.');
+    }
+
+    public function test_return_card_warns_when_confirmed_refund_is_visible_only_on_the_order(): void
+    {
+        $order = $this->createOrder([
+            'total' => '150.00',
+            'date_paid' => now()->toISOString(),
+            'payment_method' => 'payu',
+            'payment_method_title' => 'PayU',
+        ]);
+        $returnCase = $this->createReturnCase($order, ['status' => 'corrected']);
+        $invoice = $this->createCorrectionInvoice($order, -123.45);
+        $returnCase->update(['correction_invoice_id' => $invoice->id]);
+        $this->markReturnReceived($returnCase);
+
+        CustomerPayment::query()->create([
+            'external_order_id' => $order->id,
+            'direction' => 'outgoing',
+            'source' => 'manual',
+            'purpose' => 'order_refund',
+            'method' => 'bank_transfer',
+            'status' => 'paid',
+            'amount' => 123.45,
+            'currency' => 'PLN',
+            'reference' => 'ORDER-ONLY-REFUND',
+            'paid_at' => now(),
+        ]);
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Refund widoczny tylko w zamówieniu')
+            ->assertSee('Sprawdź przed ponowną wypłatą')
+            ->assertSee('Sprawdź rozliczenie zamówienia')
+            ->assertDontSee('Wyślij refund PayU');
     }
 
     public function test_mbank_payout_export_contains_cod_returns_in_elixir_record(): void
@@ -504,6 +679,20 @@ class ReturnsPaymentsNotesWorkflowTest extends TestCase
             'payment_method' => 'Zwrot',
             'issued_at' => now(),
         ]);
+    }
+
+    private function markReturnReceived(ReturnCase $returnCase): void
+    {
+        $document = WarehouseDocument::query()->create([
+            'number' => 'RX/2026/'.$returnCase->id,
+            'type' => 'RX',
+            'status' => 'posted',
+            'destination_warehouse_id' => $returnCase->target_warehouse_id,
+            'document_date' => now(),
+            'posted_at' => now(),
+        ]);
+
+        $returnCase->update(['warehouse_document_id' => $document->id]);
     }
 
     private function createInpostAccount(): CourierAccount

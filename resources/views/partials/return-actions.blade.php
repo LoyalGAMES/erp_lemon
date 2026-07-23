@@ -23,9 +23,20 @@
     $returnPayments = $returnCase->relationLoaded('customerPayments')
         ? $returnCase->customerPayments
         : collect();
-    $returnIncomingPayments = (float) $returnPayments->where('direction', 'incoming')->sum(fn ($payment) => (float) $payment->amount);
-    $returnOutgoingPayments = (float) $returnPayments->where('direction', 'outgoing')->sum(fn ($payment) => (float) $payment->amount);
-    $returnPaymentBalance = $returnIncomingPayments - $returnOutgoingPayments;
+    $returnPayoutStatus = $returnProcess['payout'] ?? [
+        'state' => 'waiting',
+        'label' => 'Brak danych',
+    ];
+    $returnPaymentStatusLabels = [
+        'booked' => ['label' => 'Potwierdzono', 'class' => ''],
+        'paid' => ['label' => 'Wypłacono', 'class' => ''],
+        'settled' => ['label' => 'Rozliczono', 'class' => ''],
+        'pending' => ['label' => 'Oczekuje', 'class' => 'orange'],
+        'processing' => ['label' => 'W trakcie', 'class' => 'orange'],
+        'unknown' => ['label' => 'Do weryfikacji', 'class' => 'orange'],
+        'manual_required' => ['label' => 'Wymaga działania', 'class' => 'red'],
+        'failed' => ['label' => 'Błąd', 'class' => 'red'],
+    ];
     $returnRecipientEmail = $returnCase->customer_email
         ?: data_get($returnCase->externalOrder?->billing_data, 'email');
     $returnEmailTemplates = $emailTemplates ?? collect();
@@ -111,7 +122,7 @@
 </details>
 
 <details class="return-message-panel">
-    <summary>Rozliczenia ({{ number_format($returnPaymentBalance, 2, ',', ' ') }} PLN)</summary>
+    <summary>Rozliczenia — {{ $returnPayoutStatus['label'] }}</summary>
     <form class="return-message-form" method="POST" action="{{ route('returns.payments.store', $returnCase) }}">
         @csrf
         <input name="amount" type="number" min="0.01" step="0.01" placeholder="Kwota" required>
@@ -133,7 +144,11 @@
         </label>
         <button class="button secondary" type="submit">Zaksięguj wpłatę</button>
     </form>
-    @if ($returnCase->correctionInvoice)
+    @if (
+        $returnCase->correctionInvoice
+        && ($returnProcess['is_payu'] ?? false)
+        && ! in_array($returnPayoutStatus['state'], ['paid', 'partially_paid', 'pending', 'verify', 'order_refund_unlinked'], true)
+    )
         <form class="return-message-form" method="POST" action="{{ route('returns.payu-refund', $returnCase) }}" onsubmit="return confirm('Wysłać refund PayU dla zwrotu {{ $returnCase->number }}?');">
             @csrf
             <button class="button secondary" type="submit">Wyślij refund PayU</button>
@@ -142,9 +157,13 @@
     @if ($returnPayments->isNotEmpty())
         <div class="return-message-history">
             @foreach ($returnPayments->take(4) as $payment)
+                @php
+                    $returnPaymentStatus = $returnPaymentStatusLabels[$payment->status]
+                        ?? ['label' => $payment->status, 'class' => 'blue'];
+                @endphp
                 <div>
-                    <span @class(['status', 'blue' => $payment->status === 'pending', 'red' => $payment->status === 'failed'])>{{ $payment->status }}</span>
-                    <span class="muted">{{ $payment->direction === 'outgoing' ? '-' : '+' }}{{ number_format((float) $payment->amount, 2, ',', ' ') }} {{ $payment->currency }} · {{ $payment->method }}</span>
+                    <span class="status {{ $returnPaymentStatus['class'] }}">{{ $returnPaymentStatus['label'] }}</span>
+                    <span class="muted">{{ $payment->direction === 'outgoing' ? 'Wypłata' : 'Dopłata' }} {{ number_format((float) $payment->amount, 2, ',', ' ') }} {{ $payment->currency }} · {{ $payment->method }}</span>
                 </div>
             @endforeach
         </div>
@@ -196,9 +215,9 @@
     <span class="status blue">{{ $returnDocuments->pluck('number')->implode(', ') }}</span>
 @else
     <a class="button secondary" href="{{ route('returns.edit', $returnCase) }}">Edytuj</a>
-    <form method="POST" action="{{ route('returns.document.create', $returnCase) }}">
+    <form method="POST" action="{{ route('returns.document.create', $returnCase) }}" onsubmit="return confirm('Utworzyć i zaksięgować RX dla zwrotu {{ $returnCase->number }}? Towar zostanie od razu przyjęty na stan magazynu.');">
         @csrf
-        <button class="button" type="submit">Utwórz RX</button>
+        <button class="button" type="submit">Przyjmij zwrot na stan (RX)</button>
     </form>
     <form method="POST" action="{{ route('returns.destroy', $returnCase) }}" onsubmit="return confirm('Usunąć zwrot {{ $returnCase->number }}?');">
         @csrf

@@ -25,6 +25,7 @@ use App\Services\Orders\OrderMutationLock;
 use App\Services\Payments\MbankTransferBasketService;
 use App\Services\Payments\PayuRefundService;
 use App\Services\Returns\ReturnNumberService;
+use App\Services\Returns\ReturnProcessStatusService;
 use App\Services\Returns\ReturnReceivingService;
 use App\Services\Returns\ReturnSettingsService;
 use App\Services\Returns\ReturnShippingRefundService;
@@ -112,6 +113,7 @@ class ReturnController extends Controller
         ReturnCase $returnCase,
         ReturnSettingsService $settings,
         MbankTransferBasketService $mbankBasket,
+        ReturnProcessStatusService $processStatuses,
     ): View {
         $returnCase->load([
             'lines.product',
@@ -134,6 +136,9 @@ class ReturnController extends Controller
             'customerPayments',
         ]);
 
+        $mbankPayoutEligible = $mbankBasket->eligibleReturns()->contains('id', $returnCase->id);
+        $mbankPayoutAmount = $mbankBasket->amount($returnCase);
+
         return view('returns.show', [
             'title' => 'Karta zwrotu '.$returnCase->number,
             'subtitle' => 'Pełna obsługa zwrotu: produkty, historia, dokumenty, wypłaty, notatki, komunikacja i etykiety.',
@@ -151,10 +156,11 @@ class ReturnController extends Controller
                 ->whereIn('context', ['return', 'both'])
                 ->orderBy('name')
                 ->get(),
-            'mbankPayoutEligible' => $mbankBasket->eligibleReturns()->contains('id', $returnCase->id),
-            'mbankPayoutAmount' => $mbankBasket->amount($returnCase),
+            'mbankPayoutEligible' => $mbankPayoutEligible,
+            'mbankPayoutAmount' => $mbankPayoutAmount,
             'mbankPayoutRecipient' => $mbankBasket->recipientName($returnCase),
             'mbankPayoutAccount' => $mbankBasket->recipientAccount($returnCase),
+            'returnProcess' => $processStatuses->summary($returnCase, $mbankPayoutEligible, $mbankPayoutAmount),
         ]);
     }
 
@@ -514,6 +520,7 @@ class ReturnController extends Controller
     public function createDocument(
         ReturnCase $returnCase,
         ReturnReceivingService $receivingService,
+        WarehouseDocumentPostingService $postingService,
         OrderMutationLock $orderLock,
         OrderCancellationGuard $cancellationGuard,
     ): RedirectResponse {
@@ -521,10 +528,16 @@ class ReturnController extends Controller
             $documents = $this->withReturnCaseFamilyLock(
                 $returnCase,
                 $orderLock,
-                function () use ($returnCase, $receivingService, $cancellationGuard): Collection {
+                function () use ($returnCase, $receivingService, $postingService, $cancellationGuard): Collection {
                     $cancellationGuard->assertReturnAllowedForCase($returnCase);
 
-                    return $receivingService->createReceivingDocuments($returnCase);
+                    $documents = $receivingService->createReceivingDocuments($returnCase);
+
+                    foreach ($documents as $document) {
+                        $postingService->post($document);
+                    }
+
+                    return $documents->map(fn (WarehouseDocument $document): WarehouseDocument => $document->refresh());
                 },
             );
         } catch (RuntimeException $exception) {
@@ -533,8 +546,8 @@ class ReturnController extends Controller
 
         $numbers = $documents->pluck('number')->implode(', ');
         $message = $documents->count() === 1
-            ? "Utworzono szkic {$numbers} dla zwrotu {$returnCase->number}. Zaksięguj dokument w module Dokumenty."
-            : "Utworzono szkice RX {$numbers} dla zwrotu {$returnCase->number} według mapowania dyspozycji. Zaksięguj dokumenty w module Dokumenty.";
+            ? "Utworzono i zaksięgowano {$numbers} dla zwrotu {$returnCase->number}. Towar został przyjęty na stan."
+            : "Utworzono i zaksięgowano RX {$numbers} dla zwrotu {$returnCase->number}. Towary zostały przyjęte na właściwe magazyny.";
 
         return back()->with('status', $message);
     }
