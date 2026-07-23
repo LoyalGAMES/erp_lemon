@@ -22,6 +22,8 @@ final class ReturnSettingsService
      *     numbering_pattern:string,
      *     numbering_prefix:string,
      *     numbering_padding:int,
+     *     refundable_shipping_cost:float,
+     *     refundable_shipping_cost_currency:string,
      *     default_target_warehouse_id:?int,
      *     default_condition:string,
      *     default_disposition:string,
@@ -50,6 +52,8 @@ final class ReturnSettingsService
             'numbering_pattern' => $this->cleanPattern((string) $data['numbering_pattern']),
             'numbering_prefix' => $this->cleanPrefix((string) $data['numbering_prefix']),
             'numbering_padding' => max(3, min(9, (int) $data['numbering_padding'])),
+            'refundable_shipping_cost' => $this->cleanMoney($data['refundable_shipping_cost'] ?? 11.90),
+            'refundable_shipping_cost_currency' => 'PLN',
             'default_target_warehouse_id' => filled($data['default_target_warehouse_id'] ?? null)
                 ? (int) $data['default_target_warehouse_id']
                 : null,
@@ -99,11 +103,16 @@ final class ReturnSettingsService
         $dispositions = $this->cleanDispositions($data['dispositions'] ?? null);
         $conditionCodes = array_column($conditions, 'code');
         $dispositionCodes = array_column($dispositions, 'code');
+        $refundableShippingCost = array_key_exists('refundable_shipping_cost', $data)
+            ? $data['refundable_shipping_cost']
+            : ($stored['refundable_shipping_cost'] ?? 11.90);
 
         $payload = [
             'numbering_pattern' => $this->cleanPattern((string) ($data['numbering_pattern'] ?? '')),
             'numbering_prefix' => $this->cleanPrefix((string) ($data['numbering_prefix'] ?? 'RET')),
             'numbering_padding' => max(3, min(9, (int) ($data['numbering_padding'] ?? 6))),
+            'refundable_shipping_cost' => $this->cleanMoney($refundableShippingCost),
+            'refundable_shipping_cost_currency' => 'PLN',
             'default_target_warehouse_id' => filled($data['default_target_warehouse_id'] ?? null)
                 ? (int) $data['default_target_warehouse_id']
                 : null,
@@ -190,6 +199,8 @@ final class ReturnSettingsService
             'numbering_pattern' => '{PREFIX}/{YYYY}/{SEQ}',
             'numbering_prefix' => 'RET',
             'numbering_padding' => 6,
+            'refundable_shipping_cost' => 11.90,
+            'refundable_shipping_cost_currency' => 'PLN',
             'default_target_warehouse_id' => null,
             'default_condition' => 'unchecked',
             'default_disposition' => 'restock',
@@ -205,6 +216,13 @@ final class ReturnSettingsService
             'store_api_token' => '',
             'store_webhook_secret' => '',
         ];
+    }
+
+    private function cleanMoney(mixed $value): float
+    {
+        $normalized = is_string($value) ? str_replace(',', '.', trim($value)) : $value;
+
+        return round(max(0, min(999999.99, (float) $normalized)), 2);
     }
 
     private function cleanToken(string $value): string

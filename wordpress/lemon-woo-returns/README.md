@@ -135,9 +135,21 @@ Odpowiedz:
 {
   "success": true,
   "external_id": "ERP-RETURN-123",
-  "status": "Zwrot zrealizowany"
+  "status": "Zwrot zrealizowany",
+  "shipping_refund_amount": 11.90,
+  "shipping_refund": {
+    "gross_amount": 11.90,
+    "net_amount": 10.00,
+    "tax_amount": 1.90,
+    "vat_rate": 19,
+    "currency": "PLN",
+    "wc_order_item_id": 456
+  },
+  "currency": "PLN"
 }
 ```
+
+Przy pelnym zwrocie platnej dostawy ERP przesyla kwote brutto oraz rozbicie netto/VAT. Wtyczka zapisuje je jako osobna pozycje dostawy w refundzie WooCommerce. Pole `shipping_refund_amount` pozostaje obslugiwane dla zgodnosci ze starszymi wersjami ERP.
 
 ERP moze tez wypchnac status webhookiem:
 
@@ -153,9 +165,13 @@ Payload webhooka:
 {
   "return_reference": "LLR-20260707-ABC123",
   "external_id": "ERP-RETURN-123",
-  "status": "Zwrot zrealizowany"
+  "status": "Zwrot zrealizowany",
+  "shipping_refund_amount": 11.90,
+  "currency": "PLN"
 }
 ```
+
+Pola `shipping_refund_amount` i `currency` sa opcjonalne. ERP przekazuje je tylko wtedy, gdy pełny zwrot płatnego zamówienia obejmuje koszt dostawy.
 
 Statusy finalne konfiguruje sie w panelu ustawien. Domyslnie finalne sa m.in. `Zwrot zrealizowany`, `zrealizowany`, `completed`, `realized`, `return_completed`.
 
@@ -168,7 +184,7 @@ Status biznesowy jest synchronizowany dopiero po skutecznym utworzeniu zgloszeni
 Po statusie finalnym z ERP wtyczka:
 
 - tworzy natywny refund WooCommerce przez `wc_create_refund`,
-- refunduje tylko pozycje i ilosci z wybranego zgloszenia,
+- refunduje pozycje i ilosci z wybranego zgloszenia oraz — gdy ERP przekaże taką kwotę — należny koszt dostawy,
 - nie uruchamia zwrotu platnosci przez bramke (`refund_payment=false`),
 - opcjonalnie przywraca stany magazynowe,
 - opcjonalnie ustawia status zamowienia WooCommerce na `refunded`, ale dopiero gdy zwrocono wszystkie jego pozycje.

@@ -9,9 +9,11 @@ use App\Models\InvoiceLine;
 use App\Models\KsefSubmission;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
-use App\Services\Automation\InvoiceKsefAutomationService;
 use App\Services\Audit\AuditLogService;
+use App\Services\Automation\InvoiceKsefAutomationService;
 use App\Services\Ksef\KsefEligibilityService;
+use App\Services\Returns\ReturnShippingRefundService;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -24,8 +26,8 @@ final class ReturnCorrectionInvoiceService
         private readonly InvoiceSettingsService $settings,
         private readonly AuditLogService $audit,
         private readonly InvoiceKsefAutomationService $ksefAutomation,
-    ) {
-    }
+        private readonly ReturnShippingRefundService $shippingRefunds,
+    ) {}
 
     public function createForReturn(ReturnCase $returnCase): Invoice
     {
@@ -73,11 +75,17 @@ final class ReturnCorrectionInvoiceService
             if (! $sellerStatus['is_ready']) {
                 throw new RuntimeException(
                     'Faktura pierwotna ma niekompletne dane sprzedawcy. Uzupełnij dane sprzedawcy na fakturze pierwotnej przed wystawieniem korekty. '
-                    . implode(' ', $sellerStatus['errors']),
+                    .implode(' ', $sellerStatus['errors']),
                 );
             }
 
             $correctionLines = $this->correctionLines($returnCase, $originalInvoice);
+
+            $shippingCorrectionLine = $this->shippingCorrectionLine($returnCase, $originalInvoice);
+
+            if ($shippingCorrectionLine !== null) {
+                $correctionLines[] = $shippingCorrectionLine;
+            }
 
             if ($correctionLines === []) {
                 throw new RuntimeException('Zwrot nie ma pozycji, które można skorygować na fakturze.');
@@ -87,7 +95,7 @@ final class ReturnCorrectionInvoiceService
             $netTotal = round(collect($correctionLines)->sum('net_total'), 2);
             $vatTotal = round(collect($correctionLines)->sum('vat_total'), 2);
             $grossTotal = round(collect($correctionLines)->sum('gross_total'), 2);
-            $metadata = $this->metadataForCorrection($returnCase, $originalInvoice, $returnDocuments);
+            $metadata = $this->metadataForCorrection($returnCase, $originalInvoice, $returnDocuments, $shippingCorrectionLine);
 
             $invoice = Invoice::query()->create([
                 'number' => $this->numbers->next($this->correctionNumberType($originalInvoice)),
@@ -144,7 +152,7 @@ final class ReturnCorrectionInvoiceService
         return $invoice->refresh()->load(['lines', 'files', 'externalOrder', 'invoiceTemplate']);
     }
 
-    private function returnDocuments(ReturnCase $returnCase): \Illuminate\Support\Collection
+    private function returnDocuments(ReturnCase $returnCase): Collection
     {
         return $returnCase->lines
             ->map(fn (ReturnCaseLine $line) => $line->warehouseDocument)
@@ -158,8 +166,12 @@ final class ReturnCorrectionInvoiceService
     /**
      * @return array<string, mixed>
      */
-    private function metadataForCorrection(ReturnCase $returnCase, Invoice $originalInvoice, \Illuminate\Support\Collection $returnDocuments): array
-    {
+    private function metadataForCorrection(
+        ReturnCase $returnCase,
+        Invoice $originalInvoice,
+        Collection $returnDocuments,
+        ?array $shippingCorrectionLine = null,
+    ): array {
         $metadata = [
             'source' => 'return_case',
             'return_case_id' => $returnCase->id,
@@ -184,6 +196,23 @@ final class ReturnCorrectionInvoiceService
             ]);
         }
 
+        if ($shippingCorrectionLine !== null) {
+            $metadata['shipping_refund'] = [
+                'included' => true,
+                'gross_amount' => abs((float) $shippingCorrectionLine['gross_total']),
+                'net_amount' => abs((float) $shippingCorrectionLine['net_total']),
+                'vat_amount' => abs((float) $shippingCorrectionLine['vat_total']),
+                'vat_rate' => (float) $shippingCorrectionLine['vat_rate'],
+                'currency' => strtoupper((string) $originalInvoice->currency),
+                'configured_gross_amount' => (float) data_get($shippingCorrectionLine, 'metadata.configured_refundable_shipping_cost', 0),
+                'configured_currency' => (string) data_get($shippingCorrectionLine, 'metadata.configured_refundable_shipping_cost_currency', 'PLN'),
+                'configured_gross_amount_in_refund_currency' => (float) data_get($shippingCorrectionLine, 'metadata.configured_refundable_shipping_cost_in_refund_currency', 0),
+                'conversion_rate' => data_get($shippingCorrectionLine, 'metadata.currency_conversion_rate'),
+                'original_shipping_gross_amount' => (float) data_get($shippingCorrectionLine, 'metadata.original_shipping_gross_amount', 0),
+                'wc_order_item_id' => data_get($shippingCorrectionLine, 'metadata.external_line_id'),
+            ];
+        }
+
         return $this->withKsefCorrectionContext($metadata, $originalInvoice);
     }
 
@@ -193,7 +222,7 @@ final class ReturnCorrectionInvoiceService
     }
 
     /**
-     * @param array<string, mixed> $metadata
+     * @param  array<string, mixed>  $metadata
      * @return array<string, mixed>
      */
     private function withKsefCorrectionContext(array $metadata, Invoice $originalInvoice): array
@@ -294,7 +323,7 @@ final class ReturnCorrectionInvoiceService
     }
 
     /**
-     * @param array<string, mixed> $values
+     * @param  array<string, mixed>  $values
      * @return array<string, mixed>
      */
     private function withoutBlankValues(array $values): array
@@ -331,7 +360,7 @@ final class ReturnCorrectionInvoiceService
 
                 return [
                     'product_id' => $invoiceLine->product_id,
-                    'name' => 'Korekta zwrotu: ' . $invoiceLine->name,
+                    'name' => 'Korekta zwrotu: '.$invoiceLine->name,
                     'sku' => $invoiceLine->sku,
                     'unit' => $invoiceLine->unit,
                     'quantity' => $quantity,
@@ -373,6 +402,76 @@ final class ReturnCorrectionInvoiceService
             ->filter()
             ->values()
             ->all();
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function shippingCorrectionLine(ReturnCase $returnCase, Invoice $originalInvoice): ?array
+    {
+        $refund = $this->shippingRefunds->snapshot($returnCase, $originalInvoice);
+
+        if ($refund === null) {
+            return null;
+        }
+
+        /** @var InvoiceLine $originalShippingLine */
+        $originalShippingLine = $refund['original_line'];
+        $refundGross = $refund['gross_amount'];
+        $refundNet = $refund['net_amount'];
+        $refundVat = $refund['vat_amount'];
+        $vatRate = $refund['vat_rate'];
+        $beforeQuantity = (float) $originalShippingLine->quantity;
+        $beforeNetTotal = (float) $originalShippingLine->net_total;
+        $beforeVatTotal = (float) $originalShippingLine->vat_total;
+        $beforeGrossTotal = (float) $originalShippingLine->gross_total;
+
+        return [
+            'product_id' => null,
+            'name' => 'Korekta zwrotu: '.$originalShippingLine->name,
+            'sku' => null,
+            'unit' => 'usł.',
+            'quantity' => -1,
+            'unit_net_price' => $refundNet,
+            'net_total' => -$refundNet,
+            'vat_rate' => $vatRate,
+            'vat_total' => -$refundVat,
+            'gross_total' => -$refundGross,
+            'metadata' => [
+                'source' => 'return_shipping_refund',
+                'line_type' => 'shipping',
+                'return_case_id' => $returnCase->id,
+                'corrected_invoice_line_id' => $originalShippingLine->id,
+                'external_line_id' => data_get($originalShippingLine->metadata, 'external_line_id'),
+                'configured_refundable_shipping_cost' => $refund['configured_gross_amount'],
+                'configured_refundable_shipping_cost_currency' => $refund['configured_currency'],
+                'configured_refundable_shipping_cost_in_refund_currency' => $refund['configured_gross_amount_in_refund_currency'],
+                'currency_conversion_rate' => $refund['conversion_rate'],
+                'original_shipping_gross_amount' => $refund['original_shipping_gross_amount'],
+                'before_correction' => [
+                    'name' => $originalShippingLine->name,
+                    'sku' => $originalShippingLine->sku,
+                    'unit' => $originalShippingLine->unit,
+                    'quantity' => $beforeQuantity,
+                    'unit_net_price' => (float) $originalShippingLine->unit_net_price,
+                    'net_total' => $beforeNetTotal,
+                    'vat_rate' => $vatRate,
+                    'vat_total' => $beforeVatTotal,
+                    'gross_total' => $beforeGrossTotal,
+                ],
+                'after_correction' => [
+                    'name' => $originalShippingLine->name,
+                    'sku' => $originalShippingLine->sku,
+                    'unit' => $originalShippingLine->unit,
+                    'quantity' => max(0, round($beforeQuantity - 1, 4)),
+                    'unit_net_price' => (float) $originalShippingLine->unit_net_price,
+                    'net_total' => round($beforeNetTotal - $refundNet, 2),
+                    'vat_rate' => $vatRate,
+                    'vat_total' => round($beforeVatTotal - $refundVat, 2),
+                    'gross_total' => round($beforeGrossTotal - $refundGross, 2),
+                ],
+            ],
+        ];
     }
 
     private function matchingInvoiceLine(Invoice $invoice, ReturnCaseLine $returnLine): ?InvoiceLine
