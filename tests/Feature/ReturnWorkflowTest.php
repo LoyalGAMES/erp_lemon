@@ -63,32 +63,26 @@ class ReturnWorkflowTest extends TestCase
         $this->assertCount(1, $returnCase->lines);
         $this->assertSame('2.0000', (string) $returnCase->lines->first()->quantity_accepted);
 
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Przyjmij zwrot na stan (RX)');
+
         $this->post(route('returns.document.create', $returnCase))
             ->assertRedirect()
-            ->assertSessionHas('status');
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'Towar został przyjęty na stan'));
 
         $document = WarehouseDocument::query()->with('lines')->firstOrFail();
 
         $this->assertSame('RX', $document->type);
-        $this->assertSame('draft', $document->status);
+        $this->assertSame('posted', $document->status);
         $this->assertSame($warehouse->id, $document->destination_warehouse_id);
         $this->assertSame($returnCase->id, $document->metadata['return_case_id']);
         $this->assertCount(1, $document->lines);
         $this->assertSame('2.0000', (string) $document->lines->first()->quantity);
 
         $returnCase->refresh();
-        $this->assertSame('document_created', $returnCase->status);
-        $this->assertSame($document->id, $returnCase->warehouse_document_id);
-
-        $this->post(route('documents.post', $document))
-            ->assertRedirect()
-            ->assertSessionHas('status');
-
-        $document->refresh();
-        $returnCase->refresh();
-
-        $this->assertSame('posted', $document->status);
         $this->assertSame('completed', $returnCase->status);
+        $this->assertSame($document->id, $returnCase->warehouse_document_id);
 
         $balance = StockBalance::query()
             ->where('warehouse_id', $warehouse->id)
@@ -165,10 +159,6 @@ class ReturnWorkflowTest extends TestCase
         $this->assertCount(2, $document->lines);
         $this->assertSame('1.0000', (string) $document->lines->firstWhere('product_id', $firstProduct->id)->quantity);
         $this->assertSame('3.0000', (string) $document->lines->firstWhere('product_id', $secondProduct->id)->quantity);
-
-        $this->post(route('documents.post', $document))
-            ->assertRedirect()
-            ->assertSessionHas('status');
 
         $firstBalance = StockBalance::query()
             ->where('warehouse_id', $warehouse->id)
@@ -680,10 +670,7 @@ class ReturnWorkflowTest extends TestCase
 
         $this->assertSame('1.0000', (string) $returnDocument->lines->firstWhere('product_id', $firstProduct->id)->quantity);
         $this->assertSame('2.0000', (string) $returnDocument->lines->firstWhere('product_id', $secondProduct->id)->quantity);
-
-        $this->post(route('documents.post', $returnDocument))
-            ->assertRedirect()
-            ->assertSessionHas('status');
+        $this->assertSame('posted', $returnDocument->status);
 
         $returnCase->refresh();
         $this->assertSame('completed', $returnCase->status);
@@ -935,10 +922,7 @@ class ReturnWorkflowTest extends TestCase
             ->assertSessionHas('status');
 
         $document = WarehouseDocument::query()->firstOrFail();
-
-        $this->post(route('documents.post', $document))
-            ->assertRedirect()
-            ->assertSessionHas('status');
+        $this->assertSame('posted', $document->status);
 
         $returnCase->refresh();
 

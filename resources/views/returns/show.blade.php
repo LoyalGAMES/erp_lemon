@@ -50,9 +50,33 @@
         ->unique('id')
         ->values();
     $returnLabels = $returnCase->shippingLabels->where('status', 'generated')->values();
-    $incomingPayments = (float) $returnCase->customerPayments->where('direction', 'incoming')->sum(fn ($payment) => (float) $payment->amount);
-    $outgoingPayments = (float) $returnCase->customerPayments->where('direction', 'outgoing')->sum(fn ($payment) => (float) $payment->amount);
-    $paymentBalance = $incomingPayments - $outgoingPayments;
+    $payoutStatus = $returnProcess['payout'];
+    $nextStep = $returnProcess['next_step'];
+    $processStateClass = fn (string $state): string => match ($state) {
+        'complete', 'paid' => 'is-complete',
+        'pending', 'partially_paid', 'verify', 'order_refund_unlinked', 'ready_bank', 'required' => 'is-warning',
+        'failed', 'accounting_only', 'not_paid' => 'is-danger',
+        default => 'is-waiting',
+    };
+    $paymentStatusLabels = [
+        'booked' => ['label' => 'Potwierdzono', 'class' => ''],
+        'paid' => ['label' => 'Wypłacono', 'class' => ''],
+        'settled' => ['label' => 'Rozliczono', 'class' => ''],
+        'pending' => ['label' => 'Oczekuje', 'class' => 'orange'],
+        'processing' => ['label' => 'W trakcie', 'class' => 'orange'],
+        'unknown' => ['label' => 'Do weryfikacji', 'class' => 'orange'],
+        'manual_required' => ['label' => 'Wymaga działania', 'class' => 'red'],
+        'failed' => ['label' => 'Błąd', 'class' => 'red'],
+    ];
+    $paymentMethodLabels = [
+        'payu' => 'PayU',
+        'mbank' => 'Przelew mBank',
+        'bank_transfer' => 'Przelew bankowy',
+        'cash' => 'Gotówka',
+        'card' => 'Karta',
+        'blik' => 'BLIK',
+        'other' => 'Inna metoda',
+    ];
     $expectedQuantity = (float) $returnCase->lines->sum(fn ($line) => (float) $line->quantity_expected);
     $acceptedQuantity = (float) $returnCase->lines->sum(fn ($line) => (float) $line->quantity_accepted);
     $customerEmail = $returnCase->customer_email ?: data_get($billing, 'email');
@@ -76,7 +100,20 @@
         $pushEvent($returnCase->correctionInvoice->issued_at ?? $returnCase->correctionInvoice->created_at, 'Wystawiono korektę '.$returnCase->correctionInvoice->number, $money($returnCase->correctionInvoice->gross_total, $returnCase->correctionInvoice->currency));
     }
     foreach ($returnCase->customerPayments as $payment) {
-        $pushEvent($payment->booked_at ?? $payment->created_at, $payment->direction === 'outgoing' ? 'Zarejestrowano wypłatę/refund' : 'Zaksięgowano dopłatę', $money($payment->amount, $payment->currency).' · '.$payment->method);
+        $paymentStatus = mb_strtolower((string) $payment->status);
+        $paymentEvent = $payment->direction !== 'outgoing'
+            ? 'Zaksięgowano dopłatę'
+            : match (true) {
+                in_array($paymentStatus, ['booked', 'paid', 'settled'], true) => 'Potwierdzono wypłatę',
+                in_array($paymentStatus, ['pending', 'processing'], true) => 'Wysłano refund — oczekuje na potwierdzenie',
+                $paymentStatus === 'unknown' => 'Refund wymaga weryfikacji',
+                default => 'Próba wypłaty nie powiodła się',
+            };
+        $pushEvent(
+            $payment->paid_at ?? $payment->booked_at ?? $payment->requested_at ?? $payment->created_at,
+            $paymentEvent,
+            $money($payment->amount, $payment->currency).' · '.($paymentMethodLabels[$payment->method] ?? $payment->method),
+        );
     }
     foreach ($returnCase->customerMessages as $message) {
         $pushEvent($message->sent_at ?? $message->created_at, 'Wiadomość do klienta', $message->renderedSubject());
@@ -104,6 +141,20 @@
         .return-summary-card { padding: 14px 16px; min-height: 82px; }
         .return-summary-card > span { display: block; color: var(--muted); font-size: 12px; font-weight: 720; margin-bottom: 5px; }
         .return-summary-card strong { display: block; font-size: 19px; line-height: 1.2; overflow-wrap: anywhere; }
+        .return-summary-card .return-summary-meta { color: var(--muted); font-size: 12px; margin-top: 5px; }
+        .return-process { margin-bottom: 16px; }
+        .return-process-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+        .return-process-step { position: relative; padding: 17px 18px 18px 54px; border-right: 1px solid var(--border); background: var(--surface); }
+        .return-process-step:last-child { border-right: 0; }
+        .return-process-number { position: absolute; top: 17px; left: 17px; width: 26px; height: 26px; border: 2px solid var(--border); border-radius: 50%; display: grid; place-items: center; color: var(--muted); background: #fff; font-size: 12px; font-weight: 800; }
+        .return-process-step strong { display: block; font-size: 15px; margin-bottom: 4px; }
+        .return-process-step p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+        .return-process-step.is-complete { background: #f3fbf6; }
+        .return-process-step.is-complete .return-process-number { border-color: #14804a; background: #14804a; color: #fff; }
+        .return-process-step.is-warning { background: #fff9ec; }
+        .return-process-step.is-warning .return-process-number { border-color: #b86a00; color: #8a4f00; }
+        .return-process-step.is-danger { background: #fff5f4; }
+        .return-process-step.is-danger .return-process-number { border-color: #c43c35; color: #a52d27; }
         .return-layout { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 18px; align-items: start; }
         .return-stack,
         .return-action-rail { display: grid; gap: 16px; min-width: 0; }
@@ -147,6 +198,18 @@
         .return-payment-row:first-child { border-top: 0; padding-top: 0; }
         .return-payment-row strong { display: block; }
         .return-payout-box { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 12px; background: #fffdfb; }
+        .return-payout-box > strong { display: block; font-size: 17px; margin-bottom: 5px; }
+        .return-payout-box.is-complete { border-color: #9dd9b9; background: #f3fbf6; }
+        .return-payout-box.is-warning { border-color: #ebc36f; background: #fff9ec; }
+        .return-payout-box.is-danger { border-color: #efb2ad; background: #fff5f4; }
+        .return-payout-amount { font-size: 22px; font-weight: 800; margin: 7px 0; }
+        .return-payment-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 14px; }
+        .return-payment-fact { border: 1px solid var(--border); border-radius: 8px; padding: 10px; background: var(--surface); }
+        .return-payment-fact span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+        .return-next-step { border: 1px solid var(--border); border-radius: 8px; padding: 13px; background: #fff; }
+        .return-next-step > span { display: block; color: var(--muted); font-size: 11px; font-weight: 760; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 5px; }
+        .return-next-step > strong { display: block; font-size: 16px; margin-bottom: 5px; }
+        .return-next-step p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
         .return-detail-page .table-scroll { width: 100%; max-width: 100%; overflow-x: auto; }
         .return-detail-page .table-scroll table { min-width: 760px; }
         .return-detail-page .products-table table { min-width: 940px; }
@@ -161,12 +224,16 @@
         }
         @media (max-width: 760px) {
             .return-summary,
+            .return-process-grid,
+            .return-payment-facts,
             .return-info-grid,
             .return-document-grid,
             .return-support-grid,
             .return-timeline-item { grid-template-columns: 1fr; }
             .return-toolbar .inline-actions,
             .return-toolbar .button { width: 100%; }
+            .return-process-step { border-right: 0; border-bottom: 1px solid var(--border); }
+            .return-process-step:last-child { border-bottom: 0; }
         }
     </style>
 @endpush
@@ -204,9 +271,36 @@
                 <strong>{{ $qty($acceptedQuantity) }} / {{ $qty($expectedQuantity) }}</strong>
             </article>
             <article class="card return-summary-card">
-                <span>Saldo zwrotu</span>
-                <strong>{{ $money($paymentBalance, $currency) }}</strong>
+                <span>Zwrot pieniędzy</span>
+                <strong>{{ $payoutStatus['label'] }}</strong>
+                <div class="return-summary-meta">
+                    {{ (float) $payoutStatus['amount'] > 0 ? $money($payoutStatus['amount'], $payoutStatus['currency']) : 'brak potwierdzonej wypłaty' }}
+                </div>
             </article>
+        </section>
+
+        <section class="card return-process" aria-label="Przebieg obsługi zwrotu">
+            <div class="panel-header">
+                <span>Przebieg obsługi zwrotu</span>
+                <span>{{ $nextStep['label'] }}</span>
+            </div>
+            <div class="return-process-grid">
+                <div class="return-process-step {{ $processStateClass($returnProcess['warehouse']['state']) }}">
+                    <span class="return-process-number">{{ $returnProcess['warehouse']['state'] === 'complete' ? '✓' : '1' }}</span>
+                    <strong>Magazyn: {{ $returnProcess['warehouse']['label'] }}</strong>
+                    <p>{{ $returnProcess['warehouse']['description'] }}</p>
+                </div>
+                <div class="return-process-step {{ $processStateClass($returnProcess['correction']['state']) }}">
+                    <span class="return-process-number">{{ $returnProcess['correction']['state'] === 'complete' ? '✓' : '2' }}</span>
+                    <strong>Dokument: {{ $returnProcess['correction']['label'] }}</strong>
+                    <p>{{ $returnProcess['correction']['description'] }}</p>
+                </div>
+                <div class="return-process-step {{ $processStateClass($payoutStatus['state']) }}">
+                    <span class="return-process-number">{{ $payoutStatus['state'] === 'paid' ? '✓' : '3' }}</span>
+                    <strong>Pieniądze: {{ $payoutStatus['label'] }}</strong>
+                    <p>{{ $payoutStatus['description'] }}</p>
+                </div>
+            </div>
         </section>
 
         <section class="return-layout">
@@ -398,28 +492,76 @@
                     <article class="card">
                         <div class="panel-header">
                             <span>Wypłaty i rozliczenia</span>
-                            <span>{{ $money($paymentBalance, $currency) }}</span>
+                            <span>{{ $payoutStatus['label'] }}</span>
                         </div>
                         <div class="return-section-body">
-                            <div class="return-payout-box">
-                                <strong>{{ $mbankPayoutEligible ? 'Gotowe do koszyka mBank' : 'Poza koszykiem mBank' }}</strong>
-                                <div class="muted">{{ $money($mbankPayoutAmount, $currency) }} · {{ $mbankPayoutRecipient }}</div>
-                                <div class="muted">{{ $mbankPayoutAccount ?: 'brak poprawnego rachunku do przelewu' }}</div>
+                            <div class="return-payout-box {{ $processStateClass($payoutStatus['state']) }}">
+                                <strong>{{ $payoutStatus['label'] }}</strong>
+                                <div class="return-payout-amount">
+                                    {{ (float) $payoutStatus['amount'] > 0 ? $money($payoutStatus['amount'], $payoutStatus['currency']) : '—' }}
+                                </div>
+                                <div class="muted">{{ $payoutStatus['description'] }}</div>
+                                @if ($payoutStatus['method'] || $payoutStatus['reference'] || $payoutStatus['date'])
+                                    <div class="return-record-meta" style="margin-top: 7px;">
+                                        {{ collect([
+                                            $payoutStatus['method'],
+                                            $payoutStatus['reference'] ? 'ref. '.$payoutStatus['reference'] : null,
+                                            $payoutStatus['date']?->format('Y-m-d H:i'),
+                                        ])->filter()->implode(' · ') }}
+                                    </div>
+                                @endif
                             </div>
+
+                            <div class="return-payment-facts" aria-label="Kwoty rozliczenia zwrotu">
+                                <div class="return-payment-fact">
+                                    <span>Kwota korekty</span>
+                                    <strong>{{ $returnCase->correctionInvoice ? $money($returnProcess['expected_amount'], $returnProcess['currency']) : '—' }}</strong>
+                                </div>
+                                <div class="return-payment-fact">
+                                    <span>Wypłata potwierdzona</span>
+                                    <strong>{{ $money($returnProcess['confirmed_amount'], $returnProcess['currency']) }}</strong>
+                                </div>
+                                <div class="return-payment-fact">
+                                    <span>Wypłata oczekująca</span>
+                                    <strong>{{ $money($returnProcess['pending_amount'], $returnProcess['currency']) }}</strong>
+                                </div>
+                            </div>
+
+                            @if ($mbankPayoutEligible)
+                                <div class="return-payout-box is-warning">
+                                    <strong>Dane do przelewu mBank</strong>
+                                    <div>{{ $money($mbankPayoutAmount, $currency) }} · {{ $mbankPayoutRecipient }}</div>
+                                    <div class="muted">{{ $mbankPayoutAccount ?: 'Brak poprawnego rachunku — uzupełnij go przed wypłatą.' }}</div>
+                                </div>
+                            @endif
+
                             <div class="return-record-list">
                                 @forelse ($returnCase->customerPayments->take(8) as $payment)
+                                    @php
+                                        $paymentStatusMeta = $paymentStatusLabels[$payment->status]
+                                            ?? ['label' => $payment->status, 'class' => 'blue'];
+                                        $paymentDate = $payment->paid_at ?? $payment->booked_at ?? $payment->requested_at ?? $payment->created_at;
+                                        $paymentError = $payment->error_message ?: data_get($payment->metadata, 'payu.error');
+                                    @endphp
                                     <div class="return-payment-row">
                                         <div>
-                                            <strong>{{ $payment->direction === 'outgoing' ? '-' : '+' }}{{ $money($payment->amount, $payment->currency) }}</strong>
-                                            <span class="return-record-meta">{{ $payment->method }} · {{ $payment->reference ?: 'bez referencji' }}</span>
+                                            <strong>{{ $payment->direction === 'outgoing' ? 'Wypłata ' : 'Dopłata ' }}{{ $money($payment->amount, $payment->currency) }}</strong>
+                                            <span class="return-record-meta">
+                                                {{ $paymentMethodLabels[$payment->method] ?? $payment->method }}
+                                                · {{ $payment->reference ? 'ref. '.$payment->reference : 'bez referencji' }}
+                                                · {{ $paymentDate?->format('Y-m-d H:i') }}
+                                            </span>
                                             @if ($payment->description)
                                                 <div class="return-record-meta">{{ $payment->description }}</div>
                                             @endif
+                                            @if ($paymentError)
+                                                <div class="return-record-meta" style="color: #a52d27;">{{ $paymentError }}</div>
+                                            @endif
                                         </div>
-                                        <span @class(['status', 'blue' => $payment->status === 'pending', 'red' => $payment->status === 'failed'])>{{ $payment->status }}</span>
+                                        <span class="status {{ $paymentStatusMeta['class'] }}">{{ $paymentStatusMeta['label'] }}</span>
                                     </div>
                                 @empty
-                                    <span class="muted">Brak ręcznych księgowań, dopłat lub refundów dla tego zwrotu.</span>
+                                    <span class="muted">Brak operacji finansowych przypisanych bezpośrednio do tej karty zwrotu.</span>
                                 @endforelse
                             </div>
                         </div>
@@ -514,11 +656,47 @@
             <aside class="return-action-rail">
                 <article class="card">
                     <div class="panel-header">
+                        <span>Status pieniędzy</span>
+                        <span>{{ $payoutStatus['label'] }}</span>
+                    </div>
+                    <div class="return-section-body">
+                        <div class="return-payout-box {{ $processStateClass($payoutStatus['state']) }}">
+                            <strong>{{ $payoutStatus['label'] }}</strong>
+                            <div class="return-payout-amount">
+                                {{ (float) $payoutStatus['amount'] > 0 ? $money($payoutStatus['amount'], $payoutStatus['currency']) : '—' }}
+                            </div>
+                            <div class="muted">{{ $payoutStatus['description'] }}</div>
+                            @if ($payoutStatus['method'] || $payoutStatus['reference'] || $payoutStatus['date'])
+                                <div class="return-record-meta" style="margin-top: 7px;">
+                                    {{ collect([
+                                        $payoutStatus['method'],
+                                        $payoutStatus['reference'] ? 'ref. '.$payoutStatus['reference'] : null,
+                                        $payoutStatus['date']?->format('Y-m-d H:i'),
+                                    ])->filter()->implode(' · ') }}
+                                </div>
+                            @endif
+                        </div>
+                        <div class="return-next-step">
+                            <span>Co dalej?</span>
+                            <strong>{{ $nextStep['label'] }}</strong>
+                            <p>{{ $nextStep['description'] }}</p>
+                        </div>
+                        @if ($order && in_array($payoutStatus['state'], ['order_refund_unlinked', 'verify'], true))
+                            <a class="button secondary" style="width: 100%; margin-top: 10px;" href="{{ route('orders.show', $order) }}">Sprawdź rozliczenie zamówienia</a>
+                        @endif
+                        @if ($payoutStatus['state'] === 'ready_bank')
+                            <a class="button" style="width: 100%; margin-top: 10px;" href="{{ route('returns.payouts.mbank') }}">Przejdź do koszyka mBank</a>
+                        @endif
+                    </div>
+                </article>
+
+                <article class="card">
+                    <div class="panel-header">
                         <span>Panel obsługi zwrotu</span>
                         <span>{{ $statusMeta['label'] }}</span>
                     </div>
                     <div class="return-section-body return-service-actions">
-                        @include('partials.return-actions', ['returnCase' => $returnCase])
+                        @include('partials.return-actions', ['returnCase' => $returnCase, 'returnProcess' => $returnProcess])
                     </div>
                 </article>
             </aside>
