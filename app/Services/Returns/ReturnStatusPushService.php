@@ -20,8 +20,8 @@ final class ReturnStatusPushService
     public function __construct(
         private readonly ReturnSettingsService $settings,
         private readonly StoreReturnIntakeService $intake,
-    ) {
-    }
+        private readonly ReturnShippingRefundService $shippingRefunds,
+    ) {}
 
     public function canPush(ReturnCase $returnCase): bool
     {
@@ -47,6 +47,13 @@ final class ReturnStatusPushService
             'external_id' => $returnCase->number,
             'status' => $this->intake->statusForStore($returnCase),
         ];
+        $shippingRefund = $this->shippingRefunds->payloadForStore($returnCase);
+
+        if ($shippingRefund !== null && $shippingRefund['gross_amount'] > 0) {
+            $payload['shipping_refund_amount'] = $shippingRefund['gross_amount'];
+            $payload['shipping_refund'] = $shippingRefund;
+            $payload['currency'] = $shippingRefund['currency'];
+        }
 
         $log = IntegrationSyncLog::query()->create([
             'direction' => 'outbound',

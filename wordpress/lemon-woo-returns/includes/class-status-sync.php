@@ -225,7 +225,7 @@ class LL_Returns_Status_Sync {
 			return true;
 		}
 
-		$refund = $this->refund_service->create_refund_for_request( $request_id );
+		$refund = $this->refund_service->create_refund_for_request( $request_id, $erp_context );
 
 		if ( is_wp_error( $refund ) ) {
 			$this->repository->record_refund_error( $request_id, $refund );

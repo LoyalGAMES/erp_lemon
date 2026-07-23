@@ -41,6 +41,17 @@
             </section>
 
             <section class="settings-section">
+                <h2>Zwrot kosztu dostawy</h2>
+                <div class="settings-fields">
+                    <label>Najniższy koszt dostępnej dostawy (brutto, PLN)
+                        <input name="refundable_shipping_cost" value="{{ old('refundable_shipping_cost', number_format((float) ($returnSettings['refundable_shipping_cost'] ?? 11.90), 2, '.', '')) }}" type="number" min="0" max="999999.99" step="0.01" inputmode="decimal" required>
+                    </label>
+                    <input name="refundable_shipping_cost_currency" value="PLN" type="hidden">
+                </div>
+                <p class="muted">Kwota w PLN zwracana przy pełnym zwrocie zamówienia, jeśli klient zapłacił za dostawę. Dla zamówienia w innej walucie system użyje kursu zapisanego na fakturze pierwotnej. Przy zwrocie częściowym koszt dostawy nie jest zwracany.</p>
+            </section>
+
+            <section class="settings-section">
                 <h2>Domyślne przyjęcie</h2>
                 <div class="settings-fields">
                     <label>Domyślny magazyn zwrotów

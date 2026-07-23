@@ -7,6 +7,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\ExternalOrder;
 use App\Models\ReturnCase;
+use App\Services\Returns\ReturnShippingRefundService;
 use App\Services\Returns\StoreReturnIntakeService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -16,6 +17,7 @@ class StoreReturnsController extends Controller
 {
     public function __construct(
         private readonly StoreReturnIntakeService $intake,
+        private readonly ReturnShippingRefundService $shippingRefunds,
     ) {}
 
     /**
@@ -118,10 +120,19 @@ class StoreReturnsController extends Controller
             ], 404);
         }
 
-        return response()->json([
+        $response = [
             'success' => true,
             'external_id' => $returnCase->number,
             'status' => $this->intake->statusForStore($returnCase),
-        ]);
+        ];
+        $shippingRefund = $this->shippingRefunds->payloadForStore($returnCase);
+
+        if ($shippingRefund !== null && $shippingRefund['gross_amount'] > 0) {
+            $response['shipping_refund_amount'] = $shippingRefund['gross_amount'];
+            $response['shipping_refund'] = $shippingRefund;
+            $response['currency'] = $shippingRefund['currency'];
+        }
+
+        return response()->json($response);
     }
 }

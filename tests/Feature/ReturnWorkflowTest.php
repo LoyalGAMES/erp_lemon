@@ -17,6 +17,7 @@ use App\Models\Warehouse;
 use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\Automation\DocumentAutomationSettingsService;
+use App\Services\Returns\ReturnSettingsService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\Http;
@@ -507,6 +508,8 @@ class ReturnWorkflowTest extends TestCase
             'numbering_prefix' => 'RMA',
             'numbering_pattern' => '{PREFIX}/{MM}/{YYYY}/{SEQ}',
             'numbering_padding' => 4,
+            'refundable_shipping_cost' => '13.45',
+            'refundable_shipping_cost_currency' => 'PLN',
             'default_target_warehouse_id' => $warehouse->id,
             'default_condition' => 'opened',
             'default_disposition' => 'inspection',
@@ -540,8 +543,13 @@ class ReturnWorkflowTest extends TestCase
             ->assertSee('RMA - Zwroty po kontroli')
             ->assertSee('Dyspozycje i magazyny domyślne')
             ->assertSee('Przywróć na stan')
+            ->assertSee('name="refundable_shipping_cost" value="13.45"', false)
+            ->assertSee('name="refundable_shipping_cost_currency" value="PLN"', false)
             ->assertSee('API formularza zwrotów aktywne')
             ->assertSee('Przykład: RMA/'.now()->format('m/Y').'/0001');
+
+        $this->assertSame(13.45, app(ReturnSettingsService::class)->data()['refundable_shipping_cost']);
+        $this->assertSame('PLN', app(ReturnSettingsService::class)->data()['refundable_shipping_cost_currency']);
 
         $this->get(route('returns.index'))
             ->assertOk()

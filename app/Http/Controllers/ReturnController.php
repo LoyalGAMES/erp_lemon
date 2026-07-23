@@ -27,6 +27,7 @@ use App\Services\Payments\PayuRefundService;
 use App\Services\Returns\ReturnNumberService;
 use App\Services\Returns\ReturnReceivingService;
 use App\Services\Returns\ReturnSettingsService;
+use App\Services\Returns\ReturnShippingRefundService;
 use App\Services\Returns\ReturnStatusPushService;
 use App\Services\Returns\StoreReturnIntakeService;
 use App\Services\Shipping\ShippingLabelService;
@@ -613,12 +614,13 @@ class ReturnController extends Controller
         CustomerCommunicationService $communication,
         OrderMutationLock $orderLock,
         OrderCancellationGuard $cancellationGuard,
+        ReturnShippingRefundService $shippingRefunds,
     ): RedirectResponse {
         try {
             return $this->withReturnCaseFamilyLock(
                 $returnCase,
                 $orderLock,
-                function () use ($returnCase, $pusher, $communication, $cancellationGuard): RedirectResponse {
+                function () use ($returnCase, $pusher, $communication, $cancellationGuard, $shippingRefunds): RedirectResponse {
                     $cancellationGuard->assertReturnAllowedForCase($returnCase);
 
                     $freshReturn = $returnCase->fresh() ?? $returnCase;
@@ -627,6 +629,7 @@ class ReturnController extends Controller
                         return back()->with('error', "Zwrot {$freshReturn->number} nie oczekuje na zatwierdzenie.");
                     }
 
+                    $shippingRefunds->snapshot($freshReturn);
                     $freshReturn->update(['status' => StoreReturnIntakeService::STATUS_COMPLETED]);
                     $communication->sendReturnStatus($freshReturn->fresh() ?? $freshReturn, 'return_approved');
 
