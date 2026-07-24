@@ -41,6 +41,16 @@
             </section>
 
             <section class="settings-section">
+                <h2>Termin na zwrot</h2>
+                <div class="settings-fields">
+                    <label>Liczba dni od odebrania przesyłki
+                        <input name="return_window_days" value="{{ old('return_window_days', $returnSettings['return_window_days'] ?? 14) }}" type="number" min="1" max="365" step="1" inputmode="numeric" required>
+                    </label>
+                </div>
+                <p class="muted">Na karcie zwrotu termin jest liczony od potwierdzonej daty doręczenia. Jeżeli przewoźnik nie przekazał tej daty, system użyje daty wysłania i wyraźnie oznaczy ją jako zastępczą.</p>
+            </section>
+
+            <section class="settings-section">
                 <h2>Zwrot kosztu dostawy</h2>
                 <div class="settings-fields">
                     <label>Najniższy koszt dostępnej dostawy (brutto, PLN)

@@ -11,6 +11,7 @@ use App\Models\Product;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
 use App\Models\SalesChannel;
+use App\Models\ShippingLabel;
 use App\Models\StockBalance;
 use App\Models\StockLedgerEntry;
 use App\Models\Warehouse;
@@ -669,6 +670,137 @@ class ReturnWorkflowTest extends TestCase
         $this->assertSame(0, ReturnCaseLine::query()->count());
     }
 
+    public function test_return_card_compares_the_whole_order_and_evaluates_delivery_deadline(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'RETURN-CONTEXT',
+            'name' => 'Sklep zwroty kontekst',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $returnedProduct = Product::query()->create([
+            'sku' => 'SKU-CONTEXT-RETURNED',
+            'name' => 'Produkt zgłoszony do zwrotu',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $keptProduct = Product::query()->create([
+            'sku' => 'SKU-CONTEXT-KEPT',
+            'name' => 'Produkt pozostawiony przez klienta',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => 'RETURN-CONTEXT-9001',
+            'external_number' => '9001',
+            'status' => 'completed',
+            'fulfillment_status' => 'shipped',
+            'currency' => 'PLN',
+            'total_gross' => 300,
+            'billing_data' => ['email' => 'deadline@example.test'],
+        ]);
+        $returnedOrderLine = $order->lines()->create([
+            'product_id' => $returnedProduct->id,
+            'external_line_id' => 'context-line-returned',
+            'sku' => $returnedProduct->sku,
+            'name' => $returnedProduct->name,
+            'quantity' => 2,
+            'unit_gross_price' => 100,
+        ]);
+        $splitOrder = ExternalOrder::query()->create([
+            'split_parent_order_id' => $order->id,
+            'split_root_order_id' => $order->id,
+            'sales_channel_id' => $channel->id,
+            'external_id' => 'RETURN-CONTEXT-9001-S1',
+            'external_number' => '9001-S1',
+            'status' => 'completed',
+            'fulfillment_status' => 'shipped',
+            'currency' => 'PLN',
+            'total_gross' => 100,
+            'billing_data' => ['email' => 'deadline@example.test'],
+        ]);
+        $splitOrder->lines()->create([
+            'product_id' => $keptProduct->id,
+            'external_line_id' => 'context-line-kept',
+            'sku' => $keptProduct->sku,
+            'name' => $keptProduct->name,
+            'quantity' => 1,
+            'unit_gross_price' => 100,
+        ]);
+        ShippingLabel::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_order_id' => $splitOrder->id,
+            'purpose' => 'shipment',
+            'status' => 'delivered',
+            'provider' => 'inpost',
+            'tracking_number' => 'RETURN-CONTEXT-TRACKING',
+            'picked_up_at' => '2026-07-08 09:15:00',
+            'response_payload' => [
+                'tracking' => [
+                    'status' => 'delivered',
+                    'delivered_at' => '2026-07-10 12:30:00',
+                ],
+            ],
+            'disk' => 'local',
+            'path' => 'shipping-labels/return-context.pdf',
+            'generated_at' => '2026-07-07 10:00:00',
+        ]);
+        $returnCase = ReturnCase::query()->create([
+            'number' => 'RET/CONTEXT/000001',
+            'external_order_id' => $order->id,
+            'status' => 'opened',
+            'customer_email' => 'deadline@example.test',
+        ]);
+        $returnCase->forceFill([
+            'created_at' => '2026-07-20 16:00:00',
+            'updated_at' => '2026-07-20 16:00:00',
+        ])->saveQuietly();
+        $returnCase->lines()->create([
+            'product_id' => $returnedProduct->id,
+            'external_order_line_id' => $returnedOrderLine->id,
+            'quantity_expected' => 1,
+            'quantity_accepted' => 1,
+            'condition' => 'unchecked',
+            'disposition' => 'restock',
+        ]);
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Całe zamówienie a ten zwrot')
+            ->assertSee('Produkt zgłoszony do zwrotu')
+            ->assertSee('Produkt pozostawiony przez klienta')
+            ->assertSee('Nie jest zwracany')
+            ->assertSee('Odebranie przesyłki')
+            ->assertSee('2026-07-10 12:30')
+            ->assertSee('2026-07-24')
+            ->assertSee('Zgłoszenie wpłynęło w terminie');
+
+        $fallbackReturn = ReturnCase::query()->create([
+            'number' => 'RET/CONTEXT/000002',
+            'external_order_id' => $order->id,
+            'status' => 'opened',
+        ]);
+        $fallbackReturn->forceFill([
+            'created_at' => '2026-07-25 09:00:00',
+            'updated_at' => '2026-07-25 09:00:00',
+        ])->saveQuietly();
+        ShippingLabel::query()
+            ->where('external_order_id', $splitOrder->id)
+            ->update(['response_payload' => ['tracking' => ['status' => 'in_transit']]]);
+
+        $this->get(route('returns.show', $fallbackReturn))
+            ->assertOk()
+            ->assertSee('Wysłanie — data zastępcza')
+            ->assertSee('2026-07-08 09:15')
+            ->assertSee('Po terminie o 3 dni')
+            ->assertSee('Zgłoszenie wpłynęło po terminie');
+    }
+
     public function test_return_settings_are_separated_and_drive_return_defaults(): void
     {
         $channel = SalesChannel::query()->create([
@@ -726,6 +858,7 @@ class ReturnWorkflowTest extends TestCase
             'numbering_padding' => 4,
             'refundable_shipping_cost' => '13.45',
             'refundable_shipping_cost_currency' => 'PLN',
+            'return_window_days' => 21,
             'default_target_warehouse_id' => $warehouse->id,
             'default_condition' => 'opened',
             'default_disposition' => 'inspection',
@@ -761,11 +894,13 @@ class ReturnWorkflowTest extends TestCase
             ->assertSee('Przywróć na stan')
             ->assertSee('name="refundable_shipping_cost" value="13.45"', false)
             ->assertSee('name="refundable_shipping_cost_currency" value="PLN"', false)
+            ->assertSee('name="return_window_days" value="21"', false)
             ->assertSee('API formularza zwrotów aktywne')
             ->assertSee('Przykład: RMA/'.now()->format('m/Y').'/0001');
 
         $this->assertSame(13.45, app(ReturnSettingsService::class)->data()['refundable_shipping_cost']);
         $this->assertSame('PLN', app(ReturnSettingsService::class)->data()['refundable_shipping_cost_currency']);
+        $this->assertSame(21, app(ReturnSettingsService::class)->data()['return_window_days']);
 
         $this->get(route('returns.index'))
             ->assertOk()
@@ -998,6 +1133,103 @@ class ReturnWorkflowTest extends TestCase
             ->assertOk()
             ->assertJsonPath('orders.0.number', 'OLD-9001')
             ->assertJsonPath('orders.0.customer', 'Anna Nowak');
+    }
+
+    public function test_return_search_and_order_lookup_match_formatted_phone_and_prioritize_newest_order(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'PHONE-RETURNS',
+            'name' => 'Zwroty po telefonie',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-PHONE-RETURN',
+            'name' => 'Produkt klientki',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $newOrder = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '863607',
+            'external_number' => '863607',
+            'status' => 'completed',
+            'currency' => 'PLN',
+            'total_gross' => 392.20,
+            'billing_data' => [
+                'first_name' => 'Małgorzata',
+                'last_name' => 'Sekuła',
+                'email' => 'malgolach@wp.pl',
+                'phone' => '+48 502 252 005',
+            ],
+            'external_created_at' => now(),
+        ]);
+        $newLine = $newOrder->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => '863607-line',
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'quantity' => 1,
+            'unit_gross_price' => 392.20,
+        ]);
+
+        $oldOrder = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '20748',
+            'external_number' => '20748',
+            'status' => 'completed',
+            'currency' => 'PLN',
+            'total_gross' => 491.89,
+            'billing_data' => [
+                'first_name' => 'Małgorzata',
+                'last_name' => 'Sekuła',
+                'email' => 'malgolach@wp.pl',
+                'phone' => '502252005',
+            ],
+            'external_created_at' => now()->subYears(2),
+        ]);
+        $oldOrder->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => '20748-line',
+            'sku' => $product->sku,
+            'name' => 'Starszy produkt klientki',
+            'quantity' => 1,
+            'unit_gross_price' => 491.89,
+        ]);
+
+        $returnCase = ReturnCase::query()->create([
+            'number' => 'RET/PHONE/000001',
+            'store_return_reference' => 'STORE-PHONE-RETURN-1',
+            'external_order_id' => $newOrder->id,
+            'status' => 'pending',
+            'customer_email' => 'malgolach@wp.pl',
+            'metadata' => [
+                'source' => 'store_form',
+            ],
+        ]);
+        $returnCase->lines()->create([
+            'product_id' => $product->id,
+            'external_order_line_id' => $newLine->id,
+            'quantity_expected' => 1,
+            'quantity_accepted' => 1,
+            'condition' => 'unchecked',
+            'disposition' => 'restock',
+        ]);
+
+        foreach (['502252005', '+48 502 252 005', '48502252005'] as $phone) {
+            $this->get(route('returns.index', ['q' => $phone]))
+                ->assertOk()
+                ->assertSee($returnCase->number);
+
+            $this->getJson(route('returns.orders.lookup', ['q' => $phone]))
+                ->assertOk()
+                ->assertJsonPath('orders.0.number', '863607')
+                ->assertJsonPath('orders.0.order_date', $newOrder->external_created_at->format('Y-m-d H:i'))
+                ->assertJsonPath('orders.1.number', '20748');
+        }
     }
 
     public function test_posted_return_can_issue_correction_invoice(): void

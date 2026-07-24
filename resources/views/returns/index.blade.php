@@ -500,6 +500,11 @@
                 orderLookup?.blur();
                 if (orderPreview) {
                     const returnableCount = (order.lines || []).filter((line) => line.returnable).length;
+                    const orderContext = [
+                        order.email || order.phone || 'brak kontaktu',
+                        order.order_date ? `zamówienie z ${order.order_date}` : '',
+                        order.status ? `status: ${order.status}` : '',
+                    ].filter(Boolean).map(escapeHtml).join(' · ');
                     const lines = (order.lines || []).slice(0, 6).map((line) => {
                         const suffix = line.returnable
                             ? `do zwrotu ${quantityLabel(line.remaining_quantity)} z ${quantityLabel(line.quantity)} szt.`
@@ -512,7 +517,7 @@
                     orderPreview.classList.toggle('warning', Boolean(order.has_returns));
                     orderPreview.innerHTML = `
                         <strong>${order.has_returns ? 'Wybrano zamówienie z istniejącym zwrotem' : 'Wybrano zamówienie'} ${escapeHtml(order.number)}</strong>
-                        <span>${escapeHtml(order.customer || 'Klient bez nazwy')} · ${escapeHtml(order.email || order.phone || 'brak kontaktu')} · pozycji do zwrotu: ${returnableCount}</span>
+                        <span>${escapeHtml(order.customer || 'Klient bez nazwy')} · ${orderContext} · pozycji do zwrotu: ${returnableCount}</span>
                         <span class="return-order-lines">${lines || 'Brak pozycji możliwych do zwrotu.'}</span>
                     `;
                 }
@@ -532,6 +537,11 @@
                 }
 
                 orderResults.innerHTML = orders.map((order, index) => {
+                    const orderContext = [
+                        order.email || order.phone || 'brak kontaktu',
+                        order.order_date ? `zamówienie z ${order.order_date}` : '',
+                        order.status ? `status: ${order.status}` : '',
+                    ].filter(Boolean).map(escapeHtml).join(' · ');
                     const lines = (order.lines || []).slice(0, 4).map((line) => {
                         const suffix = line.returnable
                             ? `do zwrotu ${quantityLabel(line.remaining_quantity)} z ${quantityLabel(line.quantity)}`
@@ -544,7 +554,7 @@
                     return `
                         <button class="return-order-result ${order.has_returns ? 'has-returns' : ''}" type="button" data-return-order-pick="${index}">
                             <strong>Zamówienie ${escapeHtml(order.number || order.external_id)}</strong>
-                            <span>${escapeHtml(order.customer || 'Klient bez nazwy')} · ${escapeHtml(order.email || order.phone || '')} ${returnNotice}</span>
+                            <span>${escapeHtml(order.customer || 'Klient bez nazwy')} · ${orderContext} ${returnNotice}</span>
                             <span class="return-order-lines">${lines || 'Brak pozycji możliwych do zwrotu.'}</span>
                         </button>
                     `;

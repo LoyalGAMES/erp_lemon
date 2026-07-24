@@ -24,6 +24,7 @@ final class ReturnSettingsService
      *     numbering_padding:int,
      *     refundable_shipping_cost:float,
      *     refundable_shipping_cost_currency:string,
+     *     return_window_days:int,
      *     default_target_warehouse_id:?int,
      *     default_condition:string,
      *     default_disposition:string,
@@ -54,6 +55,7 @@ final class ReturnSettingsService
             'numbering_padding' => max(3, min(9, (int) $data['numbering_padding'])),
             'refundable_shipping_cost' => $this->cleanMoney($data['refundable_shipping_cost'] ?? 11.90),
             'refundable_shipping_cost_currency' => 'PLN',
+            'return_window_days' => max(1, min(365, (int) ($data['return_window_days'] ?? 14))),
             'default_target_warehouse_id' => filled($data['default_target_warehouse_id'] ?? null)
                 ? (int) $data['default_target_warehouse_id']
                 : null,
@@ -106,6 +108,9 @@ final class ReturnSettingsService
         $refundableShippingCost = array_key_exists('refundable_shipping_cost', $data)
             ? $data['refundable_shipping_cost']
             : ($stored['refundable_shipping_cost'] ?? 11.90);
+        $returnWindowDays = array_key_exists('return_window_days', $data)
+            ? $data['return_window_days']
+            : ($stored['return_window_days'] ?? 14);
 
         $payload = [
             'numbering_pattern' => $this->cleanPattern((string) ($data['numbering_pattern'] ?? '')),
@@ -113,6 +118,7 @@ final class ReturnSettingsService
             'numbering_padding' => max(3, min(9, (int) ($data['numbering_padding'] ?? 6))),
             'refundable_shipping_cost' => $this->cleanMoney($refundableShippingCost),
             'refundable_shipping_cost_currency' => 'PLN',
+            'return_window_days' => max(1, min(365, (int) $returnWindowDays)),
             'default_target_warehouse_id' => filled($data['default_target_warehouse_id'] ?? null)
                 ? (int) $data['default_target_warehouse_id']
                 : null,
@@ -205,6 +211,7 @@ final class ReturnSettingsService
             'numbering_padding' => 6,
             'refundable_shipping_cost' => 11.90,
             'refundable_shipping_cost_currency' => 'PLN',
+            'return_window_days' => 14,
             'default_target_warehouse_id' => null,
             'default_condition' => 'unchecked',
             'default_disposition' => 'restock',

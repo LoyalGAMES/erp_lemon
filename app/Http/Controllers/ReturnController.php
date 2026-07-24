@@ -25,6 +25,7 @@ use App\Services\Orders\OrderMutationLock;
 use App\Services\Payments\MbankTransferBasketService;
 use App\Services\Payments\PayuRefundService;
 use App\Services\Returns\ReturnNumberService;
+use App\Services\Returns\ReturnOrderContextService;
 use App\Services\Returns\ReturnProcessStatusService;
 use App\Services\Returns\ReturnReceivingService;
 use App\Services\Returns\ReturnSettingsService;
@@ -57,6 +58,7 @@ class ReturnController extends Controller
         $returnSettings = $settings->data();
         $tab = $request->query('tab') === 'pending' ? 'pending' : 'all';
         $search = trim((string) $request->query('q', ''));
+        $phoneNeedles = $this->phoneSearchNeedles($search);
 
         $returnsQuery = ReturnCase::query()
             ->with([
@@ -69,22 +71,34 @@ class ReturnController extends Controller
                 'correctionInvoice',
             ])
             ->when($tab === 'pending', fn ($query) => $query->where('status', StoreReturnIntakeService::STATUS_PENDING))
-            ->when($search !== '', function ($query) use ($search): void {
+            ->when($search !== '', function ($query) use ($search, $phoneNeedles): void {
                 $needle = mb_strtolower($search);
-                $query->where(function ($query) use ($needle): void {
+                $query->where(function ($query) use ($needle, $phoneNeedles): void {
                     $query
                         ->whereRaw("LOWER(COALESCE(number, '')) LIKE ?", ["%{$needle}%"])
                         ->orWhereRaw("LOWER(COALESCE(customer_email, '')) LIKE ?", ["%{$needle}%"])
                         ->orWhereRaw("LOWER(COALESCE(reason, '')) LIKE ?", ["%{$needle}%"])
                         ->orWhereRaw("LOWER(COALESCE(CAST(metadata AS CHAR), '')) LIKE ?", ["%{$needle}%"])
-                        ->orWhereHas('externalOrder', function ($orderQuery) use ($needle): void {
-                            $orderQuery
-                                ->whereRaw("LOWER(COALESCE(external_number, '')) LIKE ?", ["%{$needle}%"])
-                                ->orWhereRaw("LOWER(COALESCE(external_id, '')) LIKE ?", ["%{$needle}%"]);
+                        ->orWhereHas('externalOrder', function ($orderQuery) use ($needle, $phoneNeedles): void {
+                            $orderQuery->where(function ($orderMatch) use ($needle, $phoneNeedles): void {
+                                $orderMatch
+                                    ->whereRaw("LOWER(COALESCE(external_number, '')) LIKE ?", ["%{$needle}%"])
+                                    ->orWhereRaw("LOWER(COALESCE(external_id, '')) LIKE ?", ["%{$needle}%"]);
+
+                                foreach ($phoneNeedles as $phoneNeedle) {
+                                    $orderMatch
+                                        ->orWhereRaw($this->normalizedPhoneTextSql('billing_data').' LIKE ?', ["%{$phoneNeedle}%"])
+                                        ->orWhereRaw($this->normalizedPhoneTextSql('shipping_data').' LIKE ?', ["%{$phoneNeedle}%"]);
+                                }
+                            });
                         })
                         ->orWhereHas('lines', function ($lineQuery) use ($needle): void {
                             $lineQuery->whereRaw("LOWER(COALESCE(CAST(metadata AS CHAR), '')) LIKE ?", ["%{$needle}%"]);
                         });
+
+                    foreach ($phoneNeedles as $phoneNeedle) {
+                        $query->orWhereRaw($this->normalizedPhoneTextSql('metadata').' LIKE ?', ["%{$phoneNeedle}%"]);
+                    }
                 });
             });
 
@@ -97,7 +111,8 @@ class ReturnController extends Controller
             'searchTerm' => $search,
             'orders' => ExternalOrder::query()
                 ->with(['lines.product'])
-                ->latest()
+                ->orderByRaw('COALESCE(external_created_at, created_at) DESC')
+                ->orderByDesc('id')
                 ->limit(25)
                 ->get(),
             'products' => Product::query()->where('is_active', true)->orderBy('sku')->get(),
@@ -114,6 +129,7 @@ class ReturnController extends Controller
         ReturnSettingsService $settings,
         MbankTransferBasketService $mbankBasket,
         ReturnProcessStatusService $processStatuses,
+        ReturnOrderContextService $orderContext,
     ): View {
         $returnCase->load([
             'lines.product',
@@ -138,13 +154,20 @@ class ReturnController extends Controller
 
         $mbankPayoutEligible = $mbankBasket->eligibleReturns()->contains('id', $returnCase->id);
         $mbankPayoutAmount = $mbankBasket->amount($returnCase);
+        $returnSettings = $settings->data();
+        $orderSnapshot = $orderContext->build(
+            $returnCase,
+            (int) ($returnSettings['return_window_days'] ?? 14),
+        );
 
         return view('returns.show', [
             'title' => 'Karta zwrotu '.$returnCase->number,
             'subtitle' => 'Pełna obsługa zwrotu: produkty, historia, dokumenty, wypłaty, notatki, komunikacja i etykiety.',
             'module' => 'returns',
             'returnCase' => $returnCase,
-            'returnSettings' => $settings->data(),
+            'returnSettings' => $returnSettings,
+            'orderItems' => $orderSnapshot['items'],
+            'returnDeadline' => $orderSnapshot['deadline'],
             'courierAccounts' => CourierAccount::query()
                 ->where('provider', 'inpost')
                 ->where('is_active', true)
@@ -176,9 +199,10 @@ class ReturnController extends Controller
         }
 
         $needle = mb_strtolower($term);
+        $phoneNeedles = $this->phoneSearchNeedles($term);
         $orders = ExternalOrder::query()
             ->with(['lines.product'])
-            ->where(function ($query) use ($needle): void {
+            ->where(function ($query) use ($needle, $phoneNeedles): void {
                 $query
                     ->whereRaw("LOWER(COALESCE(external_number, '')) LIKE ?", ["%{$needle}%"])
                     ->orWhereRaw("LOWER(COALESCE(external_id, '')) LIKE ?", ["%{$needle}%"])
@@ -191,8 +215,15 @@ class ReturnController extends Controller
                             ->orWhereRaw("LOWER(COALESCE(name, '')) LIKE ?", ["%{$needle}%"])
                             ->orWhereRaw("LOWER(COALESCE(CAST(raw_payload AS CHAR), '')) LIKE ?", ["%{$needle}%"]);
                     });
+
+                foreach ($phoneNeedles as $phoneNeedle) {
+                    $query
+                        ->orWhereRaw($this->normalizedPhoneTextSql('billing_data').' LIKE ?', ["%{$phoneNeedle}%"])
+                        ->orWhereRaw($this->normalizedPhoneTextSql('shipping_data').' LIKE ?', ["%{$phoneNeedle}%"]);
+                }
             })
-            ->latest()
+            ->orderByRaw('COALESCE(external_created_at, created_at) DESC')
+            ->orderByDesc('id')
             ->limit(20)
             ->get();
 
@@ -201,8 +232,9 @@ class ReturnController extends Controller
         if (! $exactOrder instanceof ExternalOrder) {
             $exactOrder = ExternalOrder::query()
                 ->with(['lines.product'])
-                ->where('external_number', $term)
-                ->orWhere('external_id', $term)
+                ->where(fn ($query) => $query
+                    ->where('external_number', $term)
+                    ->orWhere('external_id', $term))
                 ->first();
 
             if ($exactOrder instanceof ExternalOrder && ! $orders->contains('id', $exactOrder->id)) {
@@ -1056,16 +1088,38 @@ class ReturnController extends Controller
         $normalizedTerm = mb_strtolower($term);
         $email = mb_strtolower((string) data_get($order->billing_data, 'email', ''));
         $phone = preg_replace('/\D+/', '', (string) (data_get($order->billing_data, 'phone') ?: data_get($order->shipping_data, 'phone', ''))) ?? '';
-        $normalizedPhoneTerm = preg_replace('/\D+/', '', $term) ?? '';
+        $phoneMatches = $phone !== '' && collect($this->phoneSearchNeedles($term))->contains(
+            fn (string $needle): bool => str_ends_with($phone, $needle) || str_ends_with($needle, $phone),
+        );
 
         return mb_strtolower((string) $order->external_number) === $normalizedTerm
             || mb_strtolower((string) $order->external_id) === $normalizedTerm
             || ($email !== '' && $email === $normalizedTerm)
-            || ($phone !== '' && $phone === $normalizedPhoneTerm);
+            || $phoneMatches;
+    }
+
+    /** @return list<string> */
+    private function phoneSearchNeedles(string $term): array
+    {
+        $digits = preg_replace('/\D+/', '', $term) ?? '';
+
+        if (strlen($digits) < 7) {
+            return [];
+        }
+
+        return array_values(array_unique(array_filter([
+            $digits,
+            strlen($digits) > 9 ? substr($digits, -9) : null,
+        ])));
+    }
+
+    private function normalizedPhoneTextSql(string $column): string
+    {
+        return "REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(CAST({$column} AS CHAR), ''), ' ', ''), '+', ''), '-', ''), '(', ''), ')', ''), '.', '')";
     }
 
     /**
-     * @return array{id:int,number:string,external_id:string,status:string,email:string,phone:string,customer:string,has_returns:bool,return_count:int,lines:list<array{id:int,product_id:int,sku:?string,name:string,quantity:float,returned_quantity:float,remaining_quantity:float,returnable:bool}>}
+     * @return array{id:int,number:string,external_id:string,status:string,order_date:?string,email:string,phone:string,customer:string,has_returns:bool,return_count:int,lines:list<array{id:int,product_id:int,sku:?string,name:string,quantity:float,returned_quantity:float,remaining_quantity:float,returnable:bool}>}
      */
     private function serializeReturnOrder(ExternalOrder $order, ?int $excludeReturnCaseId = null): array
     {
@@ -1081,6 +1135,7 @@ class ReturnController extends Controller
             'number' => (string) $order->external_number,
             'external_id' => (string) $order->external_id,
             'status' => (string) $order->status,
+            'order_date' => ($order->external_created_at ?? $order->created_at)?->format('Y-m-d H:i'),
             'email' => (string) data_get($order->billing_data, 'email', ''),
             'phone' => (string) (data_get($order->billing_data, 'phone') ?: data_get($order->shipping_data, 'phone', '')),
             'customer' => trim(implode(' ', array_filter([

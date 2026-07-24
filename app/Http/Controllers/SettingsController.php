@@ -1105,6 +1105,7 @@ class SettingsController extends Controller
             'numbering_padding' => ['required', 'integer', 'min:3', 'max:9'],
             'refundable_shipping_cost' => ['nullable', 'numeric', 'min:0', 'max:999999.99'],
             'refundable_shipping_cost_currency' => ['nullable', 'string', 'in:PLN'],
+            'return_window_days' => ['sometimes', 'required', 'integer', 'min:1', 'max:365'],
             'default_target_warehouse_id' => ['nullable', 'integer', 'exists:warehouses,id'],
             'default_condition' => ['required', 'string', 'max:40'],
             'default_disposition' => ['required', 'string', 'max:40'],

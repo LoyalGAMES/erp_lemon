@@ -40,6 +40,17 @@
     $dispositionLabels = collect($returnSettings['dispositions'] ?? [])->pluck('label', 'code');
     $order = $returnCase->externalOrder;
     $currency = $order?->currency ?? 'PLN';
+    $deadlineSource = $returnDeadline['source'] ?? 'unknown';
+    $deadlineIsLate = $returnDeadline['is_late'] ?? null;
+    $deadlineDifferenceDays = (int) ($returnDeadline['difference_days'] ?? 0);
+    $deadlineCardClass = $deadlineIsLate === true
+        ? 'is-danger'
+        : ($deadlineIsLate === false ? 'is-complete' : 'is-warning');
+    $deadlineStatusLabel = match (true) {
+        $deadlineIsLate === true => 'Po terminie o '.$deadlineDifferenceDays.' dni',
+        $deadlineIsLate === false => 'Zgłoszono w terminie',
+        default => 'Nie można wyliczyć',
+    };
     $billing = (array) ($order?->billing_data ?? []);
     $shipping = (array) ($order?->shipping_data ?? []);
     $returnDocuments = $returnCase->lines
@@ -147,11 +158,14 @@
         .return-detail-page .panel-header > span { overflow-wrap: anywhere; }
         .return-detail-page .panel-header > span:last-child { text-align: right; }
         .return-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
-        .return-summary { display: grid; grid-template-columns: repeat(5, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+        .return-summary { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
         .return-summary-card { padding: 14px 16px; min-height: 82px; }
         .return-summary-card > span { display: block; color: var(--muted); font-size: 12px; font-weight: 720; margin-bottom: 5px; }
         .return-summary-card strong { display: block; font-size: 19px; line-height: 1.2; overflow-wrap: anywhere; }
         .return-summary-card .return-summary-meta { color: var(--muted); font-size: 12px; margin-top: 5px; }
+        .return-summary-card.is-complete { border-color: #9dd9b9; background: #f3fbf6; }
+        .return-summary-card.is-warning { border-color: #ebc36f; background: #fff9ec; }
+        .return-summary-card.is-danger { border-color: #efb2ad; background: #fff5f4; }
         .return-process { margin-bottom: 16px; }
         .return-process-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
         .return-process-step { position: relative; padding: 17px 18px 18px 54px; border-right: 1px solid var(--border); background: var(--surface); }
@@ -176,6 +190,12 @@
         .return-info-box { border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--surface); }
         .return-info-box strong { display: block; margin-bottom: 5px; }
         .return-info-box .muted { line-height: 1.45; }
+        .return-deadline-box { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(210px, 1.2fr) repeat(3, minmax(150px, 1fr)); gap: 12px; align-items: center; }
+        .return-deadline-box.is-complete { border-color: #9dd9b9; background: #f3fbf6; }
+        .return-deadline-box.is-warning { border-color: #ebc36f; background: #fff9ec; }
+        .return-deadline-box.is-danger { border-color: #efb2ad; background: #fff5f4; }
+        .return-deadline-fact > span { display: block; color: var(--muted); font-size: 11px; margin-bottom: 4px; }
+        .return-deadline-fact > strong { margin: 0; font-size: 14px; }
         .return-service-actions { display: grid; gap: 10px; }
         .return-service-actions > form,
         .return-service-actions > a,
@@ -237,6 +257,7 @@
             .return-process-grid,
             .return-payment-facts,
             .return-info-grid,
+            .return-deadline-box,
             .return-document-grid,
             .return-support-grid,
             .return-timeline-item { grid-template-columns: 1fr; }
@@ -285,6 +306,16 @@
                 <strong>{{ $payoutStatus['label'] }}</strong>
                 <div class="return-summary-meta">
                     {{ (float) $payoutStatus['amount'] > 0 ? $money($payoutStatus['amount'], $payoutStatus['currency']) : 'brak potwierdzonej wypłaty' }}
+                </div>
+            </article>
+            <article class="card return-summary-card {{ $deadlineCardClass }}">
+                <span>Termin na zwrot</span>
+                <strong>{{ $returnDeadline['deadline_at']?->format('Y-m-d') ?? 'Brak danych' }}</strong>
+                <div class="return-summary-meta">
+                    {{ $deadlineStatusLabel }}
+                    @if ($deadlineSource === 'shipped')
+                        · od daty wysłania
+                    @endif
                 </div>
             </article>
         </section>
@@ -345,6 +376,89 @@
                             <div class="muted">{{ data_get($returnCase->metadata, 'refund_bank_account', '-') }}</div>
                             <div class="muted">Metoda płatności: {{ data_get($order?->raw_payload, 'payment_method_title', '-') }}</div>
                         </div>
+                        <div class="return-info-box return-deadline-box {{ $deadlineCardClass }}">
+                            <div>
+                                <strong>Termin na zgłoszenie: {{ (int) ($returnDeadline['window_days'] ?? 14) }} dni</strong>
+                                <div class="muted">
+                                    @if ($deadlineIsLate === true)
+                                        Zgłoszenie wpłynęło po terminie — przekroczenie o {{ $deadlineDifferenceDays }} dni.
+                                    @elseif ($deadlineIsLate === false)
+                                        Zgłoszenie wpłynęło w terminie.
+                                    @else
+                                        Brakuje daty doręczenia i wysłania, dlatego terminu nie można wyliczyć.
+                                    @endif
+                                </div>
+                            </div>
+                            <div class="return-deadline-fact">
+                                <span>Odebranie przesyłki</span>
+                                <strong>{{ $returnDeadline['delivered_at']?->format('Y-m-d H:i') ?? 'Brak potwierdzenia' }}</strong>
+                            </div>
+                            <div class="return-deadline-fact">
+                                <span>{{ $deadlineSource === 'shipped' ? 'Wysłanie — data zastępcza' : 'Wysłanie' }}</span>
+                                <strong>{{ $returnDeadline['shipped_at']?->format('Y-m-d H:i') ?? 'Brak danych' }}</strong>
+                            </div>
+                            <div class="return-deadline-fact">
+                                <span>Termin / data zgłoszenia</span>
+                                <strong>
+                                    {{ $returnDeadline['deadline_at']?->format('Y-m-d') ?? '—' }}
+                                    / {{ $returnDeadline['submitted_at']?->format('Y-m-d') ?? '—' }}
+                                </strong>
+                            </div>
+                        </div>
+                    </div>
+                </article>
+
+                <article class="card">
+                    <div class="panel-header">
+                        <span>Całe zamówienie a ten zwrot</span>
+                        <span>{{ count($orderItems) }} pozycji w zamówieniu</span>
+                    </div>
+                    <div class="table-scroll">
+                        <table class="dense-table">
+                            <thead>
+                                <tr>
+                                    <th>SKU</th>
+                                    <th>Produkt</th>
+                                    <th>W całym zamówieniu</th>
+                                    <th>Zgłoszono do zwrotu</th>
+                                    <th>Przyjęto</th>
+                                    <th>Porównanie</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @forelse ($orderItems as $item)
+                                    @php
+                                        $ordered = (float) $item['ordered_quantity'];
+                                        $returned = (float) $item['returned_quantity'];
+                                        $outsideOrder = (bool) $item['return_only'] || $returned > $ordered + 0.00001;
+                                    @endphp
+                                    <tr>
+                                        <td>
+                                            @if ($item['product'])
+                                                <a class="status" href="{{ route('products.show', $item['product']) }}">{{ $item['sku'] }}</a>
+                                            @else
+                                                {{ $item['sku'] }}
+                                            @endif
+                                        </td>
+                                        <td class="wrap-cell">{{ $item['name'] }}</td>
+                                        <td><strong>{{ $qty($ordered) }}</strong></td>
+                                        <td><strong>{{ $qty($returned) }}</strong></td>
+                                        <td>{{ $qty($item['accepted_quantity']) }}</td>
+                                        <td>
+                                            @if ($outsideOrder)
+                                                <span class="status red">Poza ilością zamówienia</span>
+                                            @elseif ($returned > 0)
+                                                <span class="status blue">Zwracany</span>
+                                            @else
+                                                <span class="status">Nie jest zwracany</span>
+                                            @endif
+                                        </td>
+                                    </tr>
+                                @empty
+                                    <tr><td colspan="6">Brak powiązanego zamówienia lub jego pozycji.</td></tr>
+                                @endforelse
+                            </tbody>
+                        </table>
                     </div>
                 </article>
 
