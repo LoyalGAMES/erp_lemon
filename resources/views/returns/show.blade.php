@@ -244,6 +244,20 @@
         .return-detail-page .table-scroll table { min-width: 760px; }
         .return-detail-page .products-table table { min-width: 940px; }
         .wrap-cell { white-space: normal; min-width: 180px; }
+        .return-product-thumb { width: 58px; height: 72px; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: #f4f1ef; display: grid; place-items: center; color: var(--muted); font-size: 10px; font-weight: 780; }
+        .return-product-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .return-product-thumb-button { padding: 0; appearance: none; font: inherit; cursor: zoom-in; }
+        .return-product-thumb-button:hover { border-color: var(--green); }
+        .return-product-thumb-button:focus-visible { outline: 3px solid rgba(134, 115, 100, .45); outline-offset: 2px; }
+        .return-image-modal[hidden] { display: none; }
+        .return-image-modal { position: fixed; inset: 0; z-index: 140; display: flex; align-items: center; justify-content: center; padding: 24px; background: rgba(37, 31, 26, .72); }
+        .return-image-modal-card { width: min(900px, 94vw); max-height: 92dvh; overflow: hidden; border-radius: 9px; background: var(--surface); box-shadow: 0 24px 70px rgba(0, 0, 0, .32); }
+        .return-image-modal-header { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border-bottom: 1px solid var(--border); font-weight: 780; }
+        .return-image-modal-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .return-image-modal-close { min-width: 42px; min-height: 42px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font: inherit; font-size: 24px; cursor: pointer; }
+        .return-image-modal-close:hover,
+        .return-image-modal-close:focus-visible { background: var(--green-soft); color: var(--green-dark); }
+        .return-image-modal img { display: block; width: 100%; max-height: calc(92dvh - 52px); object-fit: contain; background: #f4f1ef; }
         @media (max-width: 1280px) {
             .return-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
             .return-info-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -265,6 +279,9 @@
             .return-toolbar .button { width: 100%; }
             .return-process-step { border-right: 0; border-bottom: 1px solid var(--border); }
             .return-process-step:last-child { border-bottom: 0; }
+            .return-image-modal { padding: 12px; }
+            .return-image-modal-card { width: 100%; max-height: 96dvh; }
+            .return-image-modal img { max-height: calc(96dvh - 52px); }
         }
     </style>
 @endpush
@@ -417,6 +434,7 @@
                         <table class="dense-table">
                             <thead>
                                 <tr>
+                                    <th>Zdjęcie</th>
                                     <th>SKU</th>
                                     <th>Produkt</th>
                                     <th>W całym zamówieniu</th>
@@ -433,6 +451,13 @@
                                         $outsideOrder = (bool) $item['return_only'] || $returned > $ordered + 0.00001;
                                     @endphp
                                     <tr>
+                                        <td>
+                                            @include('returns._product-thumbnail', [
+                                                'imageUrl' => $item['image_url'],
+                                                'thumbnailUrl' => $item['thumbnail_url'],
+                                                'imageTitle' => $item['sku'].' — '.$item['name'],
+                                            ])
+                                        </td>
                                         <td>
                                             @if ($item['product'])
                                                 <a class="status" href="{{ route('products.show', $item['product']) }}">{{ $item['sku'] }}</a>
@@ -455,7 +480,7 @@
                                         </td>
                                     </tr>
                                 @empty
-                                    <tr><td colspan="6">Brak powiązanego zamówienia lub jego pozycji.</td></tr>
+                                    <tr><td colspan="7">Brak powiązanego zamówienia lub jego pozycji.</td></tr>
                                 @endforelse
                             </tbody>
                         </table>
@@ -471,6 +496,7 @@
                         <table class="dense-table">
                             <thead>
                                 <tr>
+                                    <th>Zdjęcie</th>
                                     <th>SKU</th>
                                     <th>Nazwa</th>
                                     <th>Ilość</th>
@@ -483,7 +509,18 @@
                             </thead>
                             <tbody>
                                 @forelse ($returnCase->lines as $line)
+                                    @php
+                                        $lineImage = $returnLineImages[(int) $line->id]
+                                            ?? ['url' => null, 'thumbnail_url' => null, 'title' => 'Produkt'];
+                                    @endphp
                                     <tr>
+                                        <td>
+                                            @include('returns._product-thumbnail', [
+                                                'imageUrl' => $lineImage['url'],
+                                                'thumbnailUrl' => $lineImage['thumbnail_url'],
+                                                'imageTitle' => $lineImage['title'],
+                                            ])
+                                        </td>
                                         <td>
                                             @if ($line->product)
                                                 <a class="status" href="{{ route('products.show', $line->product) }}">{{ $line->product->sku }}</a>
@@ -506,7 +543,7 @@
                                         <td class="wrap-cell">{{ $line->notes ?: '-' }}</td>
                                     </tr>
                                 @empty
-                                    <tr><td colspan="8">Brak pozycji w zwrocie.</td></tr>
+                                    <tr><td colspan="9">Brak pozycji w zwrocie.</td></tr>
                                 @endforelse
                             </tbody>
                         </table>
@@ -837,11 +874,100 @@
                 </article>
             </aside>
         </section>
+
+        <div class="return-image-modal" data-return-image-modal aria-hidden="true" hidden>
+            <section class="return-image-modal-card" role="dialog" aria-modal="true" aria-labelledby="return-image-modal-title">
+                <div class="return-image-modal-header">
+                    <span class="return-image-modal-title" id="return-image-modal-title" data-return-image-modal-title>Podgląd produktu</span>
+                    <button class="return-image-modal-close" type="button" data-return-image-modal-close aria-label="Zamknij podgląd zdjęcia">&times;</button>
+                </div>
+                <img data-return-image-modal-image alt="" referrerpolicy="no-referrer">
+            </section>
+        </div>
     </div>
 @endsection
 
 @push('scripts')
     <script>
+        (() => {
+            const modal = document.querySelector('[data-return-image-modal]');
+            const image = modal?.querySelector('[data-return-image-modal-image]');
+            const title = modal?.querySelector('[data-return-image-modal-title]');
+            const closeButton = modal?.querySelector('[data-return-image-modal-close]');
+            let activeTrigger = null;
+            let previousBodyOverflow = '';
+
+            if (!modal || !image || !title || !closeButton) {
+                return;
+            }
+
+            const closeModal = () => {
+                if (modal.hidden) {
+                    return;
+                }
+
+                modal.hidden = true;
+                modal.setAttribute('aria-hidden', 'true');
+                image.removeAttribute('src');
+                image.alt = '';
+                document.body.style.overflow = previousBodyOverflow;
+
+                if (activeTrigger?.isConnected) {
+                    activeTrigger.focus();
+                }
+
+                activeTrigger = null;
+            };
+
+            const openModal = (trigger) => {
+                const src = trigger.dataset.returnImagePreview || '';
+                const imageTitle = trigger.dataset.returnImageTitle || 'Podgląd produktu';
+
+                if (!src) {
+                    return;
+                }
+
+                activeTrigger = trigger;
+                previousBodyOverflow = document.body.style.overflow;
+                image.src = src;
+                image.alt = imageTitle;
+                title.textContent = imageTitle;
+                modal.hidden = false;
+                modal.setAttribute('aria-hidden', 'false');
+                document.body.style.overflow = 'hidden';
+                window.requestAnimationFrame(() => closeButton.focus());
+            };
+
+            document.addEventListener('click', (event) => {
+                const trigger = event.target instanceof Element
+                    ? event.target.closest('[data-return-image-preview]')
+                    : null;
+
+                if (trigger) {
+                    openModal(trigger);
+                    return;
+                }
+
+                if (event.target === modal) {
+                    closeModal();
+                }
+            });
+            closeButton.addEventListener('click', closeModal);
+            document.addEventListener('keydown', (event) => {
+                if (modal.hidden) {
+                    return;
+                }
+
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    closeModal();
+                } else if (event.key === 'Tab') {
+                    event.preventDefault();
+                    closeButton.focus();
+                }
+            });
+        })();
+
         (() => {
             const renderTemplate = (value, context) => String(value || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (match, key) => {
                 return Object.prototype.hasOwnProperty.call(context, key) ? String(context[key] ?? '') : match;

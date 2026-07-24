@@ -167,6 +167,7 @@ class ReturnController extends Controller
             'returnCase' => $returnCase,
             'returnSettings' => $returnSettings,
             'orderItems' => $orderSnapshot['items'],
+            'returnLineImages' => $orderSnapshot['return_line_images'],
             'returnDeadline' => $orderSnapshot['deadline'],
             'courierAccounts' => CourierAccount::query()
                 ->where('provider', 'inpost')

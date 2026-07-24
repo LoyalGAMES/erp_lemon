@@ -684,6 +684,9 @@ class ReturnWorkflowTest extends TestCase
             'unit' => 'szt',
             'vat_rate' => 23,
             'quantity_precision' => 0,
+            'attributes' => [
+                'woocommerce_image' => ['src' => 'https://cdn.test/returned-product.jpg'],
+            ],
             'is_active' => true,
         ]);
         $keptProduct = Product::query()->create([
@@ -731,6 +734,9 @@ class ReturnWorkflowTest extends TestCase
             'name' => $keptProduct->name,
             'quantity' => 1,
             'unit_gross_price' => 100,
+            'raw_payload' => [
+                'image' => ['src' => 'https://cdn.test/kept-product.jpg'],
+            ],
         ]);
         ShippingLabel::query()->create([
             'sales_channel_id' => $channel->id,
@@ -769,7 +775,7 @@ class ReturnWorkflowTest extends TestCase
             'disposition' => 'restock',
         ]);
 
-        $this->get(route('returns.show', $returnCase))
+        $response = $this->get(route('returns.show', $returnCase))
             ->assertOk()
             ->assertSee('Całe zamówienie a ten zwrot')
             ->assertSee('Produkt zgłoszony do zwrotu')
@@ -778,7 +784,15 @@ class ReturnWorkflowTest extends TestCase
             ->assertSee('Odebranie przesyłki')
             ->assertSee('2026-07-10 12:30')
             ->assertSee('2026-07-24')
-            ->assertSee('Zgłoszenie wpłynęło w terminie');
+            ->assertSee('Zgłoszenie wpłynęło w terminie')
+            ->assertSee('data-return-image-modal', false)
+            ->assertSee('data-return-image-preview="https://cdn.test/returned-product.jpg"', false)
+            ->assertSee('data-return-image-preview="https://cdn.test/kept-product.jpg"', false);
+
+        $this->assertSame(2, substr_count(
+            (string) $response->getContent(),
+            'data-return-image-preview="https://cdn.test/returned-product.jpg"',
+        ));
 
         $fallbackReturn = ReturnCase::query()->create([
             'number' => 'RET/CONTEXT/000002',

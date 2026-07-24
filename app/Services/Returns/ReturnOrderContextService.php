@@ -6,8 +6,10 @@ namespace App\Services\Returns;
 
 use App\Models\ExternalOrder;
 use App\Models\ExternalOrderLine;
+use App\Models\Product;
 use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
+use App\Services\Products\ProductImageThumbnailService;
 use Carbon\CarbonImmutable;
 use DateTimeInterface;
 use Illuminate\Support\Collection;
@@ -15,9 +17,14 @@ use Throwable;
 
 final class ReturnOrderContextService
 {
+    public function __construct(
+        private readonly ProductImageThumbnailService $thumbnails,
+    ) {}
+
     /**
      * @return array{
      *     items:list<array<string, mixed>>,
+     *     return_line_images:array<int, array{url:?string,thumbnail_url:?string,title:string}>,
      *     deadline:array<string, mixed>
      * }
      */
@@ -28,6 +35,7 @@ final class ReturnOrderContextService
         if (! $order instanceof ExternalOrder) {
             return [
                 'items' => [],
+                'return_line_images' => $this->returnLineImages($returnCase),
                 'deadline' => $this->deadlineSummary($returnCase, collect(), $windowDays),
             ];
         }
@@ -49,6 +57,7 @@ final class ReturnOrderContextService
 
         return [
             'items' => $this->comparisonItems($returnCase, $orders),
+            'return_line_images' => $this->returnLineImages($returnCase),
             'deadline' => $this->deadlineSummary($returnCase, $orders, $windowDays),
         ];
     }
@@ -67,6 +76,7 @@ final class ReturnOrderContextService
         foreach ($orders as $order) {
             foreach ($order->lines as $line) {
                 $key = $this->orderLineKey($line);
+                $image = $this->imageData($line, $line->product);
 
                 if (! isset($rows[$key])) {
                     $rows[$key] = [
@@ -81,11 +91,18 @@ final class ReturnOrderContextService
                         'unit_gross_price' => $line->unit_gross_price !== null
                             ? (float) $line->unit_gross_price
                             : null,
+                        'image_url' => $image['url'],
+                        'thumbnail_url' => $image['thumbnail_url'],
                         'return_only' => false,
                     ];
                 }
 
                 $rows[$key]['ordered_quantity'] += (float) $line->quantity;
+
+                if ($rows[$key]['image_url'] === null && $image['url'] !== null) {
+                    $rows[$key]['image_url'] = $image['url'];
+                    $rows[$key]['thumbnail_url'] = $image['thumbnail_url'];
+                }
 
                 if ($line->product_id !== null) {
                     $keysByProduct[(int) $line->product_id][] = $key;
@@ -106,6 +123,7 @@ final class ReturnOrderContextService
             }
 
             if (! isset($rows[$key])) {
+                $image = $this->imageData($returnLine->externalOrderLine, $returnLine->product);
                 $rows[$key] = [
                     'key' => $key,
                     'product' => $returnLine->product,
@@ -118,6 +136,8 @@ final class ReturnOrderContextService
                     'unit_gross_price' => $returnLine->externalOrderLine?->unit_gross_price !== null
                         ? (float) $returnLine->externalOrderLine->unit_gross_price
                         : null,
+                    'image_url' => $image['url'],
+                    'thumbnail_url' => $image['thumbnail_url'],
                     'return_only' => true,
                 ];
             }
@@ -127,6 +147,26 @@ final class ReturnOrderContextService
         }
 
         return array_values($rows);
+    }
+
+    /**
+     * @return array<int, array{url:?string,thumbnail_url:?string,title:string}>
+     */
+    private function returnLineImages(ReturnCase $returnCase): array
+    {
+        $images = [];
+
+        foreach ($returnCase->lines as $line) {
+            $image = $this->imageData($line->externalOrderLine, $line->product);
+            $sku = $line->product?->sku ?: ($line->externalOrderLine?->sku ?: 'Produkt');
+            $name = $line->product?->name ?: ($line->externalOrderLine?->name ?: 'pozycja zwrotu');
+
+            $images[(int) $line->id] = $image + [
+                'title' => trim($sku.' — '.$name),
+            ];
+        }
+
+        return $images;
     }
 
     /**
@@ -243,6 +283,60 @@ final class ReturnOrderContextService
         return $line->product_id !== null
             ? 'return-product-'.$line->product_id
             : 'return-line-'.$line->id;
+    }
+
+    /** @return array{url:?string,thumbnail_url:?string} */
+    private function imageData(?ExternalOrderLine $line, ?Product $product): array
+    {
+        $raw = is_array($line?->raw_payload) ? $line->raw_payload : [];
+        $source = null;
+
+        foreach ([
+            $product?->imageUrl(),
+            data_get($raw, 'image.src'),
+            data_get($raw, 'image.url'),
+            data_get($raw, 'images.0.src'),
+            data_get($raw, 'images.0.url'),
+            data_get($raw, 'parent_image.src'),
+            data_get($raw, 'parent_image.url'),
+        ] as $candidate) {
+            $source = $this->safeImageUrl($candidate);
+
+            if ($source !== null) {
+                break;
+            }
+        }
+
+        return [
+            'url' => $source,
+            'thumbnail_url' => $this->thumbnails->thumbnailUrl($source, 58, 72),
+        ];
+    }
+
+    private function safeImageUrl(mixed $candidate): ?string
+    {
+        if (! is_scalar($candidate)) {
+            return null;
+        }
+
+        $url = trim((string) $candidate);
+
+        if ($url === '' || preg_match('/[\x00-\x1F\x7F]/', $url) === 1) {
+            return null;
+        }
+
+        if (str_starts_with($url, '/')
+            && ! str_starts_with($url, '//')
+            && ! str_contains($url, '\\')) {
+            return $url;
+        }
+
+        $scheme = mb_strtolower((string) parse_url($url, PHP_URL_SCHEME));
+
+        return filter_var($url, FILTER_VALIDATE_URL) !== false
+            && in_array($scheme, ['http', 'https'], true)
+                ? $url
+                : null;
     }
 
     /**
