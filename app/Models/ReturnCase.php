@@ -90,4 +90,28 @@ class ReturnCase extends Model
     {
         return $this->hasMany(CustomerPayment::class)->latest('booked_at')->latest();
     }
+
+    public function statusLabel(): string
+    {
+        return match ($this->status) {
+            'pending' => 'Oczekujący',
+            'opened' => 'Otwarty',
+            'document_created' => 'Przyjęcie przygotowane',
+            'completed' => 'Zrealizowany',
+            'corrected' => 'Korekta wystawiona',
+            'rejected' => 'Odrzucony',
+            'cancelled' => 'Anulowany',
+            default => (string) $this->status,
+        };
+    }
+
+    public function statusTone(): string
+    {
+        return match ($this->status) {
+            'pending' => 'orange',
+            'opened', 'document_created' => 'blue',
+            'rejected', 'cancelled' => 'red',
+            default => '',
+        };
+    }
 }

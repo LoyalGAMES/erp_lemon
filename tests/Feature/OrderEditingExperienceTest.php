@@ -10,6 +10,7 @@ use App\Models\ExternalOrder;
 use App\Models\IntegrationSyncLog;
 use App\Models\Product;
 use App\Models\ProductChannelMapping;
+use App\Models\ReturnCase;
 use App\Models\SalesChannel;
 use App\Models\WordpressIntegration;
 use App\Services\Communication\MailSettingsService;
@@ -48,7 +49,11 @@ class OrderEditingExperienceTest extends TestCase
             ],
         ]);
         $order = $this->createOrder($channel, $product, 'pending');
-
+        $order->update([
+            'raw_payload' => array_merge($order->raw_payload, [
+                'customer_note' => 'Proszę zapakować bez plastiku.',
+            ]),
+        ]);
         $this->get(route('orders.show', $order))
             ->assertOk()
             ->assertSee('data-order-lines-form', false)
@@ -60,7 +65,9 @@ class OrderEditingExperienceTest extends TestCase
             ->assertSee(route('orders.status.update', $order), false)
             ->assertSee('Ponów prośbę o wpłatę')
             ->assertSee(route('orders.payment-reminder.send', $order), false)
-            ->assertSee('https://shop.test/pay/9001', false);
+            ->assertSee('https://shop.test/pay/9001', false)
+            ->assertSee('Notatka klienta do zamówienia')
+            ->assertSee('Proszę zapakować bez plastiku.');
 
         $this->getJson(route('orders.products.lookup', ['order' => $order, 'q' => 'LENA']))
             ->assertOk()
@@ -69,6 +76,19 @@ class OrderEditingExperienceTest extends TestCase
                 'sku' => 'SKU-DRESS',
                 'name' => 'Sukienka LENA',
             ]);
+
+        $returnCase = ReturnCase::query()->create([
+            'number' => 'RET/2026/000123',
+            'external_order_id' => $order->id,
+            'status' => 'document_created',
+        ]);
+
+        $this->get(route('orders.show', $order))
+            ->assertOk()
+            ->assertSee('RET/2026/000123')
+            ->assertSee('Przyjęcie przygotowane')
+            ->assertSee('Przejdź do zwrotu')
+            ->assertSee(route('returns.show', $returnCase), false);
     }
 
     public function test_operator_can_change_order_status_in_woocommerce_and_erp(): void

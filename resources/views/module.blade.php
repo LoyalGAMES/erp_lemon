@@ -204,6 +204,23 @@
             color: var(--muted);
             font-size: 12px;
         }
+        .order-customer-note {
+            margin-top: 8px !important;
+            padding: 7px 8px;
+            border: 1px solid #e5c48c;
+            border-radius: 7px;
+            background: #fff8e8;
+            color: var(--text) !important;
+            font-size: 12px;
+            line-height: 1.35;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
+        .order-customer-note strong {
+            display: block;
+            margin-bottom: 2px;
+            font-size: 11px;
+        }
         .order-items-cell {
             min-width: 330px;
             max-width: 430px;

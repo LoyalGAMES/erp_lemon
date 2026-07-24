@@ -143,12 +143,17 @@
         .order-item-meta { color: var(--muted); font-size: 13px; margin-top: 2px; }
         .order-details, .order-notes { color: var(--muted); }
         .order-details summary, .order-notes summary { cursor: pointer; color: var(--green-dark); font-weight: 760; }
+        .packing-customer-note { padding: 11px 13px; border: 1px solid #e5c48c; border-radius: 8px; background: #fff8e8; color: var(--text); }
+        .packing-customer-note strong { display: block; margin-bottom: 4px; }
+        .packing-customer-note div { white-space: pre-wrap; overflow-wrap: anywhere; }
         .order-details-grid { display: grid; gap: 5px; margin-top: 8px; }
         .order-details-grid strong { color: var(--text); }
         .order-details-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
         .order-details-actions .button { min-height: 40px; }
         .order-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; align-items: start; }
         .order-actions .button { min-height: 48px; width: 100%; font-size: 15px; border-radius: 8px; }
+        .shipment-primary-actions { display: grid; gap: 8px; align-content: start; }
+        .packing-skip-label-form { display: grid; margin: 0; }
         .packing-choice-form, .order-problem-form { display: grid; gap: 8px; align-content: start; border: 1px solid var(--border); border-radius: 9px; padding: 11px; background: #fffdfb; }
         .packing-action-title { color: var(--text); font-size: 14px; font-weight: 820; }
         .packing-action-help { min-height: 34px; margin: 0; color: var(--muted); font-size: 12px; line-height: 1.35; }
@@ -632,12 +637,11 @@
                         $shippingTrackingUrl = $shippingLabel
                             ? $shippingProviderResolver->trackingUrl($shippingLabel)
                             : null;
-                        $customerNote = trim((string) data_get($firstTask?->metadata, 'customer_note', ''));
-                        $orderNotes = collect(data_get($firstTask?->metadata, 'order_notes', []))
+                        $customerNote = $order->customerNote();
+                        $orderNotes = collect(data_get($order->raw_payload, 'erp_imported_order_notes', []))
                             ->pluck('note')
                             ->filter()
                             ->implode(' | ');
-                        $notes = trim(implode(' | ', array_filter([$customerNote, $orderNotes])));
                         $shipping = (array) data_get($firstTask?->metadata, 'shipping', []);
                         $billing = (array) data_get($firstTask?->metadata, 'billing', []);
                         $phone = data_get($shipping, 'phone') ?: data_get($billing, 'phone') ?: '-';
@@ -670,6 +674,13 @@
                             </div>
                         </div>
 
+                        @if ($customerNote)
+                            <div class="packing-customer-note" role="note">
+                                <strong>Notatka klienta do zamówienia</strong>
+                                <div>{{ $customerNote }}</div>
+                            </div>
+                        @endif
+
                         <div class="order-items">
                             @foreach ($tasksForOrder as $task)
                                 @php
@@ -694,10 +705,10 @@
                             @endforeach
                         </div>
 
-                        @if ($notes !== '')
+                        @if ($orderNotes !== '')
                             <details class="order-notes">
                                 <summary>Uwagi z WooCommerce</summary>
-                                <div>{{ $notes }}</div>
+                                <div>{{ $orderNotes }}</div>
                             </details>
                         @endif
 
@@ -735,30 +746,36 @@
                                     </div>
                                 </div>
                             @else
-                                @if ($detectedShippingProvider !== 'gls')
-                                <form class="label-account-form" method="POST" action="{{ route('packing.orders.complete-with-label', $order) }}" data-packing-ajax>
-                                    @csrf
-                                    @if ($courierAccounts->isNotEmpty())
-                                        <select name="courier_account_id" aria-label="Konto nadawcze InPost">
-                                            <option value="">Etykieta ze sklepu</option>
-                                            @foreach ($courierAccounts as $courierAccount)
-                                                <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default)>InPost: {{ $courierAccount->name }}</option>
-                                            @endforeach
-                                        </select>
+                                <div class="shipment-primary-actions">
+                                    @if ($detectedShippingProvider !== 'gls')
+                                    <form class="label-account-form" method="POST" action="{{ route('packing.orders.complete-with-label', $order) }}" data-packing-ajax>
+                                        @csrf
+                                        @if ($courierAccounts->isNotEmpty())
+                                            <select name="courier_account_id" aria-label="Konto nadawcze InPost">
+                                                <option value="">Etykieta ze sklepu</option>
+                                                @foreach ($courierAccounts as $courierAccount)
+                                                    <option value="{{ $courierAccount->id }}" @selected($courierAccount->is_default)>InPost: {{ $courierAccount->name }}</option>
+                                                @endforeach
+                                            </select>
+                                        @endif
+                                        <div class="label-size-actions" role="group" aria-label="Wybierz gabaryt paczki">
+                                            <button class="button secondary" type="submit" name="parcel_template" value="small" aria-label="Generuj etykietę, wydrukuj i spakuj, gabaryt A">
+                                                A<small>mała</small>
+                                            </button>
+                                            <button class="button secondary" type="submit" name="parcel_template" value="medium" aria-label="Generuj etykietę, wydrukuj i spakuj, gabaryt B">
+                                                B<small>średnia</small>
+                                            </button>
+                                            <button class="button secondary" type="submit" name="parcel_template" value="large" aria-label="Generuj etykietę, wydrukuj i spakuj, gabaryt C">
+                                                C<small>duża</small>
+                                            </button>
+                                        </div>
+                                    </form>
                                     @endif
-                                    <div class="label-size-actions" role="group" aria-label="Wybierz gabaryt paczki">
-                                        <button class="button secondary" type="submit" name="parcel_template" value="small" aria-label="Generuj etykietę, wydrukuj i spakuj, gabaryt A">
-                                            A<small>mała</small>
-                                        </button>
-                                        <button class="button secondary" type="submit" name="parcel_template" value="medium" aria-label="Generuj etykietę, wydrukuj i spakuj, gabaryt B">
-                                            B<small>średnia</small>
-                                        </button>
-                                        <button class="button secondary" type="submit" name="parcel_template" value="large" aria-label="Generuj etykietę, wydrukuj i spakuj, gabaryt C">
-                                            C<small>duża</small>
-                                        </button>
-                                    </div>
-                                </form>
-                                @endif
+                                    <form class="packing-skip-label-form" method="POST" action="{{ route('packing.orders.pack', $order) }}" data-packing-ajax onsubmit="return confirm('Spakować zamówienie bez listu przewozowego?');">
+                                        @csrf
+                                        <button class="button secondary" type="submit">Pomiń list i spakuj</button>
+                                    </form>
+                                </div>
                                 <form class="packing-choice-form" method="POST" action="{{ route('packing.orders.pack-manual-shipment', $order) }}" data-packing-ajax>
                                     @csrf
                                     <div class="packing-action-title">Mam już numer przesyłki</div>
@@ -776,12 +793,6 @@
                                         <input name="tracking_number" maxlength="40" required placeholder="Numer przesyłki">
                                         <button class="button secondary" type="submit">Zapisz i spakuj</button>
                                     </div>
-                                </form>
-                                <form class="packing-choice-form" method="POST" action="{{ route('packing.orders.pack', $order) }}" data-packing-ajax onsubmit="return confirm('Spakować zamówienie bez listu przewozowego?');">
-                                    @csrf
-                                    <div class="packing-action-title">Bez listu przewozowego</div>
-                                    <p class="packing-action-help">Przejdź dalej bez numeru i bez śledzenia przesyłki.</p>
-                                    <button class="button secondary" type="submit">Pomiń list i spakuj</button>
                                 </form>
                             @endif
                             <form class="order-problem-form" method="POST" action="{{ route('packing.orders.problem', $order) }}" data-packing-ajax data-packing-problem>

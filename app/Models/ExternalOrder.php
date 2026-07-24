@@ -139,6 +139,29 @@ class ExternalOrder extends Model
         return $this->hasMany(CustomerPayment::class)->latest('booked_at')->latest();
     }
 
+    public function returnCases(): HasMany
+    {
+        return $this->hasMany(ReturnCase::class)->latest('created_at')->latest('id');
+    }
+
+    public function customerNote(): ?string
+    {
+        $rawPayload = is_array($this->raw_payload) ? $this->raw_payload : [];
+        $rawNote = data_get($rawPayload, 'customer_note');
+
+        if (! is_scalar($rawNote)) {
+            return null;
+        }
+
+        $note = trim(html_entity_decode(
+            strip_tags(str_ireplace(['<br>', '<br/>', '<br />'], "\n", (string) $rawNote)),
+            ENT_QUOTES | ENT_HTML5,
+            'UTF-8',
+        ));
+
+        return $note !== '' ? $note : null;
+    }
+
     public function cancellation(): HasOne
     {
         return $this->hasOne(OrderCancellation::class);

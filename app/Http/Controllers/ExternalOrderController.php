@@ -73,6 +73,7 @@ class ExternalOrderController extends Controller
             'customerMessages',
             'internalNotes',
             'customerPayments',
+            'returnCases',
         ]);
 
         $reservations = StockReservation::query()
@@ -190,6 +191,7 @@ class ExternalOrderController extends Controller
             'packedOrderPickingReset' => $packedOrderPickingReset,
             'pickingResetOperationId' => (string) Str::uuid(),
             'splitFamily' => $splitReversal['family'],
+            'canViewReturns' => Auth::user()?->canAccessArea('returns') ?? false,
         ]);
     }
 

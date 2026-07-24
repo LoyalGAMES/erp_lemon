@@ -68,6 +68,17 @@
         .order-summary-card { padding: 14px 16px; }
         .order-summary-card span { display: block; color: var(--muted); font-size: 12px; font-weight: 720; margin-bottom: 4px; }
         .order-summary-card strong { display: block; font-size: 20px; line-height: 1.15; }
+        .order-context { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin-bottom: 16px; }
+        .order-context-card { padding: 15px 16px; display: grid; gap: 10px; align-content: start; }
+        .order-context-card h2 { margin: 0; font-size: 17px; }
+        .order-customer-note { border-color: #e5c48c; background: #fff8e8; }
+        .order-customer-note-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .order-return-list { display: grid; gap: 8px; }
+        .order-return-row { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+        .order-return-row:first-child { padding-top: 0; border-top: 0; }
+        .order-return-identity { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; min-width: 0; }
+        .order-return-identity strong { overflow-wrap: anywhere; }
+        .order-return-row .button { flex: 0 0 auto; }
         .order-grid { display: grid; grid-template-columns: minmax(320px, .9fr) minmax(0, 1.4fr); gap: 16px; margin-bottom: 16px; }
         .order-section { margin-bottom: 16px; }
         .order-section-body { padding: 16px; }
@@ -149,6 +160,7 @@
         @media (max-width: 1000px) {
             .order-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .order-grid { grid-template-columns: 1fr; }
+            .order-context { grid-template-columns: 1fr; }
             .order-command-grid { grid-template-columns: 1fr; }
             .address-grid { grid-template-columns: 1fr; }
             .settlement-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -212,6 +224,38 @@
         <article class="card order-summary-card">
             <span>Oczekuje na towar</span>
             <strong>{{ $qty($waitingReservations) }}</strong>
+        </article>
+    </section>
+
+    <section class="order-context" aria-label="Notatka klienta i zwroty">
+        <article class="card order-context-card order-customer-note">
+            <h2>Notatka klienta do zamówienia</h2>
+            @if ($order->customerNote())
+                <p class="order-customer-note-text">{{ $order->customerNote() }}</p>
+            @else
+                <p class="muted" style="margin: 0;">Klient nie dodał notatki podczas składania zamówienia.</p>
+            @endif
+        </article>
+
+        <article class="card order-context-card">
+            <h2>Zwroty{{ $order->returnCases->isNotEmpty() ? ' ('.$order->returnCases->count().')' : '' }}</h2>
+            @if ($order->returnCases->isEmpty())
+                <p class="muted" style="margin: 0;">Brak zwrotu powiązanego z tym zamówieniem.</p>
+            @else
+                <div class="order-return-list">
+                    @foreach ($order->returnCases as $returnCase)
+                        <div class="order-return-row">
+                            <div class="order-return-identity">
+                                <strong>{{ $returnCase->number }}</strong>
+                                <span @class(['status', $returnCase->statusTone()])>{{ $returnCase->statusLabel() }}</span>
+                            </div>
+                            @if ($canViewReturns)
+                                <a class="button secondary" href="{{ route('returns.show', $returnCase) }}">Przejdź do zwrotu</a>
+                            @endif
+                        </div>
+                    @endforeach
+                </div>
+            @endif
         </article>
     </section>
 

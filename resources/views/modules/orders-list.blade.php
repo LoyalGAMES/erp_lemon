@@ -174,6 +174,7 @@
                             ->first();
                         $visibleLines = $order->lines->take(4);
                         $hiddenLinesCount = max(0, $order->lines->count() - $visibleLines->count());
+                        $customerNote = $order->customerNote();
                     @endphp
                     <tr>
                         <td class="order-main-cell" data-label="Zamówienie">
@@ -187,6 +188,9 @@
                             <strong>{{ $customer }}</strong>
                             <span>{{ $email !== '' ? $email : 'brak e-maila' }}</span>
                             <span>{{ $phone !== '' ? $phone : 'brak telefonu' }}</span>
+                            @if ($customerNote)
+                                <div class="order-customer-note"><strong>Notatka klienta</strong>{{ $customerNote }}</div>
+                            @endif
                         </td>
                         <td class="order-items-cell" data-label="Przedmioty">
                             <div class="order-items-stack">

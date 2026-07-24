@@ -95,6 +95,7 @@ class OrderListPerformanceTest extends TestCase
                 'phone' => '+48 600 700 800',
             ],
             'raw_payload' => [
+                'customer_note' => 'Proszę dołączyć papierową kartkę z życzeniami.',
                 'shipping_lines' => [
                     ['method_title' => 'InPost Kurier Standard'],
                 ],
@@ -160,6 +161,9 @@ class OrderListPerformanceTest extends TestCase
             ->assertSee('InPost: Magazyn Warszawa')
             ->assertSee('TRK-9710')
             ->assertSee('on-hold')
+            ->assertSee('Notatka klienta')
+            ->assertSee('Proszę dołączyć papierową kartkę z życzeniami.')
+            ->assertSee('order-customer-note', false)
             ->assertSee('359,99 PLN');
 
         foreach (['Anna', 'Nowak', '600700800', 'anna.nowak@example.test', 'on-hold', '9710'] as $term) {
