@@ -56,6 +56,8 @@
         .pick-card, .order-card, .courier-card, .history-card { border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: var(--shadow); }
         .collect-card { padding: 14px; display: grid; gap: 11px; }
         .collect-order-card { padding: 16px; }
+        .collect-order-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+        .collect-order-heading .order-title { min-width: 0; }
         .collect-order-customer { color: var(--muted); font-size: 13px; margin-top: 4px; }
         .collect-main { display: grid; grid-template-columns: 78px minmax(0, 1fr) auto; gap: 14px; align-items: center; }
         .product-thumb { width: 58px; height: 72px; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: #f4f1ef; display: grid; place-items: center; color: var(--muted); font-size: 11px; font-weight: 780; }
@@ -79,10 +81,11 @@
         .pick-badges, .order-badges, .history-badges { display: flex; flex-wrap: wrap; gap: 6px; }
         .pick-badge { display: inline-flex; align-items: center; min-height: 26px; border-radius: 7px; padding: 2px 8px; background: rgba(134, 115, 100, .08); color: var(--muted); font-size: 12px; font-weight: 720; }
         .collect-note input { min-height: 48px; }
-        .collect-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+        .collect-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
         .collect-actions form { min-width: 0; display: grid; gap: 8px; }
         .collect-actions input { min-height: 42px; }
         .collect-actions .button { width: 100%; min-height: 64px; font-size: 19px; border-radius: 8px; }
+        .packing-split-trigger.button { width: auto; min-height: 30px; border-radius: 6px; padding: 4px 8px; font-size: 12px; line-height: 1.2; white-space: nowrap; }
         .packing-split-modal { width: min(720px, calc(100vw - 28px)); max-height: min(88dvh, 820px); margin: auto; border: 0; border-radius: 10px; padding: 0; background: var(--surface); color: var(--text); box-shadow: 0 26px 80px rgba(33, 28, 24, .32); }
         .packing-split-modal::backdrop { background: rgba(37, 31, 26, .62); backdrop-filter: blur(2px); }
         .packing-split-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 17px 18px; border-bottom: 1px solid var(--border); }
@@ -458,7 +461,24 @@
                     <article class="order-card collect-order-card" data-packing-card>
                         <div class="order-card-header">
                             <div>
-                                <div class="order-title">Zamówienie {{ $collectOrder['order_number'] }}</div>
+                                <div class="collect-order-heading">
+                                    <div class="order-title">
+                                        Zamówienie
+                                        @if ($canViewOrders)
+                                            <a href="{{ route('orders.show', $collectOrder['order_id']) }}">{{ $collectOrder['order_number'] }}</a>
+                                        @elseif ($canEditOrders)
+                                            <a href="{{ route('orders.edit', ['order' => $collectOrder['order_id'], 'return_to' => 'packing']) }}">{{ $collectOrder['order_number'] }}</a>
+                                        @else
+                                            {{ $collectOrder['order_number'] }}
+                                        @endif
+                                    </div>
+                                    <button
+                                        class="button secondary packing-split-trigger"
+                                        type="button"
+                                        data-packing-split-open="{{ $splitModalId }}"
+                                        data-packing-split-availability-url="{{ route('packing.orders.split.availability', $collectOrder['order_id']) }}"
+                                    >Podziel zamówienie</button>
+                                </div>
                                 <div class="collect-order-customer">Odbiorca: {{ $collectOrder['customer_name'] }}</div>
                                 <div class="order-meta">
                                     {{ $collectOrder['courier'] }} · {{ $collectOrder['positions_count'] }} poz. · złożone {{ $collectOrder['order_date']?->format('Y-m-d H:i') ?? '-' }}
@@ -513,12 +533,6 @@
                                 @endforeach
                                 <button class="button" type="submit">Zebrane</button>
                             </form>
-                            <button
-                                class="button secondary"
-                                type="button"
-                                data-packing-split-open="{{ $splitModalId }}"
-                                data-packing-split-availability-url="{{ route('packing.orders.split.availability', $collectOrder['order_id']) }}"
-                            >Podziel zamówienie</button>
                         </div>
                     </article>
                     <dialog class="packing-split-modal" id="{{ $splitModalId }}" aria-labelledby="{{ $splitModalId }}-title">
@@ -550,7 +564,7 @@
                                                     type="number"
                                                     min="0"
                                                     max="{{ $splitLine['quantity'] }}"
-                                                    step="0.0001"
+                                                    step="1"
                                                     value="0"
                                                 >
                                             </label>

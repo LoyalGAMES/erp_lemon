@@ -25,10 +25,11 @@ class PackingLogisticsUpgradeTest extends TestCase
 
     public function test_mixed_order_is_kept_together_in_clothing_segment(): void
     {
-        $this->createMixedOrder();
+        [$order] = $this->createMixedOrder();
 
         $collect = $this->get(route('packing.index', ['view' => 'collect', 'segment' => 'all']));
         $collect->assertOk()
+            ->assertSee(route('orders.show', $order), false)
             ->assertSee('Sukienka LENA')
             ->assertSee('Sneakersy VIKI')
             ->assertSee('Obuwie')
@@ -61,15 +62,26 @@ class PackingLogisticsUpgradeTest extends TestCase
         $this->get(route('packing.index', ['view' => 'collect', 'segment' => 'all']))
             ->assertOk()
             ->assertSee('Podziel zamówienie')
+            ->assertSee(route('orders.edit', ['order' => $order, 'return_to' => 'packing']), false)
             ->assertSee('Wskaż produkty i ilości, które mają trafić do nowego zamówienia.')
             ->assertSee('Utwórz nowe zamówienie')
             ->assertSee(route('packing.orders.split', $order), false)
-            ->assertSee('name="split_lines['.$shoeLine->id.'][quantity]"', false);
+            ->assertSee('name="split_lines['.$shoeLine->id.'][quantity]"', false)
+            ->assertSee('step="1"', false)
+            ->assertDontSee('step="0.0001"', false);
 
         $this->getJson(route('packing.orders.split.availability', $order))
             ->assertOk()
             ->assertJsonPath('available', true)
             ->assertJsonPath('reasons', []);
+
+        $this->post(route('packing.orders.split', $order), [
+            'split_request_uuid' => (string) Str::uuid(),
+            'segment' => 'all',
+            'split_lines' => [
+                $shoeLine->id => ['quantity' => 0.5],
+            ],
+        ])->assertSessionHasErrors("split_lines.{$shoeLine->id}.quantity");
 
         $this->post(route('packing.orders.split', $order), [
             'split_request_uuid' => (string) Str::uuid(),

@@ -242,7 +242,7 @@ class PackingController extends Controller
     ): RedirectResponse {
         $validated = $request->validate([
             'split_lines' => ['required', 'array'],
-            'split_lines.*.quantity' => ['nullable', 'numeric', 'min:0'],
+            'split_lines.*.quantity' => ['nullable', 'integer', 'min:0'],
             'note' => ['nullable', 'string', 'max:1000'],
             'split_request_uuid' => ['required', 'uuid'],
             'segment' => ['nullable', 'string', 'in:all,clothing,footwear'],

@@ -613,13 +613,17 @@ class PackingWorkflowTest extends TestCase
 
         $response
             ->assertOk()
-            ->assertSee('Zamówienie 613')
+            ->assertSee('Zamówienie')
+            ->assertSee('<a href="'.route('orders.show', $order).'">613</a>', false)
             ->assertSee('Odbiorca: Anna Kowalska')
             ->assertSee('Sukienka LENA')
             ->assertSee('Buty VIKI')
             ->assertSee('3 szt.');
 
-        $this->assertSame(1, substr_count($response->getContent(), 'Zamówienie 613'));
+        $this->assertSame(1, substr_count(
+            $response->getContent(),
+            '<a href="'.route('orders.show', $order).'">613</a>',
+        ));
     }
 
     public function test_packed_order_with_manually_selected_label_generates_wz_invoice_status_and_courier_queue(): void
