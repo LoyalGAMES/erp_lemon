@@ -40,6 +40,7 @@ final class OrderSplitService
         private readonly CustomerCommunicationService $communication,
         private readonly OrderMutationLock $orderLock,
         private readonly OrderFulfillmentStatusService $fulfillmentStatus,
+        private readonly OrderWzDocumentService $wzDocuments,
         private readonly AuditLogService $audit,
     ) {}
 
@@ -165,6 +166,11 @@ final class OrderSplitService
             if ($reasons !== []) {
                 throw new RuntimeException(implode(' ', $reasons));
             }
+
+            $sourceHasDraftWz = $this->fulfillmentStatus
+                ->wzDocumentsForOrder($order)
+                ->where('status', 'draft')
+                ->exists();
 
             $lockedFamilyLines = ExternalOrderLine::query()
                 ->whereIn('external_order_id', $family->pluck('id'))
@@ -353,6 +359,19 @@ final class OrderSplitService
             $this->packingTasks->syncForOrder($order);
             $this->packingTasks->syncForOrder($splitOrder);
 
+            if ($sourceHasDraftWz) {
+                $this->wzDocuments->ensureDrafts(
+                    $order,
+                    'order_split',
+                    'WZ przeliczone po podziale zamówienia '.$order->external_number,
+                );
+                $this->wzDocuments->ensureDrafts(
+                    $splitOrder,
+                    'order_split',
+                    'WZ utworzone dla wydzielonego zamówienia '.$splitOrder->external_number,
+                );
+            }
+
             return $splitOrder;
         }, 3);
 
@@ -478,9 +497,9 @@ final class OrderSplitService
 
         if ($family->contains(fn (ExternalOrder $member): bool => $this->fulfillmentStatus
             ->wzDocumentsForOrder($member)
-            ->where('status', '!=', 'cancelled')
+            ->where('status', 'posted')
             ->exists())) {
-            $reasons[] = 'Nie można podzielić zamówienia, dla którego istnieje aktywny dokument WZ. Anulowany WZ nie blokuje podziału.';
+            $reasons[] = 'Nie można podzielić zamówienia, dla którego istnieje zaksięgowany dokument WZ z wykonanym ruchem magazynowym. Anuluj go, aby cofnąć ruch; szkic WZ nie blokuje podziału.';
         }
 
         if (Invoice::withTrashed()->whereIn('external_order_id', $orderIds)->exists()) {

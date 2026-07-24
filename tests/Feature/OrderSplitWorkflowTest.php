@@ -16,6 +16,7 @@ use App\Models\WarehouseDocument;
 use App\Models\WordpressIntegration;
 use App\Services\Communication\MailSettingsService;
 use App\Services\Inventory\StockReservationService;
+use App\Services\Orders\OrderFulfillmentStatusService;
 use App\Services\Orders\OrderSplitService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\WooCommerce\WooCommerceImportService;
@@ -184,9 +185,10 @@ class OrderSplitWorkflowTest extends TestCase
         $this->assertSame($splitOrder->id, $nestedOrder->split_parent_order_id);
         $this->assertSame($order->id, $nestedOrder->split_root_order_id);
         $this->assertSame('line-2', $nestedOrder->lines->firstOrFail()->canonical_external_line_id);
+        $this->assertSame(0, WarehouseDocument::query()->where('type', 'WZ')->count());
     }
 
-    public function test_cancelled_wz_and_cancelled_packing_task_do_not_block_a_new_split(): void
+    public function test_draft_wz_is_resynced_after_split_and_only_posted_wz_blocks_it(): void
     {
         $channel = SalesChannel::query()->create([
             'code' => 'SPLIT-CANCELLED-WZ',
@@ -251,6 +253,11 @@ class OrderSplitWorkflowTest extends TestCase
                 'external_order_number' => '869614',
             ],
         ]);
+        $wz->lines()->create([
+            'product_id' => $product->id,
+            'quantity' => 2,
+            'metadata' => ['source' => 'stock_reservation'],
+        ]);
         PackingTask::query()->create([
             'sales_channel_id' => $channel->id,
             'external_order_id' => $order->id,
@@ -265,11 +272,12 @@ class OrderSplitWorkflowTest extends TestCase
             'status' => 'cancelled',
         ]);
 
-        $blocked = app(OrderSplitService::class)->availability($order);
+        $wz->update(['status' => 'posted']);
+        $blocked = app(OrderSplitService::class)->availability($order->fresh());
         $this->assertFalse($blocked['available']);
-        $this->assertStringContainsString('aktywny dokument WZ', implode(' ', $blocked['reasons']));
+        $this->assertStringContainsString('zaksięgowany dokument WZ', implode(' ', $blocked['reasons']));
 
-        $wz->update(['status' => 'cancelled']);
+        $wz->update(['status' => 'draft']);
 
         $available = app(OrderSplitService::class)->availability($order->fresh());
         $this->assertTrue($available['available']);
@@ -284,7 +292,17 @@ class OrderSplitWorkflowTest extends TestCase
 
         $this->assertSame('869614/S1', $splitOrder->external_number);
         $this->assertSame('1.0000', (string) $splitOrder->lines()->sole()->quantity);
-        $this->assertSame('cancelled', $wz->fresh()->status);
+        $this->assertSame('draft', $wz->fresh()->status);
+        $this->assertSame('1.0000', (string) $wz->lines()->sole()->quantity);
+
+        $splitWz = app(OrderFulfillmentStatusService::class)
+            ->wzDocumentsForOrder($splitOrder)
+            ->with('lines')
+            ->sole();
+
+        $this->assertSame('draft', $splitWz->status);
+        $this->assertNotSame($wz->id, $splitWz->id);
+        $this->assertSame('1.0000', (string) $splitWz->lines->sole()->quantity);
     }
 
     public function test_split_reallocates_woo_reflection_without_creating_phantom_stock(): void
