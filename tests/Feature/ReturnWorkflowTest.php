@@ -94,6 +94,232 @@ class ReturnWorkflowTest extends TestCase
         $this->assertSame(1, StockLedgerEntry::query()->where('warehouse_document_id', $document->id)->count());
     }
 
+    public function test_default_no_restock_disposition_accepts_return_without_inventory_movement(): void
+    {
+        $warehouse = Warehouse::query()->create([
+            'code' => 'RET-NO-STOCK',
+            'name' => 'Punkt przyjęcia zwrotów',
+            'type' => 'returns',
+            'is_active' => true,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-NO-RESTOCK',
+            'name' => 'Produkt bez przywracania stanu',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 7,
+            'quantity_reserved' => 0,
+            'quantity_available' => 7,
+        ]);
+
+        $settings = app(ReturnSettingsService::class)->update([
+            'numbering_prefix' => 'RET',
+            'numbering_pattern' => '{PREFIX}/{YYYY}/{SEQ}',
+            'numbering_padding' => 6,
+            'default_target_warehouse_id' => $warehouse->id,
+            'default_condition' => 'unchecked',
+            'default_disposition' => 'no_restock',
+            'return_reasons' => ['Odstąpienie od umowy'],
+            'conditions' => [['code' => 'unchecked', 'label' => 'Niezweryfikowany']],
+            'dispositions' => [['code' => 'restock', 'label' => 'Przywróć na stan', 'warehouse_id' => $warehouse->id]],
+        ]);
+
+        $this->assertSame('no_restock', $settings['default_disposition']);
+        $this->assertContains('no_restock', collect($settings['dispositions'])->pluck('code')->all());
+
+        $this->get(route('settings.returns'))
+            ->assertOk()
+            ->assertSee('Nie przywracaj na stan')
+            ->assertSee('Nie dotyczy — bez ruchu magazynowego');
+
+        $this->post(route('returns.store'), [
+            'target_warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity' => 2,
+            'reason' => 'Odstąpienie od umowy',
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $returnCase = ReturnCase::query()->with('lines')->firstOrFail();
+        $this->assertSame('no_restock', $returnCase->lines->first()->disposition);
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Przyjmij bez zmiany stanu');
+
+        $this->post(route('returns.document.create', $returnCase))
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'bez przywracania towaru na stan'));
+
+        $this->assertSame(0, WarehouseDocument::query()->count());
+        $this->assertSame(0, StockLedgerEntry::query()->count());
+        $balance = StockBalance::query()
+            ->where('warehouse_id', $warehouse->id)
+            ->where('product_id', $product->id)
+            ->firstOrFail();
+        $this->assertSame('7.0000', (string) $balance->quantity_on_hand);
+        $this->assertSame('7.0000', (string) $balance->quantity_available);
+
+        $returnCase->refresh()->load('lines');
+        $this->assertSame('completed', $returnCase->status);
+        $this->assertNull($returnCase->warehouse_document_id);
+        $this->assertSame('no_restock', data_get($returnCase->metadata, 'inventory_receipt.mode'));
+        $this->assertSame(false, data_get($returnCase->lines->first()->metadata, 'inventory_receipt.stock_changed'));
+        $this->assertNotNull(data_get($returnCase->lines->first()->metadata, 'inventory_receipt.received_at'));
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Przyjęty bez zmiany stanu')
+            ->assertSee('RX nie był wymagany');
+    }
+
+    public function test_mixed_return_creates_rx_only_for_lines_that_should_restore_stock(): void
+    {
+        $warehouse = Warehouse::query()->create([
+            'code' => 'RET-MIX',
+            'name' => 'Magazyn zwrotów mieszanych',
+            'type' => 'returns',
+            'is_active' => true,
+        ]);
+        $restockedProduct = Product::query()->create([
+            'sku' => 'SKU-RESTOCKED',
+            'name' => 'Produkt wracający na stan',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        $excludedProduct = Product::query()->create([
+            'sku' => 'SKU-EXCLUDED',
+            'name' => 'Produkt bez powrotu na stan',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        foreach ([$restockedProduct, $excludedProduct] as $product) {
+            StockBalance::query()->create([
+                'warehouse_id' => $warehouse->id,
+                'product_id' => $product->id,
+                'quantity_on_hand' => 10,
+                'quantity_reserved' => 0,
+                'quantity_available' => 10,
+            ]);
+        }
+
+        app(ReturnSettingsService::class)->update([
+            'default_disposition' => 'no_restock',
+        ]);
+
+        $this->post(route('returns.store'), [
+            'target_warehouse_id' => $warehouse->id,
+            'reason' => 'Zwrot mieszany',
+            'lines' => [
+                [
+                    'product_id' => $restockedProduct->id,
+                    'quantity' => 2,
+                    'condition' => 'new',
+                    'disposition' => 'restock',
+                ],
+                [
+                    'product_id' => $excludedProduct->id,
+                    'quantity' => 3,
+                    'condition' => 'damaged',
+                ],
+            ],
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $returnCase = ReturnCase::query()->with('lines')->firstOrFail();
+        $this->assertSame('restock', $returnCase->lines->firstWhere('product_id', $restockedProduct->id)?->disposition);
+        $this->assertSame('no_restock', $returnCase->lines->firstWhere('product_id', $excludedProduct->id)?->disposition);
+
+        $this->post(route('returns.document.create', $returnCase))
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'nie zmieniły stanu magazynowego'));
+
+        $document = WarehouseDocument::query()->with('lines')->sole();
+        $this->assertSame('posted', $document->status);
+        $this->assertCount(1, $document->lines);
+        $this->assertSame($restockedProduct->id, $document->lines->first()->product_id);
+        $this->assertSame('2.0000', (string) $document->lines->first()->quantity);
+
+        $restockedBalance = StockBalance::query()
+            ->where('warehouse_id', $warehouse->id)
+            ->where('product_id', $restockedProduct->id)
+            ->firstOrFail();
+        $excludedBalance = StockBalance::query()
+            ->where('warehouse_id', $warehouse->id)
+            ->where('product_id', $excludedProduct->id)
+            ->firstOrFail();
+        $this->assertSame('12.0000', (string) $restockedBalance->quantity_on_hand);
+        $this->assertSame('10.0000', (string) $excludedBalance->quantity_on_hand);
+        $this->assertSame(1, StockLedgerEntry::query()->count());
+
+        $returnCase->refresh()->load('lines');
+        $this->assertSame('completed', $returnCase->status);
+        $this->assertSame('mixed', data_get($returnCase->metadata, 'inventory_receipt.mode'));
+        $this->assertNotNull(data_get(
+            $returnCase->lines->firstWhere('product_id', $excludedProduct->id)?->metadata,
+            'inventory_receipt.received_at',
+        ));
+    }
+
+    public function test_prepared_no_restock_return_can_be_confirmed_later_from_return_card(): void
+    {
+        app(DocumentAutomationSettingsService::class)->update([
+            'return_create_rx_on_store' => true,
+        ]);
+
+        $warehouse = Warehouse::query()->create([
+            'code' => 'RET-PREPARED',
+            'name' => 'Punkt przyjęcia zwrotów',
+            'type' => 'returns',
+            'is_active' => true,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-PREPARED-NO-STOCK',
+            'name' => 'Produkt bez ruchu magazynowego',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+
+        $this->post(route('returns.store'), [
+            'target_warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity' => 1,
+            'reason' => 'Zwrot przygotowany automatycznie',
+            'disposition' => 'no_restock',
+        ])->assertRedirect()->assertSessionHas('status');
+
+        $returnCase = ReturnCase::query()->with('lines')->firstOrFail();
+        $this->assertSame('document_created', $returnCase->status);
+        $this->assertNotNull(data_get($returnCase->lines->first()->metadata, 'inventory_receipt.prepared_at'));
+        $this->assertNull(data_get($returnCase->lines->first()->metadata, 'inventory_receipt.received_at'));
+        $this->assertSame(0, WarehouseDocument::query()->count());
+
+        $this->get(route('returns.show', $returnCase))
+            ->assertOk()
+            ->assertSee('Przyjmij bez zmiany stanu');
+
+        $this->post(route('returns.document.create', $returnCase))
+            ->assertRedirect()
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'bez przywracania towaru na stan'));
+
+        $returnCase->refresh()->load('lines');
+        $this->assertSame('completed', $returnCase->status);
+        $this->assertNotNull(data_get($returnCase->lines->first()->metadata, 'inventory_receipt.received_at'));
+        $this->assertSame(0, WarehouseDocument::query()->count());
+        $this->assertSame(0, StockLedgerEntry::query()->count());
+    }
+
     public function test_return_can_accept_multiple_lines_into_one_rx_document(): void
     {
         $warehouse = Warehouse::query()->create([

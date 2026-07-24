@@ -425,12 +425,19 @@
                                             </form>
                                         @endif
                                     @endif
+                                    @if ($invoice->type === 'proforma' && $invoice->externalOrder)
+                                        <form method="POST" action="{{ route('orders.proformas.destroy', [$invoice->externalOrder, $invoice]) }}" onsubmit="return confirm('Usunąć proformę {{ $invoice->number }}? Faktura VAT i zamówienie pozostaną bez zmian.');">
+                                            @csrf
+                                            @method('DELETE')
+                                            <button class="button secondary" type="submit">Usuń proformę</button>
+                                        </form>
+                                    @endif
                                 </div>
                             </td>
                         </tr>
                     @empty
                         <tr>
-                            <td colspan="10">Brak faktur. Fakturę wystawisz z poziomu zamówienia po zaksięgowaniu WZ.</td>
+                            <td colspan="10">Brak faktur. Fakturę wystawisz z poziomu zamówienia po zaksięgowaniu WZ albo oznaczeniu zamówienia jako wysłane.</td>
                         </tr>
                     @endforelse
                 </tbody>

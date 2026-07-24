@@ -186,6 +186,107 @@ class OrderSplitWorkflowTest extends TestCase
         $this->assertSame('line-2', $nestedOrder->lines->firstOrFail()->canonical_external_line_id);
     }
 
+    public function test_cancelled_wz_and_cancelled_packing_task_do_not_block_a_new_split(): void
+    {
+        $channel = SalesChannel::query()->create([
+            'code' => 'SPLIT-CANCELLED-WZ',
+            'name' => 'Podział po anulowanym WZ',
+            'type' => 'woocommerce',
+            'is_active' => true,
+        ]);
+        $warehouse = Warehouse::query()->create([
+            'code' => 'SPLIT-CANCELLED-WZ-WH',
+            'name' => 'Magazyn podziału',
+            'type' => 'physical',
+            'is_active' => true,
+        ]);
+        $warehouse->routes()->create([
+            'sales_channel_id' => $channel->id,
+            'push_stock' => true,
+            'allocation_strategy' => 'warehouse_balance',
+            'stock_buffer' => 0,
+            'priority' => 100,
+        ]);
+        $product = Product::query()->create([
+            'sku' => 'SKU-SPLIT-AFTER-CANCEL',
+            'name' => 'Produkt do wydzielenia po anulowaniu',
+            'unit' => 'szt',
+            'vat_rate' => 23,
+            'quantity_precision' => 0,
+            'is_active' => true,
+        ]);
+        StockBalance::query()->create([
+            'warehouse_id' => $warehouse->id,
+            'product_id' => $product->id,
+            'quantity_on_hand' => 2,
+            'quantity_reserved' => 0,
+            'quantity_available' => 2,
+        ]);
+        $order = ExternalOrder::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_id' => '869614',
+            'external_number' => '869614',
+            'status' => 'processing',
+            'currency' => 'PLN',
+            'total_gross' => 240,
+        ]);
+        $line = $order->lines()->create([
+            'product_id' => $product->id,
+            'external_line_id' => '869614-line-1',
+            'sku' => $product->sku,
+            'name' => $product->name,
+            'quantity' => 2,
+            'unit_gross_price' => 120,
+        ]);
+        $wz = WarehouseDocument::query()->create([
+            'number' => 'WZ/869614',
+            'type' => 'WZ',
+            'status' => 'draft',
+            'source_warehouse_id' => $warehouse->id,
+            'external_reference' => '869614',
+            'document_date' => now(),
+            'metadata' => [
+                'sales_channel_id' => $channel->id,
+                'external_order_id' => '869614',
+                'external_order_number' => '869614',
+            ],
+        ]);
+        PackingTask::query()->create([
+            'sales_channel_id' => $channel->id,
+            'external_order_id' => $order->id,
+            'external_order_line_id' => $line->id,
+            'product_id' => $product->id,
+            'external_line_id' => $line->external_line_id,
+            'order_number' => '869614',
+            'sku' => $product->sku,
+            'product_name' => $product->name,
+            'quantity_required' => 2,
+            'quantity_picked' => 1,
+            'status' => 'cancelled',
+        ]);
+
+        $blocked = app(OrderSplitService::class)->availability($order);
+        $this->assertFalse($blocked['available']);
+        $this->assertStringContainsString('aktywny dokument WZ', implode(' ', $blocked['reasons']));
+
+        $wz->update(['status' => 'cancelled']);
+
+        $available = app(OrderSplitService::class)->availability($order->fresh());
+        $this->assertTrue($available['available']);
+        $this->assertSame([], $available['reasons']);
+
+        $splitOrder = app(OrderSplitService::class)->split(
+            $order->fresh(),
+            [$line->id => 1],
+            source: 'manual',
+            requestUuid: (string) Str::uuid(),
+        );
+
+        $this->assertSame('869614/S1', $splitOrder->external_number);
+        $this->assertSame('1.0000', (string) $splitOrder->lines()->sole()->quantity);
+        $this->assertSame('cancelled', $wz->fresh()->status);
+    }
+
     public function test_split_reallocates_woo_reflection_without_creating_phantom_stock(): void
     {
         Mail::fake();

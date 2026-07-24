@@ -17,6 +17,7 @@ use App\Services\Communication\CustomerCommunicationService;
 use App\Services\Invoices\ReturnCorrectionInvoiceService;
 use App\Services\Orders\OrderCancellationGuard;
 use App\Services\Payments\PayuRefundService;
+use App\Services\Returns\ReturnInventoryReceiptService;
 use App\Services\WooCommerce\InvoiceWooCommerceUploadService;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
@@ -34,6 +35,7 @@ final class WarehouseDocumentPostingService
         private readonly CustomerCommunicationService $communication,
         private readonly PayuRefundService $payuRefunds,
         private readonly OrderCancellationGuard $cancellationGuard,
+        private readonly ReturnInventoryReceiptService $returnInventoryReceipt,
     ) {}
 
     public function post(WarehouseDocument $document): void
@@ -170,6 +172,21 @@ final class WarehouseDocumentPostingService
 
         $this->issueReturnCorrectionsAfterPosting($completedReturnCaseIds);
         $this->queueReturnReceivedAfterPosting($completedReturnCaseIds);
+    }
+
+    public function handleReturnReceiptCompletion(ReturnCase $returnCase): void
+    {
+        $returnCase = ReturnCase::query()
+            ->with('lines.warehouseDocument')
+            ->findOrFail($returnCase->id);
+
+        if (! $this->returnInventoryReceipt->isComplete($returnCase)) {
+            throw new RuntimeException('Zwrot nie został jeszcze w pełni przyjęty.');
+        }
+
+        $returnCase->update(['status' => 'completed']);
+        $this->issueReturnCorrectionsAfterPosting([(int) $returnCase->id]);
+        $this->queueReturnReceivedAfterPosting([(int) $returnCase->id]);
     }
 
     public function cancel(WarehouseDocument $document): void
@@ -632,16 +649,7 @@ final class WarehouseDocumentPostingService
 
     private function allReturnDocumentsPosted(ReturnCase $returnCase): bool
     {
-        $documents = $returnCase->lines
-            ->map(fn ($line) => $line->warehouseDocument)
-            ->filter()
-            ->push($returnCase->warehouseDocument)
-            ->filter()
-            ->unique('id')
-            ->values();
-
-        return $documents->isNotEmpty()
-            && $documents->every(fn (WarehouseDocument $document): bool => $document->status === 'posted');
+        return $this->returnInventoryReceipt->isComplete($returnCase);
     }
 
     private function documentType(WarehouseDocument $document): WarehouseDocumentType

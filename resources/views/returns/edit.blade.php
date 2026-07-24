@@ -1,4 +1,4 @@
-@extends('layouts.app', ['title' => "Edycja zwrotu {$returnCase->number}", 'subtitle' => 'Zwrot można edytować dopóki nie utworzono dokumentu RX.', 'module' => 'returns'])
+@extends('layouts.app', ['title' => "Edycja zwrotu {$returnCase->number}", 'subtitle' => 'Zwrot można edytować dopóki nie rozpoczęto przyjęcia magazynowego lub przyjęcia bez zmiany stanu.', 'module' => 'returns'])
 
 @section('content')
     @php

@@ -8,8 +8,8 @@ use App\Models\ReturnCase;
 use App\Models\ReturnCaseLine;
 use App\Models\WarehouseDocument;
 use App\Services\Inventory\WarehouseDocumentNumberService;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
 final class ReturnReceivingService
@@ -17,8 +17,8 @@ final class ReturnReceivingService
     public function __construct(
         private readonly WarehouseDocumentNumberService $numbers,
         private readonly ReturnSettingsService $settings,
-    ) {
-    }
+        private readonly ReturnInventoryReceiptService $inventoryReceipt,
+    ) {}
 
     public function createReceivingDocument(ReturnCase $returnCase): WarehouseDocument
     {
@@ -42,16 +42,9 @@ final class ReturnReceivingService
             $dispositionLabels = $this->optionLabels($returnSettings['dispositions'] ?? []);
 
             $returnCase = ReturnCase::query()
-                ->with(['lines.product', 'lines.externalOrderLine', 'lines.targetWarehouse', 'lines.warehouseDocument', 'targetWarehouse', 'externalOrder'])
+                ->with(['lines.product', 'lines.externalOrderLine', 'lines.targetWarehouse', 'lines.warehouseDocument', 'warehouseDocument', 'targetWarehouse', 'externalOrder'])
                 ->lockForUpdate()
                 ->findOrFail($returnCase->id);
-
-            $hasExistingDocument = $returnCase->warehouse_document_id !== null
-                || $returnCase->lines->contains(fn (ReturnCaseLine $line): bool => $line->warehouse_document_id !== null);
-
-            if ($hasExistingDocument) {
-                throw new RuntimeException('Zwrot ma już utworzony dokument magazynowy.');
-            }
 
             $acceptedLines = $returnCase->lines
                 ->filter(fn (ReturnCaseLine $line): bool => (float) $line->quantity_accepted > 0 && $line->product_id !== null);
@@ -60,7 +53,59 @@ final class ReturnReceivingService
                 throw new RuntimeException('Zwrot nie ma przyjętych pozycji.');
             }
 
-            $linesByWarehouse = $acceptedLines
+            if ($this->inventoryReceipt->isComplete($returnCase)) {
+                throw new RuntimeException('Zwrot został już przyjęty.');
+            }
+
+            $noRestockLines = $acceptedLines
+                ->filter(fn (ReturnCaseLine $line): bool => $this->inventoryReceipt
+                    ->isNoRestock((string) $line->disposition));
+            $stockLines = $acceptedLines
+                ->reject(fn (ReturnCaseLine $line): bool => $this->inventoryReceipt
+                    ->isNoRestock((string) $line->disposition));
+
+            $existingDocuments = collect([$returnCase->warehouseDocument])
+                ->merge($returnCase->lines->map(fn (ReturnCaseLine $line) => $line->warehouseDocument))
+                ->filter(fn ($document): bool => $document instanceof WarehouseDocument)
+                ->unique('id')
+                ->values();
+
+            if ($existingDocuments->contains(fn (WarehouseDocument $document): bool => $document->status === 'cancelled')) {
+                throw new RuntimeException('Zwrot ma anulowany dokument RX. Utwórz nowy zwrot albo popraw powiązanie dokumentu.');
+            }
+
+            if ($existingDocuments->isNotEmpty()) {
+                return $existingDocuments;
+            }
+
+            if ($stockLines->isEmpty()
+                && $noRestockLines->isNotEmpty()
+                && $noRestockLines->every(fn (ReturnCaseLine $line): bool => $this->inventoryReceipt
+                    ->isPreparedWithoutStock($line))) {
+                return collect();
+            }
+
+            $preparedAt = now();
+
+            foreach ($noRestockLines as $line) {
+                if ($this->inventoryReceipt->isPreparedWithoutStock($line)) {
+                    continue;
+                }
+
+                $line->update([
+                    'warehouse_document_id' => null,
+                    'metadata' => array_merge($line->metadata ?? [], [
+                        'inventory_receipt' => [
+                            'mode' => ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION,
+                            'prepared_at' => $preparedAt->toISOString(),
+                            'received_at' => null,
+                            'stock_changed' => false,
+                        ],
+                    ]),
+                ]);
+            }
+
+            $linesByWarehouse = $stockLines
                 ->mapToGroups(function (ReturnCaseLine $line) use ($returnCase): array {
                     $warehouseId = $line->target_warehouse_id ?? $returnCase->target_warehouse_id;
 
@@ -81,7 +126,7 @@ final class ReturnReceivingService
                     'destination_warehouse_id' => (int) $warehouseId,
                     'document_date' => now(),
                     'external_reference' => $returnCase->externalOrder?->external_number ?? $returnCase->number,
-                    'notes' => 'Przyjęcie zwrotu ' . $returnCase->number,
+                    'notes' => 'Przyjęcie zwrotu '.$returnCase->number,
                     'metadata' => [
                         'source' => 'return_case',
                         'return_case_id' => $returnCase->id,
@@ -138,16 +183,28 @@ final class ReturnReceivingService
 
             $documentIds = $documents->pluck('id')->values()->all();
 
-            if ($documentIds === []) {
+            if ($documentIds === [] && $noRestockLines->isEmpty()) {
                 throw new RuntimeException('Nie utworzono dokumentu RX dla zwrotu.');
             }
 
             $returnCase->update([
-                'warehouse_document_id' => $documentIds[0],
+                'warehouse_document_id' => $documentIds[0] ?? null,
                 'status' => 'document_created',
                 'metadata' => array_merge($returnCase->metadata ?? [], [
                     'warehouse_document_ids' => $documentIds,
                     'warehouse_document_numbers' => $documents->pluck('number')->values()->all(),
+                    'inventory_receipt' => [
+                        'mode' => match (true) {
+                            $documents->isEmpty() => ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION,
+                            $noRestockLines->isNotEmpty() => 'mixed',
+                            default => 'stock',
+                        },
+                        'prepared_at' => $preparedAt->toISOString(),
+                        'no_restock_line_ids' => $noRestockLines->pluck('id')->values()->all(),
+                        'no_restock_quantity' => (float) $noRestockLines
+                            ->sum(fn (ReturnCaseLine $line): float => (float) $line->quantity_accepted),
+                        'stock_changed' => $documents->isNotEmpty(),
+                    ],
                 ]),
             ]);
 
@@ -156,7 +213,67 @@ final class ReturnReceivingService
     }
 
     /**
-     * @param list<array{code?:string,label?:string}> $options
+     * Marks physically accepted lines that must not affect inventory. Returns
+     * true only when this operation completes the whole return receipt.
+     */
+    public function receiveWithoutStockMovement(ReturnCase $returnCase): bool
+    {
+        return DB::transaction(function () use ($returnCase): bool {
+            $returnCase = ReturnCase::query()
+                ->with(['lines.warehouseDocument'])
+                ->lockForUpdate()
+                ->findOrFail($returnCase->id);
+            $wasComplete = $this->inventoryReceipt->isComplete($returnCase);
+            $receivedAt = now();
+            $noRestockLines = $returnCase->lines
+                ->filter(fn (ReturnCaseLine $line): bool => (float) $line->quantity_accepted > 0
+                    && $line->product_id !== null
+                    && $this->inventoryReceipt->isNoRestock((string) $line->disposition));
+
+            if ($noRestockLines->isEmpty()) {
+                return false;
+            }
+
+            foreach ($noRestockLines as $line) {
+                if ($this->inventoryReceipt->isReceivedWithoutStock($line)) {
+                    continue;
+                }
+
+                $receiptMetadata = (array) data_get($line->metadata, 'inventory_receipt', []);
+                $line->update([
+                    'warehouse_document_id' => null,
+                    'metadata' => array_merge($line->metadata ?? [], [
+                        'inventory_receipt' => array_merge($receiptMetadata, [
+                            'mode' => ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION,
+                            'prepared_at' => $receiptMetadata['prepared_at'] ?? $receivedAt->toISOString(),
+                            'received_at' => $receivedAt->toISOString(),
+                            'stock_changed' => false,
+                        ]),
+                    ]),
+                ]);
+            }
+
+            $returnCase->unsetRelation('lines');
+            $returnCase->load('lines.warehouseDocument');
+            $isComplete = $this->inventoryReceipt->isComplete($returnCase);
+            $receiptMetadata = (array) data_get($returnCase->metadata, 'inventory_receipt', []);
+
+            $returnCase->update([
+                'status' => $isComplete ? 'completed' : 'document_created',
+                'metadata' => array_merge($returnCase->metadata ?? [], [
+                    'inventory_receipt' => array_merge($receiptMetadata, [
+                        'no_restock_received_at' => $receivedAt->toISOString(),
+                        'completed_at' => $isComplete ? $receivedAt->toISOString() : null,
+                    ]),
+                ]),
+            ]);
+
+            return ! $wasComplete && $isComplete;
+        });
+    }
+
+    /**
+     * @param  list<array{code?:string,label?:string}>  $options
      * @return array<string, string>
      */
     private function optionLabels(array $options): array

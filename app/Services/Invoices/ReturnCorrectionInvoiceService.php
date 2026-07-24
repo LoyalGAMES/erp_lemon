@@ -12,6 +12,7 @@ use App\Models\ReturnCaseLine;
 use App\Services\Audit\AuditLogService;
 use App\Services\Automation\InvoiceKsefAutomationService;
 use App\Services\Ksef\KsefEligibilityService;
+use App\Services\Returns\ReturnInventoryReceiptService;
 use App\Services\Returns\ReturnShippingRefundService;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
@@ -27,6 +28,7 @@ final class ReturnCorrectionInvoiceService
         private readonly AuditLogService $audit,
         private readonly InvoiceKsefAutomationService $ksefAutomation,
         private readonly ReturnShippingRefundService $shippingRefunds,
+        private readonly ReturnInventoryReceiptService $inventoryReceipt,
     ) {}
 
     public function createForReturn(ReturnCase $returnCase): Invoice
@@ -52,8 +54,8 @@ final class ReturnCorrectionInvoiceService
 
             $returnDocuments = $this->returnDocuments($returnCase);
 
-            if ($returnDocuments->isEmpty() || ! $returnDocuments->every(fn ($document): bool => $document->status === 'posted')) {
-                throw new RuntimeException('Najpierw zaksięguj wszystkie RX dla tego zwrotu.');
+            if (! $this->inventoryReceipt->isComplete($returnCase)) {
+                throw new RuntimeException('Najpierw potwierdź przyjęcie wszystkich pozycji zwrotu.');
             }
 
             if ($returnCase->externalOrder === null) {
@@ -184,6 +186,12 @@ final class ReturnCorrectionInvoiceService
             'warehouse_document_number' => $returnCase->warehouseDocument?->number,
             'warehouse_document_ids' => $returnDocuments->pluck('id')->values()->all(),
             'warehouse_document_numbers' => $returnDocuments->pluck('number')->values()->all(),
+            'inventory_receipt' => [
+                'mode' => data_get($returnCase->metadata, 'inventory_receipt.mode'),
+                'no_restock_line_ids' => data_get($returnCase->metadata, 'inventory_receipt.no_restock_line_ids', []),
+                'no_restock_quantity' => (float) data_get($returnCase->metadata, 'inventory_receipt.no_restock_quantity', 0),
+                'completed_at' => data_get($returnCase->metadata, 'inventory_receipt.completed_at'),
+            ],
             'legal_review_required' => true,
         ];
 

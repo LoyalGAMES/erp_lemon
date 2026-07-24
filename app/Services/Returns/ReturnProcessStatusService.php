@@ -20,6 +20,7 @@ final class ReturnProcessStatusService
     public function __construct(
         private readonly OrderSettlementService $orderSettlements,
         private readonly PaymentMethodClassifier $paymentMethods,
+        private readonly ReturnInventoryReceiptService $inventoryReceipt,
     ) {}
 
     /**
@@ -62,7 +63,7 @@ final class ReturnProcessStatusService
             ? $this->orderSettlements->summary($returnCase->externalOrder)
             : null;
 
-        $warehouse = $this->warehouseStatus($documents);
+        $warehouse = $this->warehouseStatus($returnCase, $documents);
         $correction = $this->correctionStatus($returnCase, $warehouse['state']);
         $payout = $this->payoutStatus(
             $returnCase,
@@ -95,21 +96,40 @@ final class ReturnProcessStatusService
     }
 
     /** @param Collection<int, mixed> $documents */
-    private function warehouseStatus(Collection $documents): array
+    private function warehouseStatus(ReturnCase $returnCase, Collection $documents): array
     {
-        if ($documents->isEmpty()) {
+        if ($this->inventoryReceipt->isComplete($returnCase)) {
+            $hasNoRestockLines = $this->inventoryReceipt->hasNoRestockLines($returnCase);
+
+            if ($documents->isEmpty()) {
+                return [
+                    'state' => 'complete',
+                    'label' => 'Przyjęty bez zmiany stanu',
+                    'description' => 'Towar został fizycznie przyjęty, ale zgodnie z dyspozycją nie zwiększył stanu magazynowego. RX nie był wymagany.',
+                ];
+            }
+
             return [
-                'state' => 'not_started',
-                'label' => 'Towar nieprzyjęty',
-                'description' => 'Nie utworzono jeszcze dokumentu przyjęcia zwrotu RX.',
+                'state' => 'complete',
+                'label' => $hasNoRestockLines ? 'Towar przyjęty częściowo na stan' : 'Towar przyjęty',
+                'description' => 'RX zaksięgowany: '.$documents->pluck('number')->implode(', ').'. '
+                    .($hasNoRestockLines
+                        ? 'Tylko wskazane pozycje zwiększyły stan; pozostałe przyjęto bez zmiany stanu.'
+                        : 'Stan magazynu został zwiększony.'),
             ];
         }
 
-        if ($documents->every(fn ($document): bool => $document->status === 'posted')) {
+        if ($documents->isEmpty()) {
+            $preparedWithoutStock = $returnCase->lines->contains(
+                fn ($line): bool => $this->inventoryReceipt->isPreparedWithoutStock($line),
+            );
+
             return [
-                'state' => 'complete',
-                'label' => 'Towar przyjęty',
-                'description' => 'RX zaksięgowany: '.$documents->pluck('number')->implode(', ').'. Stan magazynu został zwiększony.',
+                'state' => $preparedWithoutStock ? 'pending' : 'not_started',
+                'label' => $preparedWithoutStock ? 'Przyjęcie przygotowane' : 'Towar nieprzyjęty',
+                'description' => $preparedWithoutStock
+                    ? 'Dyspozycja bez przywracania stanu została przygotowana, ale przyjęcie nie zostało jeszcze potwierdzone.'
+                    : 'Nie potwierdzono jeszcze przyjęcia zwrotu.',
             ];
         }
 
@@ -134,14 +154,14 @@ final class ReturnProcessStatusService
             return [
                 'state' => 'required',
                 'label' => 'Korekta niewystawiona',
-                'description' => 'Towar jest już na stanie. Wystaw korektę, aby ustalić kwotę zwrotu.',
+                'description' => 'Zwrot został przyjęty. Wystaw korektę, aby ustalić kwotę zwrotu.',
             ];
         }
 
         return [
             'state' => 'waiting',
             'label' => 'Korekta oczekuje',
-            'description' => 'Korektę będzie można wystawić po zaksięgowaniu RX.',
+            'description' => 'Korektę będzie można wystawić po potwierdzeniu przyjęcia zwrotu.',
         ];
     }
 

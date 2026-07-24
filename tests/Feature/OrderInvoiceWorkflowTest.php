@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tests\Feature;
 
+use App\Models\AuditLog;
 use App\Models\ExternalOrder;
 use App\Models\Invoice;
 use App\Models\InvoiceFile;
@@ -515,6 +516,132 @@ class OrderInvoiceWorkflowTest extends TestCase
             ->assertSee('Wystaw fakturę');
     }
 
+    public function test_shipped_order_without_recognized_wz_can_issue_a_late_invoice(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice' => Http::response([
+                'order_id' => 501,
+                'file_url' => 'https://shop.test/invoices/late-501.pdf',
+                'stored_file' => true,
+            ]),
+        ]);
+
+        [$order, $document] = $this->createFulfilledOrder();
+        $document->delete();
+        $order->update([
+            'status' => 'completed',
+            'fulfillment_status' => 'shipped',
+            'raw_payload' => array_merge($order->raw_payload ?? [], [
+                'date_completed' => '2026-07-20T14:30:00+02:00',
+            ]),
+        ]);
+        $this->configureSeller();
+
+        $this->get(route('orders.show', $order))
+            ->assertOk()
+            ->assertSee('Wystaw proformę')
+            ->assertSee('Wystaw fakturę')
+            ->assertSee('Zamówienie wysłane · faktura zaległa');
+
+        $this->post(route('orders.invoice.create', $order), [
+            'document_type' => 'vat',
+        ])->assertRedirect()
+            ->assertSessionHas('status');
+
+        $invoice = Invoice::query()->where('type', 'vat')->firstOrFail();
+
+        $this->assertSame('2026-07-20', $invoice->sale_date->toDateString());
+        $this->assertSame('shipped_order_without_posted_wz', data_get($invoice->metadata, 'invoice_issuance.basis'));
+        $this->assertSame('erp_fulfillment_status', data_get($invoice->metadata, 'invoice_issuance.shipment_source'));
+        $this->assertNull(data_get($invoice->metadata, 'warehouse_document_id'));
+    }
+
+    public function test_order_without_wz_or_shipment_evidence_still_cannot_issue_invoice(): void
+    {
+        Http::fake();
+
+        [$order, $document] = $this->createFulfilledOrder();
+        $document->delete();
+        $this->configureSeller();
+
+        $this->get(route('orders.show', $order))
+            ->assertOk()
+            ->assertSee('Wystaw proformę')
+            ->assertDontSee('Wystaw fakturę');
+
+        $this->post(route('orders.invoice.create', $order), [
+            'document_type' => 'vat',
+        ])->assertRedirect()
+            ->assertSessionHas('error', fn (string $message): bool => str_contains($message, 'zaksięguj WZ albo oznacz zamówienie jako wysłane'));
+
+        $this->assertSame(0, Invoice::query()->count());
+        Http::assertNothingSent();
+    }
+
+    public function test_operator_can_delete_proforma_from_order_and_issue_vat_invoice_afterwards(): void
+    {
+        Http::fake([
+            'https://shop.test/wp-json/lemon-erp/v1/orders/501/invoice' => Http::response([
+                'order_id' => 501,
+                'file_url' => 'https://shop.test/invoices/501.pdf',
+                'stored_file' => true,
+            ]),
+        ]);
+
+        [$order] = $this->createFulfilledOrder();
+        $this->configureSeller();
+        $proforma = app(OrderInvoiceService::class)->createProformaForOrder($order);
+
+        $this->get(route('orders.show', $order))
+            ->assertOk()
+            ->assertSee('Proforma '.$proforma->number)
+            ->assertSee('Usuń proformę')
+            ->assertSee('Wystaw fakturę');
+
+        $this->delete(route('orders.proformas.destroy', [$order, $proforma]))
+            ->assertRedirect()
+            ->assertSessionHas('status', "Proforma {$proforma->number} została usunięta.");
+
+        $this->assertSoftDeleted('invoices', ['id' => $proforma->id]);
+        $this->assertDatabaseHas('external_orders', ['id' => $order->id]);
+        $this->assertDatabaseHas('audit_logs', [
+            'action' => 'invoice.proforma_deleted',
+            'auditable_type' => (new Invoice)->getMorphClass(),
+            'auditable_id' => $proforma->id,
+        ]);
+
+        $audit = AuditLog::query()->where('action', 'invoice.proforma_deleted')->firstOrFail();
+        $this->assertSame($proforma->number, data_get($audit->before, 'number'));
+        $this->assertSame($order->id, data_get($audit->metadata, 'external_order_id'));
+
+        $invoice = app(OrderInvoiceService::class)->createForOrder($order);
+        $this->assertDatabaseHas('invoices', [
+            'id' => $invoice->id,
+            'type' => 'vat',
+            'deleted_at' => null,
+        ]);
+    }
+
+    public function test_proforma_delete_route_refuses_to_delete_vat_invoice(): void
+    {
+        [$order] = $this->createFulfilledOrder();
+        $this->configureSeller();
+        $invoice = app(OrderInvoiceService::class)->createForOrder($order);
+
+        $this->delete(route('orders.proformas.destroy', [$order, $invoice]))
+            ->assertRedirect()
+            ->assertSessionHas('error', fn (string $message): bool => str_contains($message, 'wyłącznie proformę'));
+
+        $this->assertDatabaseHas('invoices', [
+            'id' => $invoice->id,
+            'deleted_at' => null,
+        ]);
+        $this->assertDatabaseMissing('audit_logs', [
+            'action' => 'invoice.proforma_deleted',
+            'auditable_id' => $invoice->id,
+        ]);
+    }
+
     /**
      * @return array{0:ExternalOrder,1:WarehouseDocument}
      */
@@ -613,5 +740,20 @@ class OrderInvoiceWorkflowTest extends TestCase
         ]);
 
         return [$order, $document];
+    }
+
+    private function configureSeller(): void
+    {
+        app(InvoiceSettingsService::class)->updateSellerData([
+            'name' => 'Sempre Love sp. z o.o.',
+            'tax_id' => '5261040828',
+            'address_1' => 'Testowa 1',
+            'postcode' => '00-001',
+            'city' => 'Warszawa',
+            'country' => 'PL',
+            'email' => 'biuro@example.test',
+            'phone' => '+48123123123',
+            'bank_account' => 'PL00111122223333444455556666',
+        ]);
     }
 }

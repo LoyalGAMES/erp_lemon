@@ -18,6 +18,9 @@ class DocumentAutomationSettingsTest extends TestCase
             ->assertOk()
             ->assertSee('Automatyczny obieg dokumentów')
             ->assertSee('Po dodaniu zwrotu')
+            ->assertSee('Po przyjęciu zwrotu')
+            ->assertSee('Przygotuj przyjęcie')
+            ->assertSee('Potwierdź przyjęcie')
             ->assertSee('Po spakowaniu zamówienia')
             ->assertSee('Wystaw i wyślij fakturę');
 

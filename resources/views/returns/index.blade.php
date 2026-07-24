@@ -1,4 +1,4 @@
-@extends('layouts.app', ['title' => 'Zwroty', 'subtitle' => 'Zwrot przyjmuje towar na wskazany magazyn przez dokument RX. Po zaksięgowaniu RX można wystawić fakturę korygującą do zamówienia.', 'module' => 'returns'])
+@extends('layouts.app', ['title' => 'Zwroty', 'subtitle' => 'Zwrot może zwiększyć stan przez RX albo zostać przyjęty bez ruchu magazynowego. Po potwierdzeniu przyjęcia można wystawić fakturę korygującą.', 'module' => 'returns'])
 
 @section('content')
     @php
@@ -139,7 +139,7 @@
         $statusLabels = [
             'pending' => ['label' => 'Oczekujący', 'class' => 'orange'],
             'opened' => ['label' => 'Otwarty', 'class' => 'blue'],
-            'document_created' => ['label' => 'Dokument RX', 'class' => 'blue'],
+            'document_created' => ['label' => 'Przyjęcie przygotowane', 'class' => 'blue'],
             'completed' => ['label' => 'Zrealizowany', 'class' => ''],
             'corrected' => ['label' => 'Korekta', 'class' => ''],
             'rejected' => ['label' => 'Odrzucony', 'class' => 'red'],

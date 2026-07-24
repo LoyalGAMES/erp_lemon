@@ -185,6 +185,8 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
         Route::post('/packing/scan', [PackingController::class, 'scan'])->name('packing.scan');
         Route::post('/packing/groups/pick', [PackingController::class, 'pick'])->name('packing.groups.pick');
         Route::post('/packing/groups/problem', [PackingController::class, 'problem'])->name('packing.groups.problem');
+        Route::get('/packing/orders/{order}/split', [PackingController::class, 'splitAvailability'])->name('packing.orders.split.availability');
+        Route::post('/packing/orders/{order}/split', [PackingController::class, 'splitOrder'])->name('packing.orders.split');
         Route::post('/packing/tasks/{task}/pack', [PackingController::class, 'pack'])->name('packing.tasks.pack');
         Route::post('/packing/tasks/{task}/reopen', [PackingController::class, 'reopen'])->name('packing.tasks.reopen');
         Route::post('/packing/orders/{order}/pack', [PackingController::class, 'packOrder'])->name('packing.orders.pack');
@@ -302,6 +304,8 @@ Route::middleware(RequireErpSessionAuth::class)->group(function (): void {
 
         Route::post('/orders/{order}/invoice', [ExternalOrderInvoiceController::class, 'create'])
             ->name('orders.invoice.create');
+        Route::delete('/orders/{order}/proformas/{invoice}', [ExternalOrderInvoiceController::class, 'destroyProforma'])
+            ->name('orders.proformas.destroy');
     });
 
     Route::middleware(EnsureErpRole::class.':customers')->group(function (): void {

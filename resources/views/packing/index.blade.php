@@ -79,10 +79,25 @@
         .pick-badges, .order-badges, .history-badges { display: flex; flex-wrap: wrap; gap: 6px; }
         .pick-badge { display: inline-flex; align-items: center; min-height: 26px; border-radius: 7px; padding: 2px 8px; background: rgba(134, 115, 100, .08); color: var(--muted); font-size: 12px; font-weight: 720; }
         .collect-note input { min-height: 48px; }
-        .collect-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+        .collect-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
         .collect-actions form { min-width: 0; display: grid; gap: 8px; }
         .collect-actions input { min-height: 42px; }
         .collect-actions .button { width: 100%; min-height: 64px; font-size: 19px; border-radius: 8px; }
+        .packing-split-modal { width: min(720px, calc(100vw - 28px)); max-height: min(88dvh, 820px); margin: auto; border: 0; border-radius: 10px; padding: 0; background: var(--surface); color: var(--text); box-shadow: 0 26px 80px rgba(33, 28, 24, .32); }
+        .packing-split-modal::backdrop { background: rgba(37, 31, 26, .62); backdrop-filter: blur(2px); }
+        .packing-split-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding: 17px 18px; border-bottom: 1px solid var(--border); }
+        .packing-split-header h2 { margin: 0; font-size: 21px; line-height: 1.2; }
+        .packing-split-header p { margin: 5px 0 0; color: var(--muted); }
+        .packing-split-close { flex: 0 0 auto; width: 42px; height: 42px; border: 0; border-radius: 8px; background: var(--surface-soft); color: var(--muted); font: inherit; font-size: 25px; cursor: pointer; }
+        .packing-split-body { padding: 18px; overflow-y: auto; }
+        .packing-split-form { display: grid; gap: 14px; }
+        .packing-split-lines { display: grid; gap: 9px; }
+        .packing-split-line { display: grid; grid-template-columns: minmax(0, 1fr) 150px; gap: 14px; align-items: center; border: 1px solid var(--border); border-radius: 8px; padding: 11px 12px; background: #fffdfb; }
+        .packing-split-line strong { display: block; }
+        .packing-split-line span { display: block; margin-top: 3px; color: var(--muted); font-size: 12px; }
+        .packing-split-line input { min-height: 44px; }
+        .packing-split-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 9px; padding-top: 2px; }
+        .packing-split-actions .button { min-height: 44px; }
         .button.danger { background: #ffecec; color: var(--red); border: 1px solid #f0c3c3; }
         .packing-empty { padding: 18px 16px; color: var(--muted); background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
         .segment-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 14px; }
@@ -211,6 +226,9 @@
             .packing-image-modal { padding: 12px; }
             .packing-image-modal-card { width: 100%; max-height: 96dvh; }
             .packing-image-modal img { max-height: calc(96dvh - 52px); }
+            .collect-actions { grid-template-columns: 1fr; }
+            .packing-split-line { grid-template-columns: 1fr; }
+            .packing-split-actions { display: grid; grid-template-columns: 1fr; }
         }
     </style>
 @endpush
@@ -435,6 +453,7 @@
                 @forelse ($collectOrders as $collectOrder)
                     @php
                         $problemFormId = 'problem-order-' . md5(implode('-', $collectOrder['task_ids']));
+                        $splitModalId = 'split-order-' . $collectOrder['order_id'];
                     @endphp
                     <article class="order-card collect-order-card" data-packing-card>
                         <div class="order-card-header">
@@ -494,8 +513,60 @@
                                 @endforeach
                                 <button class="button" type="submit">Zebrane</button>
                             </form>
+                            <button
+                                class="button secondary"
+                                type="button"
+                                data-packing-split-open="{{ $splitModalId }}"
+                                data-packing-split-availability-url="{{ route('packing.orders.split.availability', $collectOrder['order_id']) }}"
+                            >Podziel zamówienie</button>
                         </div>
                     </article>
+                    <dialog class="packing-split-modal" id="{{ $splitModalId }}" aria-labelledby="{{ $splitModalId }}-title">
+                        <div class="packing-split-header">
+                            <div>
+                                <h2 id="{{ $splitModalId }}-title">Podziel zamówienie {{ $collectOrder['order_number'] }}</h2>
+                                <p>Wskaż produkty i ilości, które mają trafić do nowego zamówienia.</p>
+                            </div>
+                            <button class="packing-split-close" type="button" data-packing-split-close aria-label="Zamknij">&times;</button>
+                        </div>
+                        <div class="packing-split-body">
+                            <div class="alert warning" style="margin: 0 0 14px;" data-packing-split-availability role="status">
+                                Sprawdzam możliwość podziału…
+                            </div>
+                            <form class="packing-split-form" method="POST" action="{{ route('packing.orders.split', $collectOrder['order_id']) }}">
+                                @csrf
+                                <input type="hidden" name="split_request_uuid" value="{{ $collectOrder['split_request_uuid'] }}">
+                                <input type="hidden" name="segment" value="{{ $activeSegment }}">
+                                <div class="packing-split-lines">
+                                    @foreach ($collectOrder['split_lines'] as $splitLine)
+                                        <div class="packing-split-line">
+                                            <div>
+                                                <strong>{{ $splitLine['name'] }}</strong>
+                                                <span>{{ $splitLine['sku'] ?: 'brak SKU' }} · w zamówieniu: {{ $qty($splitLine['quantity']) }} szt.</span>
+                                            </div>
+                                            <label>Ilość do wydzielenia
+                                                <input
+                                                    name="split_lines[{{ $splitLine['id'] }}][quantity]"
+                                                    type="number"
+                                                    min="0"
+                                                    max="{{ $splitLine['quantity'] }}"
+                                                    step="0.0001"
+                                                    value="0"
+                                                >
+                                            </label>
+                                        </div>
+                                    @endforeach
+                                </div>
+                                <label>Notatka do nowego zamówienia
+                                    <textarea name="note" rows="2" maxlength="1000" placeholder="np. osobna wysyłka lub późniejsza realizacja"></textarea>
+                                </label>
+                                <div class="packing-split-actions">
+                                    <button class="button secondary" type="button" data-packing-split-close>Anuluj</button>
+                                    <button class="button" type="submit" data-packing-split-submit disabled>Utwórz nowe zamówienie</button>
+                                </div>
+                            </form>
+                        </div>
+                    </dialog>
                 @empty
                     <div class="packing-empty">Brak produktów do zebrania. Nie ma też zamówień oczekujących na kompletację.</div>
                 @endforelse
@@ -1054,6 +1125,85 @@
 
 @push('scripts')
     <script>
+        (() => {
+            document.addEventListener('click', (event) => {
+                const target = event.target instanceof Element ? event.target : null;
+                const openButton = target?.closest('[data-packing-split-open]');
+
+                if (openButton) {
+                    const modal = document.getElementById(openButton.dataset.packingSplitOpen || '');
+
+                    if (modal instanceof HTMLDialogElement) {
+                        const availability = modal.querySelector('[data-packing-split-availability]');
+                        const submit = modal.querySelector('[data-packing-split-submit]');
+                        const availabilityUrl = openButton.dataset.packingSplitAvailabilityUrl || '';
+
+                        modal.showModal();
+                        window.requestAnimationFrame(() => modal.querySelector('input[type="number"]')?.focus());
+
+                        if (availability instanceof HTMLElement && submit instanceof HTMLButtonElement) {
+                            availability.hidden = false;
+                            availability.textContent = 'Sprawdzam możliwość podziału…';
+                            submit.disabled = true;
+
+                            fetch(availabilityUrl, {
+                                headers: { Accept: 'application/json' },
+                                credentials: 'same-origin',
+                            })
+                                .then((response) => {
+                                    if (!response.ok) {
+                                        throw new Error('Nie udało się sprawdzić blokad podziału.');
+                                    }
+
+                                    return response.json();
+                                })
+                                .then((result) => {
+                                    if (result.available === true) {
+                                        availability.hidden = true;
+                                        submit.disabled = false;
+
+                                        return;
+                                    }
+
+                                    const heading = document.createElement('strong');
+                                    heading.textContent = 'Nie można teraz podzielić tego zamówienia.';
+                                    const list = document.createElement('ul');
+                                    list.style.marginBottom = '0';
+
+                                    (Array.isArray(result.reasons) ? result.reasons : []).forEach((reason) => {
+                                        const item = document.createElement('li');
+                                        item.textContent = String(reason);
+                                        list.appendChild(item);
+                                    });
+                                    availability.replaceChildren(heading, list);
+                                })
+                                .catch((error) => {
+                                    availability.textContent = error instanceof Error
+                                        ? error.message
+                                        : 'Nie udało się sprawdzić blokad podziału.';
+                                });
+                        }
+                    }
+
+                    return;
+                }
+
+                const closeButton = target?.closest('[data-packing-split-close]');
+
+                if (closeButton) {
+                    closeButton.closest('dialog')?.close();
+                }
+            });
+
+            document.querySelectorAll('.packing-split-modal').forEach((modal) => {
+                modal.addEventListener('click', (event) => {
+                    if (event.target === modal) {
+                        modal.close();
+                    }
+                });
+            });
+        })();
+
         (() => {
             const modal = document.querySelector('[data-packing-image-modal]');
             const image = modal?.querySelector('[data-packing-image-modal-image]');

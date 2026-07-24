@@ -226,6 +226,7 @@ class ModuleController extends Controller
             ->with([
                 'salesChannel:id,code,name',
                 'invoices:id,external_order_id,number,type,status',
+                'packingTasks:id,external_order_id,status',
                 'lines' => fn ($query) => $query
                     ->select(['id', 'external_order_id', 'product_id', 'sku', 'name', 'quantity', 'raw_payload'])
                     ->orderBy('id'),
@@ -332,9 +333,13 @@ class ModuleController extends Controller
         }
 
         if ($invoice === 'yes') {
-            $query->whereHas('invoices', fn (Builder $invoices) => $invoices->where('type', '<>', 'proforma'));
+            $query->whereHas('invoices', fn (Builder $invoices) => $invoices
+                ->where('type', 'vat')
+                ->where('status', '!=', 'cancelled'));
         } elseif ($invoice === 'no') {
-            $query->whereDoesntHave('invoices', fn (Builder $invoices) => $invoices->where('type', '<>', 'proforma'));
+            $query->whereDoesntHave('invoices', fn (Builder $invoices) => $invoices
+                ->where('type', 'vat')
+                ->where('status', '!=', 'cancelled'));
         }
 
         if ($term === '') {

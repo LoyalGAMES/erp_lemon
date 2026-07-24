@@ -93,7 +93,7 @@ final class DocumentAutomationSettingsService
     }
 
     /**
-     * @param array<string, mixed> $data
+     * @param  array<string, mixed>  $data
      * @return array<string, bool>
      */
     public function update(array $data): array
@@ -111,7 +111,7 @@ final class DocumentAutomationSettingsService
     }
 
     /**
-     * @param array<string, mixed> $rules
+     * @param  array<string, mixed>  $rules
      * @return array<string, bool>
      */
     public function updateRules(array $rules): array
@@ -206,8 +206,8 @@ final class DocumentAutomationSettingsService
                 'description' => 'Akcje wykonywane bezpośrednio po zapisaniu zwrotu w module zwrotów.',
             ],
             'warehouse_document.rx.posted' => [
-                'label' => 'Po zaksięgowaniu RX',
-                'description' => 'Akcje wykonywane, gdy wszystkie dokumenty przyjęcia zwrotu są zaksięgowane.',
+                'label' => 'Po przyjęciu zwrotu',
+                'description' => 'Akcje wykonywane, gdy wszystkie pozycje zwrotu są przyjęte zgodnie z dyspozycją.',
             ],
             'order.imported' => [
                 'label' => 'Po pobraniu zamówienia',
@@ -235,12 +235,12 @@ final class DocumentAutomationSettingsService
     {
         return [
             'return.rx.create' => [
-                'label' => 'Utwórz RX',
-                'description' => 'Utworzy szkic RX według mapowania dyspozycja → magazyn.',
+                'label' => 'Przygotuj przyjęcie',
+                'description' => 'Utworzy szkic RX tylko dla pozycji wracających na stan, a pozostałe przygotuje bez ruchu magazynowego.',
             ],
             'return.rx.post' => [
-                'label' => 'Zaksięguj RX',
-                'description' => 'Jeżeli RX nie istnieje, system najpierw utworzy szkic, a potem go zaksięguje.',
+                'label' => 'Potwierdź przyjęcie',
+                'description' => 'Zaksięguje wymagane RX i potwierdzi pozycje przyjmowane bez zmiany stanu.',
             ],
             'return.correction.create' => [
                 'label' => 'Wystaw korektę',

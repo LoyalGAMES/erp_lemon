@@ -10,11 +10,13 @@ use App\Models\PackingTask;
 use App\Models\Product;
 use App\Models\SalesChannel;
 use App\Models\ShippingLabel;
+use App\Models\User;
 use App\Services\Packing\PackingSettingsService;
 use App\Services\Packing\PackingTaskService;
 use App\Services\Shipping\CourierPickupTrackingService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class PackingLogisticsUpgradeTest extends TestCase
@@ -41,6 +43,53 @@ class PackingLogisticsUpgradeTest extends TestCase
             ->assertOk()
             ->assertSee('Sukienka LENA')
             ->assertSee('Sneakersy VIKI');
+    }
+
+    public function test_packer_can_split_an_order_from_the_collection_modal(): void
+    {
+        [$order] = $this->createMixedOrder();
+        $shoeLine = $order->lines()->where('sku', 'SKU-SHOES')->sole();
+        $packer = User::query()->create([
+            'name' => 'Pakujący',
+            'email' => 'packing-split@example.test',
+            'password' => 'test-password',
+            'role' => User::ROLE_PACKER,
+            'is_active' => true,
+        ]);
+        $this->actingAs($packer);
+
+        $this->get(route('packing.index', ['view' => 'collect', 'segment' => 'all']))
+            ->assertOk()
+            ->assertSee('Podziel zamówienie')
+            ->assertSee('Wskaż produkty i ilości, które mają trafić do nowego zamówienia.')
+            ->assertSee('Utwórz nowe zamówienie')
+            ->assertSee(route('packing.orders.split', $order), false)
+            ->assertSee('name="split_lines['.$shoeLine->id.'][quantity]"', false);
+
+        $this->getJson(route('packing.orders.split.availability', $order))
+            ->assertOk()
+            ->assertJsonPath('available', true)
+            ->assertJsonPath('reasons', []);
+
+        $this->post(route('packing.orders.split', $order), [
+            'split_request_uuid' => (string) Str::uuid(),
+            'segment' => 'all',
+            'split_lines' => [
+                $shoeLine->id => ['quantity' => 1],
+            ],
+            'note' => 'Wydzielone podczas kompletacji',
+        ])
+            ->assertRedirect(route('packing.index', ['view' => 'collect', 'segment' => 'all']))
+            ->assertSessionHas('status', fn (string $message): bool => str_contains($message, 'Kompletacja obu części została przeliczona'));
+
+        $splitOrder = ExternalOrder::query()
+            ->where('external_id', '701-SPLIT-1')
+            ->with('lines')
+            ->sole();
+
+        $this->assertSame('701/S1', $splitOrder->external_number);
+        $this->assertSame('SKU-SHOES', $splitOrder->lines->sole()->sku);
+        $this->assertSame('packing', data_get($splitOrder->raw_payload, 'sempre_erp_split.source'));
     }
 
     public function test_operator_can_select_station_with_printer_and_it_filters_collect_view(): void

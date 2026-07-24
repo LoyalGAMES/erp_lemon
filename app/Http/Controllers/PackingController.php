@@ -9,6 +9,7 @@ use App\Models\ExternalOrder;
 use App\Models\PackingTask;
 use App\Models\PrintJob;
 use App\Models\ShippingLabel;
+use App\Services\Orders\OrderSplitService;
 use App\Services\Packing\PackingFulfillmentService;
 use App\Services\Packing\PackingProblemService;
 use App\Services\Packing\PackingSettingsService;
@@ -24,6 +25,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\View\View;
 use RuntimeException;
@@ -64,7 +66,7 @@ class PackingController extends Controller
         $packingHistoryDate = $this->historyDate((string) $request->query('date', now()->toDateString()));
 
         $tasks = PackingTask::query()
-            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'product', 'orderLine'])
+            ->with(['salesChannel', 'order.shipmentLabels.courierAccount', 'order.lines.product', 'product', 'orderLine'])
             ->whereIn('status', ['open', 'picked'])
             ->orderByRaw("case when status = 'picked' then 1 else 0 end")
             ->orderBy('courier')
@@ -231,6 +233,51 @@ class PackingController extends Controller
         );
 
         return back()->with('status', $message);
+    }
+
+    public function splitOrder(
+        Request $request,
+        ExternalOrder $order,
+        OrderSplitService $splitter,
+    ): RedirectResponse {
+        $validated = $request->validate([
+            'split_lines' => ['required', 'array'],
+            'split_lines.*.quantity' => ['nullable', 'numeric', 'min:0'],
+            'note' => ['nullable', 'string', 'max:1000'],
+            'split_request_uuid' => ['required', 'uuid'],
+            'segment' => ['nullable', 'string', 'in:all,clothing,footwear'],
+        ]);
+        $quantities = collect($validated['split_lines'])
+            ->filter(fn ($line): bool => is_array($line) && (float) ($line['quantity'] ?? 0) > 0)
+            ->mapWithKeys(fn (array $line, string|int $lineId): array => [(int) $lineId => (float) $line['quantity']])
+            ->all();
+
+        try {
+            $splitOrder = $splitter->split(
+                $order,
+                $quantities,
+                $validated['note'] ?? null,
+                source: 'packing',
+                context: ['packing_view' => 'collect'],
+                requestUuid: $validated['split_request_uuid'],
+            );
+        } catch (RuntimeException $exception) {
+            return back()->withInput()->with('error', $exception->getMessage());
+        }
+
+        return redirect()
+            ->route('packing.index', array_filter([
+                'view' => 'collect',
+                'segment' => $validated['segment'] ?? null,
+            ]))
+            ->with('status', "Wydzielono zamówienie {$splitOrder->external_number}. Kompletacja obu części została przeliczona.");
+    }
+
+    public function splitAvailability(
+        ExternalOrder $order,
+        OrderSplitService $splitter,
+    ): JsonResponse {
+        return response()->json($splitter->availability($order));
     }
 
     public function pick(
@@ -736,6 +783,17 @@ class PackingController extends Controller
                     'task_ids' => $tasks->pluck('id')->values()->all(),
                     'positions_count' => $tasks->count(),
                     'quantity' => $tasks->sum(fn (PackingTask $task): float => $task->remainingQuantity()),
+                    'split_request_uuid' => (string) Str::uuid(),
+                    'split_lines' => $order?->lines
+                        ->filter(fn ($line): bool => (float) $line->quantity > 0)
+                        ->map(fn ($line): array => [
+                            'id' => (int) $line->id,
+                            'name' => (string) $line->name,
+                            'sku' => (string) ($line->sku ?? ''),
+                            'quantity' => (float) $line->quantity,
+                        ])
+                        ->values()
+                        ->all() ?? [],
                     'segments' => $tasks
                         ->map(fn (PackingTask $task): string => $segments->segmentForTask($task))
                         ->unique()

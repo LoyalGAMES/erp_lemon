@@ -6,8 +6,16 @@
         ->filter()
         ->unique('id')
         ->values();
-    $allReturnDocumentsPosted = $returnDocuments->isNotEmpty()
-        && $returnDocuments->every(fn ($document) => $document->status === 'posted');
+    $returnReceiptComplete = ($returnProcess['warehouse']['state'] ?? null) === 'complete';
+    $acceptedReturnLines = $returnCase->lines
+        ->filter(fn ($line): bool => (float) $line->quantity_accepted > 0 && $line->product_id !== null);
+    $noRestockReturnLines = $acceptedReturnLines
+        ->filter(fn ($line): bool => (string) $line->disposition === \App\Services\Returns\ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION);
+    $allLinesWithoutRestock = $acceptedReturnLines->isNotEmpty()
+        && $noRestockReturnLines->count() === $acceptedReturnLines->count();
+    $hasLinesWithoutRestock = $noRestockReturnLines->isNotEmpty();
+    $returnReceiptStarted = $returnDocuments->isNotEmpty()
+        || $returnCase->lines->contains(fn ($line): bool => filled(data_get($line->metadata, 'inventory_receipt.prepared_at')));
     $returnLabels = $returnCase->relationLoaded('shippingLabels')
         ? $returnCase->shippingLabels->where('status', 'generated')
         : collect();
@@ -199,8 +207,8 @@
         <button class="button danger" type="submit">Odrzuć</button>
     </form>
     <a class="button secondary" href="{{ route('returns.edit', $returnCase) }}">Edytuj</a>
-@elseif ($allReturnDocumentsPosted)
-    <span class="status">Przyjęty</span>
+@elseif ($returnReceiptComplete)
+    <span class="status">{{ $returnDocuments->isEmpty() ? 'Przyjęty bez zmiany stanu' : 'Przyjęty' }}</span>
     @if ($returnCase->correctionInvoice)
         <a class="button secondary" href="{{ route('invoices.preview', $returnCase->correctionInvoice) }}" target="_blank" rel="noopener">
             Korekta {{ $returnCase->correctionInvoice->number }}
@@ -213,15 +221,29 @@
     @endif
 @elseif ($returnDocuments->isNotEmpty())
     <span class="status blue">{{ $returnDocuments->pluck('number')->implode(', ') }}</span>
+    <form method="POST" action="{{ route('returns.document.create', $returnCase) }}" onsubmit="return confirm('Zaksięgować przygotowane dokumenty i potwierdzić przyjęcie zwrotu {{ $returnCase->number }} zgodnie z dyspozycjami?');">
+        @csrf
+        <button class="button" type="submit">Zaksięguj i potwierdź przyjęcie</button>
+    </form>
 @else
-    <a class="button secondary" href="{{ route('returns.edit', $returnCase) }}">Edytuj</a>
-    <form method="POST" action="{{ route('returns.document.create', $returnCase) }}" onsubmit="return confirm('Utworzyć i zaksięgować RX dla zwrotu {{ $returnCase->number }}? Towar zostanie od razu przyjęty na stan magazynu.');">
+    @unless ($returnReceiptStarted)
+        <a class="button secondary" href="{{ route('returns.edit', $returnCase) }}">Edytuj</a>
+    @endunless
+    <form method="POST" action="{{ route('returns.document.create', $returnCase) }}" onsubmit="return confirm('{{ $allLinesWithoutRestock
+        ? 'Przyjąć zwrot '.$returnCase->number.' bez przywracania towaru na stan? RX nie zostanie utworzony.'
+        : ($hasLinesWithoutRestock
+            ? 'Przyjąć zwrot '.$returnCase->number.'? RX zwiększy stan tylko dla pozycji z inną dyspozycją. Pozycje „Nie przywracaj na stan” nie zmienią magazynu.'
+            : 'Utworzyć i zaksięgować RX dla zwrotu '.$returnCase->number.'? Towar zostanie od razu przyjęty na stan magazynu.') }}');">
         @csrf
-        <button class="button" type="submit">Przyjmij zwrot na stan (RX)</button>
+        <button class="button" type="submit">
+            {{ $allLinesWithoutRestock ? 'Przyjmij bez zmiany stanu' : ($hasLinesWithoutRestock ? 'Przyjmij zwrot według dyspozycji' : 'Przyjmij zwrot na stan (RX)') }}
+        </button>
     </form>
-    <form method="POST" action="{{ route('returns.destroy', $returnCase) }}" onsubmit="return confirm('Usunąć zwrot {{ $returnCase->number }}?');">
-        @csrf
-        @method('DELETE')
-        <button class="button danger" type="submit">Usuń</button>
-    </form>
+    @unless ($returnReceiptStarted)
+        <form method="POST" action="{{ route('returns.destroy', $returnCase) }}" onsubmit="return confirm('Usunąć zwrot {{ $returnCase->number }}?');">
+            @csrf
+            @method('DELETE')
+            <button class="button danger" type="submit">Usuń</button>
+        </form>
+    @endunless
 @endif

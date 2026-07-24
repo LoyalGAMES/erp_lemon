@@ -469,14 +469,18 @@ final class OrderSplitService
 
         if (PackingTask::query()
             ->whereIn('external_order_id', $orderIds)
+            ->where('status', '!=', 'cancelled')
             ->where(fn ($query) => $query->where('quantity_picked', '>', 0)
                 ->orWhereIn('status', ['picked', 'packed', 'shipped', 'problem']))
             ->exists()) {
             $reasons[] = 'Nie można podzielić zamówienia po rozpoczęciu kompletacji lub pakowania.';
         }
 
-        if ($family->contains(fn (ExternalOrder $member): bool => $this->fulfillmentStatus->wzDocumentsForOrder($member)->exists())) {
-            $reasons[] = 'Nie można podzielić zamówienia, dla którego istnieje dokument WZ.';
+        if ($family->contains(fn (ExternalOrder $member): bool => $this->fulfillmentStatus
+            ->wzDocumentsForOrder($member)
+            ->where('status', '!=', 'cancelled')
+            ->exists())) {
+            $reasons[] = 'Nie można podzielić zamówienia, dla którego istnieje aktywny dokument WZ. Anulowany WZ nie blokuje podziału.';
         }
 
         if (Invoice::withTrashed()->whereIn('external_order_id', $orderIds)->exists()) {

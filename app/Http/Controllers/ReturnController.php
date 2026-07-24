@@ -380,8 +380,14 @@ class ReturnController extends Controller
                 $documents = $receivingService->createReceivingDocuments($returnCase);
 
                 if ($postRx) {
+                    $completedWithoutDocument = $receivingService->receiveWithoutStockMovement($returnCase);
+
                     foreach ($documents as $document) {
                         $postingService->post($document);
+                    }
+
+                    if ($completedWithoutDocument) {
+                        $postingService->handleReturnReceiptCompletion($returnCase);
                     }
                 }
             } catch (Throwable $exception) {
@@ -412,7 +418,7 @@ class ReturnController extends Controller
         if ($this->hasReturnDocuments($returnCase)) {
             return redirect()
                 ->route('returns.show', $returnCase)
-                ->with('error', 'Zwrotu z utworzonym dokumentem RX nie można edytować. Zmień dokument magazynowy albo utwórz kolejny zwrot.');
+                ->with('error', 'Zwrotu z rozpoczętym przyjęciem nie można edytować. Zmień dokument magazynowy albo utwórz kolejny zwrot.');
         }
 
         return view('returns.edit', [
@@ -433,7 +439,7 @@ class ReturnController extends Controller
         if ($this->hasReturnDocuments($returnCase)) {
             return redirect()
                 ->route('returns.show', $returnCase)
-                ->with('error', 'Zwrotu z utworzonym dokumentem RX nie można edytować.');
+                ->with('error', 'Zwrotu z rozpoczętym przyjęciem nie można edytować.');
         }
 
         $returnSettings = $settings->data();
@@ -532,9 +538,16 @@ class ReturnController extends Controller
                     $cancellationGuard->assertReturnAllowedForCase($returnCase);
 
                     $documents = $receivingService->createReceivingDocuments($returnCase);
+                    $completedWithoutDocument = $receivingService->receiveWithoutStockMovement($returnCase);
 
                     foreach ($documents as $document) {
-                        $postingService->post($document);
+                        if ($document->status === 'draft') {
+                            $postingService->post($document);
+                        }
+                    }
+
+                    if ($completedWithoutDocument) {
+                        $postingService->handleReturnReceiptCompletion($returnCase);
                     }
 
                     return $documents->map(fn (WarehouseDocument $document): WarehouseDocument => $document->refresh());
@@ -544,10 +557,15 @@ class ReturnController extends Controller
             return back()->with('error', $exception->getMessage());
         }
 
+        $freshReturn = $returnCase->fresh() ?? $returnCase;
         $numbers = $documents->pluck('number')->implode(', ');
-        $message = $documents->count() === 1
-            ? "Utworzono i zaksięgowano {$numbers} dla zwrotu {$returnCase->number}. Towar został przyjęty na stan."
-            : "Utworzono i zaksięgowano RX {$numbers} dla zwrotu {$returnCase->number}. Towary zostały przyjęte na właściwe magazyny.";
+        $noRestockQuantity = (float) data_get($freshReturn->metadata, 'inventory_receipt.no_restock_quantity', 0);
+        $message = match (true) {
+            $documents->isEmpty() => "Przyjęto zwrot {$returnCase->number} bez przywracania towaru na stan. Dokument RX nie był wymagany.",
+            $noRestockQuantity > 0 => "Utworzono i zaksięgowano RX {$numbers} dla zwrotu {$returnCase->number}. Pozycje z dyspozycją „Nie przywracaj na stan” nie zmieniły stanu magazynowego.",
+            $documents->count() === 1 => "Utworzono i zaksięgowano {$numbers} dla zwrotu {$returnCase->number}. Towar został przyjęty na stan.",
+            default => "Utworzono i zaksięgowano RX {$numbers} dla zwrotu {$returnCase->number}. Towary zostały przyjęte na właściwe magazyny.",
+        };
 
         return back()->with('status', $message);
     }
@@ -1234,7 +1252,8 @@ class ReturnController extends Controller
     private function hasReturnDocuments(ReturnCase $returnCase): bool
     {
         return $returnCase->warehouse_document_id !== null
-            || $returnCase->lines->contains(fn (ReturnCaseLine $line): bool => $line->warehouse_document_id !== null);
+            || $returnCase->lines->contains(fn (ReturnCaseLine $line): bool => $line->warehouse_document_id !== null
+                || filled(data_get($line->metadata, 'inventory_receipt.prepared_at')));
     }
 
     /**

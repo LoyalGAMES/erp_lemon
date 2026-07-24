@@ -12,6 +12,7 @@ use App\Services\Automation\InvoiceKsefAutomationService;
 use App\Services\Orders\OrderFulfillmentStatusService;
 use Dompdf\Dompdf;
 use Dompdf\Options;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use RuntimeException;
@@ -45,7 +46,7 @@ final class OrderInvoiceService
 
         $invoice = DB::transaction(function () use ($order, $type, &$createdInvoiceId): Invoice {
             $order = ExternalOrder::query()
-                ->with(['lines', 'invoices'])
+                ->with(['lines', 'invoices', 'packingTasks'])
                 ->lockForUpdate()
                 ->findOrFail($order->id);
 
@@ -78,9 +79,10 @@ final class OrderInvoiceService
             }
 
             $wz = $this->postedWz($order);
+            $shipmentEvidence = $this->shipmentEvidence($order);
 
-            if ($type === 'vat' && $wz === null) {
-                throw new RuntimeException('Najpierw zaksięguj WZ dla tego zamówienia.');
+            if ($type === 'vat' && $wz === null && $shipmentEvidence === null) {
+                throw new RuntimeException('Najpierw zaksięguj WZ albo oznacz zamówienie jako wysłane.');
             }
 
             if ($order->lines->isEmpty()) {
@@ -115,6 +117,15 @@ final class OrderInvoiceService
             if ($wz !== null) {
                 $metadata['warehouse_document_id'] = $wz->id;
                 $metadata['warehouse_document_number'] = $wz->number;
+            } elseif ($type === 'vat' && $shipmentEvidence !== null) {
+                $metadata['invoice_issuance'] = [
+                    'basis' => 'shipped_order_without_posted_wz',
+                    'fulfillment_status' => (string) $order->fulfillment_status,
+                    'woocommerce_status' => (string) $order->status,
+                    'shipment_source' => $shipmentEvidence['source'],
+                    'shipment_confirmed_at' => $shipmentEvidence['occurred_at']?->toISOString(),
+                    'recorded_at' => now()->toISOString(),
+                ];
             }
 
             $ossMetadata = $this->ossVatRates->metadataForOrder($order);
@@ -130,7 +141,11 @@ final class OrderInvoiceService
                 'external_order_id' => $order->id,
                 'invoice_template_id' => $template->id,
                 'issue_date' => now()->toDateString(),
-                'sale_date' => ($wz?->posted_at ?? $wz?->document_date ?? $order->external_created_at ?? now())->toDateString(),
+                'sale_date' => ($wz?->posted_at
+                    ?? $wz?->document_date
+                    ?? $shipmentEvidence['occurred_at']
+                    ?? $order->external_created_at
+                    ?? now())->toDateString(),
                 'payment_due_date' => $this->settings->paymentDueDate(),
                 'currency' => $order->currency,
                 'seller_data' => $this->settings->sellerData(),
@@ -188,6 +203,57 @@ final class OrderInvoiceService
         $wz = $this->fulfillmentStatus->latestWz($order);
 
         return $wz?->status === 'posted' ? $wz : null;
+    }
+
+    /** @return array{source:string,occurred_at:?Carbon}|null */
+    private function shipmentEvidence(ExternalOrder $order): ?array
+    {
+        $shippedTask = $order->packingTasks
+            ->where('status', 'shipped')
+            ->sortByDesc('updated_at')
+            ->first();
+
+        if ($shippedTask !== null) {
+            return [
+                'source' => 'packing_task',
+                'occurred_at' => $this->date(
+                    data_get($shippedTask->metadata, 'courier_pickup.picked_up_at'),
+                ) ?? $shippedTask->updated_at,
+            ];
+        }
+
+        if ((string) $order->fulfillment_status === 'shipped') {
+            return [
+                'source' => 'erp_fulfillment_status',
+                'occurred_at' => $this->date(data_get($order->raw_payload, 'date_completed'))
+                    ?? $this->date(data_get($order->raw_payload, 'date_completed_gmt'))
+                    ?? $order->external_updated_at,
+            ];
+        }
+
+        if (in_array(mb_strtolower((string) $order->status), ['completed', 'shipped'], true)) {
+            return [
+                'source' => 'woocommerce_status',
+                'occurred_at' => $this->date(data_get($order->raw_payload, 'date_completed'))
+                    ?? $this->date(data_get($order->raw_payload, 'date_completed_gmt'))
+                    ?? $order->external_updated_at,
+            ];
+        }
+
+        return null;
+    }
+
+    private function date(mixed $value): ?Carbon
+    {
+        if (! filled($value)) {
+            return null;
+        }
+
+        try {
+            return Carbon::parse((string) $value);
+        } catch (Throwable) {
+            return null;
+        }
     }
 
     /**

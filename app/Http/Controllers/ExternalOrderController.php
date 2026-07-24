@@ -88,7 +88,8 @@ class ExternalOrderController extends Controller
             ->get();
 
         $latestInvoice = $order->invoices
-            ->reject(fn ($invoice): bool => $invoice->type === 'proforma')
+            ->where('type', 'vat')
+            ->where('status', '!=', 'cancelled')
             ->sortByDesc('id')
             ->first();
         $latestProforma = $order->invoices

@@ -137,6 +137,53 @@ final class ReturnShippingRefundTest extends TestCase
         $this->assertNull(data_get($correction->metadata, 'shipping_refund'));
     }
 
+    public function test_received_no_restock_return_can_issue_correction_without_rx(): void
+    {
+        $returnCase = $this->createReturnCase('cod', 1, false);
+        $documentId = $returnCase->warehouse_document_id;
+        $receivedAt = now()->toISOString();
+        $line = $returnCase->lines()->firstOrFail();
+
+        $line->update([
+            'warehouse_document_id' => null,
+            'disposition' => 'no_restock',
+            'target_warehouse_id' => null,
+            'metadata' => [
+                'inventory_receipt' => [
+                    'mode' => 'no_restock',
+                    'prepared_at' => $receivedAt,
+                    'received_at' => $receivedAt,
+                    'stock_changed' => false,
+                ],
+            ],
+        ]);
+        $returnCase->update([
+            'warehouse_document_id' => null,
+            'status' => 'completed',
+            'metadata' => array_merge($returnCase->metadata ?? [], [
+                'inventory_receipt' => [
+                    'mode' => 'no_restock',
+                    'prepared_at' => $receivedAt,
+                    'completed_at' => $receivedAt,
+                    'no_restock_line_ids' => [$line->id],
+                    'no_restock_quantity' => 1.0,
+                    'stock_changed' => false,
+                ],
+            ]),
+        ]);
+        WarehouseDocument::query()->whereKey($documentId)->delete();
+
+        $correction = app(ReturnCorrectionInvoiceService::class)
+            ->createForReturn($returnCase->fresh())
+            ->load('lines');
+
+        $this->assertSame('-119.00', (string) $correction->gross_total);
+        $this->assertSame([], data_get($correction->metadata, 'warehouse_document_ids'));
+        $this->assertSame('no_restock', data_get($correction->metadata, 'inventory_receipt.mode'));
+        $this->assertSame([$line->id], data_get($correction->metadata, 'inventory_receipt.no_restock_line_ids'));
+        $this->assertSame(0, WarehouseDocument::query()->count());
+    }
+
     public function test_foreign_currency_order_converts_configured_pln_amount_using_original_invoice_rate(): void
     {
         [$returnCase, $correction] = $this->createCorrection('payu', 2, true, 'EUR', 4.25);

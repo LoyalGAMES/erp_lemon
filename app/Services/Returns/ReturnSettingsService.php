@@ -160,6 +160,10 @@ final class ReturnSettingsService
         $settings ??= $this->data();
         $disposition = $this->cleanCode($disposition);
 
+        if ($disposition === ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION) {
+            return null;
+        }
+
         if ($fallbackWarehouseId !== null) {
             return $fallbackWarehouseId;
         }
@@ -209,6 +213,7 @@ final class ReturnSettingsService
             'dispositions' => $this->defaultDispositions(),
             'disposition_warehouse_ids' => [
                 'restock' => null,
+                ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION => null,
                 'inspection' => null,
                 'laundry' => null,
                 'scrap' => null,
@@ -338,6 +343,11 @@ final class ReturnSettingsService
     {
         return [
             ['code' => 'restock', 'label' => 'Przywróć na stan', 'warehouse_id' => null],
+            [
+                'code' => ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION,
+                'label' => 'Nie przywracaj na stan',
+                'warehouse_id' => null,
+            ],
             ['code' => 'inspection', 'label' => 'Do kontroli', 'warehouse_id' => null],
             ['code' => 'laundry', 'label' => 'Do prania', 'warehouse_id' => null],
             ['code' => 'scrap', 'label' => 'Utylizacja', 'warehouse_id' => null],
@@ -460,7 +470,19 @@ final class ReturnSettingsService
             ];
         }
 
-        return array_values($cleaned !== [] ? $cleaned : $this->defaultDispositions());
+        if ($cleaned === []) {
+            $cleaned = array_column($this->defaultDispositions(), null, 'code');
+        }
+
+        if (! array_key_exists(ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION, $cleaned)) {
+            $cleaned[ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION] = [
+                'code' => ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION,
+                'label' => 'Nie przywracaj na stan',
+                'warehouse_id' => null,
+            ];
+        }
+
+        return array_values($cleaned);
     }
 
     private function cleanCode(string $value): string

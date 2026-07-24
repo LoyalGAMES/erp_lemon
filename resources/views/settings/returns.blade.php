@@ -53,6 +53,7 @@
 
             <section class="settings-section">
                 <h2>Domyślne przyjęcie</h2>
+                <p class="muted">Dyspozycja „Nie przywracaj na stan” potwierdza fizyczne przyjęcie zwrotu bez tworzenia RX i bez zwiększania stanu magazynowego. Na konkretnym zwrocie można wybrać inną dyspozycję.</p>
                 <div class="settings-fields">
                     <label>Domyślny magazyn zwrotów
                         <select name="default_target_warehouse_id">
@@ -127,14 +128,21 @@
                                 <input name="dispositions[{{ $index }}][label]" value="{{ $disposition['label'] ?? '' }}" maxlength="80">
                             </label>
                             <label>Magazyn docelowy
-                                <select name="dispositions[{{ $index }}][warehouse_id]">
-                                    <option value="">Użyj magazynu domyślnego</option>
-                                    @foreach ($warehouses as $warehouse)
-                                        <option value="{{ $warehouse->id }}" @selected((string) ($disposition['warehouse_id'] ?? '') === (string) $warehouse->id)>
-                                            {{ $warehouse->code }} - {{ $warehouse->name }}
-                                        </option>
-                                    @endforeach
-                                </select>
+                                @if (($disposition['code'] ?? '') === \App\Services\Returns\ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION)
+                                    <input name="dispositions[{{ $index }}][warehouse_id]" type="hidden" value="">
+                                    <select disabled>
+                                        <option>Nie dotyczy — bez ruchu magazynowego</option>
+                                    </select>
+                                @else
+                                    <select name="dispositions[{{ $index }}][warehouse_id]">
+                                        <option value="">Użyj magazynu domyślnego</option>
+                                        @foreach ($warehouses as $warehouse)
+                                            <option value="{{ $warehouse->id }}" @selected((string) ($disposition['warehouse_id'] ?? '') === (string) $warehouse->id)>
+                                                {{ $warehouse->code }} - {{ $warehouse->name }}
+                                            </option>
+                                        @endforeach
+                                    </select>
+                                @endif
                             </label>
                         </div>
                     @endforeach

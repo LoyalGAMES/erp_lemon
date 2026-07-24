@@ -164,7 +164,8 @@
                         $trackingUrl = $label ? $shippingProviderResolver->trackingUrl($label) : null;
                         $activeReservations = (float) ($activeReservationSums[$order->sales_channel_id.'|'.$order->external_id] ?? 0);
                         $invoice = $order->invoices
-                            ->reject(fn ($invoice): bool => $invoice->type === 'proforma')
+                            ->where('type', 'vat')
+                            ->where('status', '!=', 'cancelled')
                             ->sortByDesc('id')
                             ->first();
                         $proforma = $order->invoices

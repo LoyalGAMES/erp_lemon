@@ -29,7 +29,7 @@
     $statusLabels = [
         'pending' => ['label' => 'Oczekujący', 'class' => 'orange'],
         'opened' => ['label' => 'Otwarty', 'class' => 'blue'],
-        'document_created' => ['label' => 'Dokument RX', 'class' => 'blue'],
+        'document_created' => ['label' => 'Przyjęcie przygotowane', 'class' => 'blue'],
         'completed' => ['label' => 'Zrealizowany', 'class' => ''],
         'corrected' => ['label' => 'Korekta', 'class' => ''],
         'rejected' => ['label' => 'Odrzucony', 'class' => 'red'],
@@ -49,6 +49,8 @@
         ->filter()
         ->unique('id')
         ->values();
+    $returnReceiptStarted = $returnDocuments->isNotEmpty()
+        || $returnCase->lines->contains(fn ($line): bool => filled(data_get($line->metadata, 'inventory_receipt.prepared_at')));
     $returnLabels = $returnCase->shippingLabels->where('status', 'generated')->values();
     $payoutStatus = $returnProcess['payout'];
     $nextStep = $returnProcess['next_step'];
@@ -88,6 +90,14 @@
     };
     $pushEvent($returnCase->created_at, 'Utworzono zwrot', $returnCase->number);
     $pushEvent($returnCase->updated_at, 'Ostatnia aktualizacja', $statusMeta['label']);
+    $noRestockReceivedAt = data_get($returnCase->metadata, 'inventory_receipt.no_restock_received_at');
+    if ($noRestockReceivedAt) {
+        $pushEvent(
+            \Illuminate\Support\Carbon::parse((string) $noRestockReceivedAt),
+            'Przyjęto bez zmiany stanu magazynowego',
+            $qty((float) data_get($returnCase->metadata, 'inventory_receipt.no_restock_quantity', 0)).' szt.',
+        );
+    }
     foreach ($returnDocuments as $document) {
         $pushEvent($document->created_at, 'Utworzono dokument '.$document->number, $document->status);
         $pushEvent($document->posted_at, 'Zaksięgowano dokument '.$document->number, $document->destinationWarehouse?->code ?? '');
@@ -246,7 +256,7 @@
                 @if ($order)
                     <a class="button secondary" href="{{ route('orders.show', $order) }}">Zamówienie {{ $order->external_number ?: $order->external_id }}</a>
                 @endif
-                @if ($returnCase->status !== 'completed' && $returnDocuments->isEmpty())
+                @if ($returnCase->status !== 'completed' && ! $returnReceiptStarted)
                     <a class="button secondary" href="{{ route('returns.edit', $returnCase) }}">Edytuj zwrot</a>
                 @endif
                 <a class="button secondary" href="{{ route('returns.payouts.mbank') }}">mBank wypłaty</a>
@@ -371,7 +381,13 @@
                                         <td>{{ $qty($line->quantity_accepted) }} / {{ $qty($line->quantity_expected) }}</td>
                                         <td>{{ $conditionLabels[$line->condition] ?? $line->condition }}</td>
                                         <td>{{ $dispositionLabels[$line->disposition] ?? $line->disposition }}</td>
-                                        <td>{{ $line->targetWarehouse?->code ?? $returnCase->targetWarehouse?->code ?? '-' }}</td>
+                                        <td>
+                                            @if ($line->disposition === \App\Services\Returns\ReturnInventoryReceiptService::NO_RESTOCK_DISPOSITION)
+                                                <span class="status orange">Bez przyjęcia na stan</span>
+                                            @else
+                                                {{ $line->targetWarehouse?->code ?? $returnCase->targetWarehouse?->code ?? '-' }}
+                                            @endif
+                                        </td>
                                         <td>{{ $line->externalOrderLine?->unit_gross_price !== null ? $money((float) $line->quantity_accepted * (float) $line->externalOrderLine->unit_gross_price, $currency) : '-' }}</td>
                                         <td class="wrap-cell">{{ $line->notes ?: '-' }}</td>
                                     </tr>
@@ -386,7 +402,7 @@
                 <section class="return-document-grid">
                     <article class="card">
                         <div class="panel-header">
-                            <span>Dokumenty RX</span>
+                            <span>Dokumenty RX i przyjęcie</span>
                             <span>{{ $returnDocuments->count() }} rekordów</span>
                         </div>
                         <div class="table-scroll">
@@ -410,7 +426,13 @@
                                             <td>{{ $document->document_date?->format('Y-m-d H:i') ?? '-' }}</td>
                                         </tr>
                                     @empty
-                                        <tr><td colspan="5">Brak dokumentu RX dla tego zwrotu.</td></tr>
+                                        <tr>
+                                            <td colspan="5">
+                                                {{ ($returnProcess['warehouse']['state'] ?? null) === 'complete'
+                                                    ? 'RX nie był wymagany — zwrot przyjęto bez zwiększania stanu magazynowego.'
+                                                    : 'Brak dokumentu RX dla tego zwrotu.' }}
+                                            </td>
+                                        </tr>
                                     @endforelse
                                 </tbody>
                             </table>
